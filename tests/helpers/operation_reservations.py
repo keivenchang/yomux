@@ -1,5 +1,7 @@
 """Completion-reservation doubles shared by app contract tests."""
 
+from types import SimpleNamespace
+
 
 class StubOperationReservation:
     """Stand-in completion reservation handle with exactly-once release for test doubles."""
@@ -22,3 +24,12 @@ class StubOperationReservation:
 
 def reservation_must_not_release():
     raise AssertionError("an accepted operation owns its completion reservation")
+
+
+def isolate_jobd_fs_batch_lease(webapp):
+    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+
+
+def replace_job_client_for_fs_batch(webapp, client):
+    webapp.job_client = client
+    isolate_jobd_fs_batch_lease(webapp)

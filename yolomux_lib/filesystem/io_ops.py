@@ -321,6 +321,20 @@ def _raise_if_delete_stopped(
         raise PartialDeleteError("deadline_exceeded", requested_path, deleted_paths)
 
 
+def _require_delete_name_identity(
+    parent_descriptor: int,
+    name: str,
+    expected: os.stat_result,
+    requested_path: Path,
+) -> None:
+    try:
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise paths.FilesystemError.changed_on_disk(requested_path) from error
+    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        raise paths.FilesystemError.changed_on_disk(requested_path)
+
+
 def _delete_directory_contents(
     directory_fd: int,
     requested_directory: Path,
@@ -349,7 +363,11 @@ def _delete_directory_contents(
                 deadline_monotonic=deadline_monotonic,
             )
             try:
-                paths.name_observed("delete_path", requested_child)
+                paths._authorize_requested_path(
+                    requested_child,
+                    resolved_child,
+                    operation="delete_path",
+                )
                 entry_stat = entry.stat(follow_symlinks=False)
                 if stat.S_ISDIR(entry_stat.st_mode):
                     with paths.safe_child(
@@ -368,22 +386,41 @@ def _delete_directory_contents(
                             cancel_event=cancel_event,
                             deadline_monotonic=deadline_monotonic,
                         )
-                    _raise_if_delete_stopped(
-                        requested_child,
-                        deleted_paths,
-                        cancel_event=cancel_event,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    os.rmdir(entry.name, dir_fd=directory_fd)
+                        _raise_if_delete_stopped(
+                            requested_child,
+                            deleted_paths,
+                            cancel_event=cancel_event,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                        _require_delete_name_identity(
+                            directory_fd,
+                            entry.name,
+                            child.stat_result,
+                            requested_child,
+                        )
+                        os.rmdir(entry.name, dir_fd=directory_fd)
                 else:
-                    paths.authority_pinned("delete_path", requested_child)
-                    _raise_if_delete_stopped(
+                    with paths.safe_child(
+                        directory_fd,
                         requested_child,
-                        deleted_paths,
-                        cancel_event=cancel_event,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    os.unlink(entry.name, dir_fd=directory_fd)
+                        resolved_child,
+                        flags=paths.metadata_descriptor_flags(),
+                        operation="delete_path",
+                        observe_name=False,
+                    ) as child:
+                        _raise_if_delete_stopped(
+                            requested_child,
+                            deleted_paths,
+                            cancel_event=cancel_event,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                        _require_delete_name_identity(
+                            directory_fd,
+                            entry.name,
+                            child.stat_result,
+                            requested_child,
+                        )
+                        os.unlink(entry.name, dir_fd=directory_fd)
             except PartialDeleteError:
                 raise
             except (OSError, paths.FilesystemError) as error:
@@ -416,58 +453,71 @@ def delete_path(
     work actually belongs on.  The caller re-submits with `recursive=True` under the same operation.
     """
 
-    with paths.safe_parent(raw_path, operation="delete_path") as handle:
+    with paths.safe_parent(raw_path, operation="delete_path_parent") as handle:
         path = handle.requested
         paths._ensure_not_configured_root(path, "delete", resolved=handle.resolved_target)
         try:
-            entry_stat = os.stat(handle.name, dir_fd=handle.descriptor, follow_symlinks=False)
-        except FileNotFoundError as error:
-            raise paths.FilesystemError.path_not_found(path) from error
-        if not stat.S_ISDIR(entry_stat.st_mode):
-            # Symlinks land here and report `kind: "file"`, matching the pre-split payload.  The
-            # link itself is unlinked; `safe_parent` never follows it.
-            os.unlink(handle.name, dir_fd=handle.descriptor)
-            return {"path": str(path), "deleted": True, "kind": "file"}
-        if not recursive:
-            try:
-                os.rmdir(handle.name, dir_fd=handle.descriptor)
-            except OSError as error:
-                if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                    raise
-                return {"path": str(path), "deleted": False, "kind": "dir", "pending": "subtree"}
-            return {"path": str(path), "deleted": True, "kind": "dir"}
-        deleted_paths: list[str] = []
-        try:
-            with paths.safe_child(
+            target_context = paths.safe_child(
                 handle.descriptor,
                 path,
                 handle.namespace_target,
-                flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                flags=paths.metadata_descriptor_flags(),
                 operation="delete_path",
                 observe_name=False,
-            ) as target:
-                _delete_directory_contents(
-                    target.descriptor,
+            )
+        except FileNotFoundError as error:
+            raise paths.FilesystemError.path_not_found(path) from error
+        with target_context as target:
+            handle.require_target_identity(target)
+            entry_stat = target.stat_result
+            if not stat.S_ISDIR(entry_stat.st_mode):
+                # Symlinks land here and report `kind: "file", matching the pre-split payload.  The
+                # link itself is unlinked; `safe_parent` never follows it.
+                _require_delete_name_identity(handle.descriptor, handle.name, entry_stat, path)
+                os.unlink(handle.name, dir_fd=handle.descriptor)
+                return {"path": str(path), "deleted": True, "kind": "file"}
+            if not recursive:
+                _require_delete_name_identity(handle.descriptor, handle.name, entry_stat, path)
+                try:
+                    os.rmdir(handle.name, dir_fd=handle.descriptor)
+                except OSError as error:
+                    if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                        raise
+                    return {"path": str(path), "deleted": False, "kind": "dir", "pending": "subtree"}
+                return {"path": str(path), "deleted": True, "kind": "dir"}
+            deleted_paths: list[str] = []
+            try:
+                walk_descriptor = os.open(
+                    ".",
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=target.descriptor,
+                )
+                try:
+                    _delete_directory_contents(
+                        walk_descriptor,
+                        path,
+                        handle.namespace_target,
+                        deleted_paths=deleted_paths,
+                        cancel_event=cancel_event,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                finally:
+                    os.close(walk_descriptor)
+                _raise_if_delete_stopped(
                     path,
-                    handle.namespace_target,
-                    deleted_paths=deleted_paths,
+                    deleted_paths,
                     cancel_event=cancel_event,
                     deadline_monotonic=deadline_monotonic,
                 )
-            _raise_if_delete_stopped(
-                path,
-                deleted_paths,
-                cancel_event=cancel_event,
-                deadline_monotonic=deadline_monotonic,
-            )
-            os.rmdir(handle.name, dir_fd=handle.descriptor)
-        except PartialDeleteError:
-            raise
-        except (OSError, paths.FilesystemError) as error:
-            if deleted_paths:
-                raise PartialDeleteError("entry_failed", path, deleted_paths) from error
-            raise
-        return {"path": str(path), "deleted": True, "kind": "dir"}
+                _require_delete_name_identity(handle.descriptor, handle.name, entry_stat, path)
+                os.rmdir(handle.name, dir_fd=handle.descriptor)
+            except PartialDeleteError:
+                raise
+            except (OSError, paths.FilesystemError) as error:
+                if deleted_paths:
+                    raise PartialDeleteError("entry_failed", path, deleted_paths) from error
+                raise
+            return {"path": str(path), "deleted": True, "kind": "dir"}
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
@@ -486,7 +536,7 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
                 handle.descriptor,
                 path,
                 handle.namespace_target,
-                flags=getattr(os, "O_PATH", os.O_RDONLY),
+                flags=paths.metadata_descriptor_flags(),
                 operation="rename_path",
                 observe_name=False,
             )
@@ -494,6 +544,7 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
                 source_handle,
                 operation="rename_path",
             ) as pinned_repo:
+                handle.require_target_identity(source_handle)
                 try:
                     os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
                 except FileNotFoundError:
@@ -502,28 +553,26 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
                     raise paths.FilesystemError.target_exists(target)
                 tracked = False
                 if pinned_repo is not None:
-                    _repo, old_relative, repo_handle = pinned_repo
-                    tracked = git_ops._git_with_pinned_repo(
-                        repo_handle,
-                        ["ls-files", "--error-unmatch", "--", old_relative],
-                        timeout=1.5,
-                    ).returncode == 0
-                os.rename(handle.name, name, src_dir_fd=handle.descriptor, dst_dir_fd=handle.descriptor)
+                    new_relative = handle.namespace_target.with_name(name).relative_to(pinned_repo.repo).as_posix()
+                    tracked = git_ops.prepare_pinned_index_rename(pinned_repo, new_relative)
+                current_source = os.stat(handle.name, dir_fd=handle.descriptor, follow_symlinks=False)
+                source_stat = source_handle.stat_result
+                if (current_source.st_dev, current_source.st_ino) != (source_stat.st_dev, source_stat.st_ino):
+                    raise paths.FilesystemError.changed_on_disk(path)
+                try:
+                    paths.rename_noreplace(handle.descriptor, handle.name, name)
+                except FileExistsError as error:
+                    raise paths.FilesystemError.target_exists(target) from error
                 if tracked and pinned_repo is not None:
-                    repo, old_relative, repo_handle = pinned_repo
-                    new_relative = handle.namespace_target.with_name(name).relative_to(repo).as_posix()
-                    staged = git_ops._git_with_pinned_repo(
-                        repo_handle,
-                        ["add", "-A", "--", old_relative, new_relative],
-                        timeout=3.0,
-                    )
-                    if staged.returncode != 0:
+                    renamed_stat = os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
+                    if (renamed_stat.st_dev, renamed_stat.st_ino) != (source_stat.st_dev, source_stat.st_ino):
                         raise paths.FilesystemError(
-                            "git rename staging failed",
-                            status=500,
-                            message_key="fs.error.operationFailed",
-                            diagnostic=git_ops.cmd_error(staged, "git add after rename failed"),
+                            "renamed path changed before Git index publication",
+                            status=409,
+                            message_key="fs.error.changedOnDisk",
+                            message_params={"path": str(target)},
                         )
+                    git_ops.publish_pinned_index_rename(pinned_repo)
         except FileNotFoundError as error:
             raise paths.FilesystemError.path_not_found(path) from error
         return {"path": str(target), "old_path": str(path), "name": name}
@@ -542,7 +591,12 @@ def create_directory(raw_path: str) -> dict[str, Any]:
         return {"path": str(path), "created": True, "kind": "dir"}
 
 
-def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
+def _existing_path_info(
+    raw_path: str,
+    *,
+    operation: str,
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     with paths.safe_path(raw_path, operation=operation) as handle:
         path = handle.requested
         file_stat = handle.stat_result
@@ -563,6 +617,7 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
         repo_root, tracked, history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
             handle,
             include_repo_info=True,
+            repo_info_cache=repo_info_cache,
             operation=operation,
         )
         return {
@@ -583,9 +638,14 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
         }
 
 
-def path_info(raw_path: str, *, operation: str = "path_info") -> dict[str, Any]:
+def path_info(
+    raw_path: str,
+    *,
+    operation: str = "path_info",
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     try:
-        return _existing_path_info(raw_path, operation=operation)
+        return _existing_path_info(raw_path, operation=operation, repo_info_cache=repo_info_cache)
     except paths.FilesystemError as error:
         if error.status != 404:
             raise
@@ -694,47 +754,36 @@ def _walk_directory_sources(
     path: Path,
     size_limit: int | None = None,
     *,
-    root_fd: int | None = None,
+    root_fd: int,
     operation: str = "",
     requested_root: Path | None = None,
+    resolved_root: Path | None = None,
 ) -> tuple[list[Path], list[Path], int]:
     directories: list[Path] = [path]
     files: list[Path] = []
     total_size = 0
-    owned_root_fd = None
-    if root_fd is None:
-        owned_root_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        root_fd = owned_root_fd
-    try:
-        walker = paths.walk_directory(
-            root_fd,
-            operation=operation,
-            requested_root=requested_root or path,
-        )
-        with contextlib.closing(walker):
-            for relative, _directory_fd, dirnames, file_rows in walker:
-                root_path = path / relative
-                directories.extend(root_path / dirname for dirname in dirnames)
-                for filename, child_stat in file_rows:
-                    child = root_path / filename
-                    total_size += child_stat.st_size
-                    if size_limit is not None and total_size > size_limit:
-                        raise paths.FilesystemError(
-                            _zip_limit_message(path, total_size, size_limit),
-                            status=413,
-                            message_key="fs.error.folderTooLarge",
-                            message_params={"path": str(path), "size": total_size, "max": size_limit},
-                        )
-                    files.append(child)
-    finally:
-        if owned_root_fd is not None:
-            os.close(owned_root_fd)
+    walker = paths.walk_directory(
+        root_fd,
+        operation=operation,
+        requested_root=requested_root or path,
+        resolved_root=resolved_root or path,
+    )
+    with contextlib.closing(walker):
+        for relative, _directory_fd, dirnames, file_rows in walker:
+            root_path = path / relative
+            directories.extend(root_path / dirname for dirname in dirnames)
+            for filename, child_stat in file_rows:
+                child = root_path / filename
+                total_size += child_stat.st_size
+                if size_limit is not None and total_size > size_limit:
+                    raise paths.FilesystemError(
+                        _zip_limit_message(path, total_size, size_limit),
+                        status=413,
+                        message_key="fs.error.folderTooLarge",
+                        message_params={"path": str(path), "size": total_size, "max": size_limit},
+                    )
+                files.append(child)
     return directories, files, total_size
-
-
-def _walk_zip_sources(path: Path, max_bytes: int | None = None) -> tuple[list[Path], list[Path], int]:
-    byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else FS_ZIP_MAX_BYTES
-    return _walk_directory_sources(path, byte_cap)
 
 
 def count_directory_files(raw_path: str) -> dict[str, Any]:
@@ -746,6 +795,7 @@ def count_directory_files(raw_path: str) -> dict[str, Any]:
             root_fd=handle.descriptor,
             operation="count_directory_files",
             requested_root=path,
+            resolved_root=handle.resolved,
         )
         return {"path": str(path), "kind": "dir", "files": len(files), "recursive": True}
 
@@ -782,13 +832,19 @@ def _zip_directory_handle_to(handle: Any, target: Any, byte_cap: int) -> tuple[i
         root_fd=handle.descriptor,
         operation="zip_directory",
         requested_root=path,
+        resolved_root=handle.resolved,
     )
     output = _BoundedSeekableWriter(target, byte_cap)
     with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         root_name = path.name or "root"
         archive.writestr(f"{root_name}/", b"")
         source_bytes = 0
-        walker = paths.walk_directory(handle.descriptor, operation="zip_directory", requested_root=path)
+        walker = paths.walk_directory(
+            handle.descriptor,
+            operation="zip_directory",
+            requested_root=path,
+            resolved_root=handle.resolved,
+        )
         with contextlib.closing(walker):
             for relative_directory, directory_fd, dirnames, file_rows in walker:
                 for dirname in dirnames:
@@ -797,37 +853,43 @@ def _zip_directory_handle_to(handle: Any, target: Any, byte_cap: int) -> tuple[i
                 for filename, _scanned_stat in file_rows:
                     member_path = path / relative_directory / filename
                     try:
-                        member_fd = os.open(filename, os.O_RDONLY | paths.nofollow_flag(), dir_fd=directory_fd)
-                    except OSError as error:
-                        if error.errno in {errno.ELOOP, errno.ENOENT}:
+                        member_context = paths.safe_child(
+                            directory_fd,
+                            member_path,
+                            handle.resolved / relative_directory / filename,
+                            flags=os.O_RDONLY,
+                            operation="zip_directory",
+                            observe_name=False,
+                        )
+                        with member_context as member_handle:
+                            before = member_handle.stat_result
+                            if not stat.S_ISREG(before.st_mode):
+                                continue
+                            source_bytes += before.st_size
+                            if source_bytes > byte_cap:
+                                raise paths.FilesystemError(
+                                    _zip_limit_message(path, source_bytes, byte_cap),
+                                    status=413,
+                                    message_key="fs.error.folderTooLarge",
+                                    message_params={"path": str(path), "size": source_bytes, "max": byte_cap},
+                                )
+                            archive_name = (Path(root_name) / relative_directory / filename).as_posix()
+                            with os.fdopen(os.dup(member_handle.descriptor), "rb") as source, archive.open(archive_name, "w") as archive_member:
+                                shutil.copyfileobj(source, archive_member, length=TRANSFER_COPY_CHUNK_BYTES)
+                            after = os.fstat(member_handle.descriptor)
+                            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                                raise paths.FilesystemError(
+                                    "file changed while its archive was being created",
+                                    status=409,
+                                    message_key="fs.error.changedOnDisk",
+                                    message_params={"path": str(member_path)},
+                                )
+                    except (paths.FilesystemError, OSError) as error:
+                        if isinstance(error, paths.FilesystemError) and error.message_key == "fs.error.credentialBlocked":
+                            continue
+                        if isinstance(error, OSError) and error.errno in {errno.ELOOP, errno.ENOENT}:
                             continue
                         raise
-                    try:
-                        paths.authority_pinned("zip_directory", member_path)
-                        before = os.fstat(member_fd)
-                        if not stat.S_ISREG(before.st_mode):
-                            continue
-                        source_bytes += before.st_size
-                        if source_bytes > byte_cap:
-                            raise paths.FilesystemError(
-                                _zip_limit_message(path, source_bytes, byte_cap),
-                                status=413,
-                                message_key="fs.error.folderTooLarge",
-                                message_params={"path": str(path), "size": source_bytes, "max": byte_cap},
-                            )
-                        archive_name = (Path(root_name) / relative_directory / filename).as_posix()
-                        with os.fdopen(os.dup(member_fd), "rb") as source, archive.open(archive_name, "w") as archive_member:
-                            shutil.copyfileobj(source, archive_member, length=TRANSFER_COPY_CHUNK_BYTES)
-                        after = os.fstat(member_fd)
-                        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
-                            raise paths.FilesystemError(
-                                "file changed while its archive was being created",
-                                status=409,
-                                message_key="fs.error.changedOnDisk",
-                                message_params={"path": str(member_path)},
-                            )
-                    finally:
-                        os.close(member_fd)
     size = output.high_water
     target.flush()
     target.seek(0)

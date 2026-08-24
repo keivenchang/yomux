@@ -171,16 +171,21 @@ def test_git_metadata_cache_reuses_unchanged_state_and_invalidates_dirty_paths(t
     repo = tmp_path / "repo"
     _init_repo(repo)
     root = str(repo.resolve())
-    real_git = metadata.git
+    real_runner_factory = metadata.filesystem_git_ops.pinned_git_runner
     calls: list[tuple[str, ...]] = []
     calls_lock = threading.Lock()
 
-    def counted_git(args, cwd, timeout=3.0):
-        with calls_lock:
-            calls.append(tuple(args))
-        return real_git(args, cwd, timeout=timeout)
+    def counted_runner_factory(scope, **kwargs):
+        runner = real_runner_factory(scope, **kwargs)
 
-    monkeypatch.setattr(metadata, "git", counted_git)
+        def counted_runner(args, timeout=3.0):
+            with calls_lock:
+                calls.append(tuple(args))
+            return runner(args, timeout)
+
+        return counted_runner
+
+    monkeypatch.setattr(metadata.filesystem_git_ops, "pinned_git_runner", counted_runner_factory)
     with metadata._GIT_METADATA_CACHE_LOCK:
         metadata._GIT_METADATA_CACHE.clear()
         metadata._GIT_METADATA_INFLIGHT.clear()
@@ -221,22 +226,27 @@ def test_git_metadata_invalidation_marks_inflight_snapshot_stale_without_recursi
     repo = tmp_path / "repo"
     _init_repo(repo)
     root = str(repo.resolve())
-    real_git = metadata.git
+    real_runner_factory = metadata.filesystem_git_ops.pinned_git_runner
     status_started = threading.Event()
     release_status = threading.Event()
     block_status = False
     status_calls = 0
 
-    def delayed_git(args, cwd, timeout=3.0):
-        nonlocal status_calls
-        if tuple(args[:2]) == ("status", "--short"):
-            status_calls += 1
-            if block_status and status_calls == 2:
-                status_started.set()
-                assert release_status.wait(timeout=5)
-        return real_git(args, cwd, timeout=timeout)
+    def delayed_runner_factory(scope, **kwargs):
+        runner = real_runner_factory(scope, **kwargs)
 
-    monkeypatch.setattr(metadata, "git", delayed_git)
+        def delayed_runner(args, timeout=3.0):
+            nonlocal status_calls
+            if tuple(args[:2]) == ("status", "--porcelain=v1"):
+                status_calls += 1
+                if block_status and status_calls == 2:
+                    status_started.set()
+                    assert release_status.wait(timeout=5)
+            return runner(args, timeout)
+
+        return delayed_runner
+
+    monkeypatch.setattr(metadata.filesystem_git_ops, "pinned_git_runner", delayed_runner_factory)
     with metadata._GIT_METADATA_CACHE_LOCK:
         metadata._GIT_METADATA_CACHE.clear()
         metadata._GIT_METADATA_INFLIGHT.clear()
@@ -269,6 +279,49 @@ def test_git_metadata_invalidation_marks_inflight_snapshot_stale_without_recursi
     fresh = metadata.git_metadata_base(root)
     assert fresh and fresh["status_lines"] == [" M f.txt"]
     assert status_calls == 3, "a generation-advanced entry must refresh on the next call"
+
+
+def test_git_metadata_snapshot_filters_blocked_repository_paths(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    blocked = repo / ".ssh" / "id_rsa"
+    blocked.parent.mkdir()
+    blocked.write_text("base\n", encoding="utf-8")
+    safe = repo / "safe.txt"
+    safe.write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".ssh/id_rsa", "safe.txt")
+    _git(repo, "commit", "-m", "tracked metadata fixtures")
+    blocked.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE\n", encoding="utf-8")
+    safe.write_text("changed\n", encoding="utf-8")
+
+    result = metadata.git_metadata_base(str(repo))
+
+    assert result is not None
+    assert result["status_lines"] == [" M safe.txt"]
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(result)
+    assert ".ssh/id_rsa" not in repr(result)
+
+
+def test_git_metadata_rejects_a_repository_inside_a_blocked_root(tmp_path):
+    blocked_parent = tmp_path / ".ssh"
+    blocked_parent.mkdir()
+    repo = blocked_parent / "repo"
+    _init_repo(repo)
+
+    assert metadata.git_root_for_cwd(str(repo)) is None
+    assert metadata.git_metadata_base(str(repo)) is None
+
+
+def test_git_root_discovery_does_not_build_the_full_git_object_view(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    def reject_full_scope(_path):
+        raise AssertionError("repository-root discovery must not snapshot Git objects")
+
+    monkeypatch.setattr(metadata, "pinned_metadata_git_scope", reject_full_scope)
+
+    assert metadata.git_root_for_cwd(str(repo)) == str(repo)
 
 
 def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
@@ -383,15 +436,15 @@ def test_activity_work_summary_prefers_recent_dirty_repo(tmp_path):
         _git(repo, "add", "f.txt")
         _git(repo, "commit", "-m", "init")
         repos.append(repo)
-    (repos[1] / "f.txt").write_text("changed\n", encoding="utf-8")
-    os.utime(repos[1] / "f.txt", (2_000_000_000, 2_000_000_000))
+    (repos[1] / "nested").mkdir(); (repos[1] / "nested" / "f.txt").write_text("changed\n", encoding="utf-8")
+    os.utime(repos[1] / "nested" / "f.txt", (2_000_000_000, 2_000_000_000))
     panes = [_pane("s3", 0, repos[0]), _pane("s3", 1, repos[1])]
     info = SessionInfo(session="s3", panes=panes, selected_pane=panes[0], agents=[])
 
     work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
 
     assert work["git"]["root"] == str(repos[1].resolve())
-    assert work["repos"][0]["root"] == str(repos[1].resolve())
+    assert work["repos"][0]["activity_ts"] == 2_000_000_000
 
 
 def test_activity_work_summary_prefers_current_branch_pr_within_same_signal(monkeypatch, tmp_path):
@@ -642,6 +695,27 @@ def test_feature_branch_can_use_head_subject_pr_hint():
     assert pr["source"] == "head-subject"
 
 
+def test_current_pull_request_consumers_reuse_the_metadata_scope_result(monkeypatch):
+    git_data = {
+        "github_repo": REPO,
+        "branch": "keivenc/example",
+        "head": "abc1234567 fix parser",
+        "head_sha": "abc123456789",
+        "local_pull_request": {"number": 9981, "title": "fix parser"},
+    }
+    monkeypatch.setattr(
+        metadata,
+        "local_pull_request_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reopen the repository")),
+    )
+
+    branch_pr = metadata.current_branch_pull_request(git_data, MetadataCache(), allow_network=False)
+    worktree_pr = metadata.current_worktree_pull_request(git_data, MetadataCache(), allow_network=False)
+
+    assert branch_pr["number"] == 9981
+    assert worktree_pr["number"] == 9981
+
+
 def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tmp_path):
     # Linked worktrees often use a local origin and the real GitHub repository as upstream; PR lookup
     # must still resolve the current branch by head branch instead of dropping all GitHub metadata.
@@ -666,6 +740,12 @@ def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tm
     monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
 
     git_data = metadata.git_inventory(str(repo))
+    assert "local_pull_request" in git_data
+    monkeypatch.setattr(
+        metadata,
+        "local_pull_request_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reopen the repository")),
+    )
     pr = metadata.current_branch_pull_request(git_data, MetadataCache(), allow_network=True)
 
     assert git_data["github_repo"] == {

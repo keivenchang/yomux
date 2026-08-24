@@ -181,6 +181,10 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
             pass
 
 
+class AppendRollbackError(OSError):
+    """A failed append could not restore the exact pre-append file boundary."""
+
+
 def append_fsync_text(path: Path, text: str, mode: int | None = None) -> None:
     """Append ``text`` to ``path`` durably while serializing sibling writers.
 
@@ -193,15 +197,24 @@ def append_fsync_text(path: Path, text: str, mode: int | None = None) -> None:
     encoded = text.encode("utf-8")
     with file_lock(path, dir_mode=0o700):
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, effective_mode)
+        original_size = os.fstat(descriptor).st_size
         try:
-            offset = 0
-            while offset < len(encoded):
-                written = os.write(descriptor, encoded[offset:])
-                if written <= 0:
-                    raise OSError("failed to append durable text")
-                offset += written
-            os.fsync(descriptor)
-            if mode is not None:
-                os.chmod(path, mode)
+            try:
+                offset = 0
+                while offset < len(encoded):
+                    written = os.write(descriptor, encoded[offset:])
+                    if written <= 0:
+                        raise OSError("failed to append durable text")
+                    offset += written
+                os.fsync(descriptor)
+                if mode is not None:
+                    os.chmod(path, mode)
+            except BaseException as append_error:
+                try:
+                    os.ftruncate(descriptor, original_size)
+                    os.fsync(descriptor)
+                except OSError as rollback_error:
+                    raise AppendRollbackError("failed to roll back a partial durable append") from rollback_error
+                raise
         finally:
             os.close(descriptor)

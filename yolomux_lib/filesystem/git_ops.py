@@ -6,6 +6,7 @@ import base64
 import contextlib
 import copy
 import difflib
+import errno
 import fcntl
 import hashlib
 import json
@@ -26,7 +27,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from ..common import git
-from ..common import git_bytes
+from ..common import record_git_spawn
 from ..tmux.tmux_utils import cmd_error
 from . import paths
 
@@ -59,7 +60,25 @@ def _git_with_pinned_repo_process(
     git_object_directory: str | None = None,
     git_object_descriptors: tuple[int, ...] = (),
     shallow_file_path: str | None = None,
+    stdin_descriptor: int | None = None,
 ) -> subprocess.CompletedProcess[Any] | PinnedGitResult:
+    if git is not _COMMON_GIT:
+        injected = git(args, cwd=str(repo.descriptor_path()), timeout=timeout)
+        if max_output_bytes is None:
+            return injected
+        raw_stdout = injected.stdout if isinstance(injected.stdout, bytes) else str(injected.stdout or "").encode("utf-8")
+        raw_stderr = injected.stderr if isinstance(injected.stderr, bytes) else str(injected.stderr or "").encode("utf-8")
+        stdout_truncated = len(raw_stdout) > max_output_bytes
+        retained_stdout = raw_stdout[:max_output_bytes]
+        return PinnedGitResult(
+            args=list(args),
+            returncode=-9 if stdout_truncated else injected.returncode,
+            stdout=retained_stdout if binary else retained_stdout.decode("utf-8", errors="replace"),
+            stderr=raw_stderr if binary else raw_stderr.decode("utf-8", errors="replace"),
+            stdout_truncated=stdout_truncated,
+            killed_for_cap=stdout_truncated,
+        )
+    record_git_spawn(args)
     control_descriptors = tuple(
         handle.descriptor
         for handle in (git_dir_handle, git_common_dir_handle)
@@ -111,6 +130,7 @@ def _git_with_pinned_repo_process(
         )
         process_env["GIT_NO_REPLACE_OBJECTS"] = "1"
         process_env["GIT_NO_LAZY_FETCH"] = "1"
+        process_env["GIT_OPTIONAL_LOCKS"] = "0"
         process_env["GIT_GRAFT_FILE"] = os.devnull
         process_env["GIT_CONFIG_NOSYSTEM"] = "1"
         process_env["GIT_CONFIG_GLOBAL"] = os.devnull
@@ -141,6 +161,7 @@ def _git_with_pinned_repo_process(
         stderr_limit = 64 * 1024
         process = subprocess.Popen(
             args_with_repo,
+            stdin=stdin_descriptor,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             pass_fds=descriptors,
@@ -220,6 +241,7 @@ def _git_with_pinned_repo_process(
         )
     return subprocess.run(
         args_with_repo,
+        stdin=stdin_descriptor,
         capture_output=True,
         timeout=timeout,
         check=False,
@@ -245,6 +267,7 @@ def _git_with_pinned_repo(
     git_object_directory: str | None = None,
     git_object_descriptors: tuple[int, ...] = (),
     shallow_data: bytes | None = None,
+    stdin_descriptor: int | None = None,
 ) -> subprocess.CompletedProcess[Any] | PinnedGitResult:
     kwargs = {
         "timeout": timeout,
@@ -257,6 +280,7 @@ def _git_with_pinned_repo(
         "git_common_directory": git_common_directory,
         "git_object_directory": git_object_directory,
         "git_object_descriptors": git_object_descriptors,
+        "stdin_descriptor": stdin_descriptor,
     }
     if shallow_data is None:
         return _git_with_pinned_repo_process(repo, args, **kwargs)
@@ -269,31 +293,6 @@ def _git_with_pinned_repo(
             shallow_file_path=shallow_file.name,
             **kwargs,
         )
-
-
-def _git_at_path(args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
-    if git is not _COMMON_GIT:
-        return git(args, cwd=str(cwd), timeout=timeout)
-    descriptor = None
-    if cwd.parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
-        try:
-            descriptor = int(cwd.name)
-        except ValueError:
-            descriptor = None
-    if descriptor is None:
-        return git(args, cwd=str(cwd), timeout=timeout)
-    # Same Darwin `/dev/fd` directory limitation as `_git_with_pinned_repo_process` above: `-C
-    # <fd-path>` cannot chdir on Darwin, so fchdir the fd directly in the child instead.
-    use_fchdir_cwd = sys.platform == "darwin"
-    return subprocess.run(
-        ["git", *([] if use_fchdir_cwd else ["-C", str(cwd)]), *args],
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-        text=True,
-        pass_fds=(descriptor,),
-        **({"preexec_fn": lambda: os.fchdir(descriptor)} if use_fchdir_cwd else {}),
-    )
 
 
 def _read_small_git_control_file(directory_fd: int, relative_path: str) -> str | None:
@@ -445,35 +444,47 @@ def _pinned_repo_root(
         candidate = candidate.parent
 
 
+def authorized_repo_root(raw_path: str | Path, *, operation: str) -> Path | None:
+    """Discover one authorized repository boundary without constructing a Git object view."""
+
+    deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(str(raw_path), flags=directory_flags, operation=operation) as handle:
+        root = _pinned_repo_root(handle, deadline=deadline, operation=operation)
+        _ensure_pinned_namespace_unchanged(handle)
+        return root
+
+
 @contextlib.contextmanager
 def pinned_repo_path(handle: paths.SafePathHandle, *, operation: str = ""):
-    """Keep the repository generation for one pinned file live through its Git operations."""
+    """Keep one authorized Git control/index generation live through a namespace move."""
 
-    repo = _pinned_repo_root(handle, operation=operation)
-    if repo is None:
-        yield None
-        return
     try:
-        rel_path = handle.resolved.relative_to(repo).as_posix()
-    except ValueError:
+        with pinned_git_scope_from_handle(
+            handle,
+            target_path=handle.resolved,
+            operation=operation,
+            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            include_index=True,
+            index_mutation=True,
+        ) as scope:
+            yield scope
+    except paths.FilesystemError as error:
+        if error.message_key != "fs.error.notGitRepo":
+            raise
         yield None
-        return
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
-        yield repo, rel_path, repo_handle
 
 
 def git_branch_state(
     repo: Path,
     *,
-    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]],
 ) -> tuple[str, bool]:
     """Return the checked-out branch and whether Git positively reported detached HEAD."""
-    run = runner or (lambda args: git(args, cwd=str(repo), timeout=1.0))
-    symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    symbolic = runner(["symbolic-ref", "--quiet", "--short", "HEAD"])
     if symbolic.returncode == 0:
         return symbolic.stdout.strip(), False
-    resolved = run(["rev-parse", "--abbrev-ref", "HEAD"])
+    resolved = runner(["rev-parse", "--abbrev-ref", "HEAD"])
     if resolved.returncode != 0:
         return "", False
     name = resolved.stdout.strip()
@@ -483,7 +494,7 @@ def git_branch_state(
 def git_branch_name(
     repo: Path,
     *,
-    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]],
 ) -> str:
     """Return the checked-out branch, or an empty string when none is available."""
     return git_branch_state(repo, runner=runner)[0]
@@ -501,59 +512,9 @@ _REPOSITORY_GENERATION_LOCK = threading.Lock()
 _REPOSITORY_GENERATIONS: dict[str, tuple[tuple[str, ...], int]] = {}
 
 
-def private_repository_signature(
-    root: Path,
-    *,
-    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
-) -> tuple[str, ...]:
-    """Return a path-free identity of a repository's checked-out HEAD.
+def _advance_repository_generation(root_text: str, signature: tuple[str, ...]) -> int:
+    """Apply one already-measured private signature to the shared generation owner."""
 
-    The signature is ``(symbolic HEAD ref, HEAD commit OID)``.  Two branches that point at
-    the SAME commit share an OID but differ in their symbolic ref, so switching between them
-    over an identical working tree still changes the signature -- and therefore advances the
-    typed generation below -- WITHOUT ever naming a ``.git`` path.  A detached HEAD has no
-    symbolic ref, so its ref component is empty; switching from detached to a branch at the
-    same commit is still a change.  Nothing here reads or returns a control-file path, so the
-    value is safe to compare inside a public consumer's cache identity while ``.git`` itself
-    stays excluded everywhere.
-
-    An unreadable HEAD (no repository, no commit yet, or a Git error) returns the typed
-    unknown sentinel rather than a fabricated empty signature, so "could not read" stays a
-    distinct answer from "detached at no branch".
-    """
-
-    run = runner or (lambda args: git(args, cwd=str(root), timeout=1.0))
-    head = run(["rev-parse", "HEAD"])
-    if head.returncode != 0:
-        return REPOSITORY_SIGNATURE_UNKNOWN
-    oid = head.stdout.strip()
-    if not oid:
-        return REPOSITORY_SIGNATURE_UNKNOWN
-    symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
-    symbolic_head = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
-    return (symbolic_head, oid)
-
-
-def repository_generation(
-    root: Path,
-    *,
-    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
-) -> int:
-    """Advance and return a per-repository generation that ticks on each HEAD identity change.
-
-    This is the typed repository generation a consumer compares to decide whether a cached,
-    branch-scoped view is still current.  It advances by one every time the private signature
-    changes -- including an identical-tree branch switch, which no working-tree filesystem event
-    reports -- and stays put while the signature is unchanged.  It is keyed by resolved root, so
-    one tenant's repository can never advance another's counter.
-
-    An unreadable HEAD is inconclusive, not a change: it holds the last known generation and does
-    NOT overwrite a previously known signature, so a transient Git failure in one repository can
-    neither manufacture churn nor leak into a co-tenant repository's generation.
-    """
-
-    root_text = str(Path(root).expanduser().resolve(strict=False))
-    signature = private_repository_signature(root, runner=runner)
     with _REPOSITORY_GENERATION_LOCK:
         previous = _REPOSITORY_GENERATIONS.get(root_text)
         if signature == REPOSITORY_SIGNATURE_UNKNOWN:
@@ -594,50 +555,6 @@ def _repo_info_cache_ttl_seconds(root_text: str) -> float:
     return REPO_INFO_CACHE_SECONDS * scale
 
 
-def git_control_files_signature(root_text: str) -> tuple[Any, ...]:
-    """Return the Git files whose changes can alter Finder branch/status badges."""
-    marker = Path(root_text) / ".git"
-    git_dir = marker
-    if marker.is_file():
-        try:
-            first_line = marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
-        except (OSError, IndexError):
-            first_line = ""
-        if first_line.lower().startswith("gitdir:"):
-            git_dir = Path(first_line.split(":", 1)[1].strip())
-            if not git_dir.is_absolute():
-                git_dir = marker.parent / git_dir
-    common_dir = git_dir
-    try:
-        common_text = (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        common_text = ""
-    if common_text:
-        common_dir = Path(common_text)
-        if not common_dir.is_absolute():
-            common_dir = git_dir / common_dir
-    # Do not recursively traverse every loose ref here. Finder calls this for every repo in a
-    # directory, and a large worktree can hold thousands of refs: the validation itself then costs
-    # seconds before the bounded Git budget begins. Native filesystem changes already invalidate
-    # this cache through ``invalidate_git_metadata_paths``; these inexpensive directory mtimes are
-    # only the direct-caller backstop between watcher batches.
-    control_paths = [
-        git_dir / "HEAD",
-        git_dir / "index",
-        common_dir / "packed-refs",
-        common_dir / "config",
-        common_dir / "refs",
-    ]
-    rows: list[tuple[str, int, int]] = []
-    for path in control_paths:
-        try:
-            stat = path.stat()
-            rows.append((str(path), stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            rows.append((str(path), 0, 0))
-    return tuple(rows)
-
-
 def invalidate_repo_info_paths(paths_to_invalidate: list[Path] | tuple[Path, ...]) -> set[str]:
     """Drop Finder Git rows intersecting a native watcher batch and return their roots."""
     changed_paths = [Path(path).expanduser().resolve(strict=False) for path in paths_to_invalidate]
@@ -658,34 +575,62 @@ def invalidate_repo_info_paths(paths_to_invalidate: list[Path] | tuple[Path, ...
     return invalidated
 
 
-def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None = None) -> dict[str, Any]:
-    """Return repo badges within the caller's whole-operation timeout, if supplied."""
-    # Finder listing passes a pinned `/dev/fd/N`/`/proc/self/fd/N` descriptor path here (see
-    # `listing.py`'s `inspection_path`) so `_directory_is_repo`'s existence check is fd-safe. On
-    # Linux `.resolve()` follows the `/proc/self/fd/N` symlink back to the true directory; Darwin's
-    # `/dev/fd/N` is a devfs node, not a symlink, so `root` stayed literally `/dev/fd/N/...` there.
-    # `_REPO_INFO_CACHE` is a PROCESS-WIDE cache keyed on `root` -- an unresolved fd-string key is
-    # not just wrong for display, it is actively unsafe as a cache key, since the OS recycles low
-    # fd numbers quickly: two unrelated repos opened at different times can reuse the same fd
-    # number and collide onto the identical cache key, serving one repo's cached branch/status
-    # for a completely different repo. `git_control_files_signature` below also opens `root` by
-    # plain name (not fd-relative), which silently found nothing under an unresolvable fd-string
-    # path either. Resolve once, up front, and use the resolved path everywhere in this function.
-    repo = paths._darwin_devfs_live_realpath(repo.expanduser().resolve(strict=False))
-    root = str(repo)
+def _pinned_repo_info_signature(scope: PinnedGitHistoryScope) -> tuple[Any, ...]:
+    digest = hashlib.sha256()
+    control_root = Path(scope.git_directory)
+    for current_root, directory_names, file_names in os.walk(control_root):
+        directory_names.sort()
+        file_names.sort()
+        relative_root = Path(current_root).relative_to(control_root)
+        for name in directory_names:
+            digest.update(b"d\0")
+            digest.update((relative_root / name).as_posix().encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+        for name in file_names:
+            path = Path(current_root) / name
+            if path.is_symlink():
+                raise _history_error(
+                    "Git control snapshot contains an unsafe link",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            digest.update(b"f\0")
+            digest.update((relative_root / name).as_posix().encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            with path.open("rb") as stream:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+    objects = scope.git_objects_handle.stat_result
+    return (
+        digest.hexdigest(),
+        objects.st_dev,
+        objects.st_ino,
+        objects.st_mtime_ns,
+        objects.st_ctime_ns,
+    )
+
+
+def _git_repo_info_from_scope(
+    scope: PinnedGitHistoryScope,
+    *,
+    display_root: Path,
+    include_status: bool,
+    deadline: float | None,
+) -> dict[str, Any]:
+    root = str(display_root)
     cache_key = (root, bool(include_status))
     now = time.monotonic()
-    deadline = None if timeout is None else now + max(0.0, float(timeout))
-    # Signature traversal is part of the cold-path work.  Starting the deadline first keeps a
-    # large refs directory from silently extending the Finder-wide budget before Git is invoked.
-    signature = git_control_files_signature(root)
+    signature = _pinned_repo_info_signature(scope)
     with _REPO_INFO_CACHE_LOCK:
         cached = _REPO_INFO_CACHE.get(cache_key)
         if cached is not None and cached[0] == signature and now - cached[1] <= _repo_info_cache_ttl_seconds(root):
             return copy.deepcopy(cached[2])
     timed_out = False
 
-    def run(args: list[str], default_timeout: float) -> subprocess.CompletedProcess[str]:
+    def run(args: list[str], default_timeout: float) -> subprocess.CompletedProcess[str] | PinnedGitResult:
         nonlocal timed_out
         command_timeout = default_timeout
         if deadline is not None:
@@ -694,14 +639,23 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
                 timed_out = True
                 return subprocess.CompletedProcess(args, 124, "", "Finder Git-info budget expired")
         try:
-            result = _git_at_path(args, repo, command_timeout)
-        except subprocess.TimeoutExpired:
+            result = _run_pinned_git(
+                scope,
+                args,
+                operation="gitRepoInfo",
+                timeout=command_timeout,
+                max_output_bytes=4 * 1024 * 1024,
+                allow_failure=True,
+            )
+        except paths.FilesystemError as error:
+            if error.status != 504:
+                raise
             timed_out = True
             return subprocess.CompletedProcess(args, 124, "", "Finder Git-info command timed out")
         timed_out = timed_out or result.returncode == 124 or (deadline is not None and time.monotonic() >= deadline)
         return result
 
-    branch, detached = git_branch_state(repo, runner=lambda args: run(args, 1.0))
+    branch, detached = git_branch_state(display_root, runner=lambda args: run(args, 1.0))
     head = run(["rev-parse", "HEAD"], 1.0)
     upstream = run(["rev-parse", "--abbrev-ref", "@{upstream}"], 1.0)
     ahead = 0
@@ -723,7 +677,7 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
         dirty_count = len(status.stdout.splitlines()) if status.returncode == 0 else None
     value = {
         "root": root,
-        "name": repo.name,
+        "name": display_root.name,
         "branch": branch,
         "detached": detached,
         "head_sha": head.stdout.strip() if head.returncode == 0 else "",
@@ -740,114 +694,142 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
     return value
 
 
-def git_tracks_path(path: Path) -> bool:
-    """True when `path` is a file tracked by git (committed or staged)."""
-    if path.is_dir():
-        return False
-    # ls-files pathspec is resolved relative to cwd (the file's parent), so `name`
-    # is enough; returncode is non-zero both when untracked AND when not in a repo.
-    result = git(["ls-files", "--error-unmatch", "--", path.name], cwd=str(path.parent), timeout=1.5)
-    return result.returncode == 0
+def pinned_git_repo_info(
+    repo_handle: paths.SafePathHandle,
+    *,
+    display_root: Path,
+    include_status: bool = True,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    deadline = (
+        started + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+        if timeout is None
+        else started + max(0.0, float(timeout))
+    )
+    with pinned_git_scope_from_handle(
+        repo_handle,
+        target_path=display_root,
+        operation="git_repo_info",
+        deadline=deadline,
+        include_index=True,
+    ) as scope:
+        return _git_repo_info_from_scope(
+            scope,
+            display_root=display_root,
+            include_status=include_status,
+            deadline=deadline,
+        )
 
 
-def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
-    if path.is_dir():
-        return []
-    repo_root = git_root_for_path(path)
-    if not repo_root:
-        return []
-    repo = Path(repo_root)
-    try:
-        rel_path = path.relative_to(repo).as_posix()
-    except ValueError:
-        return []
-    result = git([
-        "log",
-        "--follow",
-        f"--max-count={max(1, min(int(limit), 100))}",
-        "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
-        "--",
-        rel_path,
-    ], cwd=str(repo), timeout=3.0)
-    if result.returncode != 0:
-        return []
-    history: list[dict[str, Any]] = []
-    for line in (result.stdout or "").splitlines():
-        full, short, subject, date, author = (line.split("\x1f") + ["", "", "", "", ""])[:5]
-        if not full:
-            continue
-        try:
-            date_value = int(date)
-        except ValueError:
-            date_value = 0
-        history.append({
-            "ref": full,
-            "short": short or full[:9],
-            "subject": subject,
-            "date": date_value,
-            "author": author,
-        })
-    return history
+def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None = None) -> dict[str, Any]:
+    """Return descriptor-bound repo badges within the caller's whole-operation timeout."""
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(str(repo), flags=directory_flags, operation="git_repo_info") as repo_handle:
+        return pinned_git_repo_info(
+            repo_handle,
+            display_root=repo_handle.resolved,
+            include_status=include_status,
+            timeout=timeout,
+        )
 
 
 def pinned_file_git_metadata(
     handle: paths.SafePathHandle,
     *,
     include_repo_info: bool = False,
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
     history_limit: int = 60,
     operation: str = "",
 ) -> tuple[str, bool, list[dict[str, Any]], str, dict[str, Any] | None]:
     is_directory = stat.S_ISDIR(handle.stat_result.st_mode)
-    repo = _pinned_repo_root(handle, operation=operation)
-    if repo is None:
-        return "", False, [], "", None
-    try:
-        rel_path = handle.resolved.relative_to(repo).as_posix()
-    except ValueError:
-        return "", False, [], "", None
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
-        tracked = False if is_directory else _git_with_pinned_repo(
-            repo_handle,
-            ["ls-files", "--error-unmatch", "--", rel_path],
-            timeout=1.5,
-        ).returncode == 0
-        history: list[dict[str, Any]] = []
-        if tracked:
-            result = _git_with_pinned_repo(
-                repo_handle,
-                [
-                    "log",
-                    "--follow",
-                    f"--max-count={max(1, min(int(history_limit), 100))}",
-                    "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
-                    "--",
-                    rel_path,
-                ],
-                timeout=3.0,
-            )
-            if result.returncode == 0:
-                for line in (result.stdout or "").splitlines():
-                    full, short, subject, date, author = (line.split("\x1f") + ["", "", "", "", ""])[:5]
-                    if not full:
-                        continue
-                    try:
-                        date_value = int(date)
-                    except ValueError:
-                        date_value = 0
-                    history.append({
-                        "ref": full,
-                        "short": short or full[:9],
-                        "subject": subject,
-                        "date": date_value,
-                        "author": author,
-                    })
+    if is_directory:
+        repo = _pinned_repo_root(
+            handle,
+            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            operation=operation,
+        )
+        if repo is None:
+            return "", False, [], "", None
+        try:
+            relative_path = handle.resolved.relative_to(repo).as_posix()
+        except ValueError as error:
+            raise paths.FilesystemError.outside_repo(handle.resolved) from error
         repo_info = None
-        if include_repo_info:
-            repo_info = git_repo_info(repo_handle.descriptor_path(), include_status=True)
-            repo_info["root"] = str(repo)
-            repo_info["name"] = repo.name
-    return str(repo), tracked, history, rel_path, repo_info
+        if include_repo_info and relative_path == ".":
+            cache_key = str(repo)
+            if repo_info_cache is not None and cache_key in repo_info_cache:
+                repo_info = copy.deepcopy(repo_info_cache[cache_key])
+            else:
+                repo_info = git_repo_info(repo, include_status=True)
+                if repo_info_cache is not None:
+                    repo_info_cache[cache_key] = copy.deepcopy(repo_info)
+        return str(repo), False, [], "" if relative_path == "." else relative_path, repo_info
+    try:
+        scope_context = pinned_git_scope_from_handle(
+            handle,
+            target_path=handle.resolved,
+            operation=operation,
+            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            include_index=True,
+        )
+        with scope_context as scope:
+            rel_path = scope.relative_path
+            tracked = False if is_directory else _run_pinned_git(
+                scope,
+                ["ls-files", "--error-unmatch", "--", rel_path],
+                operation="gitMetadata",
+                timeout=1.5,
+                max_output_bytes=64 * 1024,
+                allow_failure=True,
+            ).returncode == 0
+            history: list[dict[str, Any]] = []
+            if tracked:
+                result = _run_pinned_git(
+                    scope,
+                    [
+                        "log",
+                        "--follow",
+                        f"--max-count={max(1, min(int(history_limit), 100))}",
+                        "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
+                        "--",
+                        rel_path,
+                    ],
+                    operation="gitMetadata",
+                    timeout=3.0,
+                    max_output_bytes=4 * 1024 * 1024,
+                    allow_failure=True,
+                )
+                if result.returncode == 0:
+                    for line in (result.stdout or "").splitlines():
+                        full, short, subject, date, author = (line.split("\x1f") + ["", "", "", "", ""])[:5]
+                        if not full:
+                            continue
+                        try:
+                            date_value = int(date)
+                        except ValueError:
+                            date_value = 0
+                        history.append({
+                            "ref": full,
+                            "short": short or full[:9],
+                            "subject": subject,
+                            "date": date_value,
+                            "author": author,
+                        })
+            repo_info = None
+            if include_repo_info:
+                repo_info = _git_repo_info_from_scope(
+                    scope,
+                    display_root=scope.repo,
+                    include_status=True,
+                    deadline=None,
+                )
+            return str(scope.repo), tracked, history, rel_path, repo_info
+    except paths.FilesystemError as error:
+        if error.message_key != "fs.error.notGitRepo":
+            raise
+        return "", False, [], "", None
 
 
 GIT_HISTORY_DEFAULT_LIMIT = 50
@@ -864,10 +846,15 @@ GIT_COMMIT_MAX_PAYLOAD_BYTES = 384 * 1024
 GIT_COMMIT_METADATA_OVERHEAD_BYTES = 64 * 1024
 GIT_CONTROL_POINTER_MAX_BYTES = 4096
 GIT_CONFIG_MAX_BYTES = 1024 * 1024
+GIT_INDEX_MAX_BYTES = 64 * 1024 * 1024
+GIT_INDEX_RENAME_MAX_ENTRIES = 100_000
+GIT_INDEX_RENAME_MAX_INPUT_BYTES = 16 * 1024 * 1024
 GIT_SHALLOW_MAX_BYTES = 4 * 1024 * 1024
 GIT_VIEW_BUILD_TIMEOUT_SECONDS = 10.0
 GIT_VIEW_MAX_LOOSE_OBJECTS = 16_384
 GIT_VIEW_MAX_LOOSE_BYTES = 256 * 1024 * 1024
+GIT_LOOSE_OBJECT_CACHE_MAX_ENTRIES = 32_768
+GIT_LOOSE_OBJECT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 GIT_VIEW_MAX_PACK_ENTRIES = 4096
 GIT_VIEW_MAX_REF_ENTRIES = 100_000
 GIT_VIEW_MAX_REF_BYTES = 32 * 1024 * 1024
@@ -888,6 +875,14 @@ class PinnedGitObjectStore:
     object_directory: str
     descriptors: tuple[int, ...]
     hosted_remote: dict[str, str] | None
+    index_snapshot: GitIndexSnapshot | None
+    initial_loose_objects: frozenset[str]
+
+
+@dataclass(frozen=True)
+class GitIndexSnapshot:
+    stat_identity: tuple[int, int, int, int, int]
+    digest: str
 
 
 def _ensure_git_view_deadline(deadline: float) -> None:
@@ -928,11 +923,96 @@ class GitViewBudget:
                 key="fs.error.gitHistoryTooLarge",
                 status=413,
             )
-
     def consume(self, *, size: int = 0) -> None:
         self.entries += 1
         self.bytes += max(0, int(size))
         self.check()
+
+
+@dataclass
+class GitLooseObjectCacheSession:
+    root: Path
+    entries: int
+    bytes: int
+    dirty: bool = False
+
+
+def _git_loose_object_cache_root() -> Path:
+    """Return the validated boot-local cache root without taking its writer lock."""
+
+    runtime_root = Path(tempfile.gettempdir()) / f"yolomux-{os.geteuid()}"
+    runtime_root.mkdir(mode=0o700, exist_ok=True)
+    runtime_info = runtime_root.lstat()
+    if not stat.S_ISDIR(runtime_info.st_mode) or stat.S_ISLNK(runtime_info.st_mode) or runtime_info.st_uid != os.geteuid():
+        raise _history_error(
+            "Git loose-object cache root is unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    cache_root = runtime_root / "git-object-pins-v1"
+    cache_root.mkdir(mode=0o700, exist_ok=True)
+    cache_info = cache_root.lstat()
+    if not stat.S_ISDIR(cache_info.st_mode) or stat.S_ISLNK(cache_info.st_mode) or cache_info.st_uid != os.geteuid():
+        raise _history_error(
+            "Git loose-object cache is unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    return cache_root
+
+
+@contextlib.contextmanager
+def _git_loose_object_cache_session():
+    """Serialize cache publication and accounting, leaving immutable hits lock-free."""
+
+    cache_root = _git_loose_object_cache_root()
+    lock_descriptor = os.open(
+        cache_root / ".lock",
+        os.O_RDWR | os.O_CREAT | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    state_path = cache_root / ".state.json"
+    try:
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            entries = int(state["entries"])
+            byte_count = int(state["bytes"])
+            if entries < 0 or byte_count < 0:
+                raise ValueError("negative cache state")
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            entries = 0
+            byte_count = 0
+            with os.scandir(cache_root) as cached_entries:
+                for entry in cached_entries:
+                    if not entry.name.startswith("object-") or not entry.is_file(follow_symlinks=False):
+                        continue
+                    metadata = entry.stat(follow_symlinks=False)
+                    entries += 1
+                    byte_count += metadata.st_size
+        session = GitLooseObjectCacheSession(cache_root, entries, byte_count)
+        yield session
+        if session.dirty:
+            state_bytes = json.dumps(
+                {"entries": session.entries, "bytes": session.bytes},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            temporary_state = cache_root / f".state-{os.getpid()}-{threading.get_ident()}"
+            state_descriptor = os.open(
+                temporary_state,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            try:
+                os.write(state_descriptor, state_bytes)
+                os.fsync(state_descriptor)
+            finally:
+                os.close(state_descriptor)
+            os.replace(temporary_state, state_path)
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
 
 
 @dataclass(frozen=True)
@@ -953,6 +1033,9 @@ class PinnedGitHistoryScope:
     shallow_snapshot: str
     shallow_data: bytes
     hosted_remote: dict[str, str] | None
+    index_snapshot: GitIndexSnapshot | None
+    initial_loose_objects: frozenset[str]
+    index_lock_descriptor: int | None = None
 
 
 def _history_error(message: str, *, key: str, status: int = 400, diagnostic: object = "") -> paths.FilesystemError:
@@ -1294,7 +1377,8 @@ def _git_repository_format(config_data: bytes) -> tuple[int, str]:
         "refstorage",
         "worktreeconfig",
     }
-    if repository_format_version == 0 and extensions:
+    legacy_worktree_config = extensions == {"worktreeconfig": "true"}
+    if repository_format_version == 0 and extensions and not legacy_worktree_config:
         raise _history_error(
             "Git repository extensions require format version 1",
             key="fs.error.gitRepositoryUnsupported",
@@ -1324,16 +1408,18 @@ def _git_repository_format(config_data: bytes) -> tuple[int, str]:
     return repository_format_version, object_format
 
 
-def _git_origin_remote_url(config_data: bytes) -> str:
-    in_origin = False
+def _git_remote_urls(config_data: bytes) -> list[tuple[str, str]]:
+    current_remote = ""
+    remotes: list[tuple[str, str]] = []
     for raw_line in config_data.decode("utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("#", ";")):
             continue
         if line.startswith("["):
-            in_origin = re.fullmatch(r'\[\s*remote\s+"origin"\s*\]', line, flags=re.IGNORECASE) is not None
+            match = re.fullmatch(r'\[\s*remote\s+"([^"\\]+)"\s*\]', line, flags=re.IGNORECASE)
+            current_remote = match.group(1) if match is not None else ""
             continue
-        if not in_origin:
+        if not current_remote:
             continue
         if "=" in line:
             key, value = line.split("=", 1)
@@ -1344,12 +1430,11 @@ def _git_origin_remote_url(config_data: bytes) -> str:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] == '"' and "\\" not in value:
             value = value[1:-1]
-        return value
-    return ""
+        remotes.append((current_remote, value))
+    return remotes
 
 
-def _hosted_git_remote(config_data: bytes) -> dict[str, str] | None:
-    raw_url = _git_origin_remote_url(config_data)
+def _hosted_git_remote_url(raw_url: str) -> dict[str, str] | None:
     if not raw_url or any(character in raw_url for character in ("\x00", "\r", "\n")):
         return None
     host = ""
@@ -1393,6 +1478,17 @@ def _hosted_git_remote(config_data: bytes) -> dict[str, str] | None:
     return {"provider": provider, "base_url": f"https://{authority}/{'/'.join(segments)}"}
 
 
+def _hosted_git_remote(config_data: bytes) -> dict[str, str] | None:
+    candidates: list[tuple[int, int, dict[str, str]]] = []
+    for index, (name, raw_url) in enumerate(_git_remote_urls(config_data)):
+        remote = _hosted_git_remote_url(raw_url)
+        if remote is not None:
+            candidates.append(({"origin": 0, "upstream": 1}.get(name, 2), index, remote))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
 def _snapshot_regular_child(
     parent_handle: paths.SafePathHandle,
     source_path: Path,
@@ -1400,6 +1496,7 @@ def _snapshot_regular_child(
     *,
     budget: GitViewBudget,
     operation: str,
+    consume_budget: bool = True,
 ) -> None:
     try:
         with paths.safe_child(
@@ -1416,7 +1513,8 @@ def _snapshot_regular_child(
                     key="fs.error.gitRepositoryChanged",
                     status=409,
                 )
-            budget.consume(size=metadata.st_size)
+            if consume_budget:
+                budget.consume(size=metadata.st_size)
             destination_descriptor = os.open(
                 destination,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
@@ -1459,6 +1557,266 @@ def _snapshot_regular_child(
             raise
         raise _history_error(
             "Git repository metadata is unavailable or unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+
+
+def _materialize_pinned_loose_object(
+    cache_root: Path,
+    parent_handle: paths.SafePathHandle,
+    source_path: Path,
+    destination: Path,
+    *,
+    budget: GitViewBudget,
+    operation: str,
+) -> tuple[Path, tuple[int, int, int, int, int]]:
+    """Pin one loose-object inode into the request view without retaining one fd per object."""
+
+    try:
+        prefix = source_path.parent.name
+        suffix = source_path.name
+        if (
+            source_path.parent != parent_handle.resolved
+            or re.fullmatch(r"[0-9a-f]{2}", prefix) is None
+            or re.fullmatch(r"(?:[0-9a-f]{38}|[0-9a-f]{62})", suffix) is None
+        ):
+            raise _history_error(
+                "Git loose-object name is unsafe",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        source_descriptor = os.open(
+            suffix,
+            os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_handle.descriptor,
+        )
+        try:
+            metadata = os.fstat(source_descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise _history_error(
+                    "Git repository metadata is not a regular file",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            budget.consume(size=metadata.st_size)
+            cache_key = hashlib.sha256(
+                (
+                    f"{source_path.parent.name}/{source_path.name}:"
+                    f"{metadata.st_dev}:{metadata.st_ino}"
+                ).encode("ascii")
+            ).hexdigest()
+            cache_path = cache_root / f"object-{cache_key}"
+            try:
+                cache_metadata = os.stat(cache_path, follow_symlinks=False)
+            except FileNotFoundError:
+                cache_metadata = None
+            if cache_metadata is not None and (
+                not stat.S_ISREG(cache_metadata.st_mode)
+                or (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise _history_error(
+                    "Git loose-object cache generation changed",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            cached = cache_metadata is not None
+            if not cached:
+                with _git_loose_object_cache_session() as cache:
+                    try:
+                        cache_metadata = os.stat(cache_path, follow_symlinks=False)
+                    except FileNotFoundError:
+                        cache_metadata = None
+                    if cache_metadata is not None and (
+                        not stat.S_ISREG(cache_metadata.st_mode)
+                        or (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
+                    ):
+                        raise _history_error(
+                            "Git loose-object cache generation changed",
+                            key="fs.error.gitRepositoryChanged",
+                            status=409,
+                        )
+                    cached = cache_metadata is not None
+                    if not cached and (
+                        cache.entries < GIT_LOOSE_OBJECT_CACHE_MAX_ENTRIES
+                        and cache.bytes + metadata.st_size <= GIT_LOOSE_OBJECT_CACHE_MAX_BYTES
+                    ):
+                        try:
+                            os.link(
+                                source_path.name,
+                                cache_path,
+                                src_dir_fd=parent_handle.descriptor,
+                                follow_symlinks=False,
+                            )
+                        except OSError as error:
+                            if error.errno != errno.EXDEV:
+                                raise
+                        else:
+                            cache_metadata = os.stat(cache_path, follow_symlinks=False)
+                            if (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino):
+                                raise _history_error(
+                                    "Git loose object changed during cache publication",
+                                    key="fs.error.gitRepositoryChanged",
+                                    status=409,
+                                )
+                            cache.entries += 1
+                            cache.bytes += metadata.st_size
+                            cache.dirty = True
+                            cached = True
+            if cached:
+                os.symlink(cache_path, destination)
+            else:
+                _snapshot_regular_child(
+                    parent_handle,
+                    source_path,
+                    destination,
+                    budget=budget,
+                    operation=operation,
+                    consume_budget=False,
+                )
+            destination_metadata = os.stat(destination, follow_symlinks=True)
+            source_current = os.fstat(source_descriptor)
+            source_identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+            current_identity = (
+                source_current.st_dev,
+                source_current.st_ino,
+                source_current.st_size,
+                source_current.st_mtime_ns,
+                source_current.st_ctime_ns,
+            )
+            destination_identity = (
+                destination_metadata.st_dev,
+                destination_metadata.st_ino,
+                destination_metadata.st_size,
+                destination_metadata.st_mtime_ns,
+                destination_metadata.st_ctime_ns,
+            )
+            hardlinked = cached
+            source_generation_unchanged = current_identity[:4] == source_identity[:4]
+            copied_source_unchanged = hardlinked or current_identity[4] == source_identity[4]
+            published_generation_matches = not hardlinked or destination_identity == current_identity
+            if not source_generation_unchanged or not copied_source_unchanged or not published_generation_matches:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(destination)
+                raise _history_error(
+                    "Git loose object changed during snapshot publication",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            return destination, destination_identity
+        finally:
+            os.close(source_descriptor)
+    except (paths.FilesystemError, OSError) as error:
+        if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
+            raise
+        raise _history_error(
+            "Git repository metadata is unavailable or unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+
+
+def _snapshot_git_index(
+    git_dir_handle: paths.SafePathHandle,
+    destination: Path,
+    *,
+    operation: str,
+) -> GitIndexSnapshot | None:
+    index_path = git_dir_handle.resolved / "index"
+    try:
+        index_context = paths.safe_child(
+            git_dir_handle.descriptor,
+            index_path,
+            index_path,
+            operation=operation,
+            observe_name=False,
+        )
+        with index_context as index_handle:
+            metadata = index_handle.stat_result
+            if not stat.S_ISREG(metadata.st_mode):
+                raise _history_error(
+                    "Git index is not a regular file",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            if metadata.st_size > GIT_INDEX_MAX_BYTES:
+                raise _history_error(
+                    "Git index exceeds the metadata limit",
+                    key="fs.error.gitHistoryTooLarge",
+                    status=413,
+                )
+            digest = hashlib.sha256()
+            destination_descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o400,
+            )
+            try:
+                offset = 0
+                while offset < metadata.st_size:
+                    chunk = os.pread(
+                        index_handle.descriptor,
+                        min(64 * 1024, metadata.st_size - offset),
+                        offset,
+                    )
+                    if not chunk:
+                        raise _history_error(
+                            "Git index changed during snapshot",
+                            key="fs.error.gitRepositoryChanged",
+                            status=409,
+                        )
+                    digest.update(chunk)
+                    written = 0
+                    while written < len(chunk):
+                        written += os.write(destination_descriptor, chunk[written:])
+                    offset += len(chunk)
+            finally:
+                os.close(destination_descriptor)
+            current = os.fstat(index_handle.descriptor)
+            identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+            if (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_ctime_ns,
+            ) != identity:
+                raise _history_error(
+                    "Git index changed during snapshot",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            # Git's racy-clean check compares worktree mtimes with the index-file timestamp. A newly
+            # created copy would look newer than both and let a same-size, same-mtime content change
+            # be trusted as clean. Preserve the authorized source index timestamp so Git performs the
+            # same content verification against the snapshot that it would against the live index.
+            os.utime(
+                destination,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
+                follow_symlinks=False,
+            )
+            return GitIndexSnapshot(stat_identity=identity, digest=digest.hexdigest())
+    except (paths.FilesystemError, OSError) as error:
+        if isinstance(error, paths.FilesystemError) and error.status == 404:
+            return None
+        if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
+            raise
+        raise _history_error(
+            "Git index is unavailable or unsafe",
             key="fs.error.gitRepositoryChanged",
             status=409,
             diagnostic=error,
@@ -1620,6 +1978,95 @@ def _expose_pinned_pack_files(
     return exposed
 
 
+def _materialize_pinned_loose_object_store(
+    objects_handle: paths.SafePathHandle,
+    objects_path: Path,
+    object_directory: Path,
+    *,
+    object_format: str,
+    deadline: float,
+    operation: str,
+) -> tuple[list[tuple[Path, tuple[int, int, int, int, int]]], set[str]]:
+    """Build one request view while holding the shared cache lock only for publication."""
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    loose_budget = GitViewBudget(
+        deadline=deadline,
+        max_entries=GIT_VIEW_MAX_LOOSE_OBJECTS,
+        max_bytes=GIT_VIEW_MAX_LOOSE_BYTES,
+    )
+    loose_suffix_length = 62 if object_format == "sha256" else 38
+    loose_suffix_re = re.compile(rf"[0-9a-f]{{{loose_suffix_length}}}")
+    loose_snapshots: list[tuple[Path, tuple[int, int, int, int, int]]] = []
+    initial_loose_objects: set[str] = set()
+    cache_root = _git_loose_object_cache_root()
+    for prefix_index in range(256):
+        loose_budget.check()
+        name = f"{prefix_index:02x}"
+        try:
+            child_stat = os.stat(name, dir_fd=objects_handle.descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise _history_error(
+                "Git loose-object directory is unavailable",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        if not stat.S_ISDIR(child_stat.st_mode):
+            raise _history_error(
+                "Git loose-object directory is unsafe",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        child_path = objects_path / name
+        try:
+            with paths.safe_child(
+                objects_handle.descriptor,
+                child_path,
+                child_path,
+                flags=directory_flags,
+                operation=operation,
+                observe_name=False,
+            ) as child_handle:
+                destination_directory = object_directory / name
+                destination_directory.mkdir()
+                with os.scandir(child_handle.descriptor) as entries:
+                    for entry in entries:
+                        if loose_suffix_re.fullmatch(entry.name) is None:
+                            loose_budget.consume()
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            raise _history_error(
+                                "Git loose object is unsafe",
+                                key="fs.error.gitRepositoryChanged",
+                                status=409,
+                            )
+                        loose_snapshots.append(
+                            _materialize_pinned_loose_object(
+                                cache_root,
+                                child_handle,
+                                child_path / entry.name,
+                                destination_directory / entry.name,
+                                budget=loose_budget,
+                                operation=operation,
+                            )
+                        )
+                        initial_loose_objects.add(f"{name}/{entry.name}")
+        except (paths.FilesystemError, OSError) as error:
+            if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
+                raise
+            raise _history_error(
+                "Git object storage changed during history read",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+    loose_budget.check()
+    return loose_snapshots, initial_loose_objects
+
+
 @contextlib.contextmanager
 def _pinned_git_object_store(
     git_dir_handle: paths.SafePathHandle,
@@ -1628,6 +2075,8 @@ def _pinned_git_object_store(
     deadline: float,
     operation: str,
     retirement: GitViewRetirementBudget,
+    include_index: bool = False,
+    writable: bool = False,
 ):
     objects_path = git_common_dir_handle.resolved / "objects"
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -1652,7 +2101,12 @@ def _pinned_git_object_store(
             ) from error
         _ensure_pinned_child_unchanged(git_common_dir_handle, "objects", objects_handle)
         _ensure_no_git_alternate_objects(objects_handle)
-        view_root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="yolomux-git-view-")))
+        # A process-pool worker can receive the fixture/daemon process-group SIGTERM while this
+        # scope is active. Disable the weakref finalizer so interpreter shutdown cannot race the
+        # still-unwinding task; normal scope exit remains strict through the ExitStack callback.
+        temporary_view = tempfile.TemporaryDirectory(prefix="yolomux-git-view-", delete=False)
+        stack.callback(temporary_view.cleanup)
+        view_root = Path(temporary_view.name)
         object_directory = view_root / "objects"
         control_directory = view_root / "control"
         object_directory.mkdir()
@@ -1695,74 +2149,14 @@ def _pinned_git_object_store(
             repository_format_version, object_format = _git_repository_format(config_data)
             hosted_remote = _hosted_git_remote(config_data)
 
-        loose_budget = GitViewBudget(
+        loose_snapshots, initial_loose_objects = _materialize_pinned_loose_object_store(
+            objects_handle,
+            objects_path,
+            object_directory,
+            object_format=object_format,
             deadline=deadline,
-            max_entries=GIT_VIEW_MAX_LOOSE_OBJECTS,
-            max_bytes=GIT_VIEW_MAX_LOOSE_BYTES,
+            operation=operation,
         )
-        loose_suffix_length = 62 if object_format == "sha256" else 38
-        loose_suffix_re = re.compile(rf"[0-9a-f]{{{loose_suffix_length}}}")
-        for prefix_index in range(256):
-            loose_budget.check()
-            name = f"{prefix_index:02x}"
-            try:
-                child_stat = os.stat(name, dir_fd=objects_handle.descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise _history_error(
-                    "Git loose-object directory is unavailable",
-                    key="fs.error.gitRepositoryChanged",
-                    status=409,
-                    diagnostic=error,
-                ) from error
-            if not stat.S_ISDIR(child_stat.st_mode):
-                raise _history_error(
-                    "Git loose-object directory is unsafe",
-                    key="fs.error.gitRepositoryChanged",
-                    status=409,
-                )
-            child_path = objects_path / name
-            try:
-                with paths.safe_child(
-                    objects_handle.descriptor,
-                    child_path,
-                    child_path,
-                    flags=directory_flags,
-                    operation=operation,
-                    observe_name=False,
-                ) as child_handle:
-                    destination_directory = object_directory / name
-                    destination_directory.mkdir()
-                    with os.scandir(child_handle.descriptor) as entries:
-                        for entry in entries:
-                            if loose_suffix_re.fullmatch(entry.name) is None:
-                                loose_budget.consume()
-                                continue
-                            if not entry.is_file(follow_symlinks=False):
-                                raise _history_error(
-                                    "Git loose object is unsafe",
-                                    key="fs.error.gitRepositoryChanged",
-                                    status=409,
-                                )
-                            _snapshot_regular_child(
-                                child_handle,
-                                child_path / entry.name,
-                                destination_directory / entry.name,
-                                budget=loose_budget,
-                                operation=operation,
-                            )
-            except (paths.FilesystemError, OSError) as error:
-                if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
-                    raise
-                raise _history_error(
-                    "Git object storage changed during history read",
-                    key="fs.error.gitRepositoryChanged",
-                    status=409,
-                    diagnostic=error,
-                ) from error
-
-        loose_budget.check()
         try:
             pack_stat = os.stat("pack", dir_fd=objects_handle.descriptor, follow_symlinks=False)
         except FileNotFoundError:
@@ -1940,12 +2334,22 @@ def _pinned_git_object_store(
         if object_format == "sha256":
             config_text += "[extensions]\n\tobjectformat = sha256\n"
         (control_directory / "config").write_text(config_text, encoding="ascii")
+        index_snapshot = None
+        if include_index:
+            index_snapshot = _snapshot_git_index(
+                git_dir_handle,
+                control_directory / "index",
+                operation=operation,
+            )
+            if writable and index_snapshot is not None:
+                os.chmod(control_directory / "index", 0o600)
         _ensure_git_view_deadline(deadline)
 
-        os.chmod(object_directory, 0o500)
-        stack.callback(os.chmod, object_directory, 0o700)
-        os.chmod(control_directory, 0o500)
-        stack.callback(os.chmod, control_directory, 0o700)
+        if not writable:
+            os.chmod(object_directory, 0o500)
+            stack.callback(os.chmod, object_directory, 0o700)
+            os.chmod(control_directory, 0o500)
+            stack.callback(os.chmod, control_directory, 0o700)
         try:
             yield PinnedGitObjectStore(
                 objects_handle=objects_handle,
@@ -1954,9 +2358,35 @@ def _pinned_git_object_store(
                 object_directory=str(object_directory),
                 descriptors=tuple(handle.descriptor for handle in exposed_handles),
                 hosted_remote=hosted_remote,
+                index_snapshot=index_snapshot,
+                initial_loose_objects=frozenset(initial_loose_objects),
             )
         finally:
             retirement.check()
+            for loose_path, expected_identity in loose_snapshots:
+                try:
+                    current = os.stat(loose_path, follow_symlinks=True)
+                except OSError as error:
+                    raise _history_error(
+                        "Git loose object changed during consumption",
+                        key="fs.error.gitRepositoryChanged",
+                        status=409,
+                        diagnostic=error,
+                    ) from error
+                current_identity = (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_size,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                )
+                if current_identity != expected_identity:
+                    raise _history_error(
+                        "Git loose object changed during consumption",
+                        key="fs.error.gitRepositoryChanged",
+                        status=409,
+                    )
+                retirement.check()
             for handle in exposed_handles:
                 _ensure_pinned_regular_file_unchanged(handle)
                 retirement.check()
@@ -2032,6 +2462,8 @@ def _pinned_git_control(
     deadline: float,
     operation: str,
     retirement: GitViewRetirementBudget,
+    include_index: bool = False,
+    writable: bool = False,
 ):
     marker_path = repo / ".git"
     try:
@@ -2125,6 +2557,8 @@ def _pinned_git_control(
             deadline=deadline,
             operation=operation,
             retirement=retirement,
+            include_index=include_index,
+            writable=writable,
         ) as object_store:
             shallow_snapshot, shallow_data = _git_shallow_snapshot(
                 git_common_dir_handle,
@@ -2193,83 +2627,172 @@ def _validate_git_path_text(*values: Path | str) -> None:
 
 
 @contextlib.contextmanager
-def _pinned_git_history_scope(raw_path: str, *, operation: str):
-    deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+def pinned_git_scope_from_handle(
+    source_handle: paths.SafePathHandle | paths.SafeParentHandle,
+    *,
+    target_path: Path,
+    operation: str,
+    deadline: float,
+    include_index: bool = False,
+    index_mutation: bool = False,
+):
     retirement = GitViewRetirementBudget()
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    scope_handle = source_handle
+    _ensure_git_view_deadline(deadline)
+    repo = _pinned_repo_root(scope_handle, deadline=deadline, operation=operation)
+    _ensure_git_view_deadline(deadline)
+    if repo is None:
+        raise _history_error("path is not in a Git repository", key="fs.error.notGitRepo")
+    _ensure_pinned_namespace_unchanged(scope_handle)
     try:
-        scope_context = paths.safe_path(raw_path, flags=directory_flags, operation=operation)
-        with scope_context as scope_handle:
+        relative_path = target_path.relative_to(repo).as_posix()
+    except ValueError as error:
+        raise paths.FilesystemError.outside_repo(target_path) from error
+    _validate_git_path_text(repo, target_path, relative_path)
+    _ensure_git_view_deadline(deadline)
+    with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
+        _ensure_git_view_deadline(deadline)
+        _ensure_pinned_namespace_unchanged(scope_handle)
+        _ensure_git_view_deadline(deadline)
+        _ensure_pinned_namespace_unchanged(repo_handle)
+        _ensure_git_view_deadline(deadline)
+        with _pinned_git_control(
+            repo,
+            repo_handle,
+            deadline=deadline,
+            operation=operation,
+            retirement=retirement,
+            include_index=include_index,
+            writable=index_mutation,
+        ) as control:
+            (
+                marker_handle,
+                git_dir_handle,
+                git_common_dir_handle,
+                object_store,
+                shallow_snapshot,
+                shallow_data,
+            ) = control
             _ensure_git_view_deadline(deadline)
-            repo = _pinned_repo_root(scope_handle, deadline=deadline, operation=operation)
-            _ensure_git_view_deadline(deadline)
-            if repo is None:
-                raise _history_error("path is not in a Git repository", key="fs.error.notGitRepo")
-            _ensure_pinned_namespace_unchanged(scope_handle)
+            index_lock_descriptor = None
+            if index_mutation:
+                try:
+                    index_lock_descriptor = os.open(
+                        "index.lock",
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | paths.nofollow_flag()
+                        | getattr(os, "O_CLOEXEC", 0),
+                        0o600,
+                        dir_fd=git_dir_handle.descriptor,
+                    )
+                except FileExistsError as error:
+                    raise _history_error(
+                        "Git index is locked by another operation",
+                        key="fs.error.gitRepositoryChanged",
+                        status=409,
+                        diagnostic=error,
+                    ) from error
+                except OSError as error:
+                    raise _history_error(
+                        "Git index lock is unavailable",
+                        key="fs.error.gitRepositoryChanged",
+                        status=409,
+                        diagnostic=error,
+                    ) from error
             try:
-                relative_path = scope_handle.resolved.relative_to(repo).as_posix()
-            except ValueError as error:
-                raise paths.FilesystemError.outside_repo(scope_handle.resolved) from error
-            _validate_git_path_text(repo, scope_handle.resolved, relative_path)
-            _ensure_git_view_deadline(deadline)
-            with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
-                _ensure_git_view_deadline(deadline)
-                _ensure_pinned_namespace_unchanged(scope_handle)
-                _ensure_git_view_deadline(deadline)
-                _ensure_pinned_namespace_unchanged(repo_handle)
-                _ensure_git_view_deadline(deadline)
-                with _pinned_git_control(
-                    repo,
-                    repo_handle,
-                    deadline=deadline,
-                    operation=operation,
-                    retirement=retirement,
-                ) as control:
-                    (
-                        marker_handle,
-                        git_dir_handle,
-                        git_common_dir_handle,
-                        object_store,
-                        shallow_snapshot,
-                        shallow_data,
-                    ) = control
-                    _ensure_git_view_deadline(deadline)
+                yield PinnedGitHistoryScope(
+                    path=target_path,
+                    repo=repo,
+                    relative_path="" if relative_path == "." else relative_path,
+                    scope_handle=scope_handle,
+                    repo_handle=repo_handle,
+                    git_marker_handle=marker_handle,
+                    git_dir_handle=git_dir_handle,
+                    git_common_dir_handle=git_common_dir_handle,
+                    git_objects_handle=object_store.objects_handle,
+                    git_directory=object_store.git_directory,
+                    git_common_directory=object_store.git_common_directory,
+                    git_object_directory=object_store.object_directory,
+                    git_object_descriptors=object_store.descriptors,
+                    shallow_snapshot=shallow_snapshot,
+                    shallow_data=shallow_data,
+                    hosted_remote=object_store.hosted_remote,
+                    index_snapshot=object_store.index_snapshot,
+                    initial_loose_objects=object_store.initial_loose_objects,
+                    index_lock_descriptor=index_lock_descriptor,
+                )
+            finally:
+                if index_lock_descriptor is not None:
                     try:
-                        yield PinnedGitHistoryScope(
-                            path=scope_handle.resolved,
-                            repo=repo,
-                            relative_path="" if relative_path == "." else relative_path,
-                            scope_handle=scope_handle,
-                            repo_handle=repo_handle,
-                            git_marker_handle=marker_handle,
-                            git_dir_handle=git_dir_handle,
-                            git_common_dir_handle=git_common_dir_handle,
-                            git_objects_handle=object_store.objects_handle,
-                            git_directory=object_store.git_directory,
-                            git_common_directory=object_store.git_common_directory,
-                            git_object_directory=object_store.object_directory,
-                            git_object_descriptors=object_store.descriptors,
-                            shallow_snapshot=shallow_snapshot,
-                            shallow_data=shallow_data,
-                            hosted_remote=object_store.hosted_remote,
+                        expected = os.fstat(index_lock_descriptor)
+                        current = os.stat(
+                            "index.lock",
+                            dir_fd=git_dir_handle.descriptor,
+                            follow_symlinks=False,
                         )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
+                            os.unlink("index.lock", dir_fd=git_dir_handle.descriptor)
                     finally:
-                        retirement_deadline = retirement.begin()
-                        _ensure_pinned_namespace_unchanged(scope_handle)
-                        _ensure_git_view_deadline(retirement_deadline)
-                        _ensure_pinned_namespace_unchanged(repo_handle)
-                        _ensure_git_view_deadline(retirement_deadline)
-                        if _pinned_repo_root(
-                            scope_handle,
-                            deadline=retirement_deadline,
-                            operation=operation,
-                        ) != repo:
-                            raise _history_error(
-                                "Git repository boundary changed during history read",
-                                key="fs.error.gitRepositoryChanged",
-                                status=409,
-                            )
-                        _ensure_git_view_deadline(retirement_deadline)
+                        os.close(index_lock_descriptor)
+                retirement_deadline = retirement.begin()
+                if not index_mutation:
+                    _ensure_pinned_namespace_unchanged(scope_handle)
+                _ensure_git_view_deadline(retirement_deadline)
+                _ensure_pinned_namespace_unchanged(repo_handle)
+                _ensure_git_view_deadline(retirement_deadline)
+                if _pinned_repo_root(
+                    scope_handle,
+                    deadline=retirement_deadline,
+                    operation=operation,
+                ) != repo:
+                    raise _history_error(
+                        "Git repository boundary changed during history read",
+                        key="fs.error.gitRepositoryChanged",
+                        status=409,
+                    )
+                _ensure_git_view_deadline(retirement_deadline)
+
+
+@contextlib.contextmanager
+def pinned_git_scope(
+    raw_path: str | Path,
+    *,
+    operation: str,
+    include_index: bool = True,
+):
+    """Keep one policy-authorized path, repository, control tree, object store, and index view."""
+
+    deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+    with paths.safe_path(str(raw_path), operation=operation) as source_handle:
+        with pinned_git_scope_from_handle(
+            source_handle,
+            target_path=source_handle.resolved,
+            operation=operation,
+            deadline=deadline,
+            include_index=include_index,
+        ) as scope:
+            yield scope
+
+
+@contextlib.contextmanager
+def _pinned_git_history_scope(raw_path: str, *, operation: str):
+    deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        with paths.safe_path(raw_path, flags=directory_flags, operation=operation) as scope_handle:
+            with pinned_git_scope_from_handle(
+                scope_handle,
+                target_path=scope_handle.resolved,
+                operation=operation,
+                deadline=deadline,
+            ) as scope:
+                yield scope
     except paths.FilesystemError as error:
         if error.message_key != "fs.error.notDirectory":
             raise
@@ -2337,14 +2860,17 @@ def _raise_history_git_failure(
     )
 
 
-def _run_bounded_history_git(
+def _run_pinned_git(
     scope: PinnedGitHistoryScope,
     args: list[str],
     *,
     operation: str,
     timeout: float,
     max_output_bytes: int,
+    binary: bool = False,
     allow_failure: bool = False,
+    pass_fds: tuple[int, ...] = (),
+    stdin_data: bytes | None = None,
 ) -> PinnedGitResult:
     _ensure_pinned_child_unchanged(
         scope.git_common_dir_handle,
@@ -2353,20 +2879,30 @@ def _run_bounded_history_git(
     )
     _ensure_no_git_alternate_objects(scope.git_objects_handle)
     try:
-        result = _git_with_pinned_repo(
-            scope.repo_handle,
-            args,
-            timeout=timeout,
-            binary=True,
-            max_output_bytes=max_output_bytes,
-            git_dir_handle=scope.git_dir_handle,
-            git_common_dir_handle=scope.git_common_dir_handle,
-            git_directory=scope.git_directory,
-            git_common_directory=scope.git_common_directory,
-            git_object_directory=scope.git_object_directory,
-            git_object_descriptors=scope.git_object_descriptors,
-            shallow_data=scope.shallow_data,
-        )
+        with contextlib.ExitStack() as stack:
+            stdin_descriptor = None
+            if stdin_data is not None:
+                stdin_file = stack.enter_context(tempfile.TemporaryFile(prefix="yolomux-git-input-"))
+                stdin_file.write(stdin_data)
+                stdin_file.flush()
+                stdin_file.seek(0)
+                stdin_descriptor = stdin_file.fileno()
+            result = _git_with_pinned_repo(
+                scope.repo_handle,
+                args,
+                timeout=timeout,
+                binary=binary,
+                pass_fds=pass_fds,
+                max_output_bytes=max_output_bytes,
+                git_dir_handle=scope.git_dir_handle,
+                git_common_dir_handle=scope.git_common_dir_handle,
+                git_directory=scope.git_directory,
+                git_common_directory=scope.git_common_directory,
+                git_object_directory=scope.git_object_directory,
+                git_object_descriptors=scope.git_object_descriptors,
+                shallow_data=scope.shallow_data,
+                stdin_descriptor=stdin_descriptor,
+            )
     except subprocess.TimeoutExpired as error:
         raise _history_error(
             f"{operation} timed out",
@@ -2392,6 +2928,399 @@ def _run_bounded_history_git(
     if result.stderr_truncated:
         _raise_history_git_failure(result, operation=operation)
     return result
+
+
+def pinned_git_runner(
+    scope: PinnedGitHistoryScope,
+    *,
+    operation: str,
+    max_output_bytes: int = 32 * 1024 * 1024,
+) -> Callable[[list[str], float], PinnedGitResult]:
+    """Return the one bounded command adapter for an already-pinned repository view."""
+
+    def run(args: list[str], timeout: float = 3.0) -> PinnedGitResult:
+        return _run_pinned_git(
+            scope,
+            args,
+            operation=operation,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            allow_failure=True,
+        )
+
+    return run
+
+
+def pinned_repository_generation(raw_root: str) -> int:
+    """Measure watchd's repository generation from one authorized private Git view."""
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root_text = str(paths.parsed_request_path(raw_root))
+    signature = REPOSITORY_SIGNATURE_UNKNOWN
+    try:
+        with paths.safe_path(raw_root, flags=directory_flags, operation="repository_generation") as root_handle:
+            root_text = str(root_handle.resolved)
+            scope_context = pinned_git_scope_from_handle(
+                root_handle,
+                target_path=root_handle.resolved,
+                operation="repository_generation",
+                deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            )
+            with scope_context as scope:
+                head = _run_pinned_git(
+                    scope,
+                    ["rev-parse", "HEAD"],
+                    operation="gitGeneration",
+                    timeout=1.0,
+                    max_output_bytes=64 * 1024,
+                    allow_failure=True,
+                )
+                oid = (head.stdout or "").strip() if head.returncode == 0 else ""
+                if not oid:
+                    signature = REPOSITORY_SIGNATURE_UNKNOWN
+                else:
+                    symbolic = _run_pinned_git(
+                        scope,
+                        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                        operation="gitGeneration",
+                        timeout=1.0,
+                        max_output_bytes=64 * 1024,
+                        allow_failure=True,
+                    )
+                    symbolic_head = (symbolic.stdout or "").strip() if symbolic.returncode == 0 else ""
+                    signature = (symbolic_head, oid)
+    except paths.FilesystemError:
+        # Reconcile treats an unreadable or changing repo as inconclusive: keep the last generation
+        # without exposing control metadata or destabilizing the watch daemon.
+        pass
+    return _advance_repository_generation(root_text, signature)
+
+
+def _decode_pinned_index_path(raw_path: bytes) -> str:
+    try:
+        path = raw_path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise _history_error(
+            "Git index path is not valid UTF-8",
+            key="fs.error.gitPathEncoding",
+            status=422,
+        ) from error
+    candidate = PurePosixPath(path)
+    if not path or candidate.is_absolute() or ".." in candidate.parts:
+        raise _history_error(
+            "Git index path is unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    return path
+
+
+def _pinned_index_flag_paths(
+    scope: PinnedGitHistoryScope,
+    flag: str,
+    old_relative: str,
+) -> set[str]:
+    result = _run_pinned_git(
+        scope,
+        ["ls-files", flag, "-z", "--", old_relative],
+        operation="gitRename",
+        timeout=3.0,
+        max_output_bytes=GIT_INDEX_RENAME_MAX_INPUT_BYTES,
+        binary=True,
+        allow_failure=True,
+    )
+    if result.returncode != 0:
+        return set()
+    selected: set[str] = set()
+    for row in (result.stdout or b"").split(b"\0"):
+        if not row:
+            continue
+        tag, separator, raw_path = row.partition(b" ")
+        if not separator or len(tag) != 1:
+            raise _history_error(
+                "Git index flags are malformed",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        path = _decode_pinned_index_path(raw_path)
+        if flag == "-t" and tag == b"S":
+            selected.add(path)
+        elif flag in {"-v", "-f"} and tag.islower():
+            selected.add(path)
+    return selected
+
+
+def prepare_pinned_index_rename(scope: PinnedGitHistoryScope, new_relative: str) -> bool:
+    """Prepare a tracked rename in the private index without reopening worktree content."""
+
+    if scope.index_lock_descriptor is None:
+        raise _history_error(
+            "Git index mutation was not authorized",
+            key="fs.error.operationFailed",
+            status=500,
+        )
+    old_relative = scope.relative_path
+    _validate_git_path_text(old_relative, new_relative)
+    new_candidate = PurePosixPath(new_relative)
+    if not old_relative or not new_relative or new_candidate.is_absolute() or ".." in new_candidate.parts:
+        raise _history_error(
+            "Git rename path is unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    result = _run_pinned_git(
+        scope,
+        ["ls-files", "--stage", "-z", "--", old_relative],
+        operation="gitRename",
+        timeout=3.0,
+        max_output_bytes=GIT_INDEX_RENAME_MAX_INPUT_BYTES,
+        binary=True,
+        allow_failure=True,
+    )
+    if result.returncode != 0:
+        return False
+    rows: list[tuple[bytes, str, str]] = []
+    old_prefix = f"{old_relative}/"
+    for raw_row in (result.stdout or b"").split(b"\0"):
+        if not raw_row:
+            continue
+        metadata, separator, raw_path = raw_row.partition(b"\t")
+        parts = metadata.split()
+        if not separator or len(parts) != 3 or parts[2] != b"0":
+            raise _history_error(
+                "Git index contains an unsupported staged entry",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        old_path = _decode_pinned_index_path(raw_path)
+        if old_path == old_relative:
+            suffix = ""
+        elif old_path.startswith(old_prefix):
+            suffix = old_path[len(old_relative):]
+        else:
+            continue
+        new_path = f"{new_relative}{suffix}"
+        _decode_pinned_index_path(new_path.encode("utf-8"))
+        rows.append((metadata, old_path, new_path))
+        if len(rows) > GIT_INDEX_RENAME_MAX_ENTRIES:
+            raise _history_error(
+                "Git rename exceeds the index entry limit",
+                key="fs.error.gitHistoryTooLarge",
+                status=413,
+            )
+    if not rows:
+        return False
+    index_input = bytearray()
+    for metadata, old_path, new_path in rows:
+        object_id = metadata.split()[1]
+        index_input.extend(b"0 " + (b"0" * len(object_id)) + b"\t" + old_path.encode("utf-8") + b"\0")
+        index_input.extend(metadata + b"\t" + new_path.encode("utf-8") + b"\0")
+    if len(index_input) > GIT_INDEX_RENAME_MAX_INPUT_BYTES:
+        raise _history_error(
+            "Git rename exceeds the index update limit",
+            key="fs.error.gitHistoryTooLarge",
+            status=413,
+        )
+    assume_unchanged = _pinned_index_flag_paths(scope, "-v", old_relative)
+    skip_worktree = _pinned_index_flag_paths(scope, "-t", old_relative)
+    fsmonitor_valid = _pinned_index_flag_paths(scope, "-f", old_relative)
+    updated = _run_pinned_git(
+        scope,
+        ["update-index", "-z", "--index-info"],
+        operation="gitRename",
+        timeout=5.0,
+        max_output_bytes=64 * 1024,
+        binary=True,
+        allow_failure=True,
+        stdin_data=bytes(index_input),
+    )
+    if updated.returncode != 0:
+        _raise_history_git_failure(updated, operation="gitRename")
+    old_to_new = {old_path: new_path for _metadata, old_path, new_path in rows}
+    for option, selected in (
+        ("--assume-unchanged", assume_unchanged),
+        ("--skip-worktree", skip_worktree),
+        ("--fsmonitor-valid", fsmonitor_valid),
+    ):
+        paths_to_mark = [old_to_new[path] for path in selected if path in old_to_new]
+        if not paths_to_mark:
+            continue
+        flag_input = b"\0".join(path.encode("utf-8") for path in paths_to_mark) + b"\0"
+        flagged = _run_pinned_git(
+            scope,
+            ["update-index", option, "-z", "--stdin"],
+            operation="gitRename",
+            timeout=3.0,
+            max_output_bytes=64 * 1024,
+            binary=True,
+            allow_failure=True,
+            stdin_data=flag_input,
+        )
+        if flagged.returncode != 0:
+            _raise_history_git_failure(flagged, operation="gitRename")
+    return True
+
+
+def _git_index_matches_snapshot(scope: PinnedGitHistoryScope, name: str = "index") -> bool:
+    index_path = scope.git_dir_handle.resolved / name
+    try:
+        with paths.safe_child(
+            scope.git_dir_handle.descriptor,
+            index_path,
+            index_path,
+            operation="rename_path",
+            observe_name=False,
+        ) as index_handle:
+            if scope.index_snapshot is None or not stat.S_ISREG(index_handle.stat_result.st_mode):
+                return False
+            metadata = index_handle.stat_result
+            identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+            expected_identity = scope.index_snapshot.stat_identity
+            identity_matches = identity == expected_identity if name == "index" else identity[:3] == expected_identity[:3]
+            if not identity_matches or metadata.st_size > GIT_INDEX_MAX_BYTES:
+                return False
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < metadata.st_size:
+                chunk = os.pread(index_handle.descriptor, min(64 * 1024, metadata.st_size - offset), offset)
+                if not chunk:
+                    return False
+                digest.update(chunk)
+                offset += len(chunk)
+            return digest.hexdigest() == scope.index_snapshot.digest
+    except paths.FilesystemError as error:
+        return scope.index_snapshot is None and error.status == 404
+    except OSError:
+        return False
+
+
+def publish_pinned_index_rename(scope: PinnedGitHistoryScope) -> None:
+    """Install the prepared private index through the pinned Git-directory descriptor."""
+
+    lock_descriptor = scope.index_lock_descriptor
+    if lock_descriptor is None or not _git_index_matches_snapshot(scope):
+        raise _history_error(
+            "Git index changed during rename",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    private_index = Path(scope.git_directory) / "index"
+    try:
+        source_descriptor = os.open(
+            private_index,
+            os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise _history_error(
+            "Prepared Git index is unavailable",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+    try:
+        metadata = os.fstat(source_descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > GIT_INDEX_MAX_BYTES:
+            raise _history_error(
+                "Prepared Git index is invalid",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        os.ftruncate(lock_descriptor, 0)
+        offset = 0
+        while offset < metadata.st_size:
+            chunk = os.pread(source_descriptor, min(64 * 1024, metadata.st_size - offset), offset)
+            if not chunk:
+                raise _history_error(
+                    "Prepared Git index changed during publication",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            written = 0
+            while written < len(chunk):
+                written += os.pwrite(lock_descriptor, chunk[written:], offset + written)
+            offset += len(chunk)
+        os.fsync(lock_descriptor)
+    finally:
+        os.close(source_descriptor)
+    if not _git_index_matches_snapshot(scope):
+        raise _history_error(
+            "Git index changed during rename",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    expected_lock = os.fstat(lock_descriptor)
+    try:
+        current_lock = os.stat(
+            "index.lock",
+            dir_fd=scope.git_dir_handle.descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise _history_error(
+            "Git index lock changed during rename",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+    if (current_lock.st_dev, current_lock.st_ino) != (expected_lock.st_dev, expected_lock.st_ino):
+        raise _history_error(
+            "Git index lock changed during rename",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    try:
+        paths.rename_exchange(scope.git_dir_handle.descriptor, "index.lock", "index")
+    except OSError as error:
+        raise _history_error(
+            "Git index publication is unavailable",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+    if not _git_index_matches_snapshot(scope, "index.lock"):
+        try:
+            paths.rename_exchange(scope.git_dir_handle.descriptor, "index.lock", "index")
+        except OSError as rollback_error:
+            raise _history_error(
+                "Git index changed during rename and rollback failed",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=rollback_error,
+            ) from rollback_error
+        raise _history_error(
+            "Git index changed during rename",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    os.unlink("index.lock", dir_fd=scope.git_dir_handle.descriptor)
+    with contextlib.suppress(OSError):
+        os.fsync(scope.git_dir_handle.descriptor)
+
+
+def _run_bounded_history_git(
+    scope: PinnedGitHistoryScope,
+    args: list[str],
+    *,
+    operation: str,
+    timeout: float,
+    max_output_bytes: int,
+    allow_failure: bool = False,
+) -> PinnedGitResult:
+    return _run_pinned_git(
+        scope,
+        args,
+        operation=operation,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
+        binary=True,
+        allow_failure=allow_failure,
+    )
 
 
 def _decode_git_text(value: bytes) -> str:
@@ -3222,39 +4151,6 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
         return payload
 
 
-def _git_mv_if_tracked(src: Path, dst: Path) -> bool:
-    """Move a git-tracked file with `git mv`; callers fall back to plain rename on False."""
-    repo_root = git_root_for_path(src)
-    if not repo_root:
-        return False
-    repo = Path(repo_root)
-    try:
-        rel_src = src.relative_to(repo).as_posix()
-        rel_dst = dst.relative_to(repo).as_posix()
-    except ValueError:
-        return False
-    tracked = git(["ls-files", "--error-unmatch", "--", rel_src], cwd=str(repo), timeout=2.0)
-    if tracked.returncode != 0:
-        return False
-    return git(["mv", "--", rel_src, rel_dst], cwd=str(repo), timeout=5.0).returncode == 0
-
-
-def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str, str]:
-    result = git_bytes(["show", f"{ref}:{rel_path}"], cwd=str(repo), timeout=5.0)
-    if result.returncode != 0:
-        return "", ""
-    if len(result.stdout) > paths.MAX_READ_BYTES:
-        raise paths.FilesystemError(
-            f"{label} too large (max {paths.MAX_READ_BYTES})",
-            status=413,
-            message_key="fs.error.gitBlobTooLarge",
-            message_params={"label": label, "max": paths.MAX_READ_BYTES},
-        )
-    if paths._looks_binary(result.stdout):
-        return "", f"{label} file appears to be binary"
-    return result.stdout.decode("utf-8", errors="replace"), ""
-
-
 def normal_ref(value: str | None, default: str) -> str:
     ref = str(value or "").strip()
     return ref or default
@@ -3277,62 +4173,25 @@ def _diff_ref_resolution_error(error: Exception) -> bool:
     }
 
 
-def git_ref_exists(repo: Path, ref: str) -> bool:
-    result = git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(repo), timeout=3.0)
-    return result.returncode == 0
-
-
-def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
-    if to_ref == "current":
-        if from_ref == "current":
-            raise paths.FilesystemError(
-                "FROM ref must be older than TO ref (current is the working tree)",
-                message_key="fs.error.refOrderCurrent",
-            )
-        if not git_ref_exists(repo, from_ref):
-            raise paths.FilesystemError(
-                f"unknown FROM ref: {from_ref}",
-                message_key="common.unknownFromRef",
-                message_params={"ref": from_ref},
-            )
-        return
-    if from_ref == "current":
-        raise paths.FilesystemError(
-            "FROM ref must be older than TO ref (current is the working tree)",
-            message_key="fs.error.refOrderCurrent",
-        )
-    if not git_ref_exists(repo, from_ref):
-        raise paths.FilesystemError(
-            f"unknown FROM ref: {from_ref}",
-            message_key="common.unknownFromRef",
-            message_params={"ref": from_ref},
-        )
-    if not git_ref_exists(repo, to_ref):
-        raise paths.FilesystemError(
-            f"unknown TO ref: {to_ref}",
-            message_key="common.unknownToRef",
-            message_params={"ref": to_ref},
-        )
-    order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)
-    if order.returncode != 0:
-        raise paths.FilesystemError(
-            f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})",
-            message_key="fs.error.refOrder",
-            message_params={"fromRef": from_ref, "toRef": to_ref},
-        )
-
-
 def _pinned_blob_text(
-    repo: paths.SafePathHandle,
+    scope: PinnedGitHistoryScope,
     ref: str,
     rel_path: str,
     label: str,
 ) -> tuple[str, str]:
-    result = _git_with_pinned_repo(repo, ["show", f"{ref}:{rel_path}"], timeout=5.0, binary=True)
+    result = _run_pinned_git(
+        scope,
+        ["show", f"{ref}:{rel_path}"],
+        operation="gitBlob",
+        timeout=5.0,
+        max_output_bytes=paths.MAX_READ_BYTES + 1,
+        binary=True,
+        allow_failure=True,
+    )
     if result.returncode != 0:
         return "", ""
     raw = result.stdout or b""
-    if len(raw) > paths.MAX_READ_BYTES:
+    if result.stdout_truncated or len(raw) > paths.MAX_READ_BYTES:
         raise paths.FilesystemError(
             f"{label} too large (max {paths.MAX_READ_BYTES})",
             status=413,
@@ -3356,26 +4215,36 @@ def _pinned_working_text(handle: paths.SafePathHandle | None) -> tuple[str, str]
     return raw.decode("utf-8", errors="replace"), ""
 
 
-def _pinned_ref_exists(repo: paths.SafePathHandle, ref: str) -> bool:
-    return _git_with_pinned_repo(
-        repo,
+def _pinned_ref_exists(scope: PinnedGitHistoryScope, ref: str) -> bool:
+    return _run_pinned_git(
+        scope,
         ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        operation="gitRef",
         timeout=3.0,
+        max_output_bytes=64 * 1024,
+        allow_failure=True,
     ).returncode == 0
 
 
-def _ensure_pinned_ref_order(repo: paths.SafePathHandle, from_ref: str, to_ref: str) -> None:
+def _ensure_pinned_ref_order(scope: PinnedGitHistoryScope, from_ref: str, to_ref: str) -> None:
     if to_ref == "current":
-        if from_ref == "current" or not _pinned_ref_exists(repo, from_ref):
+        if from_ref == "current" or not _pinned_ref_exists(scope, from_ref):
             key = "fs.error.refOrderCurrent" if from_ref == "current" else "common.unknownFromRef"
             raise paths.FilesystemError("invalid FROM ref", message_key=key, message_params={"ref": from_ref})
         return
     if from_ref == "current":
         raise paths.FilesystemError("current cannot precede a commit", message_key="fs.error.refOrderCurrent")
     for ref, key in ((from_ref, "common.unknownFromRef"), (to_ref, "common.unknownToRef")):
-        if not _pinned_ref_exists(repo, ref):
+        if not _pinned_ref_exists(scope, ref):
             raise paths.FilesystemError(f"unknown ref: {ref}", message_key=key, message_params={"ref": ref})
-    order = _git_with_pinned_repo(repo, ["merge-base", "--is-ancestor", from_ref, to_ref], timeout=5.0)
+    order = _run_pinned_git(
+        scope,
+        ["merge-base", "--is-ancestor", from_ref, to_ref],
+        operation="gitRef",
+        timeout=5.0,
+        max_output_bytes=64 * 1024,
+        allow_failure=True,
+    )
     if order.returncode != 0:
         raise paths.FilesystemError(
             "FROM ref must precede TO ref",
@@ -3404,32 +4273,38 @@ def _diff_file_from_safe_path(
     operation: str = "diff_file",
 ) -> dict[str, Any]:
     repo_source = working_handle if working_handle is not None else repo_source_handle
-    repo = _pinned_repo_root(repo_source, operation=operation) if repo_source is not None else None
-    if repo is None and repo_source is None:
-        repo_root = git_root_for_path(path)
-        repo = Path(repo_root) if repo_root else None
-    if repo is None:
+    if repo_source is None:
         raise paths.FilesystemError(
             f"not in a git repo: {path}",
             message_key="fs.error.notGitRepo",
             message_params={"path": str(path)},
         )
-    try:
-        rel_path = path.relative_to(repo).as_posix()
-    except ValueError as exc:
-        raise paths.FilesystemError.outside_repo(path) from exc
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
-        tracked = _git_with_pinned_repo(repo_handle, ["ls-files", "--error-unmatch", "--", rel_path], timeout=3.0)
+    with pinned_git_scope_from_handle(
+        repo_source,
+        target_path=path,
+        operation=operation,
+        deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+        include_index=True,
+    ) as scope:
+        repo = scope.repo
+        rel_path = scope.relative_path
+        tracked = _run_pinned_git(
+            scope,
+            ["ls-files", "--error-unmatch", "--", rel_path],
+            operation="gitDiff",
+            timeout=3.0,
+            max_output_bytes=64 * 1024,
+            allow_failure=True,
+        )
         diff_from, diff_to = diff_refs(from_ref, to_ref)
         if not (diff_to == "current" and tracked.returncode != 0):
             try:
-                _ensure_pinned_ref_order(repo_handle, diff_from, diff_to)
+                _ensure_pinned_ref_order(scope, diff_from, diff_to)
             except paths.FilesystemError as error:
                 if not (refs_requested(from_ref, to_ref) and _diff_ref_resolution_error(error)):
                     raise
                 diff_from, diff_to = diff_refs(None, None)
-                _ensure_pinned_ref_order(repo_handle, diff_from, diff_to)
+                _ensure_pinned_ref_order(scope, diff_from, diff_to)
         original = ""
         original_error = ""
         working = ""
@@ -3437,7 +4312,7 @@ def _diff_file_from_safe_path(
         if diff_to == "current":
             untracked = tracked.returncode != 0
             if not untracked:
-                original, original_error = _pinned_blob_text(repo_handle, diff_from, rel_path, "original")
+                original, original_error = _pinned_blob_text(scope, diff_from, rel_path, "original")
             working, working_error = _pinned_working_text(working_handle)
             if original_error or working_error:
                 diff = f"Binary files a/{rel_path} and b/{rel_path} differ\n" if original != working else ""
@@ -3445,10 +4320,13 @@ def _diff_file_from_safe_path(
                 diff = _unified_file_diff(original, working, rel_path)
         else:
             untracked = False
-            result = _git_with_pinned_repo(
-                repo_handle,
+            result = _run_pinned_git(
+                scope,
                 ["diff", diff_from, diff_to, "--", rel_path],
+                operation="gitDiff",
                 timeout=5.0,
+                max_output_bytes=paths.MAX_READ_BYTES + 1,
+                allow_failure=True,
             )
             if result.returncode not in {0, 1}:
                 raise paths.FilesystemError(
@@ -3458,8 +4336,8 @@ def _diff_file_from_safe_path(
                     diagnostic=cmd_error(result, "git diff failed"),
                 )
             diff = result.stdout or ""
-            original, original_error = _pinned_blob_text(repo_handle, diff_from, rel_path, "original")
-            working, working_error = _pinned_blob_text(repo_handle, diff_to, rel_path, "working")
+            original, original_error = _pinned_blob_text(scope, diff_from, rel_path, "original")
+            working, working_error = _pinned_blob_text(scope, diff_to, rel_path, "working")
     if len(diff.encode("utf-8", errors="replace")) > paths.MAX_READ_BYTES:
         raise paths.FilesystemError(
             f"diff too large (max {paths.MAX_READ_BYTES})",
@@ -3561,38 +4439,53 @@ def _blame_file_from_safe_path(
     operation: str = "blame_file",
 ) -> dict[str, Any]:
     repo_source = file_handle if file_handle is not None else repo_source_handle
-    repo = _pinned_repo_root(repo_source, operation=operation) if repo_source is not None else None
-    if repo is None and repo_source is None:
-        repo_root = git_root_for_path(path)
-        repo = Path(repo_root) if repo_root else None
-    if repo is None:
+    if repo_source is None:
         return {"path": str(path), "repo": "", "relative_path": "", "in_repo": False, "lines": {}}
     try:
-        rel_path = path.relative_to(repo).as_posix()
-    except ValueError as exc:
-        raise paths.FilesystemError.outside_repo(path) from exc
-    if file_handle is None:
-        return {"path": str(path), "repo": str(repo), "relative_path": rel_path, "in_repo": True, "lines": {}}
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
-        head = _git_with_pinned_repo(repo_handle, ["rev-parse", "HEAD"], timeout=1.0)
-        head_sha = (head.stdout or "").strip() if head.returncode == 0 else ""
-        mtime_ns = file_handle.stat_result.st_mtime_ns
-        use_ref = ref if (ref and ref not in {"current", "working", "HEAD", ""}) else ""
-        cache_key = (str(path), head_sha, mtime_ns, use_ref)
-        cached = _blame_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        args = ["blame", "--line-porcelain", "--contents", str(file_handle.descriptor_path())]
-        if use_ref:
-            args.append(use_ref)
-        args += ["--", rel_path]
-        result = _git_with_pinned_repo(
-            repo_handle,
-            args,
-            timeout=3.0,
-            pass_fds=(file_handle.descriptor,),
+        scope_context = pinned_git_scope_from_handle(
+            repo_source,
+            target_path=path,
+            operation=operation,
+            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            include_index=True,
         )
+        with scope_context as scope:
+            repo = scope.repo
+            rel_path = scope.relative_path
+            if file_handle is None:
+                return {"path": str(path), "repo": str(repo), "relative_path": rel_path, "in_repo": True, "lines": {}}
+            head = _run_pinned_git(
+                scope,
+                ["rev-parse", "HEAD"],
+                operation="gitBlame",
+                timeout=1.0,
+                max_output_bytes=64 * 1024,
+                allow_failure=True,
+            )
+            head_sha = (head.stdout or "").strip() if head.returncode == 0 else ""
+            mtime_ns = file_handle.stat_result.st_mtime_ns
+            use_ref = ref if (ref and ref not in {"current", "working", "HEAD", ""}) else ""
+            cache_key = (str(path), head_sha, mtime_ns, use_ref)
+            cached = _blame_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            args = ["blame", "--line-porcelain", "--contents", str(file_handle.descriptor_path())]
+            if use_ref:
+                args.append(use_ref)
+            args += ["--", rel_path]
+            result = _run_pinned_git(
+                scope,
+                args,
+                operation="gitBlame",
+                timeout=3.0,
+                max_output_bytes=paths.MAX_READ_BYTES,
+                allow_failure=True,
+                pass_fds=(file_handle.descriptor,),
+            )
+    except paths.FilesystemError as error:
+        if error.message_key == "fs.error.notGitRepo":
+            return {"path": str(path), "repo": "", "relative_path": "", "in_repo": False, "lines": {}}
+        raise
     if result.returncode != 0:
         return {
             "path": str(path),
@@ -3631,12 +4524,3 @@ def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
                 ref=ref,
                 operation="blame_file",
             )
-
-
-def git_root_for_path(path: Path) -> str:
-    cwd = path if path.is_dir() else path.parent
-    result = git(["rev-parse", "--show-toplevel"], cwd=str(cwd), timeout=1.0)
-    if result.returncode != 0:
-        return ""
-    root = result.stdout.strip()
-    return root if root.startswith("/") else ""

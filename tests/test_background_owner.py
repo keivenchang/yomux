@@ -1947,6 +1947,8 @@ def test_search_index_follower_large_sqlite_metadata_status_and_streaming_search
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     file_index.set_background_owner_done_notifier(None)
     index = file_index.RootIndex(tmp_path)
+    _pin_search_index_root(index, tmp_path)
+    index.published_root_identity = index.root_fd_identity
     index.entries = [
         (str(tmp_path / f"dir-{number % 100}" / f"target-{number:05d}.py"), f"target-{number:05d}.py", f"dir-{number % 100}/target-{number:05d}.py", number + 1, number + 10)
         for number in range(entry_count)
@@ -1962,6 +1964,7 @@ def test_search_index_follower_large_sqlite_metadata_status_and_streaming_search
         filesystem.search.SEARCH_SKIP_DIRS,
         exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
     )
+    index.close_root_fd()
     load_calls = []
 
     def slow_load_disk(*_args, **_kwargs):
@@ -2086,6 +2089,8 @@ def test_search_index_stale_ready_queries_do_not_start_rebuild_until_owner_sched
         index = file_index.RootIndex(tmp_path)
         index.entries = [(str(target), target.name, target.name, target.stat().st_size, int(target.stat().st_mtime))]
         index.built_at = time.time() - file_index.INDEX_TTL_SECONDS - 1.0
+        _pin_search_index_root(index, tmp_path)
+        index.published_root_identity = index.root_fd_identity
         index.ready = True
         index.signature = file_index._skip_signature(filesystem.search.SEARCH_SKIP_DIRS, filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE)
         file_index._REGISTRY[str(tmp_path)] = index
@@ -2101,6 +2106,7 @@ def test_search_index_stale_ready_queries_do_not_start_rebuild_until_owner_sched
         file_index.set_background_owner_checker(None)
         with file_index._REGISTRY_LOCK:
             file_index._REGISTRY.clear()
+        index.close_root_fd()
 
     assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
     assert [entry["relative_path"] for entry in repeated["files"]] == ["target.py"]

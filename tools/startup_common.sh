@@ -8,22 +8,13 @@ yolomux_default_server_optin() {
   printf '%s' 'YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1'
 }
 
-# One listener scanner shared by boot.sh and the supported launcher, so ownership
-# checks and stop logic never drift between two copies.
+# Route startup through the same fail-closed Python census as runtime probes.
 yolomux_port_listener_pids() {
   local port="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u
-    return
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    # lsof exits 1 when the query has no matches. That is a valid empty listener set,
-    # not evidence that the scanner is unavailable.
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true
-    return 0
-  fi
-  printf 'need ss or lsof to find the listener for port %s\n' "$port" >&2
-  return 2
+  local listener_python="${YOLOMUX_PYTHON:-${python_bin:-${PYTHON:-python3}}}"
+  local startup_repo_root
+  startup_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || return 2
+  (cd -- "$startup_repo_root" && "$listener_python" -m yolomux_lib.infra.listener_census "$port")
 }
 
 # Require EXACTLY one listener on a port and print its pid. The managed owner

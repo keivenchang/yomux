@@ -76,7 +76,11 @@ INDEX_TTL_SECONDS = 30.0 * 60.0
 # incomplete crawl at the shallowest pending directory after a restart. A v4 flat
 # `entries` snapshot migrates in place (its rows stay searchable as a stale
 # generation) rather than being dropped, so results survive the format bump.
-INDEX_FORMAT_VERSION = 5
+# v6 binds every published snapshot to the `(st_dev, st_ino)` identity of the
+# authorized root descriptor that produced it. Identity-less v5 stores are not
+# readable because a pathname can be replaced by a different directory while
+# retaining the same policy and durable-index key.
+INDEX_FORMAT_VERSION = 6
 # Directory coverage / frontier lifecycle states. A directory is `pending` while
 # it sits in the frontier, `scanning` while its one listing runs, and `complete`
 # or `failed` once its transaction reaches a terminal state for its generation.
@@ -113,6 +117,11 @@ PRODUCER_UNRECORDED = "unrecorded"
 _BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
 _BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 _BACKGROUND_INDEX_SEARCH_REQUESTER: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+_BACKGROUND_INDEX_SEARCH_REQUEST: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "background_index_search_request",
+    default=None,
+)
+AUTHORIZED_ROOT_IDENTITY_FIELD = "authorized_root_identity"
 _BACKGROUND_OWNER_BYTES_RECORDER: Callable[[int], None] | None = None
 _BACKGROUND_OWNER_DONE_NOTIFIER: Callable[[str, dict[str, Any]], None] | None = None
 # Streaming Quick Open (step 5): the signal-only progress notifier. `indexd` calls it after a
@@ -226,6 +235,7 @@ class RootIndex:
     def __init__(self, root: Path):
         self.root = root
         self.root_fd: int | None = None
+        self.root_fd_identity: tuple[int, int] | None = None
         self.entries: list[IndexEntry] = []
         # The list is the in-memory search snapshot.  The map makes a normal
         # file save O(log n) list maintenance instead of a full filter/sort of
@@ -247,6 +257,11 @@ class RootIndex:
         # newer cross-process unindex -- and therefore stamped the OLD identity -- can no longer keep
         # serving deleted rows from RAM. ``None`` means "no tombstone was current when this was built".
         self.published_tombstone_identity: str | None = None
+        # The root descriptor generation that produced `entries`. It is frozen
+        # atomically with `ready`; a different descriptor installed for the same
+        # pathname invalidates the rows before any serving or adoption path can
+        # use them.
+        self.published_root_identity: tuple[int, int] | None = None
         self.building = False
         self.build_generation = 0
         self.active_generation = 0
@@ -325,11 +340,35 @@ class RootIndex:
 
     def replace_root_fd(self, descriptor: int) -> None:
         replacement = os.dup(descriptor)
+        replacement_identity = parse_root_identity(root_identity(os.fstat(replacement)))
         with self.lock:
             previous = self.root_fd
-            self.root_fd = replacement
+            self._replace_root_fd_locked(replacement, replacement_identity)
         if previous is not None:
             os.close(previous)
+
+    def _replace_root_fd_locked(self, descriptor: int, identity: tuple[int, int]) -> None:
+        """Install one descriptor generation while the caller holds ``self.lock``."""
+        previous_identity = self.root_fd_identity
+        root_generation_changed = (
+            (previous_identity is not None and previous_identity != identity)
+            or (
+                self.published_root_identity is not None
+                and self.published_root_identity != identity
+            )
+        )
+        if root_generation_changed:
+            # Fence a worker that still owns the prior descriptor generation.
+            # Its publication checks the immutable assignment generation and
+            # root identity before making rows ready.
+            if self.building:
+                self.build_generation += 1
+                self.active_generation = self.build_generation
+                self.stop_event.set()
+            _clear_ready_fields_locked(self)
+            self.signature = ""
+        self.root_fd = descriptor
+        self.root_fd_identity = identity
 
     def duplicate_root_fd(self) -> int:
         with self.lock:
@@ -341,6 +380,7 @@ class RootIndex:
         with self.lock:
             descriptor = self.root_fd
             self.root_fd = None
+            self.root_fd_identity = None
         if descriptor is not None:
             os.close(descriptor)
 
@@ -408,6 +448,9 @@ class _WorkerAssignment:
     # tombstone). Its publication may clear the marker only when that identity is still current; a
     # newer unindex written mid-build carries a different identity this build must not erase.
     captured_tombstone_identity: str | None = None
+    # The authorized root descriptor generation this worker owns. Publication
+    # may proceed only while the RootIndex still names this exact identity.
+    captured_root_identity: tuple[int, int] | None = None
 
 
 @dataclass
@@ -647,44 +690,11 @@ def _pending_drop_retry_main(root: Path, key: str, token: str, completion: threa
             completion.set()
 
 
-def _descriptor_path(descriptor: int) -> Path:
-    for root in (Path("/proc/self/fd"), Path("/dev/fd")):
-        candidate = root / str(descriptor)
-        if candidate.exists():
-            return candidate
-    raise RuntimeError("this platform cannot expose the pinned search-index descriptor")
-
-
 def _nofollow_flag() -> int:
     flag = getattr(os, "O_NOFOLLOW", 0)
     if not flag:
         raise RuntimeError("safe no-follow search-index opens are unsupported on this platform")
     return flag
-
-
-def _open_relative_path(root_descriptor: int, relative: Path) -> int:
-    """Open one relative path component-by-component without following symlinks."""
-
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"index path must stay relative to its root: {relative}")
-    current_fd = os.dup(root_descriptor)
-    try:
-        parts = [part for part in relative.parts if part not in {"", "."}]
-        if not parts:
-            return os.dup(current_fd)
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-        nofollow = _nofollow_flag()
-        for component in parts[:-1]:
-            next_fd = os.open(component, directory_flags | nofollow, dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
-        return os.open(
-            parts[-1],
-            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=current_fd,
-        )
-    finally:
-        os.close(current_fd)
 
 
 # ONE absolute deadline for the WHOLE retirement batch, never N * per-root -- so demoting N roots
@@ -963,7 +973,75 @@ def set_background_index_search_requester(requester: Callable[[dict[str, Any]], 
 def request_background_index_search(payload: dict[str, Any]) -> dict[str, Any]:
     if _BACKGROUND_INDEX_SEARCH_REQUESTER is None:
         return {"ok": False, "error": "no persistent index search requester"}
-    return _BACKGROUND_INDEX_SEARCH_REQUESTER(payload)
+    token = _BACKGROUND_INDEX_SEARCH_REQUEST.set(dict(payload))
+    try:
+        return _BACKGROUND_INDEX_SEARCH_REQUESTER(payload)
+    finally:
+        _BACKGROUND_INDEX_SEARCH_REQUEST.reset(token)
+
+
+def background_index_search_request() -> dict[str, Any]:
+    """Return the current request while an adapter forwards it to ``SearchIndexerClient``."""
+    request = _BACKGROUND_INDEX_SEARCH_REQUEST.get()
+    return dict(request) if request is not None else {}
+
+
+def root_identity(stat_result: os.stat_result) -> list[int]:
+    """Encode the one cross-process root-generation identity schema."""
+    return [int(stat_result.st_dev), int(stat_result.st_ino)]
+
+
+def parse_root_identity(value: Any) -> tuple[int, int]:
+    """Parse the shared root-generation identity schema, refusing ambiguous values."""
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(part, bool) or not isinstance(part, int) or part < 0 for part in value)
+    ):
+        raise ValueError("authorized root identity is malformed")
+    return int(value[0]), int(value[1])
+
+
+def _root_identity_metadata_value(identity: tuple[int, int]) -> str:
+    """Serialize the shared identity schema into SQLite's text metadata value."""
+    return json.dumps([int(identity[0]), int(identity[1])], separators=(",", ":"))
+
+
+def _metadata_root_identity(metadata: dict[str, Any] | None) -> tuple[int, int] | None:
+    """Read one published root identity from SQLite or manifest metadata."""
+    if not metadata or AUTHORIZED_ROOT_IDENTITY_FIELD not in metadata:
+        return None
+    value = metadata.get(AUTHORIZED_ROOT_IDENTITY_FIELD)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return parse_root_identity(value)
+    except ValueError:
+        return None
+
+
+def _root_identity_matches(metadata: dict[str, Any], expected: tuple[int, int]) -> bool:
+    """The one publication/readability verdict for a root descriptor generation."""
+    return _metadata_root_identity(metadata) == expected
+
+
+def _current_root_identity(root: Path) -> tuple[int, int] | None:
+    """Pin the current directory long enough to obtain its object-generation identity."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _nofollow_flag(),
+        )
+        return parse_root_identity(root_identity(os.fstat(descriptor)))
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def set_background_owner_bytes_recorder(recorder: Callable[[int], None] | None) -> None:
@@ -1116,6 +1194,7 @@ def promote_frontier(
     *,
     to_priority: int = USER_VISIBLE_DEMAND_PRIORITY,
     to_reason: str = USER_VISIBLE_DEMAND_REASON,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> int:
     """Raise the priority of a root's pending durable frontier rows to user-visible-demand.
 
@@ -1129,14 +1208,22 @@ def promote_frontier(
     disk = _index_disk_path(root)
     if not disk.exists():
         return 0
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None:
+        return 0
     try:
         conn = sqlite3.connect(disk, timeout=_COVERAGE_LIVE_READ_TIMEOUT_SECONDS)
         try:
             conn.execute(f"PRAGMA busy_timeout={int(_COVERAGE_LIVE_READ_TIMEOUT_SECONDS * 1000)}")
             _ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if not _root_identity_matches(metadata, expected_identity):
+                return 0
             # Do not promote the frontier of a snapshot an explicit unindex invalidated: mutating a
             # deleted store's crawl queue is meaningless, and a fresh generation supersedes it anyway.
-            if _snapshot_is_tombstoned(root, dict(conn.execute("SELECT key, value FROM metadata"))):
+            if _snapshot_is_tombstoned(root, metadata):
                 return 0
             cursor = conn.execute(
                 "UPDATE frontier SET priority = ?, reason = ? WHERE state = 'pending' AND priority > ?",
@@ -1179,13 +1266,21 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
     if _BACKGROUND_OWNER_REFRESH_REQUESTER is None:
         return False
     key = str(root)
+    expected_root_identity = _current_root_identity(Path(key))
+    if expected_root_identity is None:
+        return False
     now = time.monotonic()
     with _PROMOTION_LOCK:
         last = _PROMOTION_LAST_DISPATCH.get(key, 0.0)
         if now - last < _PROMOTION_DEBOUNCE_SECONDS:
             return False
         _PROMOTION_LAST_DISPATCH[key] = now
-    payload = {"root": key, "operation": "promote", "reason": USER_VISIBLE_DEMAND_REASON}
+    payload = {
+        "root": key,
+        "operation": "promote",
+        "reason": USER_VISIBLE_DEMAND_REASON,
+        AUTHORIZED_ROOT_IDENTITY_FIELD: list(expected_root_identity),
+    }
     if directory:
         payload["directory"] = str(directory)
     threading.Thread(
@@ -1235,6 +1330,13 @@ def persisted_index_roots_within(root: Path) -> list[Path]:
         # An explicit unindex invalidates the child snapshot: do not offer a deleted root as a
         # persisted child a warming parent could serve exact files from.
         if isinstance(metadata, dict) and _snapshot_is_tombstoned(candidate, metadata):
+            continue
+        current_identity = _current_root_identity(candidate)
+        if (
+            not isinstance(metadata, dict)
+            or current_identity is None
+            or not _root_identity_matches(metadata, current_identity)
+        ):
             continue
         if candidate != root and _path_is_within(candidate, root):
             roots.append(candidate)
@@ -1382,7 +1484,12 @@ def _reconcile_manifest_tombstone_identity(root: Path, value: str) -> None:
         LOGGER.exception("failed to reconcile derived manifest tombstone identity for %s", root)
 
 
-def _stamp_snapshot_tombstone_identity(root: Path, identity: str | None) -> bool:
+def _stamp_snapshot_tombstone_identity(
+    root: Path,
+    identity: str | None,
+    *,
+    expected_root_identity: tuple[int, int] | None,
+) -> bool:
     """Commit the frozen tombstone identity into the AUTHORITATIVE sqlite snapshot, then reconcile the
     DERIVED manifest cache from that SAME value; return whether the authoritative sqlite commit landed.
 
@@ -1405,6 +1512,11 @@ def _stamp_snapshot_tombstone_identity(root: Path, identity: str | None) -> bool
     try:
         with _sqlite_index_connection(root) as conn:
             _ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if expected_root_identity is None or not _root_identity_matches(metadata, expected_root_identity):
+                return False
             conn.execute(
                 "INSERT INTO metadata(key, value) VALUES ('tombstone_identity', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1493,6 +1605,16 @@ def _clear_ready_fields_locked(ri: RootIndex) -> None:
     ri.disk_metadata_ready = False
     ri.disk_entry_count = 0
     ri.published_tombstone_identity = None
+    ri.published_root_identity = None
+
+
+def _root_index_generation_matches(ri: RootIndex) -> bool:
+    """Whether the in-memory rows belong to the currently installed root descriptor."""
+    return (
+        ri.root_fd_identity is not None
+        and ri.published_root_identity is not None
+        and ri.root_fd_identity == ri.published_root_identity
+    )
 
 
 def _evict_tombstoned_root_index(ri: RootIndex) -> bool:
@@ -1688,6 +1810,7 @@ def _walk_root_with_metrics(
     relative_root: Path | None = None,
     entry_root: Path | None = None,
     root_fd: int | None = None,
+    resolved_root: Path | None = None,
     operation: str = "",
 ) -> tuple[list[IndexEntry], bool, int]:
     entries: list[IndexEntry] = []
@@ -1701,10 +1824,18 @@ def _walk_root_with_metrics(
         except ValueError:
             relative_prefix = Path(".")
     truncated = False
-    owned_root_fd = None
+    owned_root_context: contextlib.AbstractContextManager[Any] | None = None
     if root_fd is None:
-        owned_root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        root_fd = owned_root_fd
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        owned_root_context = filesystem_paths.safe_path(
+            str(root),
+            flags=directory_flags,
+            operation=operation or "index_walk",
+        )
+        root_handle = owned_root_context.__enter__()
+        root_fd = root_handle.descriptor
+        if resolved_root is None:
+            resolved_root = root_handle.resolved
 
     def include_directory(relative: Path) -> bool:
         nonlocal ignored
@@ -1720,6 +1851,7 @@ def _walk_root_with_metrics(
             include_directory=include_directory,
             operation=operation,
             requested_root=result_root / relative_prefix,
+            resolved_root=resolved_root or root,
         )
         with contextlib.closing(walker):
             for relative_directory, _directory_fd, _dirnames, file_rows in walker:
@@ -1737,8 +1869,8 @@ def _walk_root_with_metrics(
                     rel = (logical_directory / name).as_posix()
                     entries.append((str(result_root / rel), name, rel, int(st.st_size), int(st.st_mtime)))
     finally:
-        if owned_root_fd is not None:
-            os.close(owned_root_fd)
+        if owned_root_context is not None:
+            owned_root_context.__exit__(None, None, None)
     return entries, truncated, ignored
 
 
@@ -1844,35 +1976,6 @@ def _sqlite_index_connection(root: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _table_names(conn: sqlite3.Connection) -> set[str]:
-    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-
-
-def _entries_columns(conn: sqlite3.Connection) -> set[str]:
-    return {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
-
-
-def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
-    """Preserve a v4 flat snapshot in place rather than dropping its rows.
-
-    v4 rows share the v5 column shape apart from the new `generation` column, so
-    adding that column keeps every previously indexed file immediately searchable
-    as a stale generation until a progressive rebuild republishes it. The metadata
-    version is advanced to v5 so a follower's read-path match accepts the rows.
-    """
-    tables = _table_names(conn)
-    if "entries" in tables and "generation" not in _entries_columns(conn):
-        # A migrated v4 row belongs to generation 0: it is searchable but not
-        # attributable to any progressive generation, and the next build replaces it.
-        conn.execute("ALTER TABLE entries ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
-    if "metadata" in tables:
-        conn.execute(
-            "INSERT INTO metadata(key, value) VALUES ('version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(INDEX_FORMAT_VERSION),),
-        )
-
-
 # --------------------------------------------------------------------------
 # Streaming Quick Open (DOIT.p0.search-interactivity steps 1-3): the committed
 # change journal + opaque delta cursor. `indexd` is the SOLE writer/traverser;
@@ -1893,7 +1996,7 @@ JOURNAL_MATCH_LIMIT = 500
 JOURNAL_RETENTION_REVISIONS = 10_000
 # The opaque cursor format version. A cursor whose version this reader does not recognize is treated as
 # malformed (rebase_required), never silently reinterpreted.
-_DELTA_CURSOR_VERSION = 1
+_DELTA_CURSOR_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1927,11 +2030,20 @@ class DeltaResult:
 
 
 def _encode_delta_cursor(
-    *, root: Path | str, policy: str, generation: int, revision: int, tombstone_identity: str
+    *,
+    root: Path | str,
+    policy: str,
+    generation: int,
+    revision: int,
+    tombstone_identity: str,
+    root_generation: tuple[int, int] | None = None,
 ) -> str:
     """Encode the opaque delta cursor. It pins the {root/policy identity, generation, publication
     revision, published tombstone identity} so a decoded cursor can never be applied to a different
     root, policy, generation, or post-unindex identity than the one that produced it."""
+    identity = root_generation or _current_root_identity(Path(root))
+    if identity is None:
+        raise ValueError("authorized root identity is unavailable")
     payload = {
         "v": _DELTA_CURSOR_VERSION,
         "root": _canonical_root_key(Path(root)),
@@ -1939,6 +2051,7 @@ def _encode_delta_cursor(
         "generation": int(generation),
         "revision": int(revision),
         "tombstone": str(tombstone_identity or ""),
+        "root_generation": list(identity),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
@@ -1963,6 +2076,7 @@ def _decode_delta_cursor(cursor: str) -> dict[str, Any] | None:
             "generation": int(payload["generation"]),
             "revision": int(payload["revision"]),
             "tombstone": str(payload.get("tombstone") or ""),
+            "root_generation": parse_root_identity(payload["root_generation"]),
         }
     except (KeyError, TypeError, ValueError):
         return None
@@ -2044,9 +2158,10 @@ def _mark_journal_discontinuity(conn: sqlite3.Connection) -> None:
 
 def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
     current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current_version == 4:
-        _migrate_v4_to_v5(conn)
-    elif current_version != INDEX_FORMAT_VERSION:
+    if current_version != INDEX_FORMAT_VERSION:
+        # v6 cannot adopt v4/v5 rows: neither format records the descriptor
+        # generation that produced them. Reusing those rows for a pathname now
+        # naming another directory would cross the authorization boundary.
         conn.execute("DROP TABLE IF EXISTS entries")
         conn.execute("DROP TABLE IF EXISTS metadata")
         conn.execute("DROP TABLE IF EXISTS directory_coverage")
@@ -2155,6 +2270,7 @@ _PROGRESSIVE_PUBLICATION_METADATA_KEYS = (
 _PUBLISHED_SNAPSHOT_METADATA_KEYS = (
     "skip_signature",
     "root",
+    AUTHORIZED_ROOT_IDENTITY_FIELD,
     *_SNAPSHOT_PUBLICATION_METADATA_KEYS,
     "producer_epoch",
 )
@@ -2189,6 +2305,7 @@ def _write_manifest(root: Path, metadata: dict[str, str]) -> None:
         "storage": "sqlite",
         "skip_signature": metadata["skip_signature"],
         "root": metadata["root"],
+        AUTHORIZED_ROOT_IDENTITY_FIELD: list(parse_root_identity(json.loads(metadata[AUTHORIZED_ROOT_IDENTITY_FIELD]))),
         "built_at": float(metadata["built_at"]),
         "truncated": metadata["truncated"] == "1",
         "entry_count": int(metadata["entry_count"]),
@@ -2247,7 +2364,11 @@ def _coverage_shape(source: dict[str, Any], root: Path, *, live: bool) -> dict[s
     }
 
 
-def _coverage_from_live_sqlite(root: Path) -> dict[str, Any] | None:
+def _coverage_from_live_sqlite(
+    root: Path,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
     """BOUNDED read of the LIVE coverage `_recompute_progress` writes to SQLite metadata.
 
     Read-only, query-only, with a tiny busy timeout: a locked, malformed, or missing database fails
@@ -2270,6 +2391,9 @@ def _coverage_from_live_sqlite(root: Path) -> dict[str, Any] | None:
     metadata = {str(key): str(value) for key, value in rows}
     if metadata.get("version") != str(INDEX_FORMAT_VERSION):
         return None
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None or not _root_identity_matches(metadata, expected_identity):
+        return None
     # An explicit unindex invalidates the snapshot: status must not report a deleted root's coverage as
     # live. A rebuild superseding the delete bumps its built_at past the marker, so its progress reads
     # normally again once it is the authoritative store.
@@ -2290,7 +2414,10 @@ def read_index_coverage(root: Path) -> dict[str, Any] | None:
     not verify the exclusion signature: a status caller reports whatever snapshot exists, stale or
     partial.
     """
-    live = _coverage_from_live_sqlite(root)
+    expected_identity = _current_root_identity(root)
+    if expected_identity is None:
+        return None
+    live = _coverage_from_live_sqlite(root, expected_root_identity=expected_identity)
     if live is not None:
         return live
     try:
@@ -2302,6 +2429,8 @@ def read_index_coverage(root: Path) -> dict[str, Any] | None:
     except (ValueError, TypeError):
         return None
     if not isinstance(manifest, dict):
+        return None
+    if not _root_identity_matches(manifest, expected_identity):
         return None
     if _snapshot_is_tombstoned(root, manifest):
         return None
@@ -2413,12 +2542,14 @@ def _record_pending_delta(ri: RootIndex, dirty_paths: list[Path], build_kind: st
 def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *, force: bool = False) -> None:
     with ri.lock:
         entries = list(ri.entries)
+        published_root_identity = ri.published_root_identity
         entries_signature = ri.entries_signature or _entries_signature(entries)
         estimated_bytes = _estimated_sqlite_bytes(entries)
         full_replace = ri.pending_full_replace
         has_delta = not _pending_delta_is_empty(ri)
     persistence_allowed = (
         ri.persist_enabled
+        and published_root_identity is not None
         and not ri.too_large
         and len(entries) <= ri.persist_max_files
         and estimated_bytes <= ri.persist_max_bytes
@@ -2443,6 +2574,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
             "storage": "sqlite",
             "skip_signature": signature,
             "root": str(ri.root),
+            AUTHORIZED_ROOT_IDENTITY_FIELD: _root_identity_metadata_value(published_root_identity),
             "built_at": repr(float(ri.built_at)),
             "truncated": "1" if ri.truncated else "0",
             "entry_count": str(len(entries)),
@@ -2455,12 +2587,15 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         before_size = _sqlite_storage_size(ri.root)
         with _sqlite_index_connection(ri.root) as conn:
             _ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
             db_metadata = dict(conn.execute("SELECT key, value FROM metadata"))
             schema_matches = (
                 db_metadata.get("version") == str(INDEX_FORMAT_VERSION)
                 and db_metadata.get("storage") == "sqlite"
                 and db_metadata.get("skip_signature") == signature
                 and db_metadata.get("root") == str(ri.root)
+                and _root_identity_matches(db_metadata, published_root_identity)
             )
             _replace_sqlite_metadata(conn, metadata)
             if full_replace or not schema_matches:
@@ -2501,7 +2636,13 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         pass
 
 
-def _load_disk_metadata(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> dict[str, Any] | None:
+def _load_disk_metadata(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
     if not _index_disk_path(root).exists():
         return None
     raw = read_json_file(_index_manifest_path(root), None)
@@ -2509,17 +2650,38 @@ def _load_disk_metadata(root: Path, skip_dirs: set[str], exclude_signature: str 
         return None
     if not isinstance(raw, dict) or raw.get("root") != str(root):
         return None
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None or not _root_identity_matches(raw, expected_identity):
+        return None
     if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("storage") != "sqlite" or raw.get("skip_signature") != _disk_skip_signature(root, skip_dirs, exclude_signature):
         return None
     return raw
 
 
-def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "", *, honor_tombstone: bool = True) -> tuple[list[IndexEntry], float, bool, str] | None:
+def _load_disk(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    honor_tombstone: bool = True,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> tuple[list[IndexEntry], float, bool, str, tuple[int, int]] | None:
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None:
+        return None
     try:
         with _sqlite_index_connection(root) as conn:
             _ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN")
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
-            if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
+            if not _sqlite_metadata_matches(
+                metadata,
+                root,
+                skip_dirs,
+                exclude_signature,
+                expected_root_identity=expected_identity,
+            ):
                 return None
             if not _row_serving_snapshot_metadata(metadata):
                 return None
@@ -2540,10 +2702,23 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "", *, 
         built_at = float(metadata.get("built_at") or 0.0)
     except ValueError:
         built_at = 0.0
-    return entries, built_at, metadata.get("truncated") == "1", str(metadata.get("entries_signature") or "")
+    return (
+        entries,
+        built_at,
+        metadata.get("truncated") == "1",
+        str(metadata.get("entries_signature") or ""),
+        expected_identity,
+    )
 
 
-def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: set[str], exclude_signature: str = "") -> bool:
+def _sqlite_metadata_matches(
+    metadata: dict[str, Any],
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> bool:
     """Shape only: can these rows be read as this root's index at all?
 
     This deliberately has no freshness term. It answers readability, and a stale
@@ -2551,8 +2726,11 @@ def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: se
     a label. Whether the rows may be called authoritative is a different question,
     answered by `index_freshness` below.
     """
+    expected_identity = expected_root_identity or _current_root_identity(root)
     return (
-        metadata.get("root") == str(root)
+        expected_identity is not None
+        and _root_identity_matches(metadata, expected_identity)
+        and metadata.get("root") == str(root)
         and metadata.get("version") == str(INDEX_FORMAT_VERSION)
         and metadata.get("storage") == "sqlite"
         and metadata.get("skip_signature") == _disk_skip_signature(root, skip_dirs, exclude_signature)
@@ -2664,7 +2842,13 @@ def _authoritative_snapshot_is_tombstoned(root: Path, manifest_metadata: dict[st
     return _snapshot_is_tombstoned(root, store)
 
 
-def _raw_snapshot_metadata(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> dict[str, Any] | None:
+def _raw_snapshot_metadata(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
     """Shape-valid snapshot metadata WITHOUT the tombstone filter, AUTHORITATIVE-sqlite reconciled.
 
     Freshness diagnosis reads this so it can tell a tombstoned snapshot from a genuinely missing one;
@@ -2676,18 +2860,43 @@ def _raw_snapshot_metadata(root: Path, skip_dirs: set[str], exclude_signature: s
     manifest can then neither advertise a live snapshot the sqlite search reader rejects nor hide one it
     still serves, because the caller's tombstone verdict runs on the SAME committed identity search uses.
     Only when no sqlite store is readable does the derived manifest stand (fail closed to its verdict)."""
-    opened = _open_sqlite_snapshot(root, skip_dirs, exclude_signature, honor_tombstone=False)
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None:
+        return None
+    opened = _open_sqlite_snapshot(
+        root,
+        skip_dirs,
+        exclude_signature,
+        honor_tombstone=False,
+        expected_root_identity=expected_identity,
+    )
     if opened is not None:
         conn, metadata = opened
         conn.close()
         return metadata
-    return _load_disk_metadata(root, skip_dirs, exclude_signature)
+    return _load_disk_metadata(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_identity,
+    )
 
 
-def _disk_snapshot_metadata(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> dict[str, Any] | None:
+def _disk_snapshot_metadata(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
     """Read this root's snapshot metadata, manifest first, sqlite as the fallback -- rejecting (fail
     closed) a snapshot an explicit unindex has invalidated, for BOTH the manifest and sqlite forms."""
-    raw = _raw_snapshot_metadata(root, skip_dirs, exclude_signature)
+    raw = _raw_snapshot_metadata(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
     if raw is None or _snapshot_is_tombstoned(root, raw):
         return None
     return raw
@@ -2715,7 +2924,13 @@ def index_freshness(
     # unindex has not invalidated it. A build that published after another process wrote a fresh marker
     # froze the OLD identity, so its ready snapshot is deleted -- route it through the SAME verdict as
     # disk and fall through to the tombstoned/disk path rather than reporting FRESH for a deleted root.
-    if index is not None and index.ready and owner_process and not _root_index_is_tombstoned(index):
+    if (
+        index is not None
+        and index.ready
+        and owner_process
+        and _root_index_generation_matches(index)
+        and not _root_index_is_tombstoned(index)
+    ):
         built_at = float(index.built_at or 0.0)
         return SnapshotFreshness(
                 state=FRESHNESS_FRESH,
@@ -2730,7 +2945,13 @@ def index_freshness(
             refresh_accepted=False,
         )
     if metadata is None:
-        metadata = _disk_snapshot_metadata(root, skip_dirs, exclude_signature)
+        expected_root_identity = index.root_fd_identity if index is not None else None
+        metadata = _disk_snapshot_metadata(
+            root,
+            skip_dirs,
+            exclude_signature,
+            expected_root_identity=expected_root_identity,
+        )
     if metadata is not None and _snapshot_is_tombstoned(root, metadata):
         # A caller passed a snapshot an explicit unindex already invalidated; treat it as deleted.
         metadata = None
@@ -2738,7 +2959,12 @@ def index_freshness(
         # Distinguish an explicit unindex (deletion authority) from a genuinely absent snapshot, so
         # status reports `snapshot_tombstoned` rather than `no_matching_snapshot` and callers do not
         # mistake a deleted root for one that was never indexed.
-        raw = _raw_snapshot_metadata(root, skip_dirs, exclude_signature)
+        raw = _raw_snapshot_metadata(
+            root,
+            skip_dirs,
+            exclude_signature,
+            expected_root_identity=(index.root_fd_identity if index is not None else None),
+        )
         if raw is not None and _snapshot_is_tombstoned(root, raw):
             tombstoned_built_at = _metadata_built_at(raw)
             return SnapshotFreshness(
@@ -2807,6 +3033,7 @@ def _open_sqlite_snapshot(
     exclude_signature: str = "",
     *,
     honor_tombstone: bool,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[sqlite3.Connection, dict[str, Any]] | None:
     """Open a read-only snapshot connection, shape-validated, optionally honoring the unindex tombstone.
 
@@ -2814,10 +3041,20 @@ def _open_sqlite_snapshot(
     unindex; ``honor_tombstone=False`` (freshness diagnosis only) returns the shape-valid metadata so
     the caller can report WHY it was rejected (`snapshot_tombstoned` vs `no_matching_snapshot`)."""
     conn: sqlite3.Connection | None = None
+    expected_identity = expected_root_identity or _current_root_identity(root)
+    if expected_identity is None:
+        return None
     try:
         conn = sqlite3.connect(f"file:{_index_disk_path(root).as_posix()}?mode=ro", uri=True, timeout=30.0)
+        conn.execute("BEGIN")
         metadata = dict(conn.execute("SELECT key, value FROM metadata"))
-        if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
+        if not _sqlite_metadata_matches(
+            metadata,
+            root,
+            skip_dirs,
+            exclude_signature,
+            expected_root_identity=expected_identity,
+        ):
             conn.close()
             return None
         if not _row_serving_snapshot_metadata(metadata):
@@ -2840,9 +3077,17 @@ def _read_sqlite_index(
     root: Path,
     skip_dirs: set[str],
     exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[sqlite3.Connection, dict[str, Any]] | None:
     """The tombstone-honoring read-only opener shared by follower search/recent and freshness reads."""
-    return _open_sqlite_snapshot(root, skip_dirs, exclude_signature, honor_tombstone=True)
+    return _open_sqlite_snapshot(
+        root,
+        skip_dirs,
+        exclude_signature,
+        honor_tombstone=True,
+        expected_root_identity=expected_root_identity,
+    )
 
 
 def _metadata_truncated(metadata: dict[str, Any]) -> bool:
@@ -2879,9 +3124,16 @@ def search_disk_index(
     match: Callable[[str, str, str], Any],
     max_results: int,
     literal_terms: list[str] | None = None,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], bool] | None:
     """Search a persisted index without making a follower own/build or deserialize it wholesale."""
-    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    opened = _read_sqlite_index(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
     if opened is None:
         return None
     conn, metadata = opened
@@ -2907,13 +3159,24 @@ def search_disk_index(
     return results, truncated
 
 
-def current_delta_cursor(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> str | None:
+def current_delta_cursor(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> str | None:
     """The baseline cursor for a committed snapshot: the {root/policy, generation, current publication
     revision, published tombstone identity} a client seeds its first delta request with.
 
     ``None`` when there is no committed, non-tombstoned snapshot to read (the caller then has nothing to
     subscribe to yet). Read-only: it never traverses and never builds."""
-    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    opened = _read_sqlite_index(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
     if opened is None:
         return None
     conn, metadata = opened
@@ -2929,6 +3192,7 @@ def current_delta_cursor(root: Path, skip_dirs: set[str], exclude_signature: str
         generation=int(metadata.get("published_generation") or 0),
         revision=revision,
         tombstone_identity=_metadata_tombstone_identity(metadata),
+        root_generation=_metadata_root_identity(metadata),
     )
 
 
@@ -2941,6 +3205,7 @@ def search_disk_index_delta(
     *,
     scan_limit: int | None = None,
     match_limit: int | None = None,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> DeltaResult | DeltaRebaseRequired:
     """Return the bounded, fenced committed journal deltas since ``cursor`` (step 3).
 
@@ -2963,7 +3228,12 @@ def search_disk_index_delta(
     if decoded["policy"] != str(exclude_signature):
         return DeltaRebaseRequired("cross_policy")
 
-    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    opened = _read_sqlite_index(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
     if opened is None:
         # No committed, non-tombstoned, shape-matching snapshot to read (missing, tombstoned, or a
         # different policy than the store was built under): the caller must take a fresh snapshot.
@@ -2971,6 +3241,8 @@ def search_disk_index_delta(
     conn, metadata = opened
     try:
         current_generation = int(metadata.get("published_generation") or 0)
+        if decoded["root_generation"] != _metadata_root_identity(metadata):
+            return DeltaRebaseRequired("root_generation_superseded")
         if decoded["generation"] != current_generation:
             return DeltaRebaseRequired("generation_superseded")
         if decoded["tombstone"] != _metadata_tombstone_identity(metadata):
@@ -3045,6 +3317,7 @@ def search_disk_index_delta(
             generation=current_generation,
             revision=new_revision,
             tombstone_identity=decoded["tombstone"],
+            root_generation=decoded["root_generation"],
         ),
         more=more,
         coverage=_coverage_shape(metadata, root, live=True),
@@ -3057,9 +3330,16 @@ def recent_disk_entries(
     exclude_signature: str,
     max_results: int,
     make_entry: Callable[[str, str, str], dict[str, Any]],
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], bool] | None:
     """Return recent entries from a persisted index without loading all rows into follower memory."""
-    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    opened = _read_sqlite_index(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
     if opened is None:
         return None
     conn, metadata = opened
@@ -3130,6 +3410,11 @@ def _refresh_dirty_subtrees(
         if exclude_path is not None and exclude_path(dirty):
             ignored += 1
             continue
+        try:
+            dirty.relative_to(ri.root)
+        except ValueError:
+            ignored += 1
+            continue
         usable_dirty_paths.append(dirty)
     if not usable_dirty_paths:
         # Excluded work must be a true no-op. In particular, do not filter and
@@ -3140,12 +3425,21 @@ def _refresh_dirty_subtrees(
         opened: dict[Path, tuple[int | None, os.stat_result | None]] = {}
         for dirty in usable_dirty_paths:
             try:
-                descriptor = _open_relative_path(access_descriptor, dirty.relative_to(ri.root))
-            except OSError:
+                handle = descriptors.enter_context(
+                    filesystem_paths.safe_descendant(
+                        access_descriptor,
+                        ri.root,
+                        ri.root,
+                        dirty.relative_to(ri.root),
+                        flags=os.O_RDONLY,
+                        operation=operation,
+                    )
+                )
+                descriptor = handle.descriptor
+            except (OSError, filesystem_paths.FilesystemError):
                 opened[dirty] = (None, None)
                 continue
-            descriptors.callback(os.close, descriptor)
-            opened[dirty] = (descriptor, os.fstat(descriptor))
+            opened[dirty] = (descriptor, handle.stat_result)
 
         # Native backends overwhelmingly report a regular file rather than its
         # parent directory.  Do not turn that into an 80k-row comprehension and
@@ -3198,7 +3492,7 @@ def _refresh_dirty_subtrees(
                 truncated = True
                 break
             if descriptor is not None and st is not None and stat.S_ISDIR(st.st_mode):
-                access_dirty = _descriptor_path(descriptor)
+                access_dirty = filesystem_paths.descriptor_path(descriptor)
                 entries, subtree_truncated, subtree_ignored = _walk_root_with_metrics(
                     access_dirty,
                     skip_dirs,
@@ -3208,6 +3502,7 @@ def _refresh_dirty_subtrees(
                     relative_root=access_dirty,
                     entry_root=dirty,
                     root_fd=descriptor,
+                    resolved_root=dirty,
                     operation=operation,
                 )
                 relative_prefix = dirty.relative_to(ri.root)
@@ -3454,7 +3749,11 @@ def _next_bfs_generation(root: Path) -> int:
     return active + 1
 
 
-def _resumable_frontier_generation(root: Path) -> int | None:
+def _resumable_frontier_generation(
+    root: Path,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> int | None:
     """Return the persisted ``active_generation`` IFF it still has pending frontier rows to resume.
 
     P0-4: searchable state and crawl completion are SEPARATE facts. A compatible partial can load
@@ -3465,7 +3764,12 @@ def _resumable_frontier_generation(root: Path) -> int | None:
     try:
         with _sqlite_index_connection(root) as conn:
             _ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN")
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            expected_identity = expected_root_identity or _current_root_identity(root)
+            if expected_identity is None or not _root_identity_matches(metadata, expected_identity):
+                return None
             # An explicit unindex invalidates the whole snapshot: do NOT resume its frontier. Post-unindex
             # work must start a fresh generation that supersedes the delete, not continue crawling into a
             # store the user deleted.
@@ -3489,6 +3793,7 @@ def _complete_publication(
     *,
     captured_drop_token: str | None,
     captured_tombstone_identity: str | None = None,
+    captured_root_identity: tuple[int, int] | None = None,
 ) -> None:
     """The ONE publication-completion owner for EVERY successful build (BFS full, DFS full, incremental).
 
@@ -3507,7 +3812,15 @@ def _complete_publication(
     (P1-3) only AFTER the AUTHORITATIVE current-identity sqlite snapshot commits. If the authoritative
     stamp did not land (no durable store, or a failed metadata commit), the durable-drop intent stays
     queued rather than being voided on a snapshot that cannot prove it superseded the marker."""
-    committed = _stamp_snapshot_tombstone_identity(ri.root, captured_tombstone_identity)
+    expected_root_identity = captured_root_identity
+    if expected_root_identity is None:
+        with ri.lock:
+            expected_root_identity = ri.root_fd_identity
+    committed = _stamp_snapshot_tombstone_identity(
+        ri.root,
+        captured_tombstone_identity,
+        expected_root_identity=expected_root_identity,
+    )
     if committed:
         _supersede_pending_drop(ri.root, captured_drop_token)
 
@@ -3533,7 +3846,7 @@ def _persisted_tombstone_identity(root: Path) -> str:
 
 def _adopt_disk_snapshot(
     ri: RootIndex,
-    disk: tuple[list[IndexEntry], float, bool, str],
+    disk: tuple[list[IndexEntry], float, bool, str, tuple[int, int]],
     expected_signature: str,
 ) -> None:
     """Adopt a compatible persisted snapshot into the in-memory index without re-walking.
@@ -3547,7 +3860,7 @@ def _adopt_disk_snapshot(
     # in-memory owner is judged by the same tombstone rule as the store it mirrors.
     published_identity = _persisted_tombstone_identity(ri.root)
     with ri.lock:
-        ri.entries, ri.built_at, ri.truncated, ri.entries_signature = disk
+        ri.entries, ri.built_at, ri.truncated, ri.entries_signature, disk_root_identity = disk
         ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
         ri.last_full_build_at = ri.built_at
         ri.too_large = ri.truncated
@@ -3560,10 +3873,14 @@ def _adopt_disk_snapshot(
         # P0-1: re-verify under this same `ri.lock`. A snapshot loaded as un-tombstoned can be invalidated
         # by a newer unindex between the disk read and this adopt; adopting the stale disk stamp as ready
         # would serve deleted rows. When the marker has moved past this stamp, land EVICTED instead.
-        if _publication_lands_tombstoned(ri.root, published_identity, ri.built_at):
+        if (
+            ri.root_fd_identity != disk_root_identity
+            or _publication_lands_tombstoned(ri.root, published_identity, ri.built_at)
+        ):
             _clear_ready_fields_locked(ri)
         else:
             ri.published_tombstone_identity = published_identity
+            ri.published_root_identity = disk_root_identity
             ri.ready = True
         ri.building = False
 
@@ -3580,6 +3897,7 @@ def _run_bfs_full_build(
     build_reason: str = "",
     pending_drop_token: str | None = None,
     captured_tombstone_identity: str | None = None,
+    captured_root_identity: tuple[int, int] | None = None,
 ) -> None:
     """Full build for a configured root through the breadth-first, directory-at-a-time frontier.
 
@@ -3591,14 +3909,23 @@ def _run_bfs_full_build(
     """
     def current() -> bool:
         with ri.lock:
-            return generation is None or ri.active_generation == generation
+            return (
+                (generation is None or ri.active_generation == generation)
+                and captured_root_identity is not None
+                and ri.root_fd_identity == captured_root_identity
+            )
 
     skip = set(skip_dirs)
     try:
         if not ri.ready:
             # Handoff / restart: adopt a compatible persisted snapshot rather than re-listing the
             # whole tree, matching the DFS build's fast path.
-            disk = _load_disk(ri.root, skip, exclude_signature)
+            disk = _load_disk(
+                ri.root,
+                skip,
+                exclude_signature,
+                expected_root_identity=captured_root_identity,
+            )
             if disk is not None:
                 _adopt_disk_snapshot(ri, disk, expected_signature)
                 return
@@ -3618,28 +3945,39 @@ def _run_bfs_full_build(
         # number end to end. A synchronous `build_now` (no owner generation) falls back to the
         # persisted+1 allocation, since there is no concurrent generation to fence against there.
         runner_generation = generation if generation is not None else _next_bfs_generation(ri.root)
-        _BFS_FULL_BUILD_RUNNER(
-            ri.root,
-            skip,
-            exclude_path=exclude_path,
-            exclude_signature=exclude_signature,
-            generation=runner_generation,
-            operation=operation,
-            max_entries=ri.max_files,
-            max_total_entries=ri.max_files,
-            reason=build_reason,
-            stop_event=ri.stop_event,
-            # Protocol #2/#3: the crawl stamps THIS frozen identity into every published directory's
-            # metadata and, when it differs from the persisted snapshot's stamp, establishes a clean
-            # generation in the claim transaction before publishing -- so a follower reading a partial
-            # mid-crawl sees the correct stamp and no deleted-store rows survive under it.
-            tombstone_identity=captured_tombstone_identity,
-        )
+        root_descriptor = ri.duplicate_root_fd()
+        try:
+            _BFS_FULL_BUILD_RUNNER(
+                ri.root,
+                skip,
+                exclude_path=exclude_path,
+                exclude_signature=exclude_signature,
+                generation=runner_generation,
+                operation=operation,
+                max_entries=ri.max_files,
+                max_total_entries=ri.max_files,
+                reason=build_reason,
+                stop_event=ri.stop_event,
+                root_fd=root_descriptor,
+                # Protocol #2/#3: the crawl stamps THIS frozen identity into every published directory's
+                # metadata and, when it differs from the persisted snapshot's stamp, establishes a clean
+                # generation in the claim transaction before publishing -- so a follower reading a partial
+                # mid-crawl sees the correct stamp and no deleted-store rows survive under it.
+                tombstone_identity=captured_tombstone_identity,
+            )
+        finally:
+            os.close(root_descriptor)
         if ri.stop_event.is_set() or not current():
             return
         # Read back the rows THIS crawl just committed: `honor_tombstone=False` because a build's own
         # fresh output is authoritative regardless of a marker it is in the act of superseding.
-        disk = _load_disk(ri.root, skip, exclude_signature, honor_tombstone=False)
+        disk = _load_disk(
+            ri.root,
+            skip,
+            exclude_signature,
+            honor_tombstone=False,
+            expected_root_identity=captured_root_identity,
+        )
         entries = list(disk[0]) if disk is not None else []
         # ``built_at`` is REAL observation time again (protocol #1): the artificial bump past the
         # tombstone deletion time is retired. Supersession is proven by the identity stamp
@@ -3666,7 +4004,11 @@ def _run_bfs_full_build(
             _drop_persisted_index(ri.root)
             cache_bytes = 0
         with ri.lock:
-            if generation is not None and ri.active_generation != generation:
+            if (
+                (generation is not None and ri.active_generation != generation)
+                or captured_root_identity is None
+                or ri.root_fd_identity != captured_root_identity
+            ):
                 return
             ri.entries = entries
             ri.entry_by_path = {entry[0]: entry for entry in entries}
@@ -3697,6 +4039,7 @@ def _run_bfs_full_build(
                 _clear_ready_fields_locked(ri)
             else:
                 ri.published_tombstone_identity = captured_tombstone_identity
+                ri.published_root_identity = captured_root_identity
                 ri.ready = True
             ri.completed_generation = ri.active_generation
         # P0-5: the breadth-first publication completes through the SAME owner as the DFS path -- it
@@ -3706,6 +4049,7 @@ def _run_bfs_full_build(
             ri,
             captured_drop_token=pending_drop_token,
             captured_tombstone_identity=captured_tombstone_identity,
+            captured_root_identity=captured_root_identity,
         )
         notify_background_owner_done({
             "root": str(ri.root),
@@ -3743,10 +4087,14 @@ def _run_build(
     build_reason: str = "",
     pending_drop_token: str | None = None,
     captured_tombstone_identity: str | None = None,
+    captured_root_identity: tuple[int, int] | None = None,
 ) -> None:
     # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
     started = time.perf_counter()
+    if captured_root_identity is None:
+        with ri.lock:
+            captured_root_identity = ri.root_fd_identity
     expected_signature = _skip_signature(skip_dirs, exclude_signature)
     effective_exclude_path = _build_exclude_path(exclude_path)
     with ri.lock:
@@ -3754,14 +4102,31 @@ def _run_build(
 
     def current() -> bool:
         with ri.lock:
-            return generation is None or ri.active_generation == generation
+            return (
+                (generation is None or ri.active_generation == generation)
+                and captured_root_identity is not None
+                and ri.root_fd_identity == captured_root_identity
+            )
     # A configured-root FULL build (no dirty subtrees) runs breadth-first, directory-at-a-time,
     # through the one owner registered by `bfs_index`. It manages its own per-root build lock, so it
     # runs BEFORE this function takes that lock (a second flock on the same file in this process
     # would deadlock). The DFS `_walk_root_with_metrics` full walk is retired for configured roots
     # and reached only as the fallback when no breadth-first runner is registered.
     if not dirty_paths and _BFS_FULL_BUILD_RUNNER is not None:
-        _run_bfs_full_build(ri, skip_dirs, exclude_path, exclude_signature, generation, operation, started, expected_signature, build_reason, pending_drop_token, captured_tombstone_identity)
+        _run_bfs_full_build(
+            ri,
+            skip_dirs,
+            exclude_path,
+            exclude_signature,
+            generation,
+            operation,
+            started,
+            expected_signature,
+            build_reason,
+            pending_drop_token,
+            captured_tombstone_identity,
+            captured_root_identity,
+        )
         return
     lock_fd = None
     access_fd = None
@@ -3776,13 +4141,18 @@ def _run_build(
             return
         # Another process may have just finished while we waited for the lock — adopt a fresh disk copy
         # instead of re-walking.
-        disk = _load_disk(ri.root, skip_dirs, exclude_signature)
+        disk = _load_disk(
+            ri.root,
+            skip_dirs,
+            exclude_signature,
+            expected_root_identity=captured_root_identity,
+        )
         if not dirty_paths and not ri.ready and disk is not None:
             _adopt_disk_snapshot(ri, disk, expected_signature)
             return
         if dirty_paths:
             access_fd = ri.duplicate_root_fd()
-            access_root = _descriptor_path(access_fd)
+            access_root = filesystem_paths.descriptor_path(access_fd)
             entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(
                 ri,
                 dirty_paths,
@@ -3794,7 +4164,7 @@ def _run_build(
             build_kind = "incremental"
         else:
             access_fd = ri.duplicate_root_fd()
-            access_root = _descriptor_path(access_fd)
+            access_root = filesystem_paths.descriptor_path(access_fd)
             entries, truncated, ignored_entries = _walk_root_with_metrics(
                 access_root,
                 skip_dirs,
@@ -3804,6 +4174,7 @@ def _run_build(
                 relative_root=access_root,
                 entry_root=ri.root,
                 root_fd=access_fd,
+                resolved_root=ri.root,
                 operation=operation,
             )
             entries.sort(key=lambda entry: (entry[2].lower(), entry[0]))
@@ -3815,7 +4186,11 @@ def _run_build(
                     ri.building = False
             return
         with ri.lock:
-            if generation is not None and ri.active_generation != generation:
+            if (
+                (generation is not None and ri.active_generation != generation)
+                or captured_root_identity is None
+                or ri.root_fd_identity != captured_root_identity
+            ):
                 return
             ri.entries = entries
             ri.entry_by_path = {entry[0]: entry for entry in entries}
@@ -3843,13 +4218,18 @@ def _run_build(
                 _clear_ready_fields_locked(ri)
             else:
                 ri.published_tombstone_identity = captured_tombstone_identity
+                ri.published_root_identity = captured_root_identity
                 ri.ready = True
             _record_pending_delta(ri, dirty_paths, build_kind)
         if not current():
             return
         _persist(ri, skip_dirs, exclude_signature)
         with ri.lock:
-            if generation is not None and ri.active_generation != generation:
+            if (
+                (generation is not None and ri.active_generation != generation)
+                or captured_root_identity is None
+                or ri.root_fd_identity != captured_root_identity
+            ):
                 return
             ri.disk_metadata_ready = ri.persisted
             ri.building = False
@@ -3862,6 +4242,7 @@ def _run_build(
             ri,
             captured_drop_token=pending_drop_token,
             captured_tombstone_identity=captured_tombstone_identity,
+            captured_root_identity=captured_root_identity,
         )
         notify_background_owner_done({
             "root": str(ri.root),
@@ -3927,8 +4308,20 @@ def _build_thread_main(
     # The tombstone identity frozen with this assignment, so publication clears only the marker this
     # build actually superseded (P0 class 1).
     captured_tombstone_identity = assignment.captured_tombstone_identity if assignment is not None else None
+    captured_root_identity = assignment.captured_root_identity if assignment is not None else None
     try:
-        _run_build(ri, skip_dirs, exclude_path, exclude_signature, generation, operation, build_reason, captured_drop_token, captured_tombstone_identity)
+        _run_build(
+            ri,
+            skip_dirs,
+            exclude_path,
+            exclude_signature,
+            generation,
+            operation,
+            build_reason,
+            captured_drop_token,
+            captured_tombstone_identity,
+            captured_root_identity,
+        )
     finally:
         _finalize_worker_exit(ri, assignment)
 
@@ -3984,7 +4377,12 @@ def _start_build(
     # P0-4: read the persisted generation PLAN outside the lock. A durable partial with pending frontier
     # rows must be RESUMED on its exact generation (not advanced to `active+1`, which re-lists the root
     # and orphans the pending directories); only a drained/absent frontier allocates a fresh generation.
-    resume_generation = _resumable_frontier_generation(ri.root)
+    with ri.lock:
+        expected_root_identity = ri.root_fd_identity
+    resume_generation = _resumable_frontier_generation(
+        ri.root,
+        expected_root_identity=expected_root_identity,
+    )
     # P0-6: capture the pending-drop token that exists AS the assignment begins. A newer unindex after
     # this point carries a different token that this build's publication may not supersede.
     pending_drop_token = _current_pending_drop_token(ri.root)
@@ -4021,7 +4419,14 @@ def _start_build(
         # One immutable per-worker lease (P1-5): the generation, thread, and completion event frozen
         # together, installed before the thread is visible so the finalizer and any retirement bind to
         # THIS worker by lease identity rather than by re-reading mutable fields.
-        assignment = _WorkerAssignment(generation=generation, thread=thread, completion=ri.completion, pending_drop_token=pending_drop_token, captured_tombstone_identity=captured_tombstone_identity)
+        assignment = _WorkerAssignment(
+            generation=generation,
+            thread=thread,
+            completion=ri.completion,
+            pending_drop_token=pending_drop_token,
+            captured_tombstone_identity=captured_tombstone_identity,
+            captured_root_identity=ri.root_fd_identity,
+        )
         ri.assignment = assignment
         ri.thread = thread
     # Final ownership re-check AFTER the generation I/O: a clear/unindex that popped this object from
@@ -4065,10 +4470,16 @@ def _install_candidate_root_fd(ri: RootIndex, root_fd: int | None) -> bool:
     close. When ownership is lost in the race the candidate is CLOSED instead of leaked. Returns
     whether the fd was installed. A previously pinned fd is closed only after the swap succeeds."""
     if root_fd is None:
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _nofollow_flag()
-        candidate = os.open(ri.root, directory_flags)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        with filesystem_paths.safe_path(
+            str(ri.root),
+            flags=directory_flags,
+            operation="index_root",
+        ) as root_handle:
+            candidate = os.dup(root_handle.descriptor)
     else:
         candidate = os.dup(root_fd)
+    candidate_identity = parse_root_identity(root_identity(os.fstat(candidate)))
     previous: int | None = None
     installed = False
     with _REGISTRY_LOCK:
@@ -4076,7 +4487,7 @@ def _install_candidate_root_fd(ri: RootIndex, root_fd: int | None) -> bool:
             with ri.lock:
                 if not ri.retiring:
                     previous = ri.root_fd
-                    ri.root_fd = candidate
+                    ri._replace_root_fd_locked(candidate, candidate_identity)
                     installed = True
     if not installed:
         os.close(candidate)
@@ -4103,6 +4514,11 @@ def ensure_index(
     background (re)build when missing or stale. May return a not-yet-ready index."""
     key = str(root)
     expected_signature = _skip_signature(skip_dirs, exclude_signature)
+    requested_root_identity = (
+        parse_root_identity(root_identity(os.fstat(root_fd)))
+        if root_fd is not None
+        else _current_root_identity(root)
+    )
     with _REGISTRY_LOCK:
         ri = _REGISTRY.get(key)
         if ri is None:
@@ -4117,9 +4533,20 @@ def ensure_index(
             ri.exclude_path = exclude_path
             ri.exclude_signature = exclude_signature
             if background_owner_can_build() and ri.persist_enabled:
-                disk = _load_disk(root, skip_dirs, exclude_signature)
+                disk = _load_disk(
+                    root,
+                    skip_dirs,
+                    exclude_signature,
+                    expected_root_identity=requested_root_identity,
+                )
                 if disk is not None:
-                    ri.entries, ri.built_at, ri.truncated, ri.entries_signature = disk
+                    (
+                        ri.entries,
+                        ri.built_at,
+                        ri.truncated,
+                        ri.entries_signature,
+                        ri.published_root_identity,
+                    ) = disk
                     ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
                     ri.last_full_build_at = ri.built_at
                     ri.too_large = ri.truncated
@@ -4134,7 +4561,12 @@ def ensure_index(
                     ri.published_tombstone_identity = _persisted_tombstone_identity(root)
                     ri.ready = True
             elif not background_owner_can_build() and ri.persist_enabled:
-                metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
+                metadata = _load_disk_metadata(
+                    root,
+                    skip_dirs,
+                    exclude_signature,
+                    expected_root_identity=requested_root_identity,
+                )
                 if metadata is not None:
                     try:
                         ri.built_at = float(metadata.get("built_at") or 0.0)
@@ -4147,7 +4579,12 @@ def ensure_index(
                     ri.disk_metadata_ready = True
                     ri.signature = expected_signature
         elif not background_owner_can_build() and not ri.ready and ri.persist_enabled:
-            metadata = _load_disk_metadata(root, skip_dirs, exclude_signature)
+            metadata = _load_disk_metadata(
+                root,
+                skip_dirs,
+                exclude_signature,
+                expected_root_identity=requested_root_identity,
+            )
             if metadata is not None:
                 try:
                     ri.built_at = float(metadata.get("built_at") or 0.0)
@@ -4200,13 +4637,8 @@ def ensure_index(
             ri.cache_bytes = 0
     with ri.lock:
         if ri.ready and ri.signature != expected_signature:
-            ri.entries = []
-            ri.ready = False
-            ri.built_at = 0.0
-            ri.disk_metadata_ready = False
-            ri.disk_entry_count = 0
+            _clear_ready_fields_locked(ri)
             ri.signature = ""
-            ri.published_tombstone_identity = None
     # P0-1: if another process unindexed this root after our copy was built, drop the stale in-memory
     # index so we stop serving deleted-file results. This routes through the SAME `_snapshot_is_tombstoned`
     # verdict as disk (`_evict_tombstoned_root_index`) -- comparing the owner's FROZEN published identity
@@ -4220,7 +4652,16 @@ def ensure_index(
     # nothing -- `schedule_refreshes` sees a fresh TTL and no dirty subtree -- so the crawl stalls at
     # "Indexing..." until the 30-minute TTL elapses. `_start_build` resumes the exact persisted
     # generation of that frontier rather than re-listing the root.
-    if background_owner_can_build() and (not ri.ready or _resumable_frontier_generation(root) is not None):
+    with ri.lock:
+        current_root_identity = ri.root_fd_identity
+    if background_owner_can_build() and (
+        not ri.ready
+        or _resumable_frontier_generation(
+            root,
+            expected_root_identity=current_root_identity,
+        )
+        is not None
+    ):
         _start_build(
             ri,
             skip_dirs,
@@ -4273,6 +4714,8 @@ def build_now(
     # P0 class 1: freeze the tombstone identity at synchronous-build start, so its publication clears
     # only the marker it superseded (a rebuild landing after this exact unindex), never a newer one.
     captured_tombstone_identity = _current_tombstone_identity(root)
+    with ri.lock:
+        captured_root_identity = ri.root_fd_identity
     _run_build(
         ri,
         set(skip_dirs),
@@ -4281,6 +4724,7 @@ def build_now(
         operation=operation,
         pending_drop_token=pending_drop_token,
         captured_tombstone_identity=captured_tombstone_identity,
+        captured_root_identity=captured_root_identity,
     )
     return ri
 
@@ -4300,7 +4744,7 @@ def _servable_snapshot(ri: RootIndex) -> tuple[list[tuple[str, str, str, int, fl
     then republishing its OLD identity (`_run_bfs_full_build`/`_run_build`, which also take ``ri.lock``)
     cannot interleave between the verdict and the read, so deleted rows can never be served."""
     with ri.lock:
-        if ri.ready and _root_index_is_tombstoned(ri):
+        if ri.ready and (not _root_index_generation_matches(ri) or _root_index_is_tombstoned(ri)):
             _clear_ready_fields_locked(ri)
         return list(ri.entries), ri.truncated
 
@@ -4411,6 +4855,12 @@ def _iter_candidate_index_roots() -> Iterator[Path]:
         # at publication (ready=False, not building). A fresh clean generation still BUILDING (which froze
         # the current identity but has not stamped it yet) is not yet tombstoned-by-stamp mid-build, so it
         # is still yielded via `ri.building`.
+        current_identity = _current_root_identity(resolved)
+        with ri.lock:
+            installed_identity = ri.root_fd_identity
+            rows_match = not ri.ready or _root_index_generation_matches(ri)
+        if current_identity is None or current_identity != installed_identity or not rows_match:
+            continue
         if _root_index_is_tombstoned(ri) and not ri.building:
             continue
         yield resolved
@@ -4424,6 +4874,13 @@ def _iter_candidate_index_roots() -> Iterator[Path]:
         if not isinstance(root_text, str) or not root_text.startswith("/"):
             continue
         candidate = Path(root_text).resolve(strict=False)
+        current_identity = _current_root_identity(candidate)
+        if (
+            not isinstance(payload, dict)
+            or current_identity is None
+            or not _root_identity_matches(payload, current_identity)
+        ):
+            continue
         # An explicit unindex invalidates the snapshot: a tombstoned root is neither "any root exists"
         # nor an indexed ancestor, so a deleted index can never keep serving or counting as coverage.
         # P1-3: the manifest is a derived cache -- reconcile the verdict against the AUTHORITATIVE sqlite

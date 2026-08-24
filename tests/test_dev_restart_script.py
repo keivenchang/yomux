@@ -19,6 +19,13 @@ def printable_command_text(output: str) -> str:
     return output.replace("\\ ", " ")
 
 
+def boot_function_source(name: str) -> str:
+    lines = (ROOT / "boot.sh").read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"{name}() {{")
+    end = next(index for index in range(start + 1, len(lines)) if lines[index] == "}")
+    return "\n".join(lines[start : end + 1])
+
+
 def test_boot_print_command_uses_any_configured_primary_port():
     env = {
         **os.environ,
@@ -212,13 +219,30 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'cd "$repo"' in startup_common
 
 
-def test_macos_lsof_no_match_is_an_empty_listener_set(tmp_path):
+@pytest.mark.parametrize(
+    ("scanner_name", "scanner_body", "expected_returncode", "expected_stdout", "error_text"),
+    (
+        ("lsof", "exit 1\n", 0, "", ""),
+        ("lsof", "printf 'p123\\n'\nexit 1\n", 2, "", "partial output"),
+        ("ss", "printf 'denied\\n' >&2\nexit 2\n", 2, "", "exit 2"),
+        (
+            "ss",
+            "printf 'LISTEN 0 64 0.0.0.0:48124 0.0.0.0:*\\n'\n",
+            2,
+            "",
+            "without an identifiable owner",
+        ),
+    ),
+)
+def test_startup_listener_boundary_preserves_strict_scanner_results(
+    tmp_path, scanner_name, scanner_body, expected_returncode, expected_stdout, error_text
+):
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
-    lsof = command_dir / "lsof"
-    lsof.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    lsof.chmod(0o755)
-    for name, target in (("sort", "/usr/bin/sort"), ("bash", "/bin/bash")):
+    scanner = command_dir / scanner_name
+    scanner.write_text("#!/bin/sh\n" + scanner_body, encoding="utf-8")
+    scanner.chmod(0o755)
+    for name, target in (("bash", "/bin/bash"), ("dirname", "/usr/bin/dirname")):
         (command_dir / name).symlink_to(target)
 
     result = subprocess.run(
@@ -229,13 +253,122 @@ def test_macos_lsof_no_match_is_an_empty_listener_set(tmp_path):
             "listener-probe",
             str(STARTUP_COMMON),
         ],
-        env={**os.environ, "PATH": str(command_dir)},
+        env={**os.environ, "PATH": str(command_dir), "PYTHON": sys.executable},
         text=True,
         capture_output=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    assert result.returncode == expected_returncode, result.stderr
+    assert result.stdout == expected_stdout
+    if error_text:
+        assert error_text in result.stderr
+    else:
+        assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("scanner_body", "expected_returncode", "expected_stdout"),
+    (
+        (
+            "printf 'LISTEN 0 64 0.0.0.0:48124 0.0.0.0:* users:((\\\"python\\\",pid=202,fd=6))\\n'\n"
+            "printf 'LISTEN 0 64 [::]:48124 [::]:* users:((\\\"python\\\",pid=101,fd=7))\\n'\n",
+            0,
+            "101\n202\n",
+        ),
+        ("printf 'scanner failed\\n' >&2\nexit 7\n", 2, ""),
+    ),
+)
+def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module(
+    tmp_path, scanner_body, expected_returncode, expected_stdout
+):
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    scanner = command_dir / "ss"
+    scanner.write_text("#!/bin/sh\n" + scanner_body, encoding="utf-8")
+    scanner.chmod(0o755)
+    (command_dir / "dirname").symlink_to("/usr/bin/dirname")
+    record = tmp_path / "interpreter-record"
+    wrapper = tmp_path / "selected-python"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "printf 'cwd=%s\\n' \"$PWD\" > \"$WRAPPER_RECORD\"\n"
+        "for arg in \"$@\"; do printf 'arg=%s\\n' \"$arg\" >> \"$WRAPPER_RECORD\"; done\n"
+        "exec \"$REAL_PYTHON\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", 'source "$1"; yolomux_port_listener_pids 48124', "probe", str(STARTUP_COMMON)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": str(command_dir),
+            "YOLOMUX_PYTHON": str(wrapper),
+            "REAL_PYTHON": sys.executable,
+            "WRAPPER_RECORD": str(record),
+        },
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    assert result.stdout == expected_stdout
+    assert record.read_text(encoding="utf-8").splitlines() == [
+        f"cwd={ROOT}",
+        "arg=-m",
+        "arg=yolomux_lib.infra.listener_census",
+        "arg=48124",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failed_census_call", "expected_kills"),
+    (
+        (2, ["kill:123"]),
+        (11, ["kill:123", "kill:-KILL 123"]),
+    ),
+)
+def test_stop_port_listener_preserves_census_failure_at_each_wait_boundary(
+    tmp_path, failed_census_call, expected_kills
+):
+    events = tmp_path / "events"
+    functions = "\n\n".join(
+        boot_function_source(name) for name in ("wait_for_port_free", "stop_port_listener")
+    )
+    script = functions + r'''
+event_path="$1"
+failed_census_call="$2"
+port_listener_pids() {
+  printf 'census\n' >> "$event_path"
+  census_call_count="$(/usr/bin/grep -c '^census$' "$event_path")"
+  if [[ "$census_call_count" -eq "$failed_census_call" ]]; then
+    return 2
+  fi
+  printf '123\n'
+}
+kill() {
+  printf 'kill:%s\n' "$*" >> "$event_path"
+}
+sleep() {
+  :
+}
+stop_port_listener 48124
+stop_status="$?"
+printf 'status=%s\n' "$stop_status"
+'''
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", script, "stop-probe", str(events), str(failed_census_call)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    event_rows = events.read_text(encoding="utf-8").splitlines()
+    assert result.stdout == "status=2\n"
+    assert [row for row in event_rows if row.startswith("kill:")] == expected_kills
+    assert event_rows.count("census") == failed_census_call
 
 
 def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path):

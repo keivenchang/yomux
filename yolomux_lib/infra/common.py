@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.13"
+YOLOMUX_VERSION = "0.7.14"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -936,12 +936,16 @@ def record_metadata_warm_http(url: str) -> None:
         metrics["linear_http_calls"] += 1
 
 
-def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
+def record_git_spawn(args: list[str]) -> None:
     verb = args[0] if args else ""
     GIT_COMMAND_COUNTS[verb] = GIT_COMMAND_COUNTS.get(verb, 0) + 1
     metrics = _METADATA_WARM_WORK_METRICS.get()
     if metrics is not None:
         metrics["git_spawns"] += 1
+
+
+def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
+    record_git_spawn(args)
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
 
 

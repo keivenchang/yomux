@@ -158,7 +158,8 @@ def test_visible_directory_scan_duplicates_pinned_dev_fd_on_macos(tmp_path, monk
     monkeypatch.setattr(os, "open", guarded_open)
     try:
         names, truncated = filesystem.listing._visible_directory_names(
-            Path("/dev/fd") / str(descriptor),
+            descriptor,
+            resolved_parent=tmp_path,
             requested_path=tmp_path,
             include_repo_info=False,
         )
@@ -213,12 +214,12 @@ def test_symlink_target_resolution_follows_parent_replacement(tmp_path):
     (blocked / "item").write_text("blocked\n", encoding="utf-8")
     link = tmp_path / "link"
     link.symlink_to(safe / "item")
-    assert filesystem.listing._resolved_symlink_target(link) == safe / "item"
+    assert filesystem.listing._resolved_symlink_target(link, target_text=os.readlink(link)) == safe / "item"
 
     safe.rename(tmp_path / "safe-old")
     safe.symlink_to(blocked, target_is_directory=True)
 
-    assert filesystem.listing._resolved_symlink_target(link) == blocked / "item"
+    assert filesystem.listing._resolved_symlink_target(link, target_text=os.readlink(link)) == blocked / "item"
 
 
 def test_symlink_target_parent_resolution_does_not_poison_later_rows(monkeypatch, tmp_path):
@@ -248,8 +249,9 @@ def test_symlink_target_parent_resolution_does_not_poison_later_rows(monkeypatch
         return original_normalize(path)
 
     monkeypatch.setattr(filesystem.listing.paths, "_normalized_scope_path", normalize_during_temporary_repoint)
-    assert filesystem.listing._resolved_symlink_target(link) == second_target / "subdirectory" / "item"
-    assert filesystem.listing._resolved_symlink_target(link) == first_target / "subdirectory" / "item"
+    target_text = os.readlink(link)
+    assert filesystem.listing._resolved_symlink_target(link, target_text=target_text) == second_target / "subdirectory" / "item"
+    assert filesystem.listing._resolved_symlink_target(link, target_text=target_text) == first_target / "subdirectory" / "item"
 
 
 def test_listing_symlink_metadata_stays_bound_to_the_authorized_target(monkeypatch, tmp_path):
@@ -278,12 +280,10 @@ def test_listing_symlink_metadata_stays_bound_to_the_authorized_target(monkeypat
     monkeypatch.setattr(filesystem.listing.paths, "_path_is_secret", swap_after_authorization)
 
     payload = filesystem.list_directory(str(tmp_path))
-    listed_link = {entry["name"]: entry for entry in payload["entries"]}["link"]
+    entries = {entry["name"]: entry for entry in payload["entries"]}
 
     assert swapped is True
-    assert listed_link["size"] == 1
-    assert listed_link["symlink_target"] == str(safe_target)
-    assert listed_link["realpath"] == str(safe_target)
+    assert "link" not in entries
 
 
 def test_listing_regular_child_repointed_to_blocked_symlink_never_leaks_metadata(monkeypatch, tmp_path):
@@ -423,6 +423,44 @@ def test_filesystem_batch_watch_signature_reuses_the_directory_listing_scan(tmp_
     assert len(scans) == 1
     assert result["responses"][0]["watch_signature"] == expected_signature
     assert "watch_signature" not in result["responses"][0]["payload"]
+
+
+def test_filesystem_batch_reuses_directory_repo_info_once_per_repo(tmp_path, monkeypatch):
+    repos = [tmp_path / "repo-a", tmp_path / "repo-b"]
+    directories = []
+    for repo in repos:
+        repo.mkdir()
+        init_repo(repo)
+        directories.append(repo)
+        for index in range(3):
+            directory = repo / f"directory-{index}"
+            directory.mkdir()
+            directories.append(directory)
+
+    calls = []
+    original = git_ops.git_repo_info
+
+    def count_repo_info(repo, include_status=True, timeout=None):
+        calls.append(repo)
+        return original(repo, include_status=include_status, timeout=timeout)
+
+    monkeypatch.setattr(git_ops, "git_repo_info", count_repo_info)
+    result = filesystem.filesystem_batch_result({
+        "requests": [
+            {
+                "id": f"directory-{index}",
+                "type": "info",
+                "path": str(directory),
+                "trigger_counts": {"explicit-user": 1},
+            }
+            for index, directory in enumerate(directories)
+        ],
+        "client_scope": "browser",
+        filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
+    })
+
+    assert all(response["ok"] is True for response in result["responses"])
+    assert calls == repos
 
 
 @pytest.mark.parametrize("reader", [filesystem_io.read_file, filesystem_io.read_raw])
@@ -565,6 +603,32 @@ def test_zip_directory_never_follows_a_repointed_descendant_directory(monkeypatc
 
     assert swapped is True
     assert blocked_bytes not in archived_bytes
+
+
+def test_recursive_count_and_zip_skip_every_blocked_child(tmp_path):
+    source = tmp_path / "tree"
+    blocked_directory = source / ".ssh"
+    blocked_directory.mkdir(parents=True)
+    (source / "safe.txt").write_text("safe", encoding="utf-8")
+    (source / ".netrc").write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    (blocked_directory / "id_rsa").write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+
+    count = filesystem.count_directory_files(str(source))
+    archive_file, _archive_size = filesystem.zip_directory(str(source), max_bytes=1024 * 1024)
+    try:
+        with zipfile.ZipFile(archive_file) as archive:
+            names = archive.namelist()
+            archived_bytes = b"\n".join(
+                archive.read(name)
+                for name in names
+                if not name.endswith("/")
+            )
+    finally:
+        archive_file.close()
+
+    assert count["files"] == 1
+    assert names == ["tree/", "tree/safe.txt"]
+    assert b"BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in archived_bytes
 
 
 def test_search_files_consumes_the_authorized_directory_handle(monkeypatch, tmp_path):
@@ -739,6 +803,39 @@ def test_async_index_build_consumes_the_authorized_directory_handle(monkeypatch,
     filesystem_search.file_index.clear_memory_indexes()
 
 
+def test_breadth_first_index_build_keeps_the_authorized_root_generation(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "secret.txt").write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    parked = tmp_path / "safe-authorized"
+    file_index = filesystem_search.file_index
+    file_index.clear_memory_indexes()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with filesystem_paths.safe_path(str(safe), flags=directory_flags, operation="search_files") as handle:
+        safe.rename(parked)
+        safe.symlink_to(blocked, target_is_directory=True)
+        try:
+            index = file_index.build_now(
+                handle.resolved,
+                set(),
+                persist_enabled=False,
+                root_fd=handle.descriptor,
+                operation="search_files",
+            )
+        finally:
+            safe.unlink()
+            parked.rename(safe)
+
+    assert [entry[1] for entry in index.entries] == ["safe.txt"]
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(index.entries)
+    file_index.clear_memory_indexes()
+
+
 def test_async_index_never_follows_a_repointed_descendant(monkeypatch, tmp_path):
     indexed = tmp_path / "indexed"
     nested = indexed / "nested"
@@ -840,21 +937,23 @@ def test_diff_keeps_working_file_descriptor_live_through_git_consumption(monkeyp
     original_pinned_repo_root = git_ops._pinned_repo_root
     swapped = False
 
-    def swap_before_repo_discovery(handle, *, operation=""):
+    def swap_before_repo_discovery(handle, *, deadline=None, operation=""):
         nonlocal swapped
         if not swapped:
             swapped = True
             target.rename(tmp_path / "safe-old.py")
             target.symlink_to(blocked_target)
-        return original_pinned_repo_root(handle, operation=operation)
+        return original_pinned_repo_root(handle, deadline=deadline, operation=operation)
 
     monkeypatch.setattr(git_ops, "_pinned_repo_root", swap_before_repo_discovery)
 
-    payload = git_ops.diff_file(str(target))
+    with pytest.raises(FilesystemError) as changed:
+        git_ops.diff_file(str(target))
 
     assert swapped is True
-    assert "FAKE_DIFF_CONSUMER_SECRET" not in payload["diff"]
-    assert "+safe" in payload["diff"]
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+    assert "FAKE_DIFF_CONSUMER_SECRET" not in str(changed.value)
 
 
 def test_indexed_search_annotation_binds_realpath_and_size_to_one_descriptor(monkeypatch, tmp_path):
@@ -869,15 +968,22 @@ def test_indexed_search_annotation_binds_realpath_and_size_to_one_descriptor(mon
     state = _swap_path_after_authorization(monkeypatch, link, link, blocked_target)
     entry = {"path": str(link), "realpath": "stale", "size": 999, "file_id": "stale"}
 
-    filesystem_search._annotate_search_dedupe_fields(entry)
+    with filesystem_paths.safe_path(
+        str(tmp_path),
+        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        operation="search.annotate",
+    ) as root_handle:
+        admitted = filesystem_search._annotate_search_dedupe_fields(
+            entry,
+            root=tmp_path,
+            root_descriptor=root_handle.descriptor,
+        )
 
     assert state["swapped"] is True
-    assert entry["realpath"] == str(safe)
-    assert entry["size"] == 1
-    assert entry["file_id"] != "stale"
+    assert admitted is False
 
 
-def test_indexed_search_annotation_omits_stale_metadata_when_current_path_is_blocked(tmp_path):
+def test_indexed_search_annotation_rejects_the_complete_row_when_current_path_is_blocked(tmp_path):
     blocked = tmp_path / ".ssh"
     blocked.mkdir()
     blocked_target = blocked / "secret.txt"
@@ -892,9 +998,18 @@ def test_indexed_search_annotation_omits_stale_metadata_when_current_path_is_blo
         "file_identity": "stale",
     }
 
-    filesystem_search._annotate_search_dedupe_fields(entry)
+    with filesystem_paths.safe_path(
+        str(tmp_path),
+        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        operation="search.annotate",
+    ) as root_handle:
+        admitted = filesystem_search._annotate_search_dedupe_fields(
+            entry,
+            root=tmp_path,
+            root_descriptor=root_handle.descriptor,
+        )
 
-    assert not {"realpath", "size", "file_id", "file_identity"} & entry.keys()
+    assert admitted is False
 
 
 def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
@@ -1286,7 +1401,7 @@ def test_git_repo_info_does_not_collide_across_two_repos_sharing_a_recycled_desc
     assert not any(key.startswith("/dev/fd/") for key in cache_keys), "a raw fd-string must never become a cache key"
 
 
-def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
+def test_list_directory_explicit_opt_out_probes_repo_markers_without_spawning_git(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -1295,17 +1410,11 @@ def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path,
         "git",
         lambda *_args, **_kwargs: pytest.fail("base directory listing must not spawn Git"),
     )
-    monkeypatch.setattr(
-        filesystem.listing,
-        "_directory_is_repo",
-        lambda *_args, **_kwargs: pytest.fail("base directory listing must not probe repository markers"),
-    )
-
     payload = filesystem.list_directory(str(tmp_path), include_repo_info=False)
 
     entries = {entry["name"]: entry for entry in payload["entries"]}
     assert entries["repo"]["repo_info_deferred"] is True
-    assert "is_repo" not in entries["repo"]
+    assert entries["repo"]["is_repo"] is True
     assert "repo" not in entries["repo"]
     assert entries["repo"]["mtime"] > 0
 
@@ -1350,28 +1459,28 @@ def test_private_repository_signature_distinguishes_same_commit_branch_switch_wi
     git(repo, "add", "file.txt")
     git(repo, "commit", "-m", "one")
 
-    on_master = git_ops.private_repository_signature(repo)
+    _reset_repository_generation(repo)
+    on_master = git_ops.pinned_repository_generation(str(repo))
     # A second branch at the SAME commit: identical tree, identical OID, different symbolic ref.
     git(repo, "branch", "other")
     git(repo, "checkout", "other")
-    on_other = git_ops.private_repository_signature(repo)
+    on_other = git_ops.pinned_repository_generation(str(repo))
 
-    assert on_master != on_other, "an identical-tree branch switch must change the signature"
-    assert on_master[1] == on_other[1], "the OID is unchanged across a same-commit branch switch"
-    assert on_master[0] == "master" and on_other[0] == "other"
-    # The signature is path-free: it never names a `.git` control path.
-    assert not any(".git" in part for part in (*on_master, *on_other))
+    assert on_master == 1
+    assert on_other == 2, "an identical-tree branch switch must change the pinned generation"
 
 
 def test_private_repository_signature_is_unknown_for_non_repo_and_unborn(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert git_ops.private_repository_signature(plain) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+    _reset_repository_generation(plain)
+    assert git_ops.pinned_repository_generation(str(plain)) == 0
 
     unborn = tmp_path / "unborn"
     unborn.mkdir()
     init_repo(unborn)  # a repository with a symbolic HEAD but no commit yet
-    assert git_ops.private_repository_signature(unborn) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+    _reset_repository_generation(unborn)
+    assert git_ops.pinned_repository_generation(str(unborn)) == 0
 
 
 def test_repository_generation_advances_on_identical_tree_branch_switch(tmp_path):
@@ -1383,14 +1492,14 @@ def test_repository_generation_advances_on_identical_tree_branch_switch(tmp_path
     git(repo, "commit", "-m", "one")
     _reset_repository_generation(repo)
 
-    first = git_ops.repository_generation(repo)
+    first = git_ops.pinned_repository_generation(str(repo))
     assert first == 1
-    assert git_ops.repository_generation(repo) == first, "an unchanged HEAD does not advance the generation"
+    assert git_ops.pinned_repository_generation(str(repo)) == first, "an unchanged HEAD does not advance the generation"
 
     git(repo, "branch", "other")
     git(repo, "checkout", "other")
-    assert git_ops.repository_generation(repo) == first + 1, "a same-commit branch switch advances the generation"
-    assert git_ops.repository_generation(repo) == first + 1
+    assert git_ops.pinned_repository_generation(str(repo)) == first + 1, "a same-commit branch switch advances the generation"
+    assert git_ops.pinned_repository_generation(str(repo)) == first + 1
 
 
 def test_repository_generation_isolates_a_malformed_signature_between_tenants(tmp_path):
@@ -1406,36 +1515,28 @@ def test_repository_generation_isolates_a_malformed_signature_between_tenants(tm
     _reset_repository_generation(tenant_a)
     _reset_repository_generation(tenant_b)
 
-    assert git_ops.repository_generation(tenant_b) == 0, "an unreadable repository holds a null generation"
-    assert git_ops.repository_generation(tenant_a) == 1
+    assert git_ops.pinned_repository_generation(str(tenant_b)) == 0, "an unreadable repository holds a null generation"
+    assert git_ops.pinned_repository_generation(str(tenant_a)) == 1
     git(tenant_a, "branch", "other")
     git(tenant_a, "checkout", "other")
     # A's real branch switch advances A; B's malformed state neither advances nor is disturbed.
-    assert git_ops.repository_generation(tenant_a) == 2
-    assert git_ops.repository_generation(tenant_b) == 0
+    assert git_ops.pinned_repository_generation(str(tenant_a)) == 2
+    assert git_ops.pinned_repository_generation(str(tenant_b)) == 0
 
 
 def test_repository_generation_holds_through_a_transient_unreadable_head(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     _reset_repository_generation(root)
-    state = {"head_oid": "c0ffee", "head_rc": 0}
-
-    def runner(args):
-        if args[:1] == ["rev-parse"]:
-            return subprocess.CompletedProcess(args, state["head_rc"], f"{state['head_oid']}\n", "")
-        return subprocess.CompletedProcess(args, 0, "master\n", "")
-
-    assert git_ops.repository_generation(root, runner=runner) == 1
+    root_text = str(root.resolve())
+    signature = ("master", "c0ffee")
+    assert git_ops._advance_repository_generation(root_text, signature) == 1
     # A transient failure to read HEAD is inconclusive: hold the generation.
-    state["head_rc"] = 1
-    assert git_ops.repository_generation(root, runner=runner) == 1
+    assert git_ops._advance_repository_generation(root_text, git_ops.REPOSITORY_SIGNATURE_UNKNOWN) == 1
     # Recovering to the SAME signature must not flap the generation.
-    state["head_rc"] = 0
-    assert git_ops.repository_generation(root, runner=runner) == 1
+    assert git_ops._advance_repository_generation(root_text, signature) == 1
     # A genuine HEAD change after recovery advances exactly once.
-    state["head_oid"] = "beefbeef"
-    assert git_ops.repository_generation(root, runner=runner) == 2
+    assert git_ops._advance_repository_generation(root_text, ("master", "beefbeef")) == 2
 
 
 def test_git_repo_info_cache_ttl_is_stable_and_desynchronizes_repo_roots():
@@ -1454,6 +1555,8 @@ def test_git_repo_info_cache_applies_each_repo_ttl_independently(tmp_path, monke
     repo_long = tmp_path / "repo-long"
     repo_short.mkdir()
     repo_long.mkdir()
+    init_repo(repo_short)
+    init_repo(repo_long)
     now = [100.0]
     calls = []
 
@@ -1540,7 +1643,7 @@ def test_list_directory_bounds_slow_repo_enrichment_without_dropping_repo_row(tm
     assert sum(entry.get("repo_info_deferred") is True for entry in repo_rows) == 1
 
 
-def test_list_directory_returns_fifty_directory_rows_without_git_or_repo_probes(tmp_path, monkeypatch):
+def test_list_directory_returns_fifty_repo_rows_without_spawning_git(tmp_path, monkeypatch):
     repos = [tmp_path / f"repo-{index:02d}" for index in range(50)]
     for repo in repos:
         repo.mkdir()
@@ -1552,12 +1655,6 @@ def test_list_directory_returns_fifty_directory_rows_without_git_or_repo_probes(
         "git",
         lambda *_args, **_kwargs: pytest.fail("base directory listing must not spawn Git"),
     )
-    monkeypatch.setattr(
-        filesystem.listing,
-        "_directory_is_repo",
-        lambda *_args, **_kwargs: pytest.fail("base directory listing must not probe repository markers"),
-    )
-
     started = time.perf_counter()
     entries = {
         entry["name"]: entry
@@ -1566,7 +1663,7 @@ def test_list_directory_returns_fifty_directory_rows_without_git_or_repo_probes(
     assert time.perf_counter() - started < 0.25
     directory_rows = [entries[repo.name] for repo in repos]
     assert all(entry.get("repo_info_deferred") is True for entry in directory_rows)
-    assert all("is_repo" not in entry for entry in directory_rows)
+    assert all(entry["is_repo"] is True for entry in directory_rows)
     assert all("repo" not in entry for entry in directory_rows)
 
 
@@ -1678,10 +1775,8 @@ def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_pat
         filesystem.read_file(str(link))
 
     assert info.value.status == 403
-    listed_link = {entry["name"]: entry for entry in filesystem.list_directory(str(allowed))["entries"]}["link.txt"]
-    assert "file_id" not in listed_link
-    assert "file_identity" not in listed_link
-    assert "realpath" not in listed_link
+    entries = {entry["name"]: entry for entry in filesystem.list_directory(str(allowed))["entries"]}
+    assert "link.txt" not in entries
 
 
 def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
@@ -1825,8 +1920,8 @@ def test_package_path_info_normalizes_required_stat_permission_failure(monkeypat
 
 
 def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path):
-    def denied_list(_path, *, performance_details=None, include_repo_info=True, requested_path=None, operation="list_directory"):
-        del include_repo_info, requested_path, operation
+    def denied_list(_descriptor, *, resolved_parent, performance_details=None, include_repo_info=True, requested_path=None, operation="list_directory"):
+        del resolved_parent, include_repo_info, requested_path, operation
         raise PermissionError(13, "list denied", str(tmp_path))
 
     monkeypatch.setattr(filesystem.listing, "_visible_directory_names", denied_list)
@@ -1889,7 +1984,14 @@ def test_walk_directory_closes_open_children_when_directory_filter_raises(tmp_pa
     try:
         assert _open_descriptors_beneath(tmp_path) == {str(root_fd): str(tmp_path)}
         with pytest.raises(RuntimeError, match="filter failed"):
-            next(filesystem_paths.walk_directory(root_fd, include_directory=include_directory))
+            next(
+                filesystem_paths.walk_directory(
+                    root_fd,
+                    include_directory=include_directory,
+                    requested_root=tmp_path,
+                    resolved_root=tmp_path,
+                )
+            )
     finally:
         os.close(root_fd)
     try:
@@ -2427,6 +2529,27 @@ def test_rename_path_rejects_nested_name(tmp_path):
     assert info.value.status == 400
 
 
+@pytest.mark.parametrize("blocked_name", [".netrc", ".npmrc", ".pypirc", ".ssh"])
+def test_rename_path_refuses_a_blocked_destination_before_mutation(monkeypatch, tmp_path, blocked_name):
+    target = tmp_path / "safe.txt"
+    target.write_text("safe", encoding="utf-8")
+    rename_calls = []
+
+    def record_rename(*args, **kwargs):
+        rename_calls.append((args, kwargs))
+        raise AssertionError("blocked destination reached os.rename")
+
+    monkeypatch.setattr(filesystem_paths.os, "rename", record_rename)
+
+    with pytest.raises(FilesystemError) as error:
+        filesystem.rename_path(str(target), blocked_name)
+
+    assert error.value.status == 403
+    assert error.value.message_key == "fs.error.credentialBlocked"
+    assert rename_calls == []
+    assert target.read_text(encoding="utf-8") == "safe"
+
+
 def test_delete_path_removes_directory_tree(tmp_path):
     target = tmp_path / "dir"
     (target / "nested").mkdir(parents=True)
@@ -2863,6 +2986,42 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert older["head"] == repo.merge_sha
     assert new_head not in {item["sha"] for item in older["commits"]}
     assert [item["sha"] for item in older["commits"]] == expected[2:4]
+
+
+def test_pinned_git_view_reuses_warm_loose_objects_without_the_cross_process_writer_lock(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    monkeypatch.setattr(git_ops.tempfile, "gettempdir", lambda: str(runtime_root))
+    repo = create_git_history_repository(tmp_path / "history")
+
+    first = filesystem.git_history(str(repo.root), limit=2)
+
+    def reject_cache_writer_lock():
+        raise AssertionError("warm immutable loose-object hits must not take the cache writer lock")
+
+    monkeypatch.setattr(git_ops, "_git_loose_object_cache_session", reject_cache_writer_lock)
+    second = filesystem.git_history(str(repo.root), limit=2)
+
+    assert [item["sha"] for item in second["commits"]] == [item["sha"] for item in first["commits"]]
+
+
+def test_pinned_git_view_opens_validated_loose_object_basenames_from_the_authorized_prefix(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    monkeypatch.setattr(git_ops.tempfile, "gettempdir", lambda: str(runtime_root))
+    repo = create_git_history_repository(tmp_path / "history")
+    original_safe_child = git_ops.paths.safe_child
+
+    def reject_reauthorization_of_loose_object(parent_descriptor, requested, resolved, **kwargs):
+        if requested.parent.parent.name == "objects" and re.fullmatch(r"[0-9a-f]{2}", requested.parent.name):
+            raise AssertionError("validated loose-object basenames must open from their authorized prefix descriptor")
+        return original_safe_child(parent_descriptor, requested, resolved, **kwargs)
+
+    monkeypatch.setattr(git_ops.paths, "safe_child", reject_reauthorization_of_loose_object)
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["commits"][0]["sha"] == repo.merge_sha
 
 
 def test_git_history_snapshot_cursor_reloads_the_frozen_first_page(tmp_path):
@@ -3501,6 +3660,112 @@ def test_git_history_rejects_symlinked_object_directory_outside_allowed_roots(tm
     assert changed.value.message_key == "fs.error.gitRepositoryChanged"
 
 
+@pytest.mark.parametrize(
+    "consumer",
+    ["read", "info", "list", "diff", "blame", "rename"],
+)
+def test_lightweight_git_consumers_refuse_out_of_root_object_directory(tmp_path, monkeypatch, consumer):
+    allowed = tmp_path / "allowed"
+    repo = allowed / "repo"
+    repo.mkdir(parents=True)
+    init_repo(repo)
+    target = repo / "item.txt"
+    target.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE\n", encoding="utf-8")
+    git(repo, "add", "item.txt")
+    git(repo, "commit", "-m", "BLOCKED_SENTINEL_DO_NOT_EXPOSE")
+    target.write_text("safe working generation\n", encoding="utf-8")
+    external_objects = tmp_path / "external-objects"
+    (repo / ".git" / "objects").rename(external_objects)
+    (repo / ".git" / "objects").symlink_to(external_objects, target_is_directory=True)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    def consume():
+        if consumer == "read":
+            return filesystem.read_file(str(target))
+        if consumer == "info":
+            return filesystem.path_info(str(target))
+        if consumer == "list":
+            return filesystem.list_directory(str(allowed))
+        if consumer == "diff":
+            return filesystem.diff_file(str(target))
+        if consumer == "blame":
+            return filesystem.blame_file(str(target))
+        return filesystem.rename_path(str(target), "renamed.txt")
+
+    with pytest.raises(FilesystemError) as changed:
+        consume()
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in str(changed.value)
+    if consumer == "rename":
+        assert target.read_text(encoding="utf-8") == "safe working generation\n"
+        assert not (repo / "renamed.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ["read", "info", "list", "diff", "blame", "rename"],
+)
+def test_lightweight_git_consumers_reject_object_store_replacement_after_pin(tmp_path, monkeypatch, consumer):
+    safe_repo = tmp_path / "safe"
+    blocked_repo = tmp_path / "blocked"
+    for repo, content, subject in (
+        (safe_repo, "safe committed\n", "safe subject"),
+        (blocked_repo, "BLOCKED_SENTINEL_DO_NOT_EXPOSE\n", "BLOCKED_SENTINEL_DO_NOT_EXPOSE"),
+    ):
+        repo.mkdir()
+        init_repo(repo)
+        (repo / "item.txt").write_text(content, encoding="utf-8")
+        git(repo, "add", "item.txt")
+        git(repo, "commit", "-m", subject)
+    target = safe_repo / "item.txt"
+    target.write_text("safe working generation\n", encoding="utf-8")
+    safe_objects = safe_repo / ".git" / "objects"
+    parked_objects = safe_repo / ".git" / "objects-authorized"
+    blocked_objects = blocked_repo / ".git" / "objects"
+    original_git = git_ops._git_with_pinned_repo
+    replaced = False
+
+    def replace_objects_after_scope_pin(repo_handle, args, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            safe_objects.rename(parked_objects)
+            blocked_objects.rename(safe_objects)
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", replace_objects_after_scope_pin)
+
+    def consume():
+        if consumer == "read":
+            return filesystem.read_file(str(target))
+        if consumer == "info":
+            return filesystem.path_info(str(target))
+        if consumer == "list":
+            return filesystem.list_directory(str(tmp_path))
+        if consumer == "diff":
+            return filesystem.diff_file(str(target))
+        if consumer == "blame":
+            return filesystem.blame_file(str(target))
+        return filesystem.rename_path(str(target), "renamed.txt")
+
+    try:
+        with pytest.raises(FilesystemError) as changed:
+            consume()
+        assert replaced is True
+        assert changed.value.status == 409
+        assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+        assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in str(changed.value)
+        if consumer == "rename":
+            assert target.read_text(encoding="utf-8") == "safe working generation\n"
+            assert not (safe_repo / "renamed.txt").exists()
+    finally:
+        if replaced:
+            safe_objects.rename(blocked_objects)
+            parked_objects.rename(safe_objects)
+
+
 def test_git_history_rejects_symlinked_loose_object_outside_allowed_roots(tmp_path, monkeypatch):
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -3591,6 +3856,52 @@ def test_git_history_probes_only_finite_object_directory_names(tmp_path, monkeyp
     history = filesystem.git_history(str(repo.root), limit=1)
 
     assert history["commits"][0]["sha"] == repo.merge_sha
+
+
+def test_git_history_hardlinks_pinned_loose_objects_without_copying_or_retaining_descriptors(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    real_snapshot = git_ops._snapshot_regular_child
+    copied_loose_objects: list[str] = []
+
+    def record_loose_object_copy(parent_handle, source_path, destination, **kwargs):
+        if re.fullmatch(r"[0-9a-f]{2}", source_path.parent.name) and source_path.parent.parent.name == "objects":
+            copied_loose_objects.append(str(source_path))
+        return real_snapshot(parent_handle, source_path, destination, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_snapshot_regular_child", record_loose_object_copy)
+    before_descriptors = len(os.listdir("/proc/self/fd"))
+    history = filesystem.git_history(str(repo.root), limit=1)
+    after_descriptors = len(os.listdir("/proc/self/fd"))
+
+    assert history["commits"][0]["sha"] == repo.merge_sha
+    assert copied_loose_objects == []
+    assert after_descriptors == before_descriptors
+
+
+def test_git_history_rejects_in_place_loose_object_rewrite_during_read(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    loose_object = repo.root / ".git" / "objects" / repo.merge_sha[:2] / repo.merge_sha[2:]
+    loose_object.chmod(0o644)
+    original_object = loose_object.read_bytes()
+    original_git = git_ops._git_with_pinned_repo
+    rewritten = False
+
+    def rewrite_loose_object_after_log(repo_handle, args, **kwargs):
+        nonlocal rewritten
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args and not rewritten:
+            rewritten = True
+            loose_object.write_bytes(bytes([original_object[0] ^ 1]) + original_object[1:])
+            loose_object.write_bytes(original_object)
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", rewrite_loose_object_after_log)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert rewritten is True
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
 
 
 def test_git_history_checks_snapshot_deadline_before_each_loose_prefix_probe(tmp_path, monkeypatch):
@@ -3840,6 +4151,15 @@ def test_git_history_rejects_unsupported_repository_extensions(tmp_path, key, va
 
     assert unsupported.value.status == 422
     assert unsupported.value.message_key == "fs.error.gitRepositoryUnsupported"
+
+
+def test_git_history_accepts_legacy_worktree_config_at_format_zero(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("config", "extensions.worktreeConfig", "true")
+
+    payload = filesystem.git_history(str(repo.root))
+
+    assert payload["commits"]
 
 
 def test_git_history_rejects_repository_config_include(tmp_path):
@@ -4555,6 +4875,85 @@ def test_rename_path_stages_a_tracked_file_at_its_new_name(tmp_path):
     assert tracked.returncode == 0, "the rename must stage the new path"
 
 
+def test_rename_path_preserves_unstaged_content_and_index_flags(tmp_path):
+    init_repo(tmp_path)
+    target = tmp_path / "old.txt"
+    target.write_text("committed\n", encoding="utf-8")
+    git(tmp_path, "add", "old.txt")
+    git(tmp_path, "commit", "-m", "initial")
+    git(tmp_path, "update-index", "--assume-unchanged", "old.txt")
+    target.write_text("working-only\n", encoding="utf-8")
+
+    filesystem.rename_path(str(target), "new.txt")
+
+    assert git(tmp_path, "show", ":new.txt").stdout == "committed\n"
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "working-only\n"
+    assert git(tmp_path, "ls-files", "-v", "new.txt").stdout.startswith("h ")
+    assert not (tmp_path / ".git" / "index.lock").exists()
+
+
+def test_rename_path_moves_every_tracked_directory_index_entry(tmp_path):
+    init_repo(tmp_path)
+    source = tmp_path / "old"
+    source.mkdir()
+    (source / "a.txt").write_text("a\n", encoding="utf-8")
+    (source / "b.txt").write_text("b\n", encoding="utf-8")
+    git(tmp_path, "add", "old")
+    git(tmp_path, "commit", "-m", "initial")
+
+    filesystem.rename_path(str(source), "new")
+
+    assert git(tmp_path, "ls-files").stdout.splitlines() == ["new/a.txt", "new/b.txt"]
+    assert not (tmp_path / ".git" / "index.lock").exists()
+
+
+def test_rename_path_refuses_existing_index_lock_before_filesystem_mutation(tmp_path):
+    init_repo(tmp_path)
+    target = tmp_path / "old.txt"
+    target.write_text("committed\n", encoding="utf-8")
+    git(tmp_path, "add", "old.txt")
+    git(tmp_path, "commit", "-m", "initial")
+    lock = tmp_path / ".git" / "index.lock"
+    lock.write_text("owned by another operation", encoding="utf-8")
+
+    with pytest.raises(FilesystemError) as busy:
+        filesystem.rename_path(str(target), "new.txt")
+
+    assert busy.value.status == 409
+    assert busy.value.message_key == "fs.error.gitRepositoryChanged"
+    assert target.read_text(encoding="utf-8") == "committed\n"
+    assert not (tmp_path / "new.txt").exists()
+    assert lock.read_text(encoding="utf-8") == "owned by another operation"
+
+
+def test_rename_path_refuses_concurrent_index_replacement_without_publishing(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    target = tmp_path / "old.txt"
+    target.write_text("committed\n", encoding="utf-8")
+    git(tmp_path, "add", "old.txt")
+    git(tmp_path, "commit", "-m", "initial")
+    original_prepare = git_ops.prepare_pinned_index_rename
+    replacement_bytes = b"BLOCKED_SENTINEL_DO_NOT_EXPOSE"
+
+    def replace_index(scope, new_relative):
+        tracked = original_prepare(scope, new_relative)
+        replacement = tmp_path / ".git" / "replacement-index"
+        replacement.write_bytes(replacement_bytes)
+        replacement.replace(tmp_path / ".git" / "index")
+        return tracked
+
+    monkeypatch.setattr(git_ops, "prepare_pinned_index_rename", replace_index)
+
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.rename_path(str(target), "new.txt")
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+    assert (tmp_path / ".git" / "index").read_bytes() == replacement_bytes
+    assert not (tmp_path / ".git" / "index.lock").exists()
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "committed\n"
+
+
 def test_rename_git_staging_keeps_the_authorized_repository_descriptor_live(monkeypatch, tmp_path):
     safe_repo = tmp_path / "safe-repo"
     blocked_repo = tmp_path / ".ssh" / "blocked-repo"
@@ -4574,7 +4973,7 @@ def test_rename_git_staging_keeps_the_authorized_repository_descriptor_live(monk
 
     def swap_before_stage(repo_handle, args, **kwargs):
         nonlocal swapped
-        if args and args[0] == "add" and not swapped:
+        if args and args[0] == "update-index" and not swapped:
             swapped = True
             safe_repo.rename(parked)
             safe_repo.symlink_to(blocked_repo, target_is_directory=True)
@@ -4599,7 +4998,6 @@ def test_rename_path_plain_rename_for_untracked_file(tmp_path):
     result = filesystem.rename_path(str(tmp_path / "a.txt"), "b.txt")
     assert result["name"] == "b.txt"
     assert (tmp_path / "b.txt").exists() and not (tmp_path / "a.txt").exists()
-    assert filesystem._git_mv_if_tracked(tmp_path / "b.txt", tmp_path / "c.txt") is False
 
 
 def test_list_directory_flags_symlinks_with_target(tmp_path):

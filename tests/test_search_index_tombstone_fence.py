@@ -18,6 +18,7 @@ import pytest
 from yolomux_lib.search import file_index
 from yolomux_lib.search import bfs_index
 from yolomux_lib.search import search_indexer
+from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.filesystem import search as filesystem_search
 
 
@@ -51,6 +52,14 @@ def _reset_registry():
         # background waiter never leaks into the next. Any still-blocked waiter is a no-op once its token is gone.
         file_index._PENDING_DROP_RETRIES.clear()
     assert not late, f"late search-index retirees survived teardown: {late}"
+
+
+def _install_root_fd(index, root):
+    descriptor = os.open(root, os.O_RDONLY)
+    try:
+        index.replace_root_fd(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def test_ensure_revalidates_ownership_atomically_when_installing_root_fd(tmp_path, monkeypatch):
@@ -106,7 +115,7 @@ def test_final_ownership_failure_leaves_assignment_for_finalizer(tmp_path, monke
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -160,7 +169,7 @@ def test_failed_thread_start_after_retirement_finalizes_installed_assignment(tmp
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -283,7 +292,7 @@ def test_retirement_registration_cannot_land_after_the_worker_finalized(tmp_path
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     completion = threading.Event()
     assignment = file_index._WorkerAssignment(
         generation=1,
@@ -331,7 +340,7 @@ def test_successful_bfs_publication_supersedes_a_pending_drop(tmp_path, monkeypa
     file_index.clear_memory_indexes()
 
     old = file_index.RootIndex(root)
-    old.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(old, root)
     release = threading.Event()
     completion = threading.Event()
 
@@ -393,7 +402,7 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     root.mkdir()
     (root / "first.txt").write_text("first", encoding="utf-8")
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -405,8 +414,8 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     # AFTER the build started (a different token) is not superseded, so the db is deleted.
     real_stamp = file_index._stamp_snapshot_tombstone_identity
 
-    def pause_before_pending_drop_supersession(candidate_root, identity):
-        real_stamp(candidate_root, identity)
+    def pause_before_pending_drop_supersession(candidate_root, identity, *, expected_root_identity):
+        real_stamp(candidate_root, identity, expected_root_identity=expected_root_identity)
         publication_ready.set()
         assert resume_publication.wait(3.0)
 
@@ -438,7 +447,7 @@ def test_publication_cannot_clear_a_tombstone_written_by_a_newer_unindex(tmp_pat
     root.mkdir()
     (root / "first.txt").write_text("first", encoding="utf-8")
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -450,13 +459,20 @@ def test_publication_cannot_clear_a_tombstone_written_by_a_newer_unindex(tmp_pat
     # Under the no-clear model publication never touches the marker file, so the intent (a newer
     # unindex's tombstone survives the older build's publication) holds by construction; the assertion
     # still proves the durable marker is never cleared.
-    def pause_before_publication_completion(candidate, *, captured_drop_token, captured_tombstone_identity=None):
+    def pause_before_publication_completion(
+        candidate,
+        *,
+        captured_drop_token,
+        captured_tombstone_identity=None,
+        captured_root_identity=None,
+    ):
         publication_ready.set()
         assert resume_publication.wait(3.0)
         real_complete_publication(
             candidate,
             captured_drop_token=captured_drop_token,
             captured_tombstone_identity=captured_tombstone_identity,
+            captured_root_identity=captured_root_identity,
         )
 
     monkeypatch.setattr(file_index, "_complete_publication", pause_before_publication_completion)
@@ -542,7 +558,7 @@ def test_unindex_cannot_write_its_tombstone_after_a_superseding_rebuild(tmp_path
     file_index.clear_memory_indexes()
 
     old = file_index.RootIndex(root)
-    old.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(old, root)
     release = threading.Event()
     completion = threading.Event()
 
@@ -612,9 +628,10 @@ def test_progressive_build_enter_closes_lock_fd_when_root_open_fails(tmp_path, m
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     missing = tmp_path / "missing-root"
     build = bfs_index.ProgressiveBuild(missing, set(), generation=1)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(filesystem_paths.FilesystemError) as missing_error:
         with build:
             pass
+    assert missing_error.value.status == 404
     leaked = build._lock_fd
     try:
         assert leaked is None, "failed __enter__ retained the per-root build lock descriptor"
@@ -823,10 +840,10 @@ def test_tombstone_arriving_during_publication_is_not_deleted(tmp_path, monkeypa
     resume = threading.Event()
     real_stamp = file_index._stamp_snapshot_tombstone_identity
 
-    def paused_stamp(candidate_root, identity):
+    def paused_stamp(candidate_root, identity, *, expected_root_identity):
         checked.set()
         assert resume.wait(3.0)
-        return real_stamp(candidate_root, identity)
+        return real_stamp(candidate_root, identity, expected_root_identity=expected_root_identity)
 
     monkeypatch.setattr(file_index, "_stamp_snapshot_tombstone_identity", paused_stamp)
     worker = threading.Thread(
@@ -1108,7 +1125,11 @@ def test_manifest_replace_failure_cannot_diverge_from_the_authoritative_sqlite_i
     # Simulate a build that COMMITTED the current identity to the authoritative sqlite but whose manifest
     # replace failed (the derived cache is left stale at the old empty identity).
     monkeypatch.setattr(file_index, "_reconcile_manifest_tombstone_identity", lambda _root, _value: None)
-    assert file_index._stamp_snapshot_tombstone_identity(root, identity) is True
+    assert file_index._stamp_snapshot_tombstone_identity(
+        root,
+        identity,
+        expected_root_identity=file_index._current_root_identity(root),
+    ) is True
 
     try:
         # The sqlite search reader accepts the store (its stamp matches the marker).
@@ -1126,6 +1147,51 @@ def test_manifest_replace_failure_cannot_diverge_from_the_authoritative_sqlite_i
         _reset_registry()
 
 
+def test_stale_publication_cannot_stamp_a_replacement_root_snapshot(tmp_path, monkeypatch):
+    _reset_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "safe.txt").write_text("safe", encoding="utf-8")
+    index = file_index.build_now(root, set())
+    assert index.root_fd_identity is not None
+
+    authorized_root = tmp_path / "authorized-root"
+    root.rename(authorized_root)
+    root.mkdir()
+    (root / "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt").write_text("blocked", encoding="utf-8")
+    replacement_identity = file_index.root_identity(root.stat())
+    blocked_stamp = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
+    with sqlite3.connect(file_index._index_disk_path(root)) as writer:
+        writer.execute(
+            "UPDATE metadata SET value = ? WHERE key = ?",
+            (
+                file_index._root_identity_metadata_value(replacement_identity),
+                file_index.AUTHORIZED_ROOT_IDENTITY_FIELD,
+            ),
+        )
+        writer.execute(
+            "INSERT INTO metadata(key, value) VALUES ('tombstone_identity', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (blocked_stamp,),
+        )
+
+    try:
+        file_index._complete_publication(
+            index,
+            captured_drop_token=None,
+            captured_tombstone_identity="stale-authorized-generation",
+        )
+        with sqlite3.connect(file_index._index_disk_path(root)) as reader:
+            metadata = dict(reader.execute("SELECT key, value FROM metadata"))
+        assert metadata[file_index.AUTHORIZED_ROOT_IDENTITY_FIELD] == file_index._root_identity_metadata_value(
+            replacement_identity
+        )
+        assert metadata["tombstone_identity"] == blocked_stamp
+    finally:
+        _reset_registry()
+
+
 def test_publication_does_not_supersede_drop_when_authoritative_sqlite_stamp_fails(tmp_path, monkeypatch):
     # P1-3: the authoritative sqlite stamp is the commit that proves a build superseded the deletion.
     # If it fails, `_complete_publication` must NOT supersede the durable-drop intent as though both the
@@ -1138,7 +1204,11 @@ def test_publication_does_not_supersede_drop_when_authoritative_sqlite_stamp_fai
     key = file_index._canonical_root_key(root)
     token = file_index._request_pending_drop(root)
     # The authoritative sqlite commit did not land (no durable store / injected metadata-commit failure).
-    monkeypatch.setattr(file_index, "_stamp_snapshot_tombstone_identity", lambda _root, _identity: False)
+    monkeypatch.setattr(
+        file_index,
+        "_stamp_snapshot_tombstone_identity",
+        lambda _root, _identity, *, expected_root_identity: False,
+    )
     ri = file_index.RootIndex(root)
     try:
         file_index._complete_publication(ri, captured_drop_token=token, captured_tombstone_identity=identity)
@@ -1326,7 +1396,11 @@ def test_divergent_manifest_stamp_is_rejected_by_readers_agreeing_with_sqlite_se
     # Commit a DIVERGENT identity S into the authoritative sqlite store, then stamp the derived manifest to
     # the CURRENT marker T (the divergence: the cache says superseded, the committed store does not).
     identity_s = f"{identity_t}-divergent"
-    assert file_index._stamp_snapshot_tombstone_identity(root, identity_s) is True
+    assert file_index._stamp_snapshot_tombstone_identity(
+        root,
+        identity_s,
+        expected_root_identity=file_index._current_root_identity(root),
+    ) is True
     file_index._reconcile_manifest_tombstone_identity(root, identity_t)
 
     # Confirm the divergence is real on disk: manifest carries T, authoritative sqlite carries S.

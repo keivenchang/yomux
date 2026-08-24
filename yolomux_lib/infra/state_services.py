@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+import copy
 from dataclasses import dataclass, field
 from http import HTTPStatus
 import threading
+import time
 from typing import Any
 from typing import Callable
 
@@ -120,6 +122,36 @@ class JobdOperationFlight:
     cancelled: threading.Event = field(default_factory=threading.Event)
     owner_operation_id: str = ""
     participants: int = 1
+    producer_lock: threading.Lock = field(default_factory=threading.Lock)
+    producer: dict[str, Any] = field(default_factory=dict)
+    producer_generation: int = 0
+    operation_ids: set[str] = field(default_factory=set)
+
+    @staticmethod
+    def completion_key(job_id: str, replace: bool) -> str:
+        """Separate completion owners whose cache replacement policies differ."""
+        return f"{job_id}|replace={int(bool(replace))}"
+
+    @staticmethod
+    def producer_attribution(
+        stage: str,
+        job_id: str,
+        coalesce_key: str,
+        generation: int,
+        state: str,
+        *,
+        code: str = "",
+    ) -> dict[str, Any]:
+        item = {
+            "stage": str(stage),
+            "job_id": str(job_id),
+            "coalesce_key": str(coalesce_key),
+            "generation": int(generation),
+            "state": str(state),
+        }
+        if code:
+            item["code"] = str(code)
+        return {"service": "jobd", "chain": [item]}
 
     def accept_owner(self, operation_id: str) -> None:
         self.owner_operation_id = str(operation_id)
@@ -132,6 +164,80 @@ class JobdOperationFlight:
     def wait_for_owner(self) -> str:
         self.owner_ready.wait()
         return "" if self.cancelled.is_set() else self.owner_operation_id
+
+    def producer_snapshot(self) -> dict[str, Any]:
+        with self.producer_lock:
+            return copy.deepcopy(self.producer)
+
+    def register_operation(self, operation_id: str) -> tuple[dict[str, Any], int]:
+        """Register one persisted participant and atomically snapshot its producer generation."""
+        with self.producer_lock:
+            self.operation_ids.add(str(operation_id))
+            return copy.deepcopy(self.producer), self.producer_generation
+
+    def unregister_operation(self, operation_id: str) -> None:
+        with self.producer_lock:
+            self.operation_ids.discard(str(operation_id))
+
+    def append_producer(
+        self,
+        stage: str,
+        job_id: str,
+        coalesce_key: str,
+        generation: int,
+        state: str,
+        *,
+        code: str = "",
+    ) -> tuple[dict[str, Any], tuple[str, ...], int]:
+        """Append one producer stage and return its durable participant targets."""
+        attribution = self.producer_attribution(
+            stage,
+            job_id,
+            coalesce_key,
+            generation,
+            state,
+            code=code,
+        )
+        with self.producer_lock:
+            chain = self.producer.setdefault("chain", [])
+            chain.append(attribution["chain"][0])
+            self.producer.setdefault("service", "jobd")
+            self.producer_generation += 1
+            return copy.deepcopy(self.producer), tuple(self.operation_ids), self.producer_generation
+
+    def finish_current_producer(
+        self,
+        state: str,
+        *,
+        code: str = "",
+    ) -> tuple[dict[str, Any], tuple[str, ...], int]:
+        """Move the current stage to an observed terminal state."""
+        with self.producer_lock:
+            chain = self.producer.get("chain")
+            if not isinstance(chain, list) or not chain or not isinstance(chain[-1], dict):
+                raise RuntimeError("jobd operation flight has no current producer")
+            chain[-1]["state"] = str(state)
+            if code:
+                chain[-1]["code"] = str(code)
+            else:
+                chain[-1].pop("code", None)
+            self.producer_generation += 1
+            return copy.deepcopy(self.producer), tuple(self.operation_ids), self.producer_generation
+
+    def fail_current_producer(
+        self,
+        code: str,
+    ) -> tuple[dict[str, Any], tuple[str, ...], int]:
+        """Fail only a stage that has not already reached a terminal producer state."""
+        with self.producer_lock:
+            chain = self.producer.get("chain")
+            if not isinstance(chain, list) or not chain or not isinstance(chain[-1], dict):
+                raise RuntimeError("jobd operation flight has no current producer")
+            if str(chain[-1].get("state") or "") not in {"completed", "failed"}:
+                chain[-1]["state"] = "failed"
+                chain[-1]["code"] = str(code)
+            self.producer_generation += 1
+            return copy.deepcopy(self.producer), tuple(self.operation_ids), self.producer_generation
 
 
 @dataclass
@@ -533,6 +639,8 @@ class JobdOperationService:
         lane: str,
         key: str,
         deadline_at: float,
+        *,
+        producer: dict[str, Any] | None = None,
     ) -> tuple[JobdOperationFlight | None, JobdOperationReservation | None, bool]:
         """Atomically join one keyed flight or reserve the lane for its first caller."""
         if lane not in self._lane_slots:
@@ -548,7 +656,12 @@ class JobdOperationService:
             if self.stop_event.is_set() or not self._lane_slots[lane].acquire(blocking=False):
                 return None, None, False
             reservation = JobdOperationReservation(self, lane)
-            flight = JobdOperationFlight(lane=lane, key=str(key), deadline_at=float(deadline_at))
+            flight = JobdOperationFlight(
+                lane=lane,
+                key=str(key),
+                deadline_at=float(deadline_at),
+                producer=copy.deepcopy(producer or {}),
+            )
             self.flights[flight_key] = flight
             return flight, reservation, True
 
@@ -557,6 +670,20 @@ class JobdOperationService:
         with self.lock:
             if flight.participants > 0:
                 flight.participants -= 1
+
+    def rollback_flight_participant(
+        self,
+        flight: JobdOperationFlight,
+        operation_id: str,
+        *,
+        owns_producer: bool,
+    ) -> None:
+        """Release one failed participant and unblock its owner worker when applicable."""
+        if operation_id:
+            flight.unregister_operation(operation_id)
+        self.release_flight_participant(flight)
+        if owns_producer:
+            flight.cancel_owner()
 
     def release_flight(self, flight: JobdOperationFlight) -> None:
         """Release only the current owner for this exact lane/key generation."""
@@ -611,6 +738,360 @@ class JobdOperationService:
             executor.shutdown(wait=True, cancel_futures=True)
         with self.lock:
             self.flights.clear()
+
+
+class SessionFilesOperationProduct(tuple):
+    """Two-value compatibility result carrying worker-owned cache identity metadata."""
+
+    def __new__(cls, payload: dict[str, Any], status: HTTPStatus, job: dict[str, Any]):
+        value = super().__new__(cls, (payload, status))
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        identities = result.get("repository_identities")
+        value.repository_identities = copy.deepcopy(identities) if isinstance(identities, dict) else {}
+        return value
+
+
+class SessionFilesProducerPersistenceError(RuntimeError):
+    """Internal boundary for a producer transition that could not reach the ledger."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def canonical_session_files_cache_key(cache_key: tuple[Any, ...], identities: dict[str, Any]) -> tuple[Any, ...] | None:
+    def freeze(value: Any) -> Any:
+        return tuple(freeze(item) for item in value) if isinstance(value, (list, tuple)) else value
+    signatures = []
+    for repo, signature in cache_key[-1]:
+        if isinstance(signature, str) and signature.startswith("deferred-unwatched:"):
+            replacement = freeze(identities.get(str(repo)))
+            if not isinstance(replacement, tuple):
+                return None
+            signature = replacement
+        signatures.append((repo, signature))
+    return (*cache_key[:-1], tuple(signatures))
+
+
+class SessionFilesOperationLifecycle:
+    """Own accepted session-files producer flights from broker receipt to durable terminal result."""
+
+    @staticmethod
+    def accepted_job(response: dict[str, Any]) -> tuple[str, str]:
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        producer_state = str(job.get("status") or "")
+        if response.get("ok") and producer_state in {"queued", "running", "completed"}:
+            return str(job.get("job_id") or ""), producer_state
+        return "", producer_state
+
+    @staticmethod
+    def persist_transition(
+        app: Any,
+        transition: tuple[dict[str, Any], tuple[str, ...], int],
+    ) -> dict[str, Any]:
+        producer, operation_ids, producer_generation = transition
+        try:
+            app.queued_delivery_ledger.update_operation_producers(
+                operation_ids,
+                producer,
+                producer_generation=producer_generation,
+            )
+        except Exception as error:
+            raise SessionFilesProducerPersistenceError(error) from error
+        return producer
+
+    @staticmethod
+    def producer_persistence_failure(
+        error: SessionFilesProducerPersistenceError,
+        exception_cause: Callable[[BaseException], dict[str, Any]],
+    ) -> tuple[None, HTTPStatus, tuple[dict[str, Any], str, str]]:
+        failure = {"error": str(error.cause), "cause": exception_cause(error.cause)}
+        return (
+            None,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            (failure, "session-files.complete", "producer_failed"),
+        )
+
+    @classmethod
+    def complete(
+        cls,
+        app: Any,
+        flight: JobdOperationFlight,
+        job_id: str,
+        session: str | None,
+        infos: dict[str, Any],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        deadline_at: float,
+        replace: bool,
+        priority: str,
+        requester: str,
+        *,
+        deferred: bool,
+        cache_refresh_seconds: float,
+        unavailable_type: type[Exception],
+        exception_cause: Callable[[BaseException], dict[str, Any]],
+    ) -> None:
+        """Resolve one producer into one canonical cache publication."""
+        failure_operation = "jobd.result"
+        outcome = None
+        try:
+            completed_product = app.wait_for_session_files_operation_job(job_id, deadline_at)
+            producer_payload, producer_status = completed_product
+            repository_identities = completed_product.repository_identities if isinstance(completed_product, SessionFilesOperationProduct) else {}
+            cls.persist_transition(app, flight.finish_current_producer("completed"))
+            if deferred:
+                canonical_cache_key = canonical_session_files_cache_key(cache_key, repository_identities)
+                if canonical_cache_key is not None:
+                    cache_key = canonical_cache_key
+                else:
+                    cache_key = app.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
+                    failure_operation = "jobd.canonical-submit"
+                    response, coalesce_key, generation = app.submit_session_files_job(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester, replace=replace)
+                    canonical_job_id, producer_state = cls.accepted_job(response)
+                    if not canonical_job_id:
+                        producer_code = str(response.get("status") or "service_unavailable")
+                        cls.persist_transition(app, flight.append_producer("canonical", "", coalesce_key, generation, "failed", code=producer_code))
+                        raise unavailable_type(str(response.get("error") or "jobd canonical submit rejected"), response)
+                    cls.persist_transition(app, flight.append_producer("canonical", canonical_job_id, coalesce_key, generation, producer_state))
+                    failure_operation = "jobd.canonical-result"
+                    producer_payload, producer_status = app.wait_for_session_files_operation_job(canonical_job_id, deadline_at)
+                    cls.persist_transition(app, flight.finish_current_producer("completed"))
+            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(
+                cache_key,
+                lambda: (producer_payload, producer_status),
+                replace=replace,
+            )
+            terminal_payload = copy.deepcopy(payload)
+            terminal_payload["cache"] = {
+                "hit": bool(cache_hit),
+                "stale": False,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": cache_refresh_seconds,
+            }
+            outcome = terminal_payload, status, None
+        except unavailable_type as error:
+            producer_code = str(error.failure.get("status") or error.code)
+            try:
+                cls.persist_transition(app, flight.fail_current_producer(producer_code))
+            except SessionFilesProducerPersistenceError as persistence_error:
+                outcome = cls.producer_persistence_failure(persistence_error, exception_cause)
+            else:
+                failure = error.failure or {"error": str(error)}
+                outcome = None, error.status, (failure, failure_operation, error.code)
+        except SessionFilesProducerPersistenceError as error:
+            outcome = cls.producer_persistence_failure(error, exception_cause)
+        except Exception as error:
+            try:
+                cls.persist_transition(app, flight.fail_current_producer("producer_failed"))
+            except SessionFilesProducerPersistenceError as persistence_error:
+                outcome = cls.producer_persistence_failure(persistence_error, exception_cause)
+            else:
+                failure = {"error": str(error), "cause": exception_cause(error)}
+                outcome = (
+                    None,
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    (failure, "session-files.complete", "producer_failed"),
+                )
+        finally:
+            try:
+                if outcome is not None and not flight.future.done():
+                    flight.future.set_result(outcome)
+                flight.wait_for_owner()
+            finally:
+                app.jobd_operation_service.release_flight(flight)
+
+    @staticmethod
+    def terminalize_callback(
+        app: Any,
+        flight: JobdOperationFlight,
+        request_id: str,
+        operation_id: str,
+    ) -> Callable[[Future[Any]], None]:
+        def terminalize(completed: Future[Any]) -> None:
+            data, status, failure = completed.result()
+            if failure is None:
+                result = app.session_files_ready_result(request_id, copy.deepcopy(data))
+            else:
+                failure_payload, failure_operation, code = failure
+                result = app.session_files_failure_result(
+                    request_id,
+                    copy.deepcopy(failure_payload),
+                    operation_id=operation_id,
+                    operation=failure_operation,
+                    code=code,
+                )
+            result["producer"] = flight.producer_snapshot()
+            app.terminalize_operation(operation_id, result, status)
+
+        return terminalize
+
+    @classmethod
+    def start(
+        cls,
+        app: Any,
+        session: str | None,
+        infos: dict[str, Any],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str,
+        requester: str,
+        replace: bool,
+        deadline_ms: int,
+        context: dict[str, Any],
+        exception_cause: Callable[[BaseException], dict[str, Any]],
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        request_id = app.new_api_request_id()
+        response, coalesce_key, generation = app.submit_session_files_job(
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            priority=priority,
+            requester=requester,
+            replace=replace,
+        )
+        job_id, producer_state = cls.accepted_job(response)
+        if not job_id:
+            failure = dict(response)
+            if not failure.get("error"):
+                failure["error"] = "jobd did not return an accepted job receipt"
+            result = app.session_files_failure_result(request_id, failure, operation="jobd.submit")
+            app.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+
+        deadline_at = time.time() + (deadline_ms / 1000.0)
+        initial_attribution = JobdOperationFlight.producer_attribution(
+            "requested",
+            job_id,
+            coalesce_key,
+            generation,
+            producer_state,
+        )
+        flight_key = JobdOperationFlight.completion_key(job_id, replace)
+        flight, reservation, owns_producer = app.jobd_operation_service.claim(
+            "bulk",
+            flight_key,
+            deadline_at,
+            producer=initial_attribution,
+        )
+        if flight is None:
+            result = app.session_files_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                operation="jobd.submit",
+                code="service_busy",
+            )
+            app.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+
+        if owns_producer:
+            assert reservation is not None
+            submitted = app.jobd_operation_service.submit_reserved(
+                reservation,
+                app.complete_session_files_operation,
+                flight,
+                job_id,
+                session,
+                infos,
+                hours,
+                from_ref,
+                to_ref,
+                repo_refs,
+                cache_key,
+                deadline_at,
+                replace,
+                priority,
+                requester,
+            )
+            if not submitted:
+                failure = {"error": "jobd operation completion worker could not start"}
+                flight.cancel_owner()
+                app.jobd_operation_service.release_flight(flight)
+                flight.future.set_result((
+                    None,
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    (failure, "session-files.start", "producer_failed"),
+                ))
+                result = app.session_files_failure_result(
+                    request_id,
+                    failure,
+                    operation="session-files.start",
+                    code="producer_failed",
+                )
+                app.record_operation_failure("", result)
+                return result, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        try:
+            receipt = app.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route="GET /api/session-files",
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": producer_state,
+                },
+                producer=initial_attribution,
+                kind="session_files",
+                context=context,
+            )
+        except Exception:
+            app.jobd_operation_service.rollback_flight_participant(
+                flight,
+                "",
+                owns_producer=owns_producer,
+            )
+            raise
+
+        operation = receipt.get("operation") if isinstance(receipt.get("operation"), dict) else {}
+        operation_id = str(operation.get("id") or "")
+        try:
+            if receipt.get("state") != "queued" or not operation_id:
+                raise RuntimeError("session-files operation ledger returned an invalid queued receipt")
+            current_producer, producer_generation = flight.register_operation(operation_id)
+            app.queued_delivery_ledger.update_operation_producer(
+                operation_id,
+                current_producer,
+                producer_generation=producer_generation,
+            )
+            callback = cls.terminalize_callback(app, flight, request_id, operation_id)
+            flight.future.add_done_callback(callback)
+            if owns_producer:
+                flight.accept_owner(operation_id)
+        except Exception as error:
+            failure = {"error": str(error), "cause": exception_cause(error)}
+            result = app.session_files_failure_result(
+                request_id,
+                failure,
+                operation_id=operation_id,
+                operation="session-files.start",
+                code="producer_failed",
+            )
+            result["producer"] = flight.producer_snapshot()
+            try:
+                if operation_id:
+                    app.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+                else:
+                    app.record_operation_failure("", result)
+            finally:
+                app.jobd_operation_service.rollback_flight_participant(
+                    flight,
+                    operation_id,
+                    owns_producer=owns_producer,
+                )
+            return result, HTTPStatus.INTERNAL_SERVER_ERROR
+        return receipt, HTTPStatus.ACCEPTED
 
 
 @dataclass

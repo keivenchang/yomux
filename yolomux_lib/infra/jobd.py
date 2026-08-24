@@ -2269,8 +2269,11 @@ class JobClient(LocalServiceClient):
             self._scheduler_lease_id = ""
             return True
 
-    def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0) -> dict[str, Any]:
-        return self.request({"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms})
+    def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0, fresh_only: bool = False) -> dict[str, Any]:
+        request = {"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms}
+        if fresh_only:
+            request["fresh_only"] = True
+        return self.request(request)
 
     def result(self, job_id: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> dict[str, Any]:
         return self.request_if_running({"action": "result", "job_id": job_id}, timeout=timeout)

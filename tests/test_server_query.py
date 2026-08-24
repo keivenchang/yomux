@@ -2156,7 +2156,8 @@ def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
         lambda path, *, performance_details=None, watch_signature_child_limit=0, include_repo_info=True: {"path": path, "entries": [{"name": "a"}]},
     )
 
-    def path_info(path, *, operation):
+    def path_info(path, *, operation, repo_info_cache=None):
+        assert repo_info_cache == {}
         assert operation == "fs_batch.info"
         if path == "/missing":
             raise FilesystemError.path_not_found("/missing")
@@ -2220,7 +2221,8 @@ def test_filesystem_batch_list_preserves_repo_metadata_by_default_and_allows_exp
 
 
 def test_filesystem_batch_product_returns_typed_permission_failure_without_raising(monkeypatch):
-    def denied_path_info(_raw_path, *, operation):
+    def denied_path_info(_raw_path, *, operation, repo_info_cache=None):
+        assert repo_info_cache == {}
         assert operation == "fs_batch.info"
         raise PermissionError(13, "permission denied", "/restricted/item")
 
@@ -2330,7 +2332,7 @@ def test_filesystem_batch_accepts_deferred_repo_enrichment_info(monkeypatch):
     monkeypatch.setattr(
         server_module.filesystem,
         "path_info",
-        lambda path, *, operation: {"path": path, "kind": "dir", "repo": repo},
+        lambda path, *, operation, repo_info_cache=None: {"path": path, "kind": "dir", "repo": repo},
     )
 
     result = server_module.filesystem.filesystem_batch_result({

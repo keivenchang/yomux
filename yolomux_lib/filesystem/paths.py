@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import contextvars
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import stat
 import sys
+from contextlib import ExitStack
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -122,6 +125,58 @@ def nofollow_flag() -> int:
             message_key="fs.error.operationFailed",
         )
     return flag
+
+
+def metadata_descriptor_flags() -> int:
+    """Open one leaf for identity without following it on each supported platform."""
+
+    path_flag = getattr(os, "O_PATH", 0)
+    if path_flag:
+        return path_flag
+    return os.O_RDONLY | getattr(os, "O_SYMLINK", 0)
+
+
+def descriptor_open_flags(flags: int) -> int:
+    """Add the platform's descriptor-safe leaf flags without defeating ``O_SYMLINK``."""
+
+    symlink_flag = getattr(os, "O_SYMLINK", 0)
+    nofollow = 0 if symlink_flag and flags & symlink_flag else nofollow_flag()
+    return flags | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
+def _renameat_with_flags(parent_descriptor: int, source: str, target: str, flags: int) -> None:
+    """Apply a platform-native atomic rename flag within one pinned directory."""
+
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform.startswith("linux"):
+            rename_call = library.renameat2
+        elif sys.platform == "darwin":
+            rename_call = library.renameatx_np
+        else:
+            raise AttributeError
+    except (AttributeError, OSError) as error:
+        raise OSError(errno.ENOSYS, "atomic rename flags are unavailable") from error
+    rename_call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename_call.restype = ctypes.c_int
+    if rename_call(parent_descriptor, source_bytes, parent_descriptor, target_bytes, flags) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), target)
+
+
+def rename_noreplace(parent_descriptor: int, source: str, target: str) -> None:
+    """Rename one child without replacing a concurrently created destination."""
+
+    flag = 1 if sys.platform.startswith("linux") else 4
+    _renameat_with_flags(parent_descriptor, source, target, flag)
+
+
+def rename_exchange(parent_descriptor: int, first: str, second: str) -> None:
+    """Atomically exchange two children so the displaced generation can be verified."""
+
+    _renameat_with_flags(parent_descriptor, first, second, 2)
 
 
 def validate_request_path_lexical(raw: str) -> str:
@@ -546,6 +601,39 @@ def _ensure_path_allowed(path: Path, *, resolved: Path | None = None) -> None:
         )
 
 
+def _authorize_requested_path(
+    requested: Path,
+    resolved: Path,
+    *,
+    operation: str,
+    observe_name: bool = True,
+) -> None:
+    """Apply the one path policy before a caller pins and consumes this generation."""
+
+    if observe_name:
+        name_observed(operation, requested)
+    _ensure_path_allowed(requested, resolved=resolved)
+
+
+def descriptor_path(descriptor: int) -> Path:
+    """Return the shared generation-bound pathname for one live descriptor."""
+
+    for root in DESCRIPTOR_PATH_ROOTS:
+        candidate = root / str(descriptor)
+        if candidate.exists():
+            return candidate
+    raise FilesystemError(
+        "this platform cannot expose the pinned filesystem descriptor",
+        status=500,
+        message_key="fs.error.operationFailed",
+        diagnostic=(
+            "descriptor-bound authorization refused: no per-descriptor path root "
+            f"({', '.join(str(root) for root in DESCRIPTOR_PATH_ROOTS)}) is available on this "
+            "platform, so the authorized generation cannot be named for the consumer"
+        ),
+    )
+
+
 class SafePathHandle:
     """One authorized canonical path and the descriptor opened from that value."""
 
@@ -568,32 +656,20 @@ class SafePathHandle:
         re-resolution -- that branch is gone; darwin now takes `/dev/fd/N` like every other
         non-Linux platform, and refuses when even that is unavailable.
         """
-        for root in DESCRIPTOR_PATH_ROOTS:
-            candidate = root / str(self.descriptor)
-            if candidate.exists():
-                return candidate
-        raise FilesystemError(
-            "this platform cannot expose the pinned filesystem descriptor",
-            status=500,
-            message_key="fs.error.operationFailed",
-            # The localized string stays the shared generic one, because nothing the USER can do
-            # differs here.  An OPERATOR reading a 500 does need to tell this apart from every other
-            # operation failure: it is a platform capability refusal, not a fault in the request or
-            # the file, and it is the fail-closed branch of the descriptor-bound authorization owner
-            # rather than a re-resolution.  `diagnostic` is the existing field for exactly that --
-            # operator-facing detail carried alongside an unchanged localized message.
-            diagnostic=(
-                "descriptor-bound authorization refused: no per-descriptor path root "
-                f"({', '.join(str(root) for root in DESCRIPTOR_PATH_ROOTS)}) is available on this "
-                "platform, so the authorized generation cannot be named for the consumer"
-            ),
-        )
+        return descriptor_path(self.descriptor)
 
 
 class SafeParentHandle:
     """Pinned authorized parent used for descriptor-relative namespace mutations."""
 
-    def __init__(self, requested: Path, resolved_target: Path, resolved_parent: Path, descriptor: int):
+    def __init__(
+        self,
+        requested: Path,
+        resolved_target: Path,
+        resolved_parent: Path,
+        descriptor: int,
+        target_descriptor: int | None,
+    ):
         self.requested = requested
         self.resolved_target = resolved_target
         self.resolved_parent = resolved_parent
@@ -602,9 +678,58 @@ class SafeParentHandle:
         self.descriptor = descriptor
         self.name = requested.name
         self.stat_result = os.fstat(descriptor)
+        self.target_descriptor = target_descriptor
+        self.target_identity = (
+            _stat_identity(os.fstat(target_descriptor))
+            if target_descriptor is not None
+            else None
+        )
+
+    def require_target_identity(self, target: SafePathHandle) -> None:
+        """Require a consumed child to be the namespace generation observed before authorization."""
+
+        _require_descriptor_identity(target.descriptor, self.target_identity, self.requested)
 
     def close(self) -> None:
-        os.close(self.descriptor)
+        try:
+            os.close(self.descriptor)
+        finally:
+            if self.target_descriptor is not None:
+                os.close(self.target_descriptor)
+
+
+FileIdentity = tuple[int, int]
+
+
+def _stat_identity(metadata: os.stat_result) -> FileIdentity:
+    return int(metadata.st_dev), int(metadata.st_ino)
+
+
+def _observed_resolved_chain(resolved: Path) -> dict[Path, FileIdentity]:
+    """Snapshot every existing canonical component before policy authorization runs."""
+
+    observed: dict[Path, FileIdentity] = {}
+    current = Path(resolved.anchor)
+    observed[current] = _stat_identity(os.stat(current, follow_symlinks=False))
+    for component in resolved.parts[1:]:
+        current /= component
+        try:
+            observed[current] = _stat_identity(os.stat(current, follow_symlinks=False))
+        except FileNotFoundError:
+            break
+    return observed
+
+
+def _require_descriptor_identity(
+    descriptor: int,
+    expected: FileIdentity | None,
+    requested: Path,
+) -> None:
+    if expected is None or _stat_identity(os.fstat(descriptor)) != expected:
+        raise FilesystemError.changed_on_disk(
+            requested,
+            diagnostic="authorized filesystem generation changed before descriptor pin",
+        )
 
 
 def _open_resolved_path(
@@ -613,6 +738,8 @@ def _open_resolved_path(
     mode: int = 0o666,
     *,
     create_parents: bool = False,
+    observed_chain: dict[Path, FileIdentity] | None = None,
+    requested: Path | None = None,
 ) -> int:
     """Open an absolute canonical path without following another mutable symlink."""
 
@@ -621,23 +748,49 @@ def _open_resolved_path(
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     nofollow = nofollow_flag()
     current_fd = os.open("/", directory_flags)
+    current_path = Path(resolved.anchor)
+    requested_path = requested or resolved
     try:
+        if observed_chain is not None:
+            _require_descriptor_identity(current_fd, observed_chain.get(current_path), requested_path)
         parts = resolved.parts[1:]
         if not parts:
             if flags & getattr(os, "O_DIRECTORY", 0):
                 return os.dup(current_fd)
-            return os.open(".", flags | nofollow, mode, dir_fd=current_fd)
+            return os.open(".", descriptor_open_flags(flags), mode, dir_fd=current_fd)
         for component in parts[:-1]:
-            try:
-                next_fd = os.open(component, directory_flags | nofollow, dir_fd=current_fd)
-            except FileNotFoundError:
+            next_path = current_path / component
+            if observed_chain is not None and next_path not in observed_chain:
                 if not create_parents:
-                    raise
-                os.mkdir(component, dir_fd=current_fd)
+                    raise FileNotFoundError(component)
+                try:
+                    os.mkdir(component, dir_fd=current_fd)
+                except FileExistsError as error:
+                    raise FilesystemError.changed_on_disk(requested_path) from error
                 next_fd = os.open(component, directory_flags | nofollow, dir_fd=current_fd)
+            else:
+                next_fd = os.open(component, directory_flags | nofollow, dir_fd=current_fd)
+                if observed_chain is not None:
+                    try:
+                        _require_descriptor_identity(next_fd, observed_chain.get(next_path), requested_path)
+                    except BaseException:
+                        os.close(next_fd)
+                        raise
             os.close(current_fd)
             current_fd = next_fd
-        return os.open(parts[-1], flags | nofollow | getattr(os, "O_CLOEXEC", 0), mode, dir_fd=current_fd)
+            current_path = next_path
+        target_flags = descriptor_open_flags(flags)
+        expected_target = observed_chain.get(resolved) if observed_chain is not None else None
+        if observed_chain is not None and expected_target is None and flags & os.O_CREAT:
+            target_flags |= os.O_EXCL
+        descriptor = os.open(parts[-1], target_flags, mode, dir_fd=current_fd)
+        try:
+            if observed_chain is not None and expected_target is not None:
+                _require_descriptor_identity(descriptor, expected_target, requested_path)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
     finally:
         os.close(current_fd)
 
@@ -656,12 +809,23 @@ def safe_path(
     """Resolve once, authorize that value, then consume only its no-follow descriptor."""
 
     requested = parsed_request_path(raw_path)
-    if observe_name:
-        name_observed(operation, requested)
     resolved = resolved_path if resolved_path is not None else _normalized_scope_path(requested)
-    _ensure_path_allowed(requested, resolved=resolved)
+    observed_chain = _observed_resolved_chain(resolved)
+    _authorize_requested_path(
+        requested,
+        resolved,
+        operation=operation,
+        observe_name=observe_name,
+    )
     try:
-        descriptor = _open_resolved_path(resolved, flags, mode, create_parents=create_parents)
+        descriptor = _open_resolved_path(
+            resolved,
+            flags,
+            mode,
+            create_parents=create_parents,
+            observed_chain=observed_chain,
+            requested=requested,
+        )
     except FileNotFoundError as error:
         raise FilesystemError.path_not_found(requested) from error
     except IsADirectoryError as error:
@@ -697,15 +861,18 @@ def safe_child(
 ) -> Iterator[SafePathHandle]:
     """Authorize and open one child relative to an already-pinned directory."""
 
-    if observe_name:
-        name_observed(operation, requested)
-    _ensure_path_allowed(requested, resolved=resolved)
     try:
-        descriptor = os.open(
-            requested.name,
-            flags | nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
-            dir_fd=parent_descriptor,
-        )
+        observed_identity = _stat_identity(os.stat(requested.name, dir_fd=parent_descriptor, follow_symlinks=False))
+    except FileNotFoundError:
+        observed_identity = None
+    _authorize_requested_path(
+        requested,
+        resolved,
+        operation=operation,
+        observe_name=observe_name,
+    )
+    try:
+        descriptor = os.open(requested.name, descriptor_open_flags(flags), dir_fd=parent_descriptor)
     except FileNotFoundError as error:
         raise FilesystemError.path_not_found(requested) from error
     except IsADirectoryError as error:
@@ -714,6 +881,7 @@ def safe_child(
         raise FilesystemError.not_directory(requested) from error
     try:
         authority_pinned(operation, requested)
+        _require_descriptor_identity(descriptor, observed_identity, requested)
         handle = SafePathHandle(requested, resolved, descriptor)
     except BaseException:
         os.close(descriptor)
@@ -722,6 +890,75 @@ def safe_child(
         yield handle
     finally:
         handle.close()
+
+
+@contextmanager
+def safe_descendant(
+    root_descriptor: int,
+    requested_root: Path,
+    resolved_root: Path,
+    relative: Path,
+    *,
+    flags: int = os.O_RDONLY,
+    operation: str = "",
+    observe_name: bool = True,
+) -> Iterator[SafePathHandle]:
+    """Authorize and pin a nested descendant relative to one already-authorized root descriptor."""
+
+    relative = Path(relative)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise FilesystemError.changed_on_disk(
+            requested_root / relative,
+            diagnostic="descriptor descendant escaped its authorized root",
+        )
+    parts = [part for part in relative.parts if part not in {"", "."}]
+    if not parts:
+        descriptor = os.dup(root_descriptor)
+        handle = SafePathHandle(requested_root, resolved_root, descriptor)
+        try:
+            yield handle
+        finally:
+            handle.close()
+        return
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    current_descriptor = root_descriptor
+    requested = requested_root
+    resolved = resolved_root
+    with ExitStack() as stack:
+        handle: SafePathHandle | None = None
+        for index, component in enumerate(parts):
+            requested /= component
+            resolved /= component
+            handle = stack.enter_context(
+                safe_child(
+                    current_descriptor,
+                    requested,
+                    resolved,
+                    flags=flags if index == len(parts) - 1 else directory_flags,
+                    operation=operation,
+                    observe_name=observe_name,
+                )
+            )
+            current_descriptor = handle.descriptor
+        if handle is None:
+            raise FilesystemError.changed_on_disk(requested_root)
+        if stat.S_ISLNK(handle.stat_result.st_mode):
+            try:
+                target_text = os.readlink("", dir_fd=handle.descriptor)
+            except OSError as error:
+                raise FilesystemError.changed_on_disk(requested, diagnostic=error) from error
+            target = Path(target_text)
+            if not target.is_absolute():
+                target = requested.parent / target
+            target_resolved = _normalized_scope_path(target)
+            _authorize_requested_path(
+                requested,
+                target_resolved,
+                operation=operation,
+                observe_name=False,
+            )
+        yield handle
 
 
 @contextmanager
@@ -734,33 +971,58 @@ def safe_parent(
     """Pin the authorized lexical parent before a create, rename, or delete."""
 
     requested = parsed_request_path(raw_path)
-    observed_paths = (requested, *additional_requested)
-    for observed_path in observed_paths:
-        name_observed(operation, observed_path)
-    resolved_target = _normalized_scope_path(requested)
-    resolved_parent = _normalized_scope_path(requested.parent)
-    _ensure_path_allowed(requested, resolved=resolved_target)
-    _ensure_path_allowed(requested.parent, resolved=resolved_parent)
+    target_descriptor: int | None = None
     try:
-        descriptor = _open_resolved_path(
-            resolved_parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-    except FileNotFoundError as error:
-        raise FilesystemError.path_not_found(requested.parent) from error
-    except NotADirectoryError as error:
-        raise FilesystemError.not_directory(requested.parent) from error
+        target_descriptor = os.open(requested, descriptor_open_flags(metadata_descriptor_flags()))
+    except FileNotFoundError:
+        pass
+    handle: SafeParentHandle | None = None
     try:
-        for observed_path in observed_paths:
-            authority_pinned(operation, observed_path)
-        handle = SafeParentHandle(requested, resolved_target, resolved_parent, descriptor)
-    except BaseException:
-        os.close(descriptor)
-        raise
-    try:
+        resolved_target = _normalized_scope_path(requested)
+        resolved_parent = _normalized_scope_path(requested.parent)
+        observed_chain = _observed_resolved_chain(resolved_parent)
+        _authorize_requested_path(requested, resolved_target, operation=operation)
+        _ensure_path_allowed(requested.parent, resolved=resolved_parent)
+        for additional_path in additional_requested:
+            if additional_path.parent != requested.parent:
+                raise ValueError("namespace mutation target must share the authorized parent")
+            _authorize_requested_path(
+                additional_path,
+                resolved_parent / additional_path.name,
+                operation=operation,
+            )
+        try:
+            descriptor = _open_resolved_path(
+                resolved_parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                observed_chain=observed_chain,
+                requested=requested,
+            )
+        except FileNotFoundError as error:
+            raise FilesystemError.path_not_found(requested.parent) from error
+        except NotADirectoryError as error:
+            raise FilesystemError.not_directory(requested.parent) from error
+        try:
+            authority_pinned(operation, requested)
+            for additional_path in additional_requested:
+                authority_pinned(operation, additional_path)
+            handle = SafeParentHandle(
+                requested,
+                resolved_target,
+                resolved_parent,
+                descriptor,
+                target_descriptor,
+            )
+            target_descriptor = None
+        except BaseException:
+            os.close(descriptor)
+            raise
         yield handle
     finally:
-        handle.close()
+        if handle is not None:
+            handle.close()
+        elif target_descriptor is not None:
+            os.close(target_descriptor)
 
 
 def walk_directory(
@@ -768,7 +1030,8 @@ def walk_directory(
     *,
     include_directory: Callable[[Path], bool] | None = None,
     operation: str = "",
-    requested_root: Path | None = None,
+    requested_root: Path,
+    resolved_root: Path,
 ) -> Iterator[tuple[Path, int, tuple[str, ...], tuple[tuple[str, os.stat_result], ...]]]:
     """Walk from a pinned root, opening every child directory before its parent is released."""
 
@@ -783,11 +1046,16 @@ def walk_directory(
                     with os.scandir(directory_fd) as entries:
                         for entry in sorted(entries, key=lambda item: item.name.lower()):
                             child_relative = relative / entry.name
-                            requested_child = (requested_root or Path(".")) / child_relative
-                            name_observed(operation, requested_child)
+                            requested_child = requested_root / child_relative
+                            resolved_child = resolved_root / child_relative
                             try:
+                                _authorize_requested_path(
+                                    requested_child,
+                                    resolved_child,
+                                    operation=operation,
+                                )
                                 entry_stat = entry.stat(follow_symlinks=False)
-                            except OSError:
+                            except (FilesystemError, OSError):
                                 continue
                             if stat.S_ISDIR(entry_stat.st_mode):
                                 if include_directory is not None and not include_directory(child_relative):
@@ -817,9 +1085,7 @@ def walk_directory(
                                 try:
                                     child_fd = os.open(
                                         entry.name,
-                                        getattr(os, "O_PATH", os.O_RDONLY)
-                                        | nofollow_flag()
-                                        | getattr(os, "O_CLOEXEC", 0),
+                                        descriptor_open_flags(metadata_descriptor_flags()),
                                         dir_fd=directory_fd,
                                     )
                                 except OSError:
@@ -918,14 +1184,13 @@ def _darwin_devfs_live_realpath(resolved: Path) -> Path:
 def _physical_file_identity(
     path: Path,
     *,
-    resolved: Path | None = None,
-    stat_result: os.stat_result | None = None,
+    resolved: Path,
+    stat_result: os.stat_result,
 ) -> dict[str, Any]:
     """Return safe file identity without repeating validation/metadata work from listings."""
     try:
-        resolved = resolved if resolved is not None else _normalized_scope_path(path)
         _ensure_path_allowed(path, resolved=resolved)
-        st = stat_result if stat_result is not None else path.stat()
+        st = stat_result
     except (FilesystemError, OSError):
         return {}
     file_id = f"{st.st_dev}:{st.st_ino}"

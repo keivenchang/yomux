@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import copy
 import errno
 import hashlib
@@ -13,6 +15,7 @@ import logging
 import os
 import re
 import shlex
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -33,8 +36,6 @@ from ..infra.atomic_file import file_lock
 from ..infra.common import AgentInfo
 from ..infra.common import SessionInfo
 from ..infra.common import TmuxPaneInfo
-from ..infra.common import git
-from ..infra.common import git_ahead_behind_counts
 from ..infra.common import is_generated_upload_name
 from ..infra.common import positive_finite_number
 from ..infra.common import path_mtime_or_zero
@@ -42,17 +43,20 @@ from ..infra.filesystem_preflight import FilesystemClassification
 from ..infra.filesystem_preflight import classify_filesystem
 from ..infra.host_partition import host_partitioned_state_dir
 from ..filesystem import FilesystemError
+from ..filesystem import git_ops as filesystem_git_ops
 from ..filesystem import git_root_for_path
+from ..filesystem import paths as filesystem_paths
 from ..filesystem.exclusions import CompiledExclusionPolicy
 from ..filesystem.exclusions import ExclusionPolicy
 from ..filesystem.exclusions import default_exclusion_policy
 from ..filesystem.io_ops import read_json_file
 from ..filesystem.git_ops import diff_refs
 from ..filesystem.git_ops import git_branch_name
-from ..filesystem.git_ops import git_ref_exists
 from ..filesystem.git_ops import normal_ref  # noqa: F401 - compatibility export for session-file consumers
 from ..filesystem.git_ops import refs_requested
 from .locales import message_descriptor
+from .repository_snapshot_schema import repository_snapshot_admits_path
+from .repository_snapshot_schema import sanitize_repository_snapshot
 from .settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from .settings import DEFAULT_INDEX_EXCLUDE_PATHS
 from .locales import user_message_payload
@@ -96,13 +100,20 @@ _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES = 256 * 1024
 _TRANSCRIPT_SCAN_PERSIST_INTERVAL_SECONDS = 30.0
 REMOTE_TRANSCRIPT_POLL_INTERVAL_SECONDS = 5.0
-_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION = 2
+_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION = 5
 _REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS = 60.0
 _REPOSITORY_SNAPSHOT_CACHE_DIRNAME = "session-files-repository-snapshots"
 _REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS = 300.0
 _REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS = 3600.0
+_REPOSITORY_SNAPSHOT_CACHE_RECORD_FIELDS = frozenset({
+    "schema_version", "generation", "root_identity", "verified_at", "snapshot",
+})
 _repository_snapshot_cache_prune_lock = threading.Lock()
 _repository_snapshot_cache_last_pruned_at = 0.0
+_AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "authorized_repository_snapshot_handle",
+    default=None,
+)
 
 
 def disk_cache_index_path(cache_dir: Path) -> Path:
@@ -615,6 +626,7 @@ logger = logging.getLogger(__name__)
 
 SessionFilesPhaseRecorder = Callable[[str, float, dict[str, Any]], None]
 GitSnapshotProvider = Callable[[Path, str | None, str | None], dict[str, Any]]
+PinnedGitRunner = Callable[[list[str], float], Any]
 
 # The jobd product carries only these aggregate timings.  Keeping the vocabulary fixed prevents a
 # worker result from becoming an unbounded diagnostics channel or exposing session/repository names.
@@ -2661,41 +2673,96 @@ def session_files_cutoff(hours: float, now: float | None = None) -> float:
     return current - bounded_session_files_hours(hours) * 3600 - SESSION_FILES_CUTOFF_GRACE_SECONDS
 
 
-def git_default_branch_ref(repo: Path) -> str | None:
-    result = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=str(repo), timeout=5.0)
+@contextlib.contextmanager
+def pinned_session_git_scope_from_handle(repo_handle: Any, *, operation: str) -> Iterator[Any]:
+    """Keep one already-authorized worktree handle through the complete Git view."""
+
+    with filesystem_git_ops.pinned_git_scope_from_handle(
+        repo_handle,
+        target_path=repo_handle.resolved,
+        operation=operation,
+        deadline=time.monotonic() + filesystem_git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+        include_index=True,
+    ) as scope:
+        yield scope
+
+
+@contextlib.contextmanager
+def pinned_session_git_scope(repo: Path, *, operation: str) -> Iterator[Any]:
+    """Keep the authorized worktree, control files, refs, objects, and index in one view."""
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with filesystem_paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
+        with pinned_session_git_scope_from_handle(repo_handle, operation=operation) as scope:
+            yield scope
+
+
+@contextlib.contextmanager
+def authorized_repository_handle(repo: Path, *, operation: str) -> Iterator[Any]:
+    """Keep one repository root generation through snapshot lookup and row projection."""
+
+    current = _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.get()
+    if current is not None:
+        requested = Path(repo).expanduser()
+        if requested not in {current.requested, current.resolved}:
+            raise FilesystemError.changed_on_disk(
+                repo,
+                diagnostic="repository snapshot handle does not match the requested repository",
+            )
+        yield current
+        return
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with filesystem_paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
+        token = _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.set(repo_handle)
+        try:
+            yield repo_handle
+        finally:
+            _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.reset(token)
+
+
+def pinned_snapshot_runner(scope: Any, *, operation: str) -> PinnedGitRunner:
+    return filesystem_git_ops.pinned_git_runner(scope, operation=operation)
+
+
+def git_default_branch_ref(repo: Path, runner: PinnedGitRunner) -> str | None:
+    result = runner(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], 5.0)
     if result.returncode == 0:
         ref = result.stdout.strip()
         if ref:
             return ref
     for ref in ("origin/main", "origin/master", "main", "master"):
         verify_ref = f"refs/remotes/{ref}" if ref.startswith("origin/") else f"refs/heads/{ref}"
-        verify = git(["show-ref", "--verify", "--quiet", verify_ref], cwd=str(repo), timeout=5.0)
+        verify = runner(["show-ref", "--verify", "--quiet", verify_ref], 5.0)
         if verify.returncode == 0:
             return ref
     return None
 
 
-def git_diff_base(repo: Path) -> str:
-    default_ref = git_default_branch_ref(repo)
+def git_diff_base(repo: Path, runner: PinnedGitRunner) -> str:
+    default_ref = git_default_branch_ref(repo, runner)
     if default_ref:
-        result = git(["merge-base", default_ref, "HEAD"], cwd=str(repo), timeout=5.0)
+        result = runner(["merge-base", default_ref, "HEAD"], 5.0)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     return "HEAD"
 
 
-def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:
+def snapshot_ref_exists(repo: Path, ref: str, runner: PinnedGitRunner) -> bool:
+    return runner(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], 3.0).returncode == 0
+
+
+def validate_diff_refs(repo: Path, from_ref: str, to_ref: str, runner: PinnedGitRunner) -> str:
     if to_ref == "current":
         if from_ref == "current":
             return "FROM ref must be older than TO ref (current is the working tree)"
-        return "" if git_ref_exists(repo, from_ref) else f"unknown FROM ref: {from_ref}"
+        return "" if snapshot_ref_exists(repo, from_ref, runner) else f"unknown FROM ref: {from_ref}"
     if from_ref == "current":
         return "FROM ref must be older than TO ref (current is the working tree)"
-    if not git_ref_exists(repo, from_ref):
+    if not snapshot_ref_exists(repo, from_ref, runner):
         return f"unknown FROM ref: {from_ref}"
-    if not git_ref_exists(repo, to_ref):
+    if not snapshot_ref_exists(repo, to_ref, runner):
         return f"unknown TO ref: {to_ref}"
-    order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)
+    order = runner(["merge-base", "--is-ancestor", from_ref, to_ref], 5.0)
     if order.returncode != 0:
         return f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})"
     return ""
@@ -2714,16 +2781,16 @@ def diff_ref_issue(message: str, from_ref: str, to_ref: str, repo: str = "") -> 
     return message_descriptor("diff.error.git", fallback, params)
 
 
-def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[list[str], bool, str]:
+def git_diff_args(repo: Path, runner: PinnedGitRunner, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[list[str], bool, str]:
     if refs_requested(from_ref, to_ref):
         older, newer = diff_refs(from_ref, to_ref)
-        error = validate_diff_refs(repo, older, newer)
+        error = validate_diff_refs(repo, older, newer, runner)
         if error:
             return [], False, error
         if newer == "current":
             return [older], True, ""
         return [older, newer], False, ""
-    return [base or git_diff_base(repo)], True, ""
+    return [base or git_diff_base(repo, runner)], True, ""
 
 
 def git_decoration_aliases(decorations: str, *, include_head: bool = False) -> list[str]:
@@ -2763,13 +2830,13 @@ def git_ref_label(short_sha: str, aliases: list[str]) -> str:
     return f"{short_sha}/{aliases[0]}{' ' + ' '.join(aliases[1:]) if len(aliases) > 1 else ''}"
 
 
-def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, Any]]:
-    result = git([
+def git_recent_refs(repo: Path, runner: PinnedGitRunner, limit: int = 100) -> list[dict[str, Any]]:
+    result = runner([
         "log",
         "--decorate=short",
         f"--max-count={max(1, min(limit, 200))}",
         "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an%x1f%D",
-    ], cwd=str(repo), timeout=5.0)
+    ], 5.0)
     refs: list[dict[str, Any]] = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
@@ -2812,12 +2879,12 @@ def diff_ref_resolution_error(message: str) -> bool:
     )
 
 
-def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[dict[str, str], str]:
+def git_name_status(repo: Path, runner: PinnedGitRunner, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[dict[str, str], str]:
     statuses: dict[str, str] = {}
-    diff_args, include_untracked, error = git_diff_args(repo, base, from_ref, to_ref)
+    diff_args, include_untracked, error = git_diff_args(repo, runner, base, from_ref, to_ref)
     if error:
         return statuses, error
-    diff = git(["diff", "--name-status", "-z", "--find-renames", *diff_args], cwd=str(repo), timeout=5.0)
+    diff = runner(["diff", "--name-status", "-z", "--find-renames", *diff_args], 5.0)
     if diff.returncode == 0:
         parts = diff.stdout.split("\0")
         index = 0
@@ -2838,7 +2905,7 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
             if rel_path:
                 statuses[rel_path] = "A" if status == "A" else "D" if status == "D" else "M"
     if include_untracked:
-        untracked = git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=str(repo), timeout=5.0)
+        untracked = runner(["ls-files", "--others", "--exclude-standard", "-z"], 5.0)
     else:
         untracked = None
     if untracked and untracked.returncode == 0:
@@ -2861,12 +2928,12 @@ def parse_numstat_value(value: str) -> int | None:
         return None
 
 
-def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, dict[str, int | None]]:
+def git_numstat(repo: Path, runner: PinnedGitRunner, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, dict[str, int | None]]:
     counts: dict[str, dict[str, int | None]] = {}
-    diff_args, _, error = git_diff_args(repo, base, from_ref, to_ref)
+    diff_args, _, error = git_diff_args(repo, runner, base, from_ref, to_ref)
     if error:
         return counts
-    diff = git(["diff", "--numstat", "-z", "--find-renames", *diff_args], cwd=str(repo), timeout=5.0)
+    diff = runner(["diff", "--numstat", "-z", "--find-renames", *diff_args], 5.0)
     if diff.returncode != 0:
         return counts
     parts = diff.stdout.split("\0")
@@ -2895,24 +2962,27 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
     return counts
 
 
-def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, int]:
+def git_ahead_behind(repo: Path, runner: PinnedGitRunner, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, int]:
     if refs_requested(from_ref, to_ref):
         older, newer = diff_refs(from_ref, to_ref)
         left_ref = older
         right_ref = "HEAD" if newer == "current" else newer
     else:
-        upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=str(repo), timeout=3.0)
+        upstream = runner(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 3.0)
         if upstream.returncode != 0 or not upstream.stdout.strip():
             return {}
         left_ref = upstream.stdout.strip()
         right_ref = "HEAD"
-    if not git_ref_exists(repo, left_ref) or not git_ref_exists(repo, right_ref):
+    if not snapshot_ref_exists(repo, left_ref, runner) or not snapshot_ref_exists(repo, right_ref, runner):
         return {}
     # shared ahead/behind parse. left...right -> ahead = right-only commits, behind = left-only.
-    counts = git_ahead_behind_counts(str(repo), left_ref, right_ref)
-    if counts is None:
+    result = runner(["rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], 5.0)
+    if result.returncode != 0:
         return {}
-    ahead, behind = counts
+    try:
+        behind, ahead = (int(value) for value in result.stdout.split()[:2])
+    except (TypeError, ValueError):
+        return {}
     return {"behind": behind, "ahead": ahead}
 
 
@@ -2942,61 +3012,73 @@ def canonical_repository_refs(repo_refs: dict[str, dict[str, str]] | None) -> di
     return normalized
 
 
-def git_snapshot_identity(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> tuple[Any, ...]:
-    """Return every worktree/ref input that can change a shared Git snapshot."""
-    canonical_repo = canonical_repository_path(repo)
-    git_dir_result = git(["rev-parse", "--absolute-git-dir"], cwd=canonical_repo, timeout=5.0)
-    git_dir = git_dir_result.stdout.strip() if git_dir_result.returncode == 0 else ""
-    head_result = git(["rev-parse", "--verify", "HEAD"], cwd=canonical_repo, timeout=5.0)
-    head = head_result.stdout.strip() if head_result.returncode == 0 else ""
-    status_result = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=canonical_repo, timeout=10.0)
-    status_text = status_result.stdout if status_result.returncode == 0 else f"error:{status_result.returncode}:{status_result.stderr}"
-    worktree_signature = hashlib.sha256(status_text.encode("utf-8", errors="replace")).hexdigest()
-    index_signature = ""
-    index_result = git(["rev-parse", "--git-path", "index"], cwd=canonical_repo, timeout=5.0)
-    if index_result.returncode == 0 and index_result.stdout.strip():
-        index_path = Path(index_result.stdout.strip())
-        if not index_path.is_absolute():
-            index_path = repo / index_path
-        try:
-            index_signature = hashlib.sha256(index_path.read_bytes()).hexdigest()
-        except OSError:
-            pass
-    refs_active = refs_requested(from_ref, to_ref)
-    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+def git_worktree_signature_from_scope(scope: Any) -> str: result = pinned_snapshot_runner(scope, operation="gitSnapshotIdentity")(["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10.0); return hashlib.sha256((result.stdout if result.returncode == 0 else f"error:{result.returncode}:{result.stderr}").encode("utf-8", errors="replace")).hexdigest()
+
+def git_snapshot_identity_from_scope(scope: Any, from_ref: str | None = None, to_ref: str | None = None) -> tuple[Any, ...]:
+    """Return every snapshot input through an already-authorized Git scope."""
+    runner = pinned_snapshot_runner(scope, operation="gitSnapshotIdentity")
+    git_dir_identity = (scope.git_dir_handle.stat_result.st_dev, scope.git_dir_handle.stat_result.st_ino,
+                        scope.git_common_dir_handle.stat_result.st_dev, scope.git_common_dir_handle.stat_result.st_ino)
+    refs_result = runner(["show-ref", "--head", "--dereference"], 5.0)
+    refs_text = refs_result.stdout if refs_result.returncode == 0 else f"error:{refs_result.returncode}:{refs_result.stderr}"
+    head = next((line.split(" ", 1)[0] for line in refs_result.stdout.splitlines() if line.endswith(" HEAD")), "")
+    worktree_signature = git_worktree_signature_from_scope(scope)
+    index_signature = scope.index_snapshot.digest if scope.index_snapshot is not None else ""
+    refs_active = refs_requested(from_ref, to_ref); selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     ref_commits: list[tuple[str, str]] = []
     for ref in (selected_from, selected_to):
-        if not ref or ref == "current":
-            ref_commits.append((ref, ref))
+        if not ref or ref in {"HEAD", "current"}:
+            ref_commits.append((ref, head if ref == "HEAD" else ref))
             continue
-        result = git(["rev-parse", "--verify", ref], cwd=canonical_repo, timeout=5.0)
+        result = runner(["rev-parse", "--verify", ref], 5.0)
         ref_commits.append((ref, result.stdout.strip() if result.returncode == 0 else ""))
-    default_ref = "" if refs_active else str(git_default_branch_ref(repo) or "")
-    default_commit = ""
-    if default_ref:
-        default_result = git(["rev-parse", "--verify", default_ref], cwd=canonical_repo, timeout=5.0)
-        default_commit = default_result.stdout.strip() if default_result.returncode == 0 else ""
-    refs_result = git(["for-each-ref", "--format=%(refname)%00%(objectname)"], cwd=canonical_repo, timeout=5.0)
-    refs_text = refs_result.stdout if refs_result.returncode == 0 else f"error:{refs_result.returncode}:{refs_result.stderr}"
+    default_ref = "" if refs_active else str(git_default_branch_ref(scope.repo, runner) or "")
+    default_result = runner(["rev-parse", "--verify", default_ref], 5.0) if default_ref else None
+    default_commit = default_result.stdout.strip() if default_result is not None and default_result.returncode == 0 else ""
     refs_signature = hashlib.sha256(refs_text.encode("utf-8", errors="replace")).hexdigest()
-    return (
-        canonical_repo,
-        git_dir,
-        head,
-        index_signature,
-        worktree_signature,
-        selected_from,
-        selected_to,
-        tuple(ref_commits),
-        default_ref,
-        default_commit,
-        refs_signature,
+    return (str(scope.repo), git_dir_identity, head, index_signature, worktree_signature, selected_from, selected_to, tuple(ref_commits), default_ref, default_commit, refs_signature)
+
+
+def git_snapshot_identity(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> tuple[Any, ...]:
+    """Return every worktree/ref input that can change a shared Git snapshot."""
+    with pinned_session_git_scope(repo, operation="session_files_identity") as scope:
+        return git_snapshot_identity_from_scope(scope, from_ref, to_ref)
+
+
+def repository_snapshot_cache_path(
+    repo: Path,
+    from_ref: str | None,
+    to_ref: str | None,
+    generation: int,
+    *,
+    root_identity: tuple[int, int] | None = None,
+) -> Path:
+    """Return the private cache path for one watcher and authorized root generation."""
+
+    identity = root_identity
+    if identity is None:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        with filesystem_paths.safe_path(
+            str(repo),
+            flags=directory_flags,
+            operation="session_files_snapshot_cache_key",
+        ) as repo_handle:
+            identity = (int(repo_handle.stat_result.st_dev), int(repo_handle.stat_result.st_ino))
+            canonical_repo = str(repo_handle.resolved)
+    else:
+        canonical_repo = canonical_repository_path(repo)
+    key = json.dumps(
+        [
+            _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION,
+            canonical_repo,
+            int(identity[0]),
+            int(identity[1]),
+            from_ref or "",
+            to_ref or "",
+            generation,
+        ],
+        separators=(",", ":"),
     )
-
-
-def repository_snapshot_cache_path(repo: Path, from_ref: str | None, to_ref: str | None, generation: int) -> Path:
-    """Return the private cross-worker cache path for one watcher-owned Git state."""
-    key = json.dumps([_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION, canonical_repository_path(repo), from_ref or "", to_ref or "", generation], separators=(",", ":"))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return host_partitioned_state_dir(common.STATE_DIR) / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME / f"{digest}.json"
 
@@ -3030,6 +3112,35 @@ def prune_repository_snapshot_cache(now: float | None = None) -> int:
         _repository_snapshot_cache_prune_lock.release()
 
 
+def repository_snapshot_cache_record_is_fresh(record: dict[str, Any], now: float) -> bool:
+    """Validate the cache timestamp without accepting malformed or future-dated records."""
+
+    verified_at = record.get("verified_at")
+    if (
+        set(record) != _REPOSITORY_SNAPSHOT_CACHE_RECORD_FIELDS
+        or isinstance(verified_at, bool)
+        or not isinstance(verified_at, (int, float))
+    ):
+        return False
+    timestamp = positive_finite_number(verified_at)
+    if timestamp == 0.0:
+        return False
+    age = float(now) - timestamp
+    return 0.0 <= age <= _REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS
+
+
+def repository_snapshot_cache_root_identity(value: Any) -> tuple[int, int] | None:
+    """Parse the cache's exact root-generation identity without bool/int ambiguity."""
+
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(part, bool) or not isinstance(part, int) or part < 0 for part in value)
+    ):
+        return None
+    return int(value[0]), int(value[1])
+
+
 def cached_repository_snapshot(
     repo: Path,
     from_ref: str | None,
@@ -3037,74 +3148,179 @@ def cached_repository_snapshot(
     generation: int | None,
     builder: Callable[[Path, str | None, str | None], dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Load or build immutable Git facts; reuse is allowed only for a watcher generation."""
-    snapshot_builder = builder or build_git_snapshot
-    if generation is None:
-        return snapshot_builder(repo, from_ref, to_ref), False
-    prune_repository_snapshot_cache()
-    path = repository_snapshot_cache_path(repo, from_ref, to_ref, generation)
-    try:
-        with file_lock(path, dir_mode=0o700):
-            try:
-                now = time.time()
-                record = read_json_file(path, {}, exceptions=()) if path.is_file() else {}
-            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-                logger.warning("repository snapshot cache read failed for %s: %s", repo.name, error)
-                record = {}
-            if (
-                isinstance(record, dict)
-                and record.get("schema_version") == _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION
-                and record.get("generation") == generation
-                and isinstance(record.get("snapshot"), dict)
-                and now - float(record.get("verified_at") or 0.0) <= _REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS
-            ):
-                return copy.deepcopy(record["snapshot"]), True
-            snapshot = snapshot_builder(repo, from_ref, to_ref)
-            try:
-                atomic_write_text(path, json.dumps({"schema_version": _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION, "generation": generation, "verified_at": now, "snapshot": snapshot}, ensure_ascii=False, separators=(",", ":"), sort_keys=True), mode=0o600)
-            except (OSError, TypeError, ValueError) as error:
-                logger.warning("repository snapshot cache write failed for %s: %s", repo.name, error)
-            return copy.deepcopy(snapshot), False
-    except OSError as error:
-        logger.warning("repository snapshot cache lock unavailable for %s: %s", repo.name, error)
-        return snapshot_builder(repo, from_ref, to_ref), False
+    """Load or build immutable Git facts for one authorized repository generation."""
+
+    with authorized_repository_handle(repo, operation="session_files_snapshot_cache") as repo_handle:
+        root_identity = (int(repo_handle.stat_result.st_dev), int(repo_handle.stat_result.st_ino))
+        identity_payload = [root_identity[0], root_identity[1]]
+
+        def build_snapshot() -> dict[str, Any]:
+            snapshot_builder = builder or build_git_snapshot
+            built = snapshot_builder(repo_handle.resolved, from_ref, to_ref)
+            sanitized = sanitize_repository_snapshot(repo_handle.resolved, built)
+            if sanitized is None:
+                raise FilesystemError(
+                    "repository snapshot builder returned an invalid payload",
+                    status=500,
+                    message_key="fs.error.operationFailed",
+                )
+            return sanitized
+
+        if generation is None:
+            return build_snapshot(), False
+        prune_repository_snapshot_cache()
+        path = repository_snapshot_cache_path(
+            repo_handle.resolved,
+            from_ref,
+            to_ref,
+            generation,
+            root_identity=root_identity,
+        )
+        try:
+            with file_lock(path, dir_mode=0o700):
+                try:
+                    now = time.time()
+                    record = read_json_file(path, {}, exceptions=()) if path.is_file() else {}
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                    logger.warning("repository snapshot cache read failed for %s: %s", repo.name, error)
+                    record = {}
+                cached = sanitize_repository_snapshot(
+                    repo_handle.resolved,
+                    record.get("snapshot") if isinstance(record, dict) else None,
+                )
+                if (
+                    isinstance(record, dict)
+                    and isinstance(record.get("schema_version"), int)
+                    and not isinstance(record.get("schema_version"), bool)
+                    and record.get("schema_version") == _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION
+                    and isinstance(record.get("generation"), int)
+                    and not isinstance(record.get("generation"), bool)
+                    and record.get("generation") == generation
+                    and repository_snapshot_cache_root_identity(record.get("root_identity")) == root_identity
+                    and cached is not None
+                    and cached == record.get("snapshot")
+                    and repository_snapshot_cache_record_is_fresh(record, now)
+                ):
+                    return copy.deepcopy(cached), True
+                snapshot = build_snapshot()
+                try:
+                    atomic_write_text(
+                        path,
+                        json.dumps(
+                            {
+                                "schema_version": _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION,
+                                "generation": generation,
+                                "root_identity": identity_payload,
+                                "verified_at": now,
+                                "snapshot": snapshot,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        mode=0o600,
+                    )
+                except (OSError, TypeError, ValueError) as error:
+                    logger.warning("repository snapshot cache write failed for %s: %s", repo.name, error)
+                return copy.deepcopy(snapshot), False
+        except OSError as error:
+            logger.warning("repository snapshot cache lock unavailable for %s: %s", repo.name, error)
+            return build_snapshot(), False
 
 
-def build_git_snapshot(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
-    """Build repository-wide Git facts once; session attribution is merged later."""
+def _build_git_snapshot_from_scope(
+    scope: Any,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+) -> dict[str, Any]:
+    """Build repository Git facts from the exact authorized scope held by the caller."""
+
+    runner = pinned_snapshot_runner(scope, operation="gitSnapshot")
+    pinned_repo = scope.repo
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     repo_error = ""
     repo_error_message = message_descriptor("", "")
-    diff_base = "" if refs_active else git_diff_base(repo)
-    statuses, status_error = git_name_status(repo, diff_base or None, selected_from or None, selected_to or None)
+    diff_base = "" if refs_active else git_diff_base(pinned_repo, runner)
+    statuses, status_error = git_name_status(pinned_repo, runner, diff_base or None, selected_from or None, selected_to or None)
     if status_error and refs_active and diff_ref_resolution_error(status_error):
-        fallback_base = git_diff_base(repo)
-        statuses, status_error = git_name_status(repo, fallback_base)
-        numstat = git_numstat(repo, fallback_base) if not status_error else {}
+        fallback_base = git_diff_base(pinned_repo, runner)
+        statuses, status_error = git_name_status(pinned_repo, runner, fallback_base)
+        numstat = git_numstat(pinned_repo, runner, fallback_base) if not status_error else {}
         selected_from, selected_to = "", ""
         repo_error = "requested refs not found in this repo; showing default"
-        repo_error_message = message_descriptor("diff.warning.refsFallback", repo_error, {"repo": repo.name})
+        repo_error_message = message_descriptor("diff.warning.refsFallback", repo_error, {"repo": pinned_repo.name})
     elif status_error:
-        issue = diff_ref_issue(status_error, selected_from, selected_to, repo.name)
+        issue = diff_ref_issue(status_error, selected_from, selected_to, pinned_repo.name)
         repo_error = status_error
         repo_error_message = issue
         statuses = {}
         numstat = {}
     else:
-        numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
+        numstat = git_numstat(pinned_repo, runner, diff_base or None, selected_from or None, selected_to or None)
+    statuses = {
+        relative_path: status
+        for relative_path, status in statuses.items()
+        if repository_snapshot_admits_path(pinned_repo, relative_path)
+    }
+    file_identities: dict[str, list[int] | None] = {}
+    retained_statuses: dict[str, str] = {}
+    for relative_path, status in statuses.items():
+        try:
+            with filesystem_paths.safe_descendant(
+                scope.repo_handle.descriptor,
+                scope.repo_handle.requested,
+                scope.repo_handle.resolved,
+                Path(relative_path),
+                flags=filesystem_paths.metadata_descriptor_flags(),
+                operation="session_files_snapshot_row",
+            ) as row_handle:
+                identity = row_handle.stat_result
+                file_identities[relative_path] = [int(identity.st_dev), int(identity.st_ino)]
+        except FilesystemError as error:
+            if error.status == HTTPStatus.NOT_FOUND and (refs_active or status == "D"):
+                file_identities[relative_path] = None
+            else:
+                continue
+        except OSError:
+            continue
+        retained_statuses[relative_path] = status
+    statuses = retained_statuses
+    numstat = {
+        relative_path: counts
+        for relative_path, counts in numstat.items()
+        if relative_path in statuses
+    }
+    branch = git_branch_name(pinned_repo, runner=lambda args: runner(args, 5.0))
+    recent_refs = git_recent_refs(pinned_repo, runner=runner)
+    ahead_behind = git_ahead_behind(pinned_repo, runner, selected_from or None, selected_to or None)
     return {
-        "branch": git_branch_name(repo),
+        "branch": branch,
         "statuses": statuses,
         "numstat": numstat,
+        "file_identities": file_identities,
         "selected_from": selected_from,
         "selected_to": selected_to,
         "status_error": status_error,
         "repo_error": repo_error,
         "repo_error_message": repo_error_message,
-        "recent_refs": git_recent_refs(repo),
-        "ahead_behind": git_ahead_behind(repo, selected_from or None, selected_to or None),
+        "recent_refs": recent_refs,
+        "ahead_behind": ahead_behind,
     }
+
+
+def build_git_snapshot(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
+    """Build repository-wide Git facts once; session attribution is merged later."""
+
+    authorized_handle = _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.get()
+    if authorized_handle is not None:
+        with pinned_session_git_scope_from_handle(
+            authorized_handle,
+            operation="session_files_snapshot",
+        ) as scope:
+            return _build_git_snapshot_from_scope(scope, from_ref, to_ref)
+    with pinned_session_git_scope(repo, operation="session_files_snapshot") as scope:
+        return _build_git_snapshot_from_scope(scope, from_ref, to_ref)
 
 
 def record_session_files_phase(
@@ -3145,6 +3361,7 @@ def session_files_view_phase_summary(samples: list[tuple[str, float]]) -> dict[s
 # cannot grow it without limit.
 _UNTRACKED_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int, int, int], int | None]] = {}
 _UNTRACKED_LINE_COUNT_CACHE_MAX = 4096
+_EXPECTED_FILE_IDENTITY_UNSET = object()
 
 # Cumulative session-files work accounting (DOIT.optimize-backends): monotonic
 # counters sampled through the existing performance owner, so per-build deltas
@@ -3165,35 +3382,89 @@ def session_files_runtime_counters() -> dict[str, Any]:
     }
 
 
-def untracked_added_line_count(path: Path) -> int | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+@contextlib.contextmanager
+def session_file_handle(
+    path: Path,
+    *,
+    operation: str,
+    flags: int | None = None,
+    repo_handle: Any | None = None,
+    relative_path: Path | None = None,
+) -> Iterator[Any]:
+    """Open one session row from its live repository generation when available."""
+
+    flags = filesystem_paths.metadata_descriptor_flags() if flags is None else flags
+    if repo_handle is None:
+        with filesystem_paths.safe_path(str(path), flags=flags, operation=operation) as handle:
+            yield handle
+        return
+    if relative_path is None:
+        raise ValueError("repository-relative path is required with a repository handle")
+    with filesystem_paths.safe_descendant(
+        repo_handle.descriptor,
+        repo_handle.requested,
+        repo_handle.resolved,
+        relative_path,
+        flags=flags,
+        operation=operation,
+    ) as handle:
+        yield handle
+
+
+def _untracked_added_line_count_from_handle(path: Path, handle: Any) -> int | None:
+    metadata = handle.stat_result
+    identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
     key = str(path)
     cached = _UNTRACKED_LINE_COUNT_CACHE.get(key)
     if cached is not None and cached[0] == identity:
         RUNTIME_COUNTS["untracked_line_count_hits"] += 1
         return cached[1]
     RUNTIME_COUNTS["untracked_line_count_reads"] += 1
-    if stat.st_size > 2 * 1024 * 1024:
+    if not stat.S_ISREG(metadata.st_mode):
+        count = None
+    elif metadata.st_size > 2 * 1024 * 1024:
         count = None
     else:
         try:
-            raw = path.read_bytes()
+            source_descriptor = os.open(
+                handle.descriptor_path(),
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            with os.fdopen(source_descriptor, "rb") as source:
+                source_identity = os.fstat(source.fileno())
+                if (source_identity.st_dev, source_identity.st_ino) != identity[:2]:
+                    raise FilesystemError.changed_on_disk(path)
+                raw = source.read()
+            after = os.fstat(handle.descriptor)
         except OSError:
             return None
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if after_identity != identity:
+            raise FilesystemError.changed_on_disk(path)
         if b"\x00" in raw[:8192]:
             count = None
         else:
             count = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
     if len(_UNTRACKED_LINE_COUNT_CACHE) >= _UNTRACKED_LINE_COUNT_CACHE_MAX:
-        # Evict the oldest half in insertion order; simple, bounded, allocation-light.
         for stale_key in list(_UNTRACKED_LINE_COUNT_CACHE)[: _UNTRACKED_LINE_COUNT_CACHE_MAX // 2]:
             del _UNTRACKED_LINE_COUNT_CACHE[stale_key]
     _UNTRACKED_LINE_COUNT_CACHE[key] = (identity, count)
     return count
+
+
+def untracked_added_line_count(
+    path: Path,
+    *,
+    repo_handle: Any | None = None,
+    relative_path: Path | None = None,
+) -> int | None:
+    with session_file_handle(
+        path,
+        operation="session_files_untracked_line_count",
+        repo_handle=repo_handle,
+        relative_path=relative_path,
+    ) as handle:
+        return _untracked_added_line_count_from_handle(path, handle)
 
 
 def repo_relative_path(path: Path, repo: Path) -> str | None:
@@ -3359,11 +3630,45 @@ def session_file_entry(
     mtime: float | None = None,
     diff_tracked: bool | None = None,
     agent_windows: list[dict[str, Any]] | None = None,
-) -> SessionFileEntry:
+    repo_handle: Any | None = None,
+    relative_path: Path | None = None,
+    count_untracked: bool = False,
+    expected_identity: tuple[int, int] | None | object = _EXPECTED_FILE_IDENTITY_UNSET,
+) -> SessionFileEntry | None:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
     tracked_diff = bool(repo) and source == "git" and status != "?"
-    missing = not path.exists()
+    try:
+        with session_file_handle(
+            path,
+            operation="session_files_entry",
+            repo_handle=repo_handle,
+            relative_path=relative_path,
+        ) as handle:
+            file_stat = handle.stat_result
+            actual_identity = (int(file_stat.st_dev), int(file_stat.st_ino))
+            if expected_identity is None or (
+                expected_identity is not _EXPECTED_FILE_IDENTITY_UNSET
+                and actual_identity != expected_identity
+            ):
+                return None
+            missing = False
+            entry_mtime = float(file_stat.st_mtime)
+            entry_size: int | None = int(file_stat.st_size)
+            if count_untracked:
+                added = _untracked_added_line_count_from_handle(path, handle)
+                removed = 0
+    except FilesystemError as error:
+        if error.status != HTTPStatus.NOT_FOUND:
+            return None
+        if expected_identity is not _EXPECTED_FILE_IDENTITY_UNSET and expected_identity is not None:
+            return None
+        missing = True
+        try:
+            entry_mtime = float(mtime) if mtime not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            entry_mtime = 0.0
+        entry_size = None
     if diff_tracked is not None:
         tracked_diff = diff_tracked
     return {
@@ -3377,8 +3682,8 @@ def session_file_entry(
         "repo": str(repo) if repo else "",
         "path": rel_path or str(path),
         "abs_path": str(path),
-        "mtime": file_mtime(path) if mtime is None else mtime,
-        "size": file_size(path),
+        "mtime": entry_mtime,
+        "size": entry_size,
         "missing": missing,
         "source": source,
         "added": added,
@@ -3734,109 +4039,124 @@ def session_files_payload_for_info(
     refs_by_repo: dict[str, list[dict[str, Any]]] = {}
     for repo_text in sorted(repos):
         repo = Path(repo_text)
-        # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
-        repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
-        repo_from = str(repo_override.get("from") or "").strip() or from_ref
-        repo_to = str(repo_override.get("to") or "").strip() or to_ref
-        repo_refs_active = refs_requested(repo_from, repo_to)
-        snapshot = (
-            git_snapshot_provider(repo, repo_from, repo_to)
-            if git_snapshot_provider is not None
-            else build_git_snapshot(repo, repo_from, repo_to)
-        )
-        repo_exclusions = differ_policy.compiled_for(repo)
-        statuses = {
-            str(path): str(status)
-            for path, status in snapshot.get("statuses", {}).items()
-            # `git status` lists untracked `.cache`/`node_modules` rows that never went through the
-            # transcript door, so the SAME compiled policy is applied here rather than only there.
-            if differ_admits_path(repo_exclusions, repo / str(path))
-        }
-        numstat = {
-            str(path): dict(counts)
-            for path, counts in snapshot.get("numstat", {}).items()
-            if isinstance(counts, dict)
-        }
-        sel_from = str(snapshot.get("selected_from") or "")
-        sel_to = str(snapshot.get("selected_to") or "")
-        status_error = str(snapshot.get("status_error") or "")
-        repo_error = str(snapshot.get("repo_error") or "")
-        raw_error_message = snapshot.get("repo_error_message")
-        repo_error_message = dict(raw_error_message) if isinstance(raw_error_message, dict) else message_descriptor("", "")
-        if status_error and not repo_error.startswith("requested refs not found"):
-            issue = repo_error_message if repo_error_message.get("fallback") else diff_ref_issue(status_error, sel_from, sel_to, repo.name)
-            errors.append(message_descriptor("diff.error.repo", f"{repo.name}: {status_error}", {"repo": repo.name, "error": issue["fallback"]}))
-        touched_by_rel: dict[str, dict[str, Any]] = {}
-        for touched_path, metadata in touched.items():
-            rel_path = repo_relative_path(Path(touched_path), repo)
-            if rel_path:
-                touched_by_rel[rel_path] = metadata
-        repo_entries: list[SessionFileEntry] = []
-        for rel_path, status in statuses.items():
-            path = repo / rel_path
-            counts = numstat.get(rel_path, {})
-            added = counts.get("added")
-            removed = counts.get("removed")
-            diff_tracked = status != "?" and rel_path in numstat
-            if status in {"A", "?"} and rel_path not in numstat:
-                added = untracked_added_line_count(path)
-                removed = 0
-            # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
-            # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
-            agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
-            repo_entries.append(session_file_entry(
-                info.session,
-                agents,
-                status,
-                path,
-                repo,
-                "git",
-                added=added,
-                removed=removed,
-                diff_tracked=diff_tracked,
-                agent_windows=merge_agent_window_lists(touched_by_rel.get(rel_path, {}).get("agent_windows", [])),
-            ))
-        for rel_path, metadata in touched_by_rel.items():
-            if rel_path in statuses:
+        with authorized_repository_handle(repo, operation="session_files_repository_view") as repo_handle:
+            # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
+            repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
+            repo_from = str(repo_override.get("from") or "").strip() or from_ref
+            repo_to = str(repo_override.get("to") or "").strip() or to_ref
+            repo_refs_active = refs_requested(repo_from, repo_to)
+            snapshot = (
+                git_snapshot_provider(repo, repo_from, repo_to)
+                if git_snapshot_provider is not None
+                else build_git_snapshot(repo, repo_from, repo_to)
+            )
+            repo_exclusions = differ_policy.compiled_for(repo)
+            statuses = {
+                str(path): str(status)
+                for path, status in snapshot.get("statuses", {}).items()
+                # `git status` lists untracked `.cache`/`node_modules` rows that never went through the
+                # transcript door, so the SAME compiled policy is applied here rather than only there.
+                if differ_admits_path(repo_exclusions, repo / str(path))
+            }
+            numstat = {
+                str(path): dict(counts)
+                for path, counts in snapshot.get("numstat", {}).items()
+                if isinstance(counts, dict) and str(path) in statuses
+            }
+            sel_from = str(snapshot.get("selected_from") or "")
+            sel_to = str(snapshot.get("selected_to") or "")
+            status_error = str(snapshot.get("status_error") or "")
+            repo_error = str(snapshot.get("repo_error") or "")
+            raw_error_message = snapshot.get("repo_error_message")
+            repo_error_message = dict(raw_error_message) if isinstance(raw_error_message, dict) else message_descriptor("", "")
+            if status_error and not repo_error.startswith("requested refs not found"):
+                issue = repo_error_message if repo_error_message.get("fallback") else diff_ref_issue(status_error, sel_from, sel_to, repo.name)
+                errors.append(message_descriptor("diff.error.repo", f"{repo.name}: {status_error}", {"repo": repo.name, "error": issue["fallback"]}))
+            touched_by_rel: dict[str, dict[str, Any]] = {}
+            for touched_path, metadata in touched.items():
+                rel_path = repo_relative_path(Path(touched_path), repo)
+                if rel_path:
+                    touched_by_rel[rel_path] = metadata
+            repo_entries: list[SessionFileEntry] = []
+            for rel_path, status in statuses.items():
+                path = repo / rel_path
+                counts = numstat.get(rel_path, {})
+                added = counts.get("added")
+                removed = counts.get("removed")
+                diff_tracked = status != "?" and rel_path in numstat
+                count_untracked = status in {"A", "?"} and rel_path not in numstat
+                raw_identity = snapshot.get("file_identities", {}).get(rel_path, _EXPECTED_FILE_IDENTITY_UNSET)
+                expected_identity = (
+                    tuple(raw_identity)
+                    if isinstance(raw_identity, list) and len(raw_identity) == 2
+                    else raw_identity
+                )
+                # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
+                # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
+                agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
+                entry = session_file_entry(
+                    info.session,
+                    agents,
+                    status,
+                    path,
+                    repo,
+                    "git",
+                    added=added,
+                    removed=removed,
+                    diff_tracked=diff_tracked,
+                    agent_windows=merge_agent_window_lists(touched_by_rel.get(rel_path, {}).get("agent_windows", [])),
+                    repo_handle=repo_handle,
+                    relative_path=Path(rel_path),
+                    count_untracked=count_untracked,
+                    expected_identity=expected_identity,
+                )
+                if entry is not None:
+                    repo_entries.append(entry)
+            for rel_path, metadata in touched_by_rel.items():
+                if rel_path in statuses:
+                    continue
+                if repo_refs_active:
+                    continue
+                path = repo / rel_path
+                entry = session_file_entry(
+                    info.session,
+                    merge_agent_lists(metadata.get("agents", []), (agent_attribution or {}).get(str(path), [])),
+                    "T",
+                    path,
+                    repo,
+                    "transcript",
+                    mtime=metadata.get("mtime"),
+                    agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
+                    repo_handle=repo_handle,
+                    relative_path=Path(rel_path),
+                )
+                if entry is not None:
+                    repo_entries.append(entry)
+            repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
+            files.extend(repo_entries)
+            rendered_entries = differ_visible_entries(repo_entries)
+            if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
                 continue
-            if repo_refs_active:
-                continue
-            path = repo / rel_path
-            repo_entries.append(session_file_entry(
-                info.session,
-                merge_agent_lists(metadata.get("agents", []), (agent_attribution or {}).get(str(path), [])),
-                "T",
-                path,
-                repo,
-                "transcript",
-                mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
-                agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
-            ))
-        repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
-        files.extend(repo_entries)
-        rendered_entries = differ_visible_entries(repo_entries)
-        if not rendered_entries and repo_text not in live_pane_repo_roots and not repo_refs_active:
-            continue
-        refs_by_repo[str(repo)] = copy.deepcopy(snapshot.get("recent_refs", []))
-        repo_payload: RepoPayload = {
-            "repo": str(repo),
-            "branch": str(snapshot.get("branch") or ""),
-            "count": len(rendered_entries),
-            "touched_count": len(repos[repo_text]),
-            "added": line_total(rendered_entries, "added"),
-            "removed": line_total(rendered_entries, "removed"),
-            # C6: report the refs THIS repo actually compared, plus any per-repo fallback, so each repo
-            # header can render its own comparison title independently of the others.
-            "from_ref": sel_from or "default",
-            "to_ref": sel_to or "base",
-            "error": repo_error,
-        }
-        if repo_error_message.get("key") or repo_error_message.get("fallback"):
-            repo_payload["error_message"] = repo_error_message
-        ahead_behind = snapshot.get("ahead_behind")
-        if isinstance(ahead_behind, dict):
-            repo_payload.update({str(key): int(value) for key, value in ahead_behind.items() if isinstance(value, int)})
-        repo_payloads.append(repo_payload)
+            refs_by_repo[str(repo)] = copy.deepcopy(snapshot.get("recent_refs", []))
+            repo_payload: RepoPayload = {
+                "repo": str(repo),
+                "branch": str(snapshot.get("branch") or ""),
+                "count": len(rendered_entries),
+                "touched_count": len(repos[repo_text]),
+                "added": line_total(rendered_entries, "added"),
+                "removed": line_total(rendered_entries, "removed"),
+                # C6: report the refs THIS repo actually compared, plus any per-repo fallback, so each repo
+                # header can render its own comparison title independently of the others.
+                "from_ref": sel_from or "default",
+                "to_ref": sel_to or "base",
+                "error": repo_error,
+            }
+            if repo_error_message.get("key") or repo_error_message.get("fallback"):
+                repo_payload["error_message"] = repo_error_message
+            ahead_behind = snapshot.get("ahead_behind")
+            if isinstance(ahead_behind, dict):
+                repo_payload.update({str(key): int(value) for key, value in ahead_behind.items() if isinstance(value, int)})
+            repo_payloads.append(repo_payload)
 
     for absent_root in sorted(absent_root_paths):
         # A retired worktree is ONE row. There is no working tree to compare, so it carries no
@@ -3859,19 +4179,23 @@ def session_files_payload_for_info(
             path = Path(path_text)
             metadata = touched.get(path_text, {})
             status = str(metadata.get("status") or "?")
-            outside_entries.append(session_file_entry(
+            entry = session_file_entry(
                 info.session,
                 merge_agent_lists(metadata.get("agents", []), (agent_attribution or {}).get(str(path), [])),
                 status if status in {"A", "D", "M", "?"} else "?",
                 path,
                 None,
                 "transcript",
-                untracked_added_line_count(path) if path.exists() and path.is_file() else None,
-                0 if path.exists() and path.is_file() else None,
-                mtime=file_mtime_or_fallback(path, metadata.get("mtime")),
+                None,
+                None,
+                mtime=metadata.get("mtime"),
                 diff_tracked=False,
                 agent_windows=merge_agent_window_lists(metadata.get("agent_windows", [])),
-            ))
+                count_untracked=True,
+            )
+            if entry is None:
+                continue
+            outside_entries.append(entry)
         outside_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(outside_entries)
         repo_payloads.append({
@@ -4076,20 +4400,42 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     def phase_recorder(phase: str, elapsed_ms: float, _details: dict[str, Any]) -> None:
         phase_samples.append((phase, elapsed_ms))
 
-    snapshot_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+    snapshot_cache: dict[tuple[str, int, int, str, str], dict[str, Any]] = {}
+    repository_identities: dict[str, tuple[Any, ...]] = {}
     git_snapshot_builds = 0
     git_snapshot_cache_hits = 0
 
     def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
         nonlocal git_snapshot_builds, git_snapshot_cache_hits
         canonical_repo = canonical_repository_path(repo)
-        key = (canonical_repo, repo_from or "", repo_to or "")
+        repo_handle = _AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.get()
+        if repo_handle is None:
+            raise FilesystemError(
+                "session-files repository provider has no authorized root handle",
+                status=500,
+                message_key="fs.error.operationFailed",
+            )
+        key = (
+            canonical_repo,
+            int(repo_handle.stat_result.st_dev),
+            int(repo_handle.stat_result.st_ino),
+            repo_from or "",
+            repo_to or "",
+        )
         snapshot = snapshot_cache.get(key)
         if snapshot is None:
             started = time.perf_counter()
-            snapshot, hit = cached_repository_snapshot(
-                repo, repo_from, repo_to, repository_generations.get(canonical_repo), build_git_snapshot,
-            )
+            def build_snapshot_with_identity(_repo: Path, build_from: str | None, build_to: str | None) -> dict[str, Any]:
+                for attempt in range(2):
+                    with pinned_session_git_scope_from_handle(repo_handle, operation="session_files_snapshot") as scope:
+                        identity = git_snapshot_identity_from_scope(scope, build_from, build_to)
+                        built = _build_git_snapshot_from_scope(scope, build_from, build_to)
+                        if git_worktree_signature_from_scope(scope) == identity[4]:
+                            repository_identities[canonical_repo] = identity
+                            return built
+                    if attempt == 1:
+                        raise FilesystemError.changed_on_disk(_repo, diagnostic="repository changed while building the session-files snapshot")
+            snapshot, hit = cached_repository_snapshot(repo, repo_from, repo_to, repository_generations.get(canonical_repo), build_git_snapshot if canonical_repo in repository_generations else build_snapshot_with_identity)
             phase_samples.append(("git-snapshot", max(0.0, (time.perf_counter() - started) * 1000)))
             if hit:
                 git_snapshot_cache_hits += 1
@@ -4115,13 +4461,11 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     )
     if include_cross:
         phase_samples.append(("cross-session-attribution", max(0.0, (time.perf_counter() - attribution_started) * 1000)))
-    truncated = bound_session_files_view_payload(result_payload, max_bytes)
     profile = {
         "phases": session_files_view_phase_summary(phase_samples),
         "work": {
             "sessions": len(infos),
             "repositories": len(snapshot_cache),
-            "files": len(result_payload.get("files") or []),
             # A provider call may read the versioned cross-worker cache. Report real builds
             # separately from cache hits so System/DOIT CPU evidence never mistakes a cheap read
             # for another Git subprocess snapshot.
@@ -4137,16 +4481,17 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
             and isinstance(value, (str, int))
         },
     }
-    response = {"payload": result_payload, "status": int(status), "truncated": truncated, "profile": profile}
-    profile["work"]["result_bytes"] = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    response = {"payload": result_payload, "status": int(status), "truncated": False, "profile": profile, "repository_identities": repository_identities}
+    response["truncated"] = bound_session_files_view_payload(response, max_bytes)
+    profile["work"].update({"files": len(result_payload.get("files") or []), "result_bytes": len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))})
     return response
 
 
-def bound_session_files_view_payload(result_payload: dict[str, Any], max_bytes: int) -> bool:
+def bound_session_files_view_payload(result: dict[str, Any], max_bytes: int) -> bool:
     """Trim the file list until the serialized product fits ``max_bytes``; report if it was trimmed."""
-    files = result_payload.get("files")
+    files = (result.get("payload") if isinstance(result.get("payload"), dict) else result).get("files")
     truncated = False
-    while len(json.dumps(result_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
         if not isinstance(files, list) or not files:
             break
         files.pop()

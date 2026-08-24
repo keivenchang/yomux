@@ -165,6 +165,7 @@
     let zoomWindowEnd = null;
     let activeDeltaRevision = 0;
     let lastGenerationAdvanceAtMs = null;
+    const selectionSourceGenerationFloors = new Map();
     const selectionSnapshots = new Map();
 
     function resolutionSecondsFor(value) {
@@ -225,7 +226,7 @@
         }
         return false;
       }
-      if (activeGeneration && snapshot.source_generation < activeGeneration.source_generation) {
+      if (snapshot.source_generation < (selectionSourceGenerationFloors.get(selectionSnapshotKey()) ?? 0)) {
         throw new Error('snapshot source generation regressed');
       }
       activeDeltaRevision = 0;
@@ -385,6 +386,11 @@
     function publish(value, authoritativeWindow, delta = null) {
       const candidate = freezeJson(value);
       activeGeneration = candidate;
+      const selectionKey = selectionSnapshotKey();
+      selectionSourceGenerationFloors.set(
+        selectionKey,
+        Math.max(selectionSourceGenerationFloors.get(selectionKey) ?? 0, candidate.source_generation),
+      );
       lastGenerationAdvanceAtMs = clock.now();
       selectionSnapshots.set(selectionSnapshotKey(), Object.freeze({
         generation: candidate,
@@ -639,6 +645,9 @@
       if (cached) {
         activeDeltaRevision = cached.deltaRevision;
         zoomedStatic = false;
+        // This generation was already accepted for this exact selection. Reusing it as
+        // last-known-good keeps that selection's source-generation floor, while another range may
+        // legitimately have been materialized at an older source generation.
         // The cached generation may carry a stale requested_resolution spelling (AUTO reused
         // under its concrete number, or vice versa) from whichever fetch first populated this
         // key; relabel it to the selection that was just made so the UI picker and any observer

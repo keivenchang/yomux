@@ -327,9 +327,10 @@ wait_for_pid_exit() {
 wait_for_port_free() {
   local port="$1"
   local max_attempts="${2:-8}"
-  local attempt
+  local attempt pids
   for ((attempt = 0; attempt < max_attempts; attempt++)); do
-    if [[ -z "$(port_listener_pids "$port")" ]]; then
+    pids="$(port_listener_pids "$port")" || return 2
+    if [[ -z "$pids" ]]; then
       return 0
     fi
     sleep 1
@@ -340,34 +341,48 @@ wait_for_port_free() {
 stop_port_listener() {
   local port="$1"
   local existing_pids=()
-  local pid
+  local pid pids wait_status
+  pids="$(port_listener_pids "$port")" || return 2
   while IFS= read -r pid; do
     if [[ -n "$pid" ]]; then
       existing_pids+=("$pid")
     fi
-  done < <(port_listener_pids "$port")
+  done <<< "$pids"
   if [[ "${#existing_pids[@]}" -eq 0 ]]; then
     return
   fi
   kill "${existing_pids[@]}"
   if wait_for_port_free "$port" 8; then
     return
+  else
+    wait_status="$?"
+  fi
+  if [[ "$wait_status" -eq 2 ]]; then
+    return 2
   fi
 
   existing_pids=()
+  pids="$(port_listener_pids "$port")" || return 2
   while IFS= read -r pid; do
     if [[ -n "$pid" ]]; then
       existing_pids+=("$pid")
     fi
-  done < <(port_listener_pids "$port")
+  done <<< "$pids"
   if [[ "${#existing_pids[@]}" -gt 0 ]]; then
     printf 'port %s listener still alive after SIGTERM; sending SIGKILL to pid(s): %s\n' "$port" "${existing_pids[*]}" >&2
     kill -KILL "${existing_pids[@]}" 2>/dev/null || true
   fi
-  if ! wait_for_port_free "$port" 4; then
-    printf 'port %s still has listener pid(s) after stop: %s\n' "$port" "$(port_listener_pids "$port" | tr '\n' ' ')" >&2
-    return 1
+  if wait_for_port_free "$port" 4; then
+    return
+  else
+    wait_status="$?"
   fi
+  if [[ "$wait_status" -eq 2 ]]; then
+    return 2
+  fi
+  pids="$(port_listener_pids "$port")" || return 2
+  printf 'port %s still has listener pid(s) after stop: %s\n' "$port" "${pids//$'\n'/ }" >&2
+  return 1
 }
 
 port_restart_lock_dir() {

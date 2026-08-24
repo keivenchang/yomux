@@ -253,6 +253,7 @@ from .state_services import JobdOperationReservation
 from .state_services import jobd_operation_lane
 from .state_services import SessionFilesDiskPruneRecord
 from .state_services import SessionFilesGitSnapshotRecord
+from .state_services import SessionFilesOperationLifecycle, SessionFilesOperationProduct
 from .state_services import SessionFilesService
 from .state_services import SessionFilesWorkRecord
 from .state_services import StatsCollectionState
@@ -429,9 +430,18 @@ class SessionFilesJobdUnavailable(RuntimeError):
     cached; the next request re-triggers. It never falls back to inline git in the caller's thread.
     """
 
-    def __init__(self, message: str, failure: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        message: str,
+        failure: dict[str, Any] | None = None,
+        *,
+        code: str = "service_unavailable",
+        status: HTTPStatus = HTTPStatus.SERVICE_UNAVAILABLE,
+    ) -> None:
         super().__init__(message)
         self.failure = copy.deepcopy(failure or {})
+        self.code = str(code)
+        self.status = status
 
 
 class JobdOperationUnavailable(RuntimeError):
@@ -4674,9 +4684,9 @@ class SessionFilesCoordinator:
 
         settings = app.settings_payload().get("settings", {}).get("file_explorer", {})
         return exclusions.ExclusionPolicy.from_settings(settings, session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
-    def session_files_cache_key( self, app, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
+    def session_files_cache_key( self, app, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, *, deferred_unwatched_identity: str | None = None, ) -> tuple[Any, ...]:
         repo_refs = session_files.canonical_repository_refs(repo_refs)
-        repo_signatures: list[tuple[str, tuple[Any, ...]]] = []
+        repo_signatures: list[tuple[str, Any]] = []
         repo_roots = {
             session_files.canonical_repository_path(repo)
             for info in infos.values()
@@ -4695,6 +4705,11 @@ class SessionFilesCoordinator:
             # SESSION_FILES_CACHE_SECONDS staleness remains the no-watcher backstop.
             if app.watcher_covers_repo(repo):
                 repo_signatures.append((repo_text, app.repo_dirty_generation(repo_text)))
+            elif deferred_unwatched_identity:
+                # Accepted HTTP requests cannot run Git identity work before returning 202. The
+                # request-scoped suffix keeps application cache ownership honest; jobd strips only
+                # that suffix below so concurrent requests still share one in-flight producer.
+                repo_signatures.append((repo_text, f"deferred-unwatched:{deferred_unwatched_identity}"))
             else:
                 repo_signatures.append((repo_text, app.shared_git_identity(repo, repo_from, repo_to)[0]))
         return (
@@ -5053,14 +5068,13 @@ class SessionFilesCoordinator:
         elif result is not None and not record.future.done():
             record.future.set_result((copy.deepcopy(result[0]), result[1], result[2], result[3]))
         self.state.finish_work(key, record)
-    def compute_session_files_cache_entry( self, app, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
+    def compute_session_files_cache_entry( self, app, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, replace: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
         path, signature = app.session_files_disk_cache_path(key)
-        work_record, owner = self.state.claim_work(
-            key,
-            threading.get_ident(),
-            reserved=reserved,
-            stable_signature=signature,
-        )
+        work_record, owner = self.state.claim_work(key, threading.get_ident(), reserved=reserved, stable_signature=signature)
+        while replace and not owner:
+            with self.state.work_condition:
+                self.state.work_condition.wait_for(lambda: self.state.work_records.get(key) is not work_record)
+            work_record, owner = self.state.claim_work(key, threading.get_ident(), reserved=reserved, stable_signature=signature)
         if not owner:
             payload, status, cache_hit, age_seconds = work_record.future.result()
             app.record_performance_sample(
@@ -5081,7 +5095,7 @@ class SessionFilesCoordinator:
         computed_result: tuple[SessionFilesPayload, HTTPStatus] | None = None
         try:
             with file_lock(path, dir_mode=0o700):
-                cached = app.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=False)
+                cached = None if replace else app.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=False)
                 if cached:
                     payload, status, _fresh, age_seconds = cached
                     app.record_performance_sample(
@@ -5290,19 +5304,31 @@ class SessionFilesCoordinator:
         overwrite a newer product for the same view.
         """
         _path, signature = app.session_files_disk_cache_path(cache_key)
-        source_generation = app.session_files_source_generation(cache_key)
+        jobd_cache_key = self.session_files_jobd_cache_key(cache_key)
+        source_generation = app.session_files_source_generation(jobd_cache_key)
         coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
         generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
         return coalesce_key, generation
+    @staticmethod
+    def session_files_jobd_cache_key(cache_key: tuple[Any, ...]) -> tuple[Any, ...]:
+        """Normalize only request-scoped unwatched suffixes for in-flight jobd ownership."""
+        repo_signatures = tuple(
+            (repo, "deferred-unwatched")
+            if isinstance(signature, str) and signature.startswith("deferred-unwatched:")
+            else (repo, signature)
+            for repo, signature in cache_key[-1]
+        )
+        return (*cache_key[:-1], repo_signatures)
     def session_files_jobd_source_profile(self, app, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
         """Return bounded source-change facts for jobd diagnostics, never raw cache-key contents."""
         _path, stable_view = app.session_files_disk_cache_path(cache_key)
-        repo_generations = [item[1] for item in cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
+        jobd_cache_key = self.session_files_jobd_cache_key(cache_key)
+        repo_generations = [item[1] for item in jobd_cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
         return {
             "requester": requester,
             "stable_view": stable_view,
             "info_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-2]).encode("utf-8")).hexdigest(),
-            "repo_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-1]).encode("utf-8")).hexdigest(),
+            "repo_signature": hashlib.sha256(app.client_event_payload_signature(jobd_cache_key[-1]).encode("utf-8")).hexdigest(),
             "repo_dirty_generation_count": len(repo_generations),
             "repo_dirty_generation_max": max(repo_generations, default=0),
         }
@@ -5314,7 +5340,12 @@ class SessionFilesCoordinator:
             if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
                 states.append({"path": session_files.canonical_repository_path(item[0]), "generation": item[1]})
         return states
-    def submit_session_files_job( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[dict[str, Any], str, int]:
+    def submit_session_files_job(
+        self, app, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
+        replace: bool = False,
+    ) -> tuple[dict[str, Any], str, int]:
         """Submit one immutable session-files job and return its atomic broker receipt."""
         coalesce_key, generation = app.session_files_view_coalesce_identity(cache_key)
         payload = {
@@ -5337,9 +5368,15 @@ class SessionFilesCoordinator:
             generation=generation,
             coalesce_key=coalesce_key,
             deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+            fresh_only=bool(replace) or self.session_files_jobd_cache_key(cache_key) != cache_key,
         )
         return response, coalesce_key, generation
-    def compute_session_files_payload_via_jobd( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[SessionFilesPayload, HTTPStatus]:
+    def compute_session_files_payload_via_jobd(
+        self, app, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
+        replace: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
         """Materialize a session-files payload in the background cache worker."""
         response, coalesce_key, generation = app.submit_session_files_job(
             session,
@@ -5351,6 +5388,7 @@ class SessionFilesCoordinator:
             cache_key,
             priority=priority,
             requester=requester,
+            replace=replace,
         )
         if not response.get("ok"):
             raise SessionFilesJobdUnavailable(
@@ -5388,47 +5426,57 @@ class SessionFilesCoordinator:
         try:
             job = app.wait_for_jobd_operation_job(job_id, deadline_at)
         except JobdOperationUnavailable as error:
-            raise SessionFilesJobdUnavailable(str(error), error.failure) from error
-        return app.session_files_payload_from_job(job)
-    def complete_session_files_operation( self, app, operation_id: str, request_id: str, job_id: str, cache_key: tuple[Any, ...], deadline_at: float, ) -> None:
-        """Supervisor boundary for one accepted producer and its terminal delivery."""
-        try:
-            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(
-                cache_key,
-                lambda: app.wait_for_session_files_operation_job(job_id, deadline_at),
-            )
-            terminal_payload = copy.deepcopy(payload)
-            terminal_payload["cache"] = {
-                "hit": bool(cache_hit),
-                "stale": False,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": SESSION_FILES_CACHE_SECONDS,
-            }
-            result = app.session_files_ready_result(request_id, terminal_payload)
-            app.terminalize_operation(operation_id, result, status)
-        except SessionFilesJobdUnavailable as error:
-            result = app.session_files_failure_result(
-                request_id,
-                error.failure or {"error": str(error)},
-                operation_id=operation_id,
-                operation="jobd.result",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
-        except Exception as error:
-            result = app.session_files_failure_result(
-                request_id,
-                {
-                    "error": str(error),
-                    "cause": local_service_exception_cause(error),
-                },
-                operation_id=operation_id,
-                operation="session-files.complete",
-                code="producer_failed",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
-    def start_session_files_operation( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str, requester: str, ) -> tuple[dict[str, Any], HTTPStatus]:
-        request_id = app.new_api_request_id()
-        response, coalesce_key, generation = app.submit_session_files_job(
+            raise SessionFilesJobdUnavailable(
+                str(error),
+                error.failure,
+                code=error.code,
+                status=error.status,
+            ) from error
+        payload, status = app.session_files_payload_from_job(job)
+        return SessionFilesOperationProduct(payload, status, job)
+    @staticmethod
+    def accepted_session_files_job(response: dict[str, Any]) -> tuple[str, str]:
+        return SessionFilesOperationLifecycle.accepted_job(response)
+    def complete_session_files_operation(
+        self, app, flight: JobdOperationFlight, job_id: str, session: str | None,
+        infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], deadline_at: float,
+        replace: bool, priority: str, requester: str,
+    ) -> None:
+        return SessionFilesOperationLifecycle.complete(
+            app,
+            flight,
+            job_id,
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            deadline_at,
+            replace,
+            priority,
+            requester,
+            deferred=self.session_files_jobd_cache_key(cache_key) != cache_key,
+            cache_refresh_seconds=SESSION_FILES_CACHE_SECONDS,
+            unavailable_type=SessionFilesJobdUnavailable,
+            exception_cause=local_service_exception_cause,
+        )
+    def start_session_files_operation(
+        self, app, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str, requester: str, replace: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        context = {
+            "session": str(session or ""),
+            "from_ref": str(from_ref or ""),
+            "to_ref": str(to_ref or ""),
+            "hours": float(hours),
+            "repo_refs": session_files.canonical_repository_refs(repo_refs),
+        }
+        return SessionFilesOperationLifecycle.start(
+            app,
             session,
             infos,
             hours,
@@ -5438,81 +5486,11 @@ class SessionFilesCoordinator:
             cache_key,
             priority=priority,
             requester=requester,
+            replace=replace,
+            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+            context=context,
+            exception_cause=local_service_exception_cause,
         )
-        job = response.get("job") if isinstance(response.get("job"), dict) else {}
-        job_id = str(job.get("job_id") or "")
-        producer_state = str(job.get("status") or "")
-        if not response.get("ok") or not job_id or producer_state not in {"queued", "running", "completed"}:
-            failure = dict(response)
-            if not failure.get("error"):
-                failure["error"] = "jobd did not return an accepted job receipt"
-            result = app.session_files_failure_result(
-                request_id,
-                failure,
-                operation="jobd.submit",
-            )
-            app.record_operation_failure("", result)
-            return result, HTTPStatus.SERVICE_UNAVAILABLE
-        reservation = app.jobd_operation_service.reserve("bulk")
-        if reservation is None:
-            result = app.session_files_failure_result(
-                request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
-                operation="jobd.submit",
-                code="service_busy",
-            )
-            app.record_operation_failure("", result)
-            return result, HTTPStatus.SERVICE_UNAVAILABLE
-        deadline_at = time.time() + (SESSION_FILES_JOBD_JOB_DEADLINE_MS / 1000.0)
-        try:
-            receipt = app.queued_delivery_ledger.accept_operation(
-                request_id=request_id,
-                route="GET /api/session-files",
-                deadline_at=deadline_at,
-                progress={
-                    "phase": "waiting_for_product",
-                    "producer": "jobd",
-                    "producer_state": producer_state,
-                },
-                producer={
-                    "service": "jobd",
-                    "job_id": job_id,
-                    "coalesce_key": coalesce_key,
-                    "generation": generation,
-                },
-                kind="session_files",
-                context={
-                    "session": str(session or ""),
-                    "from_ref": str(from_ref or ""),
-                    "to_ref": str(to_ref or ""),
-                    "hours": float(hours),
-                    "repo_refs": session_files.canonical_repository_refs(repo_refs),
-                },
-            )
-        except Exception:
-            reservation.release()
-            raise
-        operation_id = str(receipt["operation"]["id"])
-        submitted = app.jobd_operation_service.submit_reserved(
-            reservation,
-            app.complete_session_files_operation,
-            operation_id,
-            request_id,
-            job_id,
-            cache_key,
-            deadline_at,
-        )
-        if not submitted:
-            result = app.session_files_failure_result(
-                request_id,
-                {"error": "jobd operation completion worker could not start"},
-                operation_id=operation_id,
-                operation="session-files.start",
-                code="producer_failed",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return result, HTTPStatus.INTERNAL_SERVER_ERROR
-        return receipt, HTTPStatus.ACCEPTED
     def refresh_session_files_payload_cache( self, app, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
         started = time.perf_counter()
         refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": session or ""}, cache_key=cache_key)
@@ -5714,8 +5692,21 @@ class SessionFilesCoordinator:
         for session in app.sessions:
             info = sessions.get(session)
             if info is not None and info.agents:
-                key = app.session_files_cache_key("payload", {session: info}, session, 24.0, None, None, None)
-                app.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
+                try:
+                    key = app.session_files_cache_key("payload", {session: info}, session, 24.0, None, None, None)
+                    app.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
+                except filesystem.FilesystemError as error:
+                    logger.warning("session-files warm skipped for %s: %s", session, error)
+                    app.log_event(
+                        session,
+                        "session_files_warm_failed",
+                        "Session files warm skipped",
+                        {
+                            "error": type(error).__name__,
+                            "status": error.status,
+                            "message_key": error.message_key,
+                        },
+                    )
     def warm_start_tabber_activity_cache(self, app) -> None:
         if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warm-start"})
@@ -5739,7 +5730,16 @@ class SessionFilesCoordinator:
         return payloads
     def session_files_payload_for_infos( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         started = time.perf_counter()
-        cache_key = app.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
+        cache_key = app.session_files_cache_key(
+            "payload",
+            infos,
+            session,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            deferred_unwatched_identity=uuid.uuid4().hex if accepted_operation else None,
+        )
         max_age = SESSION_FILES_CACHE_SECONDS
         cached = None if force else app.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
         priority = "interactive" if force else "freshness"
@@ -5755,7 +5755,7 @@ class SessionFilesCoordinator:
                 repo_refs,
                 cache_key,
                 priority=priority,
-                requester=requester,
+                requester=requester, replace=force,
             )
 
         cache_meta: dict[str, Any]
@@ -5803,7 +5803,7 @@ class SessionFilesCoordinator:
                     repo_refs,
                     cache_key,
                     priority=priority,
-                    requester=requester,
+                    requester=requester, replace=force,
                 )
                 cache_meta = {
                     "hit": False,
@@ -5812,7 +5812,7 @@ class SessionFilesCoordinator:
                 }
             else:
                 try:
-                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd, replace=force)
                     cache_meta = {
                         "hit": cache_hit,
                         "stale": False,
@@ -9154,6 +9154,7 @@ class TmuxWebtermApp:
                 operation="jobd.result",
                 code="producer_abandoned",
             )
+            if str(record.get("kind") or "") == "session_files" and isinstance(record.get("producer"), dict): result["producer"] = copy.deepcopy(record["producer"])
             self.queued_delivery_ledger.terminalize_operation(
                 operation_id,
                 result,
@@ -9224,6 +9225,8 @@ class TmuxWebtermApp:
             raise AssertionError({
                 "accepted_operations_settled": settled,
                 "open_operations": open_operations,
+                "jobd_status": self.job_client.request_if_running({"action": "status"}, timeout=0.5),
+                "jobd_profile": self.job_client.request_if_running({"action": "profile"}, timeout=0.5),
             })
 
     def stop_jobd_operation_service(self) -> None:
@@ -9346,7 +9349,9 @@ class TmuxWebtermApp:
                         # Item 5: a Quick Open query for a not-yet-covered scope promotes that root's
                         # existing frontier to user-visible-demand, never launching a second crawl.
                         result["indexer"] = self.search_indexer.promote_user_visible(
-                            root, str(request_payload.get("directory") or "")
+                            root,
+                            str(request_payload.get("directory") or ""),
+                            request_payload.get(file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
                         )
                     else:
                         changed_paths = request_payload.get("paths")
@@ -10747,8 +10752,8 @@ class TmuxWebtermApp:
     def session_files_exclusion_policy(self) -> exclusions.ExclusionPolicy:
         return self._session_files_coordinator.session_files_exclusion_policy(self)
 
-    def session_files_cache_key( self, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
-        return self._session_files_coordinator.session_files_cache_key(self, kind, infos, session, hours, from_ref, to_ref, repo_refs)
+    def session_files_cache_key( self, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, *, deferred_unwatched_identity: str | None = None, ) -> tuple[Any, ...]:
+        return self._session_files_coordinator.session_files_cache_key(self, kind, infos, session, hours, from_ref, to_ref, repo_refs, deferred_unwatched_identity=deferred_unwatched_identity)
 
     def session_files_refresh_request_payload( self, cache_key: tuple[Any, ...], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> dict[str, Any]:
         return self._session_files_coordinator.session_files_refresh_request_payload(self, cache_key, session, hours, from_ref, to_ref, repo_refs)
@@ -10827,8 +10832,8 @@ class TmuxWebtermApp:
     def complete_session_files_work( self, key: tuple[Any, ...], record: SessionFilesWorkRecord, result: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None, error: Exception | None = None, ) -> None:
         return self._session_files_coordinator.complete_session_files_work(self, key, record, result, error)
 
-    def compute_session_files_cache_entry( self, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
-        return self._session_files_coordinator.compute_session_files_cache_entry(self, key, compute, reserved=reserved)
+    def compute_session_files_cache_entry( self, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, replace: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
+        return self._session_files_coordinator.compute_session_files_cache_entry(self, key, compute, reserved=reserved, replace=replace)
 
     def get_session_files_cache( self, key: tuple[Any, ...], max_age_seconds: float | None = None, allow_stale: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
         return self._session_files_coordinator.get_session_files_cache(self, key, max_age_seconds, allow_stale)
@@ -10858,26 +10863,52 @@ class TmuxWebtermApp:
     def session_files_jobd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
         return SessionFilesCoordinator.session_files_jobd_repository_states(cache_key)
 
-    def submit_session_files_job( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[dict[str, Any], str, int]:
-        return self._session_files_coordinator.submit_session_files_job(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
-
-    def compute_session_files_payload_via_jobd( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.compute_session_files_payload_via_jobd(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
-
+    def submit_session_files_job(
+        self, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
+        replace: bool = False,
+    ) -> tuple[dict[str, Any], str, int]:
+        return self._session_files_coordinator.submit_session_files_job(
+            self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key,
+            priority=priority, requester=requester, replace=replace,
+        )
+    def compute_session_files_payload_via_jobd(
+        self, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
+        replace: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        return self._session_files_coordinator.compute_session_files_payload_via_jobd(
+            self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key,
+            priority=priority, requester=requester, replace=replace,
+        )
     def session_files_payload_from_product(self, body: bytes) -> tuple[SessionFilesPayload, HTTPStatus]:
         return self._session_files_coordinator.session_files_payload_from_product(self, body)
 
     def session_files_payload_from_job(self, job: dict[str, Any]) -> tuple[SessionFilesPayload, HTTPStatus]:
         return self._session_files_coordinator.session_files_payload_from_job(self, job)
-
     def wait_for_session_files_operation_job( self, job_id: str, deadline_at: float, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         return self._session_files_coordinator.wait_for_session_files_operation_job(self, job_id, deadline_at)
-
-    def complete_session_files_operation( self, operation_id: str, request_id: str, job_id: str, cache_key: tuple[Any, ...], deadline_at: float, ) -> None:
-        return self._session_files_coordinator.complete_session_files_operation(self, operation_id, request_id, job_id, cache_key, deadline_at)
-
-    def start_session_files_operation( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str, requester: str, ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._session_files_coordinator.start_session_files_operation(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
+    def complete_session_files_operation(
+        self, flight: JobdOperationFlight, job_id: str, session: str | None,
+        infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], deadline_at: float,
+        replace: bool, priority: str, requester: str,
+    ) -> None:
+        return self._session_files_coordinator.complete_session_files_operation(
+            self, flight, job_id, session, infos, hours, from_ref, to_ref, repo_refs,
+            cache_key, deadline_at, replace, priority, requester,
+        )
+    def start_session_files_operation(
+        self, session: str | None, infos: dict[str, SessionInfo], hours: float,
+        from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...], *, priority: str, requester: str, replace: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._session_files_coordinator.start_session_files_operation(
+            self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key,
+            priority=priority, requester=requester, replace=replace,
+        )
 
     def refresh_session_files_payload_cache( self, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
         return self._session_files_coordinator.refresh_session_files_payload_cache(self, cache_key, session, infos, hours, from_ref, to_ref, repo_refs)

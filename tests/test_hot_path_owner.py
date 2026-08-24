@@ -6,6 +6,7 @@ root, refresh in seconds instead of at the 1800s safety TTL, decay their heat af
 cannot starve breadth/safety reconciliation of a forever-hot root.
 """
 
+import json
 import os
 import sqlite3
 import threading
@@ -38,6 +39,14 @@ def _reset_lifecycle_registry():
     for index in indexes:
         index.stop_event.set()
         index.close_root_fd()
+
+
+def _install_root_fd(index, root):
+    descriptor = os.open(root, os.O_RDONLY)
+    try:
+        index.replace_root_fd(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _record_start_builds(monkeypatch):
@@ -258,6 +267,7 @@ def test_visible_path_promotes_the_indexed_ancestor_frontier(tmp_path, monkeypat
     sub.mkdir(parents=True)
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     index = file_index.RootIndex(root)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root.resolve())] = index
     promoted: list[tuple[str, str]] = []
@@ -278,6 +288,7 @@ def test_change_promotes_a_pending_frontier_to_hot_change_priority(tmp_path, mon
     changed = root / "f.txt"
     changed.write_text("f", encoding="utf-8")
     index = file_index.RootIndex(root)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
     promotions: list[tuple[str, int, str]] = []
@@ -351,7 +362,12 @@ def test_any_index_roots_exist_shares_manifest_validation_with_indexed_ancestor_
 
     # A valid manifest whose root is an ancestor -> both see it.
     root = tmp_path / "root"
-    (idx / "d.manifest.json").write_text(f'{{"root": "{root.resolve()}"}}', encoding="utf-8")
+    root.mkdir(parents=True)
+    identity = file_index.root_identity(root.stat())
+    (idx / "d.manifest.json").write_text(
+        json.dumps({"root": str(root.resolve()), file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: identity}),
+        encoding="utf-8",
+    )
     assert file_index.any_index_roots_exist() is True
     assert root.resolve() in file_index.indexed_ancestor_roots(somewhere)
     _clear_registry()
@@ -401,7 +417,7 @@ def test_clear_memory_indexes_stops_the_bfs_worker_before_closing_its_root_fd(tm
     root = tmp_path / "root"
     root.mkdir()
     ri = file_index.RootIndex(root)
-    ri.root_fd = os.open(str(root), os.O_RDONLY)
+    _install_root_fd(ri, root)
     used_after_close: list[str] = []
     started = threading.Event()
 
@@ -457,7 +473,7 @@ def _install_worker(root, *, cooperative, release, register=True):
     ONE finalizer (`_finalize_worker_exit`), and its completion event is created cleared BEFORE the
     thread becomes visible -- exactly `_start_build`'s contract."""
     ri = file_index.RootIndex(Path(root))
-    ri.root_fd = os.open(str(root), os.O_RDONLY)
+    _install_root_fd(ri, root)
     ri.completion = threading.Event()  # cleared: a worker is in flight
     started = threading.Event()
 
@@ -539,7 +555,7 @@ def test_assigned_but_not_started_worker_retires_on_eventual_start(tmp_path, mon
     root = tmp_path / "root"
     root.mkdir()
     ri = file_index.RootIndex(root)
-    ri.root_fd = os.open(str(root), os.O_RDONLY)
+    _install_root_fd(ri, root)
     ri.completion = threading.Event()  # cleared, as _start_build does before the thread is visible
     release = threading.Event()
 
@@ -578,7 +594,7 @@ def test_assigned_but_not_started_worker_retires_on_start_rollback(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     ri = file_index.RootIndex(root)
-    ri.root_fd = os.open(str(root), os.O_RDONLY)
+    _install_root_fd(ri, root)
     ri.completion = threading.Event()
     thread = threading.Thread(target=lambda: None, name="never-started")
     ri.thread = thread
@@ -612,7 +628,7 @@ def test_current_worker_retirement_does_not_self_join(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
     ri = file_index.RootIndex(root)
-    ri.root_fd = os.open(str(root), os.O_RDONLY)
+    _install_root_fd(ri, root)
     ri.completion = threading.Event()
     result_box = {}
     proceed = threading.Event()
@@ -838,7 +854,7 @@ def test_retiring_is_terminal_start_build_refuses_and_never_calls_the_runner(tmp
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", lambda *_a, **_k: runner_calls.append(_k) or True)
     try:
         ri = file_index.RootIndex(root)
-        ri.root_fd = os.open(str(root), os.O_RDONLY)
+        _install_root_fd(ri, root)
         with file_index._REGISTRY_LOCK:
             file_index._REGISTRY[str(root)] = ri
 
@@ -852,7 +868,7 @@ def test_retiring_is_terminal_start_build_refuses_and_never_calls_the_runner(tmp
         # Subcase 2: an object that is no longer the registry owner for its key is refused.
         _clear_registry()  # finalize the retiree
         other = file_index.RootIndex(root)
-        other.root_fd = os.open(str(root), os.O_RDONLY)  # NOT registered as the owner for this key
+        _install_root_fd(other, root)  # NOT registered as the owner for this key
         assert file_index._start_build(other, set()) is False
         assert runner_calls == []
         other.close_root_fd()
@@ -1115,7 +1131,7 @@ def test_final_ownership_failure_leaves_assignment_for_finalizer(tmp_path, monke
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -1171,7 +1187,7 @@ def test_failed_thread_start_after_retirement_finalizes_installed_assignment(tmp
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -1204,7 +1220,7 @@ def test_retirement_registration_cannot_land_after_the_worker_finalized(tmp_path
     root = tmp_path / "root"
     root.mkdir()
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     completion = threading.Event()
     assignment = file_index._WorkerAssignment(
         generation=1,
@@ -1254,7 +1270,7 @@ def test_successful_bfs_publication_supersedes_a_pending_drop(tmp_path, monkeypa
     file_index.clear_memory_indexes()
 
     old = file_index.RootIndex(root)
-    old.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(old, root)
     release = threading.Event()
     completion = threading.Event()
 
@@ -1318,7 +1334,7 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     root.mkdir()
     (root / "first.txt").write_text("first", encoding="utf-8")
     index = file_index.RootIndex(root)
-    index.root_fd = os.open(root, os.O_RDONLY)
+    _install_root_fd(index, root)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
 
@@ -1330,8 +1346,8 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     # publication is paused mid-completion must not have its pending drop superseded by the older build.
     real_stamp = file_index._stamp_snapshot_tombstone_identity
 
-    def pause_before_pending_drop_supersession(candidate_root, identity):
-        real_stamp(candidate_root, identity)
+    def pause_before_pending_drop_supersession(candidate_root, identity, *, expected_root_identity):
+        real_stamp(candidate_root, identity, expected_root_identity=expected_root_identity)
         publication_ready.set()
         assert resume_publication.wait(3.0)
 

@@ -285,15 +285,23 @@ def scan_directory_once(
     """
     result = ScanResult()
     relative = Path(".") if directory == root else directory.relative_to(root)
+    directory_context = filesystem_paths.safe_descendant(
+        root_fd,
+        root,
+        root,
+        relative,
+        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        operation=operation,
+    )
     try:
-        directory_fd = file_index._open_relative_path(root_fd, relative)
+        directory_handle = directory_context.__enter__()
     except FileNotFoundError:
         result.missing = True
         return result
-    except OSError as exc:
+    except (OSError, filesystem_paths.FilesystemError) as exc:
         result.error = f"open:{exc.__class__.__name__}"
         return result
-    nofollow = filesystem_paths.nofollow_flag()
+    directory_fd = directory_handle.descriptor
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         with os.scandir(directory_fd) as entries:
@@ -313,29 +321,48 @@ def scan_directory_once(
                     if exclude_path is not None and exclude_path(result_path):
                         continue
                     try:
-                        child_fd = os.open(entry.name, directory_flags | nofollow, dir_fd=directory_fd)
-                    except OSError:
+                        with filesystem_paths.safe_child(
+                            directory_fd,
+                            result_path,
+                            result_path,
+                            flags=directory_flags,
+                            operation=operation,
+                        ) as child:
+                            child_stat = child.stat_result
+                    except (OSError, filesystem_paths.FilesystemError):
                         continue
-                    try:
-                        child_stat = os.fstat(child_fd)
-                    finally:
-                        os.close(child_fd)
                     if (child_stat.st_dev, child_stat.st_ino) != (entry_stat.st_dev, entry_stat.st_ino):
                         continue
                     result.child_directories.append(entry.name)
                 elif stat.S_ISREG(entry_stat.st_mode):
                     if exclude_path is not None and exclude_path(result_path):
                         continue
+                    try:
+                        with filesystem_paths.safe_child(
+                            directory_fd,
+                            result_path,
+                            result_path,
+                            flags=filesystem_paths.metadata_descriptor_flags(),
+                            operation=operation,
+                        ) as child:
+                            child_stat = child.stat_result
+                    except (OSError, filesystem_paths.FilesystemError):
+                        continue
+                    if not stat.S_ISREG(child_stat.st_mode) or (
+                        child_stat.st_dev,
+                        child_stat.st_ino,
+                    ) != (entry_stat.st_dev, entry_stat.st_ino):
+                        continue
                     rel_posix = (relative / entry.name).as_posix()
                     if rel_posix.startswith("./"):
                         rel_posix = rel_posix[2:]
                     result.files.append(
-                        (str(result_path), entry.name, rel_posix, int(entry_stat.st_size), int(entry_stat.st_mtime))
+                        (str(result_path), entry.name, rel_posix, int(child_stat.st_size), int(child_stat.st_mtime))
                     )
     except OSError as exc:
         result.error = f"scandir:{exc.__class__.__name__}"
     finally:
-        os.close(directory_fd)
+        directory_context.__exit__(None, None, None)
     return result
 
 
@@ -361,6 +388,7 @@ class ProgressiveBuild:
         max_total_entries: int | None = None,
         operation: str = "",
         tombstone_identity: str | None = None,
+        root_fd: int | None = None,
     ):
         self.root = root.expanduser()
         self.skip_dirs = set(skip_dirs)
@@ -388,7 +416,10 @@ class ProgressiveBuild:
         self.last_published_coverage: dict[str, object] = {}
         self.scanned_directories = 0
         self.scanned_files = 0
+        self._provided_root_fd = root_fd
         self._root_fd: int | None = None
+        self.root_identity: tuple[int, int] | None = None
+        self._root_context: contextlib.ExitStack | None = None
         self._lock_fd: int | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -402,6 +433,9 @@ class ProgressiveBuild:
         if self._root_fd is not None:
             os.close(self._root_fd)
             self._root_fd = None
+        if self._root_context is not None:
+            self._root_context.close()
+            self._root_context = None
         if self._lock_fd is not None:
             with contextlib.suppress(OSError):
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
@@ -414,7 +448,25 @@ class ProgressiveBuild:
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
             directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | file_index._nofollow_flag()
-            self._root_fd = os.open(self.root, directory_flags)
+            if self._provided_root_fd is not None:
+                self._root_fd = os.dup(self._provided_root_fd)
+            else:
+                # Direct builders still route through the one filesystem authorization owner.
+                # Production index builds pass RootIndex.root_fd below, so neither path reopens an
+                # already-authorized root name after a namespace replacement.
+                root_context = contextlib.ExitStack()
+                root_handle = root_context.enter_context(
+                    filesystem_paths.safe_path(
+                        str(self.root),
+                        flags=directory_flags,
+                        operation=self.operation or "index_build",
+                    )
+                )
+                self._root_context = root_context
+                self._root_fd = os.dup(root_handle.descriptor)
+            self.root_identity = file_index.parse_root_identity(
+                file_index.root_identity(os.fstat(self._root_fd))
+            )
         except BaseException:
             # A failed flock or root open means `__exit__` will never run; reclaim the lock
             # descriptor (and any root descriptor) here before propagating the original error.
@@ -502,7 +554,23 @@ class ProgressiveBuild:
                     "SELECT value FROM metadata WHERE key = 'tombstone_identity'"
                 ).fetchone()
                 persisted_identity = str(stamp_row[0]) if stamp_row and stamp_row[0] is not None else ""
-                if self.tombstone_identity and self.tombstone_identity != persisted_identity:
+                root_identity_row = conn.execute(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    (file_index.AUTHORIZED_ROOT_IDENTITY_FIELD,),
+                ).fetchone()
+                persisted_root_identity = file_index._metadata_root_identity(
+                    {
+                        file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: (
+                            root_identity_row[0] if root_identity_row is not None else None
+                        )
+                    }
+                )
+                root_generation_changed = (
+                    self.root_identity is None or persisted_root_identity != self.root_identity
+                )
+                if root_generation_changed or (
+                    self.tombstone_identity and self.tombstone_identity != persisted_identity
+                ):
                     conn.execute("DELETE FROM entries")
                     conn.execute("DELETE FROM directory_coverage")
                     conn.execute("DELETE FROM frontier")
@@ -536,6 +604,14 @@ class ProgressiveBuild:
         """
         with self._connect() as conn:
             file_index._ensure_sqlite_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN")
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if self.root_identity is None or not file_index._root_identity_matches(
+                metadata,
+                self.root_identity,
+            ):
+                return 0
             rows = conn.execute(
                 "SELECT root, directory, depth, generation, reason, priority, enqueued_at, retries, seq "
                 "FROM frontier WHERE generation = ? AND state = 'pending'",
@@ -674,6 +750,9 @@ class ProgressiveBuild:
             "storage": "sqlite",
             "skip_signature": signature,
             "root": str(self.root),
+            file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index._root_identity_metadata_value(
+                self.root_identity
+            ),
             "producer_epoch": file_index.self_process_epoch(),
         }
         existing = dict(conn.execute("SELECT key, value FROM metadata"))
@@ -929,6 +1008,9 @@ class ProgressiveBuild:
             "storage": "sqlite",
             "skip_signature": file_index._disk_skip_signature(self.root, self.skip_dirs, self.exclude_signature),
             "root": str(self.root),
+            file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index._root_identity_metadata_value(
+                self.root_identity
+            ),
             "producer_epoch": file_index.self_process_epoch(),
             "built_at": repr(float(wall)),
             "truncated": "1" if self.truncated else "0",
@@ -988,6 +1070,7 @@ def build_root_progressively(
     reason: str = REASON_STARTUP,
     should_stop: Callable[[], bool] | None = None,
     tombstone_identity: str | None = None,
+    root_fd: int | None = None,
 ) -> ProgressiveBuild:
     """Run one full breadth-first build of ``root`` and return its build record.
 
@@ -1009,6 +1092,7 @@ def build_root_progressively(
         max_total_entries=max_total_entries,
         operation=operation,
         tombstone_identity=tombstone_identity,
+        root_fd=root_fd,
     )
     with build:
         # P0-4: resume a durable partial frontier FIRST. If this generation still has pending frontier
@@ -1052,6 +1136,7 @@ def build_root_into_index(
     reason: str = "",
     stop_event: Any = None,
     tombstone_identity: str | None = None,
+    root_fd: int | None = None,
 ) -> bool:
     """Run one breadth-first full build for a configured root, driven by ``file_index._run_build``.
 
@@ -1079,5 +1164,6 @@ def build_root_into_index(
         reason=effective_reason,
         should_stop=should_stop,
         tombstone_identity=tombstone_identity,
+        root_fd=root_fd,
     )
     return not (stop_event is not None and stop_event.is_set())

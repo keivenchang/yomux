@@ -10,7 +10,6 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import platform
 from pathlib import Path
 import secrets
@@ -25,7 +24,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from yolomux_lib.infra.host_identity import process_identity_snapshot
 from yolomux_lib.infra.host_identity import process_start_identity
+from yolomux_lib.infra.listener_census import canonical_listener_pids
+from yolomux_lib.infra.listener_census import listener_pids
+from yolomux_lib.infra.listener_census import require_unique_listener_pid
 from yolomux_lib.infra.root_paths import resolved_product_path
 from yolomux_lib.local_services.registry import darwin_process_environment
 from yolomux_lib.tmux.sessions import process_cwd
@@ -73,71 +76,12 @@ def process_command(pid: int) -> str:
         return ""
 
 
-def canonical_listener_pids(
-    pids: list[int],
-    *,
-    parent_reader=process_parent_pid,
-    command_reader=process_command,
-) -> list[int]:
-    """Collapse only a fork-before-exec clone of an already identified listener owner.
-
-    A loaded server can be observed after fork and before close-on-exec closes its listener in the
-    child. Both PIDs then name the same socket and command for that instant. Unrelated listeners,
-    an exec'd child, or an unobservable process stay distinct and fail the exact-one-owner gate.
-    """
-
-    candidates = sorted(set(pids))
-    candidate_set = set(candidates)
-    commands = {pid: command_reader(pid) for pid in candidates}
-    canonical = []
-    for pid in candidates:
-        command = commands[pid]
-        ancestor = parent_reader(pid)
-        seen = {pid}
-        inherited = False
-        while ancestor > 1 and ancestor not in seen:
-            if ancestor in candidate_set:
-                inherited = bool(command and command == commands[ancestor])
-                break
-            seen.add(ancestor)
-            ancestor = parent_reader(ancestor)
-        if not inherited:
-            canonical.append(pid)
-    return canonical
-
-
-def listener_pids(port: int) -> list[int]:
-    if platform.system() == "Darwin":
-        completed = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        pids = sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
-        return canonical_listener_pids(pids)
-    inodes = set()
-    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
-        try:
-            rows = table.read_text(encoding="utf-8").splitlines()[1:]
-        except OSError:
-            continue
-        for row in rows:
-            fields = row.split()
-            if len(fields) > 9 and int(fields[1].rsplit(":", 1)[1], 16) == port and fields[3] == "0A":
-                inodes.add(fields[9])
-    pids = set()
-    for process_dir in Path("/proc").iterdir():
-        if not process_dir.name.isdigit():
-            continue
-        try:
-            targets = (os.readlink(entry) for entry in (process_dir / "fd").iterdir())
-            if any(target.removeprefix("socket:[").removesuffix("]") in inodes for target in targets):
-                pids.add(int(process_dir.name))
-        except (OSError, PermissionError):
-            continue
-    return canonical_listener_pids(sorted(pids))
+def canonicalized_listener_pids(port: int) -> list[int]:
+    return canonical_listener_pids(
+        listener_pids(port),
+        parent_reader=process_parent_pid,
+        command_reader=process_command,
+    )
 
 
 def process_environment(pid: int) -> dict[str, str]:
@@ -218,11 +162,39 @@ def nearest_rank(values: list[float], fraction: float) -> float:
     return ordered[max(1, math.ceil(len(ordered) * fraction)) - 1]
 
 
+def validate_final_listener_owner(port: int, pid: int, before: dict[str, object]) -> None:
+    """Classify process exit/reuse separately from listener absence or takeover."""
+
+    expected_start = str(before["start_identity"])
+
+    def require_original_process(phase: str) -> None:
+        snapshot = process_identity_snapshot(pid)
+        if snapshot is None:
+            raise RuntimeError(
+                f"listener owner process exited or became unobservable {phase}: pid {pid}"
+            )
+        if snapshot.state == "Z":
+            raise RuntimeError(f"listener owner process exited {phase}: pid {pid}")
+        if snapshot.start_identity != expected_start:
+            raise RuntimeError(
+                f"listener owner process identity changed {phase}: pid {pid} "
+                f"{expected_start} != {snapshot.start_identity}"
+            )
+
+    require_original_process("before final listener census")
+    after_pids = canonicalized_listener_pids(port)
+    require_original_process("after final listener census")
+    if after_pids == [pid]:
+        return
+    if not after_pids:
+        raise RuntimeError(f"listener absent while original process remains alive: pid {pid}")
+    if len(after_pids) == 1:
+        raise RuntimeError(f"listener takeover during run: pid {pid} -> {after_pids[0]}")
+    raise RuntimeError(f"multiple listener owners after run: expected pid {pid}, found {after_pids}")
+
+
 def run(port: int, scheme: str, output: Path) -> bool:
-    pids = listener_pids(port)
-    if len(pids) != 1:
-        raise RuntimeError(f"port {port} must have exactly one listener; found {pids or 'none'}")
-    pid = pids[0]
+    pid = require_unique_listener_pid(port, canonicalized_listener_pids(port))
     before = process_identity(pid)
     cookie = auth_cookie(config_dir_from_process(process_environment(pid), port), port)
     base = f"{scheme}://127.0.0.1:{port}"
@@ -258,9 +230,7 @@ def run(port: int, scheme: str, output: Path) -> bool:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
             raise RuntimeError(f"missing measured record {request_id}")
         values.append(float(value))
-    after_pids = listener_pids(port)
-    if after_pids != [pid]:
-        raise RuntimeError(f"listener ownership changed during run: {[pid]} != {after_pids or 'none'}")
+    validate_final_listener_owner(port, pid, before)
     after = process_identity(pid)
     if before != after:
         raise RuntimeError(f"listener identity drifted: {before} != {after}")

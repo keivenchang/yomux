@@ -437,7 +437,7 @@ class PersistentWatchService:
         # Last typed private-repository generation observed per repo root.  A same-commit branch
         # switch changes the checked-out HEAD identity but leaves the working tree byte-for-byte
         # identical, so no watchfiles/native or directory-signature event reports it.  Reconcile
-        # polls filesystem.git_ops.repository_generation -- the ONE typed generation owner -- for
+        # polls filesystem.git_ops.pinned_repository_generation -- the ONE typed generation owner -- for
         # each repo root and, when its generation advances past what we last saw, bumps
         # repo_generations so the Differ consumer refreshes.  Baseline is recorded silently on the
         # first observation so startup does not manufacture a spurious refresh.
@@ -942,7 +942,7 @@ class PersistentWatchService:
         # shells out to git): an identical-tree branch switch advances this generation with no
         # working-tree event, so it is the only signal that reports a same-commit HEAD change.
         observed_repo_generations = {
-            repo: filesystem.git_ops.repository_generation(Path(repo))
+            repo: filesystem.git_ops.pinned_repository_generation(repo)
             for repo in configuration.repo_roots
         }
         with self.lock:

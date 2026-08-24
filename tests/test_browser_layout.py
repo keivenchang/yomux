@@ -568,9 +568,20 @@ def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(mo
             "#{window_width}x#{window_height}",
             timeout=5,
         )
+        current_path = run_isolated_tmux(
+            runtime,
+            "display-message",
+            "-p",
+            "-t",
+            f"{session}:",
+            "#{pane_current_path}",
+            timeout=5,
+        )
         assert ready, panes
         assert dimensions.returncode == 0, dimensions.stderr or dimensions.stdout
         assert dimensions.stdout.strip() == "93x27"
+        assert current_path.returncode == 0, current_path.stderr or current_path.stdout
+        assert Path(current_path.stdout.strip()).resolve() == tmp_path.resolve()
     finally:
         stop_isolated_tmux_runtime(runtime)
     assert not socket_dir.exists()

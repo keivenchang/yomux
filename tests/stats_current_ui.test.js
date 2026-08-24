@@ -788,6 +788,24 @@ test('cache generations are immutable and source generations cannot regress', ()
   assert.equal(controller.generation().cache_generation, 3);
 });
 
+test('source generations cannot regress within one range selection', () => {
+  const clock = new FakeClock();
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'selection-generation', clock,
+  });
+  controller.acceptSnapshot(snapshot({requested: 1, cache: 5, sourceGeneration: 5}));
+  controller.select(900, 10);
+  assert.equal(controller.generation(), null);
+  controller.acceptSnapshot(snapshot({range: 900, requested: 10, resolution: 10, cache: 6, sourceGeneration: 0}));
+  controller.acceptSnapshot(snapshot({range: 900, requested: 10, resolution: 10, cache: 7, sourceGeneration: 6}));
+  controller.select(300, 1);
+  assert.equal(controller.generation().cache_generation, 5, 'an already accepted exact cache remains last-known-good');
+  assert.throws(
+    () => controller.acceptSnapshot(snapshot({requested: 1, cache: 8, sourceGeneration: 4})),
+    /source generation regressed/,
+  );
+});
+
 test('applies exact newer deltas and rejects stale or wrong-key deltas', async () => {
   const clock = new FakeClock();
   let repairs = 0;

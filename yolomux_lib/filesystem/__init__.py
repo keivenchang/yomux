@@ -100,7 +100,6 @@ _validated_path = paths._validated_path
 
 _directory_is_repo = listing._directory_is_repo
 _entry_info = listing._entry_info
-_repo_marker_is_real = listing._repo_marker_is_real
 _visible_directory_names = listing._visible_directory_names
 
 _alnum_search_text = search._alnum_search_text
@@ -120,12 +119,8 @@ _BLAME_SHA_RE = git_ops._BLAME_SHA_RE
 _blame_cache = git_ops._blame_cache
 _diff_ref_resolution_error = git_ops._diff_ref_resolution_error
 _diff_refs = git_ops.diff_refs
-_ensure_ref_order = git_ops._ensure_ref_order
-_git_blob_text = git_ops._git_blob_text
-_git_mv_if_tracked = git_ops._git_mv_if_tracked
 _normal_ref = git_ops.normal_ref
 _parse_blame_porcelain = git_ops._parse_blame_porcelain
-_ref_exists = git_ops.git_ref_exists
 _refs_requested = git_ops.refs_requested
 
 _mtime_matches_expected = io_ops._mtime_matches_expected
@@ -276,6 +271,7 @@ def _filesystem_batch_result_authorized(payload: dict[str, Any]) -> dict[str, An
     requests = validated_batch_requests(payload)
     summary = filesystem_batch_request_summary(payload)
     responses = []
+    repo_info_cache: dict[str, dict[str, Any] | None] = {}
     list_operation_ms = 0.0
     info_operation_ms = 0.0
     list_performance_details: dict[str, float] = {}
@@ -337,7 +333,11 @@ def _filesystem_batch_result_authorized(payload: dict[str, Any]) -> dict[str, An
                         list_performance_details[key] = list_performance_details.get(key, 0.0) + value
             else:
                 try:
-                    result = path_info(raw_path, operation="fs_batch.info")
+                    result = path_info(
+                        raw_path,
+                        operation="fs_batch.info",
+                        repo_info_cache=repo_info_cache,
+                    )
                 finally:
                     info_operation_ms += max(0.0, (time.perf_counter() - item_started) * 1000)
         except FilesystemError as exc:
@@ -403,7 +403,11 @@ def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
     _sync_package_overrides()
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(str(repo), flags=flags) as handle:
-        payload = git_ops.git_repo_info(handle.descriptor_path(), include_status=include_status)
+        payload = git_ops.pinned_git_repo_info(
+            handle,
+            display_root=handle.resolved,
+            include_status=include_status,
+        )
         payload["root"] = str(handle.resolved)
         payload["name"] = handle.resolved.name
         return payload
@@ -413,7 +417,7 @@ def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
 def git_tracks_path(path: Path) -> bool:
     _sync_package_overrides()
     try:
-        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+        with paths.safe_path(str(path), flags=paths.metadata_descriptor_flags()) as handle:
             _repo, tracked, _history, _relative, _repo_info = git_ops.pinned_file_git_metadata(handle)
             return tracked
     except FilesystemError as error:
@@ -426,7 +430,7 @@ def git_tracks_path(path: Path) -> bool:
 def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
     _sync_package_overrides()
     try:
-        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+        with paths.safe_path(str(path), flags=paths.metadata_descriptor_flags()) as handle:
             _repo, _tracked, history, _relative, _repo_info = git_ops.pinned_file_git_metadata(
                 handle,
                 history_limit=limit,
@@ -473,7 +477,7 @@ def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
 def git_root_for_path(path: Path) -> str:
     _sync_package_overrides()
     try:
-        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+        with paths.safe_path(str(path), flags=paths.metadata_descriptor_flags()) as handle:
             repo = git_ops._pinned_repo_root(handle)
     except FilesystemError as error:
         if error.status != 404:
@@ -568,9 +572,18 @@ def create_directory(raw_path: str) -> dict[str, Any]:
 
 
 @normalize_os_errors
-def path_info(raw_path: str, *, operation: str = "path_info") -> dict[str, Any]:
+def path_info(
+    raw_path: str,
+    *,
+    operation: str = "path_info",
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.path_info(raw_path, operation=operation)
+    return io_ops.path_info(
+        raw_path,
+        operation=operation,
+        repo_info_cache=repo_info_cache,
+    )
 
 
 def is_text_path(raw_path: str) -> bool:

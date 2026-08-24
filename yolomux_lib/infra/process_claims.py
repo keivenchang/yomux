@@ -49,6 +49,24 @@ told so by name, and a successor that dies mid-transfer leaves a marker whose
 recorded holder a later pass can fence and clear rather than a claim two owners
 both think they hold.
 
+The marker alone is NOT sufficient, and assuming it was is how two live
+supervisors used to end up holding one claim.  It serialises *overlapping*
+transactions; it says nothing about a successor that read the claim before a
+previous transaction committed and only reached the marker afterwards.  That
+successor sees an unchanged ``claim_id`` -- adoption never mints a new one --
+and would overwrite a supervisor that is now alive.  So the transfer is a real
+compare-and-swap: under the marker the claim is re-read and both the supervisor
+identity and the ``adoption_count`` it was fenced against must still be exactly
+what this successor saw, or the successor LOSES by name
+(``supervisor_changed_during_adoption``) and sends nothing.  ``adoption_count``
+is that CAS version counter, which is the only reason it exists; a field written
+by one side and read by nobody is how this defect stayed invisible.
+
+Provenance is measured, never remembered: ``adopted_from`` names the supervisor
+the winner actually displaced, read from the claim under the marker, not from
+the pre-transaction view -- otherwise a second adoption credits the long-dead
+original launcher instead of the supervisor it really took over from.
+
 Rejected shortcuts, restated so they are not reintroduced: ``ps`` command-text
 matching, PPID/PGID, hostname, or "it looks like one of ours" are never
 sufficient authority.  Every ambiguity fails closed -- no signal, no unlink,
@@ -118,6 +136,8 @@ CLAIM_REASON_ADOPTION_IN_PROGRESS = "adoption_in_progress"
 CLAIM_REASON_STALE_ADOPTION_MARKER_CLEARED = "stale_adoption_marker_cleared"
 CLAIM_REASON_ADOPTION_MARKER_UNREADABLE = "adoption_marker_unreadable"
 CLAIM_REASON_CLAIM_CHANGED_DURING_ADOPTION = "claim_changed_during_adoption"
+CLAIM_REASON_SUPERVISOR_CHANGED_DURING_ADOPTION = "supervisor_changed_during_adoption"
+CLAIM_REASON_UNREADABLE_ADOPTION_COUNT = "unreadable_adoption_count"
 CLAIM_REASON_GENERATION_MISMATCH = "generation_mismatch"
 
 
@@ -342,9 +362,19 @@ class ProcessClaimLedger:
             row = _row(path, pid, action, CLAIM_RESULT_REPORTED_ONLY, CLAIM_REASON_SUPERVISOR_ALIVE)
             row["surviving_supervisor"] = supervisor_state.as_dict()
             return row, pid, supervisor_state
+        if not process_is_provably_gone(supervisor_state):
+            # Not alive is not the same as proven gone.  A supervisor whose
+            # `/proc/<pid>/stat` is merely unreadable lands here, and treating
+            # that as "gone" authorized `_reap_one` to terminate a live, fully
+            # proven target -- the one outcome this ledger exists to prevent.
+            # The fence's own reason is carried through so no second vocabulary
+            # can drift away from it.
+            row = _row(path, pid, action, CLAIM_RESULT_REPORTED_ONLY, supervisor_state.reason.value)
+            row["unprovable_supervisor"] = supervisor_state.as_dict()
+            return row, pid, supervisor_state
         return None, pid, supervisor_state
 
-    def adopt_unsupervised(self, *, generation: str = "") -> list[dict[str, Any]]:
+    def adopt_unsupervised(self, *, generation: str = "", pid: int | None = None) -> list[dict[str, Any]]:
         """Transfer, to this process, every claim whose supervisor is provably gone.
 
         This is the only path by which a helper outlives its launcher.  It is
@@ -356,11 +386,15 @@ class ProcessClaimLedger:
         ``generation`` optionally restricts adoption to claims published for one
         spawn epoch, so a successor cannot inherit a generation it never asked
         for.  An empty value adopts regardless of generation and records the
-        claim's own.
+        claim's own. ``pid`` narrows the transaction to one recorded survivor;
+        callers deciding one daemon's fate must not transfer sibling claims as a
+        side effect of that decision.
         """
 
         adopted: list[dict[str, Any]] = []
         for path, record in self.rows():
+            if pid is not None and _record_pid(record or {}) != int(pid):
+                continue
             adopted.append(self._adopt_one(path, record, generation=str(generation or "")))
         return adopted
 
@@ -417,33 +451,7 @@ class ProcessClaimLedger:
                 handle.write(json.dumps(marker_payload, sort_keys=True, separators=(",", ":")) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            # The claim must still be the exact one that was fenced. Re-reading
-            # under the marker is what makes the transfer a transaction rather
-            # than two independent reads with a hole between them.
-            current = _read_claim(path)
-            if current is None or str(current.get("claim_id") or "") != claim_id:
-                return _row(
-                    path,
-                    pid,
-                    CLAIM_ACTION_ADOPT,
-                    CLAIM_RESULT_ADOPTION_FAILED,
-                    CLAIM_REASON_CLAIM_CHANGED_DURING_ADOPTION,
-                )
-            payload = dict(current)
-            payload["supervisor"] = successor
-            payload["adopted_from"] = record.get("supervisor")
-            payload["adopted_at"] = float(self.clock())
-            payload["adoption_count"] = int(current.get("adoption_count") or 0) + 1
-            try:
-                atomic_write_text(
-                    path,
-                    json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-                    mode=0o600,
-                )
-            except OSError as error:
-                row = _row(path, pid, CLAIM_ACTION_ADOPT, CLAIM_RESULT_ADOPTION_FAILED, CLAIM_REASON_SUPERVISOR_GONE)
-                row["error"] = type(error).__name__
-                return row
+            row = self._swap_supervisor(path, record, pid, claim_id, successor, target_state)
         finally:
             try:
                 marker_path.unlink()
@@ -454,14 +462,99 @@ class ProcessClaimLedger:
                 # this claim, so the failure has to reach the caller rather than
                 # being dropped into a bare `pass`.
                 self._last_marker_cleanup_error = type(error).__name__
-        row = _row(path, pid, CLAIM_ACTION_ADOPT, CLAIM_RESULT_ADOPTED, CLAIM_REASON_SUPERVISOR_GONE)
-        row["surviving_supervisor"] = dict(successor)
-        row["previous_supervisor"] = record.get("supervisor")
-        row["generation"] = str(record.get("generation") or "")
-        row["target_identity"] = target_state.as_dict()
         if self._last_marker_cleanup_error:
+            # Consumed on EVERY outcome, not just the winning one: a refusal that
+            # left the error set would hand it to the next unrelated transaction.
             row["marker_remove_error"] = self._last_marker_cleanup_error
             self._last_marker_cleanup_error = ""
+        return row
+
+    def _swap_supervisor(
+        self,
+        path: Path,
+        record: dict[str, Any],
+        pid: int,
+        claim_id: str,
+        successor: dict[str, Any],
+        target_state: LocalProcessDiagnostic,
+    ) -> dict[str, Any]:
+        """Compare and swap the supervisor, or lose the transfer by name.
+
+        Runs under the adoption marker, which serialises overlapping
+        transactions but cannot see one that already COMMITTED: a successor that
+        read the claim before another finished still finds its own ``claim_id``
+        intact, because adoption never mints a new one.  So the fence here is the
+        pair that adoption actually mutates -- the supervisor identity and the
+        ``adoption_count`` version counter.  Either one moving means another
+        successor took the helper first, and the correct outcome is to lose,
+        signal nothing, and say so.
+        """
+
+        current = _read_claim(path)
+        if current is None or str(current.get("claim_id") or "") != claim_id:
+            return _row(
+                path,
+                pid,
+                CLAIM_ACTION_ADOPT,
+                CLAIM_RESULT_ADOPTION_FAILED,
+                CLAIM_REASON_CLAIM_CHANGED_DURING_ADOPTION,
+            )
+        fenced_count = _adoption_count(record)
+        observed_count = _adoption_count(current)
+        if fenced_count is None or observed_count is None:
+            # A version counter that cannot be read cannot fence anything, and a
+            # transfer that cannot be fenced must not happen.
+            row = _row(
+                path,
+                pid,
+                CLAIM_ACTION_ADOPT,
+                CLAIM_RESULT_ADOPTION_CONTENDED,
+                CLAIM_REASON_UNREADABLE_ADOPTION_COUNT,
+            )
+            row["fenced_adoption_count"] = record.get("adoption_count")
+            row["observed_adoption_count"] = current.get("adoption_count")
+            return row
+        displaced = current.get("supervisor")
+        if displaced != record.get("supervisor") or observed_count != fenced_count:
+            # CONTENDED, not FAILED: the caller's contract for a contended row is
+            # "another successor owns this, do not reclaim it", which is exactly
+            # what a loser must do.  Reporting a failure here would let the loser
+            # fall through to reclaiming the helper the winner now supervises.
+            row = _row(
+                path,
+                pid,
+                CLAIM_ACTION_ADOPT,
+                CLAIM_RESULT_ADOPTION_CONTENDED,
+                CLAIM_REASON_SUPERVISOR_CHANGED_DURING_ADOPTION,
+            )
+            row["fenced_supervisor"] = record.get("supervisor")
+            row["observed_supervisor"] = displaced
+            row["fenced_adoption_count"] = fenced_count
+            row["observed_adoption_count"] = observed_count
+            return row
+        payload = dict(current)
+        payload["supervisor"] = successor
+        # What was ACTUALLY displaced, read under the marker. The pre-transaction
+        # view would name the original launcher on every adoption after the first.
+        payload["adopted_from"] = displaced
+        payload["adopted_at"] = float(self.clock())
+        payload["adoption_count"] = observed_count + 1
+        try:
+            atomic_write_text(
+                path,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+                mode=0o600,
+            )
+        except OSError as error:
+            row = _row(path, pid, CLAIM_ACTION_ADOPT, CLAIM_RESULT_ADOPTION_FAILED, CLAIM_REASON_SUPERVISOR_GONE)
+            row["error"] = type(error).__name__
+            return row
+        row = _row(path, pid, CLAIM_ACTION_ADOPT, CLAIM_RESULT_ADOPTED, CLAIM_REASON_SUPERVISOR_GONE)
+        row["surviving_supervisor"] = dict(successor)
+        row["previous_supervisor"] = displaced
+        row["adoption_count"] = int(payload["adoption_count"])
+        row["generation"] = str(current.get("generation") or "")
+        row["target_identity"] = target_state.as_dict()
         return row
 
     def _resolve_contended_marker(self, path: Path, marker_path: Path, pid: int) -> dict[str, Any]:
@@ -484,7 +577,7 @@ class ProcessClaimLedger:
                 CLAIM_REASON_ADOPTION_MARKER_UNREADABLE,
             )
         holder_state = is_current_local_process(holder, host_identity=self.identity)
-        if holder_state.current or not holder_state.may_remove_stale_record:
+        if not process_is_provably_gone(holder_state):
             row = _row(
                 path,
                 pid,
@@ -531,7 +624,7 @@ class ProcessClaimLedger:
         target_state = is_current_local_process(record, host_identity=self.identity)
         if target_state.current:
             return self._terminate(path, pid, target_state, signal_process=signal_process, signal_number=signal_number)
-        if target_state.reason in _CLAIM_TARGET_GONE_REASONS:
+        if process_is_provably_gone(target_state):
             # The claimed process cannot exist any more, so the claim file is the
             # only leftover.  Removing it is record-only cleanup: no signal, no
             # adoption, and it is the only way a stale claim stops accumulating.
@@ -592,11 +685,34 @@ class ProcessClaimLedger:
         return _row(path, pid, CLAIM_ACTION_UNLINK_CLAIM, result, target_state.reason.value)
 
 
-_CLAIM_TARGET_GONE_REASONS = frozenset({
+_PROVABLY_GONE_REASONS = frozenset({
     LocalProcessReason.PROCESS_NOT_FOUND,
     LocalProcessReason.PROCESS_IDENTITY_REUSED,
     LocalProcessReason.PREVIOUS_BOOT,
 })
+
+
+def process_is_provably_gone(state: LocalProcessDiagnostic) -> bool:
+    """Whether the fence PROVED this recorded process no longer exists.
+
+    The one owner of "gone" for every destructive decision that reads a claim:
+    the claimed target, the recorded supervisor, and the holder of an adoption
+    marker.  There used to be three spellings of this question -- ``not
+    state.current``, ``state.may_remove_stale_record``, and a bare
+    ``not pid_is_alive()`` -- and they disagreed in exactly the direction that
+    costs the most.  ``not current`` is the dangerous one: it reads
+    ``process_identity_unavailable`` (a live process whose ``/proc/<pid>/stat``
+    merely could not be read) as gone, which is fail-OPEN at a boundary whose
+    next step is a signal.
+
+    Only these three reasons prove absence, and each is reachable only after the
+    dimensions before it already matched: ``previous_boot`` is returned after the
+    host matched, and the other two after host AND boot matched.  Every other
+    reason -- foreign host, missing identity, invalid pid, unreadable identity --
+    means the proof did not complete, and unproven must never read as absent.
+    """
+
+    return state.reason in _PROVABLY_GONE_REASONS
 
 
 def _read_claim(path: Path) -> dict[str, Any] | None:
@@ -605,6 +721,25 @@ def _read_claim(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _adoption_count(record: Mapping[str, Any]) -> int | None:
+    """Read the CAS version counter, or ``None`` when it cannot be read.
+
+    Absent is NOT a silent default: a claim `publish` wrote carries no
+    ``adoption_count`` at all and that genuinely means "never adopted", which is
+    zero.  A value that is present but not a whole number is a different thing
+    entirely -- the counter is corrupt and can fence nothing -- so it returns
+    ``None`` and the caller refuses rather than coercing it to zero and
+    swapping on a comparison it never really made.
+    """
+
+    value = record.get("adoption_count")
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _record_pid(record: Mapping[str, Any]) -> int:

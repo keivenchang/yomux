@@ -1,3 +1,4 @@
+import contextlib
 import copy as copy_module
 import dataclasses
 import json
@@ -17,8 +18,6 @@ import pytest
 import threading as threading_module
 
 import yolomux_lib.app as app_module
-import yolomux_lib.observability.queued_delivery as queued_delivery_module
-from yolomux_lib.infra import jobd as jobd_module
 from yolomux_lib import common as common_module
 from yolomux_lib import sessions as sessions_module
 from yolomux_lib import watchd
@@ -41,10 +40,16 @@ from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import stop_browser_server
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryCompactionOwner
-from yolomux_lib.observability.queued_delivery import compact_queued_delivery_journal
 from yolomux_lib.server_logs import SERVER_LOGS
 from yolomux_lib.filesystem import exclusions
+from yolomux_lib.filesystem import paths as filesystem_paths
+from yolomux_lib.infra import jobd as jobd_module
+
+
+@contextlib.contextmanager
+def pinned_test_snapshot_runner(repo: Path):
+    with session_files.pinned_session_git_scope(repo, operation="test_session_files_git") as scope:
+        yield session_files.pinned_snapshot_runner(scope, operation="testSessionFilesGit")
 
 
 def agent(kind, transcript, cwd, session="s1"):
@@ -87,6 +92,13 @@ def operation_terminal_response(server, status_url, timeout=10):
         time.sleep(0.02)
 
 
+@pytest.fixture
+def isolated_real_jobd_runtime(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "jobd-runtime"
+    monkeypatch.setattr(jobd_module, "RUNTIME_DIR", runtime_dir)
+    return runtime_dir
+
+
 def retire_expected_session_files_failure_logs(
     server,
     *,
@@ -94,6 +106,7 @@ def retire_expected_session_files_failure_logs(
     operation_id,
     stack_operation,
     expect_transport,
+    expected_code="service_unavailable",
 ):
     """Retire one exact correlated session-files failure from this fixture boundary."""
 
@@ -134,7 +147,7 @@ def retire_expected_session_files_failure_logs(
     structured = [json.loads(entry["message"]) for entry in failures[-2:]]
     for payload in structured:
         assert payload["request"]["id"] == request_id, payload
-        assert payload["code"] == "service_unavailable", payload
+        assert payload["code"] == expected_code, payload
         assert payload["origin"] == "local_services.jobd", payload
         assert payload["stack"][0]["operation"] == "GET /api/session-files", payload
         assert payload["stack"][-1]["operation"] == stack_operation, payload
@@ -161,7 +174,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert {"branch", "from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
     assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
 
-    assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
+    assert get_type_hints(session_files.session_file_entry)["return"] == SessionFileEntry | None
     assert get_type_hints(session_files.session_files_payload_for_info)["return"] is SessionFilesPayload
     assert tuple_return_args(get_type_hints(session_files.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
@@ -171,11 +184,15 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
-def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(monkeypatch, tmp_path):
+def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(
+    isolated_real_jobd_runtime, monkeypatch, tmp_path,
+):
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.1")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp([])
     webapp.refresh_sessions = lambda: []
+    assert jobd_module.RUNTIME_DIR == isolated_real_jobd_runtime
+    assert webapp.job_client.socket_path == jobd_module.default_socket_path()
     assert webapp.job_client.start_for_scheduler()
     first_pid = int(webapp.job_client.registry._read_record()["pid"])
     server = thread = None
@@ -255,139 +272,128 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
         webapp.control_server.stop()
 
 
-def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(
-    monkeypatch,
-    tmp_path,
-):
-    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(
-        app_module,
-        "SESSION_FILES_OPERATION_STATE_PATH",
-        tmp_path / "operations" / "session-files.json",
-        raising=False,
-    )
+def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir(); init_repo(repo)
+    pane = PaneInfo(session="5", window="0", pane="0", pane_id="%1", target="5:0.0", current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=11)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, [])); monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache"); monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json", raising=False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
-    release_result = threading_module.Event()
-    terminal_published = threading_module.Event()
-    published = []
-
+    release_result, terminal_published, changed_terminal_published = threading_module.Event(), threading_module.Event(), threading_module.Event()
+    published, submissions, result_calls, durable_writes, result_path = [], [], [], [], ["done.py"]
     class ControlledJobClient:
         def stop_for_scheduler(self):
             return None
-
-        def submit(self, *_args, **_kwargs):
-            return {
-                "ok": True,
-                "job": {
-                    "job_id": "job-session-files-ready",
-                    "generation": 7,
-                    "status": "queued",
-                },
-            }
-
+        def submit(self, *_args, **kwargs):
+            submissions.append(kwargs)
+            count = len(submissions)
+            job_id = "job-session-files-ready" if count <= 2 else f"job-session-files-fresh-{count}"
+            return {"ok": True, "job": {"job_id": job_id, "generation": 7, "status": "queued"}}
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 7}, b""
-
         def result(self, job_id, *, timeout):
-            assert job_id == "job-session-files-ready"
-            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
-            assert release_result.wait(2.0), "test did not release the accepted job"
-            return {
-                "ok": True,
-                "job": {
-                    "job_id": job_id,
-                    "status": "completed",
-                    "result": {
-                        "payload": {
-                            "session": "5",
-                            "loaded": True,
-                            "files": [{"path": "done.py"}],
-                            "repos": [],
-                            "errors": [],
-                        },
-                        "status": int(HTTPStatus.OK),
-                    },
-                },
-            }
+            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS; assert release_result.wait(2.0), "test did not release the accepted job"
+            result_calls.append(job_id)
+            path = "done.py" if job_id == "job-session-files-ready" else result_path[0]
+            payload = {"session": "5", "loaded": True, "files": [{"path": path}], "repos": [], "errors": []}
+            return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": {"payload": payload, "status": int(HTTPStatus.OK), "repository_identities": {str(repo.resolve()): ["producer-derived"]}}}}
+    webapp = TmuxWebtermApp(["5"]); webapp.job_client = ControlledJobClient(); webapp.refresh_sessions = lambda: []
+    def producer_derived_git_identity(*_args):
+        assert release_result.is_set(), "accepted HTTP request performed unwatched Git identity work before 202"
+        return ("producer-derived",), "test-derived"
 
-    webapp = TmuxWebtermApp(["5"])
-    webapp.job_client = ControlledJobClient()
-    webapp.refresh_sessions = lambda: []
+    monkeypatch.setattr(webapp, "shared_git_identity", producer_derived_git_identity)
+    original_write = webapp.write_session_files_disk_cache_unlocked
+    def capture_durable_write(path, signature, payload, status, source_generation=""):
+        durable_writes.append((path, source_generation))
+        return original_write(path, signature, payload, status, source_generation)
+
+    webapp.write_session_files_disk_cache_unlocked = capture_durable_write
     webapp.request_session_files_disk_cache_prune = lambda *_args, **_kwargs: None
     original_publish = webapp.publish_client_event
-
     def capture_publish(event_type, payload, **kwargs):
         event = original_publish(event_type, payload, **kwargs)
         if event_type == "operation_terminal":
             published.append(payload)
-            terminal_published.set()
+            if len(published) == 2: terminal_published.set()
+            elif len(published) == 3: changed_terminal_published.set()
         return event
 
-    webapp.publish_client_event = capture_publish
-    webapp.start_client_event_watcher = lambda: None
-    webapp.wake_client_event_watcher = lambda: None
-    webapp.stop_client_event_watcher_if_idle = lambda: True
+    webapp.publish_client_event = capture_publish; webapp.start_client_event_watcher = lambda: None
+    webapp.wake_client_event_watcher = lambda: None; webapp.stop_client_event_watcher_if_idle = lambda: True
     server = thread = None
     try:
         server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
-        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         refs = {"/repo/z": {"to": " current ", "from": " HEAD~2 "}}
+        canonical_refs = {"/repo/z": {"from": "HEAD~2", "to": "current"}}  # The HTTP boundary trims these before canonical publication.
         encoded_refs = quote(json.dumps(refs, separators=(",", ":")), safe="")
-        connection.request("GET", f"/api/session-files?session=5&force=1&hours=7.5&from=HEAD~3&to=current&refs={encoded_refs}")
-        response = connection.getresponse()
-        receipt = json.loads(response.read().decode("utf-8"))
-        connection.close()
-
-        assert response.status == HTTPStatus.ACCEPTED
-        assert receipt["state"] == "queued"
-        assert receipt["request"]["id"].startswith("r-")
+        request_path = f"/api/session-files?session=5&hours=7.5&from=HEAD~3&to=current&refs={encoded_refs}"
+        def request_session_files(path=request_path):
+            connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            connection.request("GET", path); response = connection.getresponse()
+            receipt = json.loads(response.read().decode("utf-8")); connection.close()
+            assert response.status == HTTPStatus.ACCEPTED
+            return receipt
+        receipt, duplicate_receipt = request_session_files(), request_session_files()
+        assert receipt["state"] == "queued"; assert receipt["request"]["id"].startswith("r-")
         operation = receipt["operation"]
-        assert operation["id"].startswith("op-")
-        assert operation["status_url"] == f"/api/operations/{operation['id']}"
-        assert operation["events_url"] == f"/api/client-events?operation_id={operation['id']}"
-        assert operation["cursor"]["seq"] == 0
-        assert operation["context"] == {
-            "session": "5",
-            "from_ref": "HEAD~3",
-            "to_ref": "current",
-            "hours": 7.5,
-            "repo_refs": {"/repo/z": {"from": "HEAD~2", "to": "current"}},
-        }
-        assert operation["progress"] == {
-            "phase": "waiting_for_product",
-            "producer": "jobd",
-            "producer_state": "queued",
-        }
-
-        release_result.set()
-        assert terminal_published.wait(2.0), "accepted operation did not publish a terminal result"
-        terminal = published[-1]
-        assert terminal["operation"]["id"] == operation["id"]
-        assert terminal["operation"]["cursor"]["seq"] == 1
-        assert terminal["result"]["state"] == "ready"
-        assert terminal["result"]["data"]["files"] == [{"path": "done.py"}]
-
+        assert operation["id"].startswith("op-"); assert operation["status_url"] == f"/api/operations/{operation['id']}"
+        assert operation["events_url"] == f"/api/client-events?operation_id={operation['id']}"; assert operation["cursor"]["seq"] == 0
+        assert operation["context"] == {"session": "5", "from_ref": "HEAD~3", "to_ref": "current", "hours": 7.5, "repo_refs": {"/repo/z": {"from": "HEAD~2", "to": "current"}}}
+        assert operation["progress"] == {"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"}
+        assert duplicate_receipt["operation"]["id"] != operation["id"]; assert len(submissions) == 2
+        assert submissions[0]["coalesce_key"] == submissions[1]["coalesce_key"]; assert submissions[0]["generation"] == submissions[1]["generation"]
+        assert submissions[0]["fresh_only"] is submissions[1]["fresh_only"] is True
+        release_result.set(); assert terminal_published.wait(2.0), "accepted operations did not publish terminal results"
+        terminals = {item["operation"]["id"]: item for item in published}
+        assert set(terminals) == {operation["id"], duplicate_receipt["operation"]["id"]}
+        terminal = terminals[operation["id"]]
+        assert terminal["operation"]["id"] == operation["id"]; assert terminal["operation"]["cursor"]["seq"] == 1
+        assert terminal["result"]["state"] == "ready"; assert terminal["result"]["data"]["files"] == [{"path": "done.py"}]
+        assert [item["state"] for item in terminal["result"]["producer"]["chain"]] == ["completed"]
+        assert result_calls == ["job-session-files-ready"]
+        canonical_key = webapp.session_files_cache_key("payload", {"5": info}, "5", 7.5, "HEAD~3", "current", canonical_refs)
+        path, _signature = webapp.session_files_disk_cache_path(canonical_key)
+        canonical_source_generation = webapp.session_files_source_generation(canonical_key)
+        assert durable_writes == [(path, canonical_source_generation)]
+        record = json.loads(path.read_text(encoding="utf-8")); assert record["source_generation"] == canonical_source_generation
+        refresh_starts, original_start_refresh = [], webapp.start_session_files_cache_refresh
+        webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (refresh_starts.append(cache_key) or original_start_refresh(cache_key, target, *args))
+        snapshot, snapshot_status = webapp.session_files_payload_for_infos("5", {"5": info}, 7.5, "HEAD~3", "current", canonical_refs, requester="descriptor-snapshot")
+        assert (snapshot_status, snapshot["files"], snapshot["cache"]["stale"]) == (HTTPStatus.OK, [{"path": "done.py"}], False)
+        assert refresh_starts == []; assert webapp.session_files_service.wait_for_idle(0.1)
+        result_path[0] = "changed.py"; changed_receipt = request_session_files(f"{request_path}&force=1")
+        assert changed_receipt["state"] == "queued"
+        assert changed_terminal_published.wait(2.0), "changed operation did not publish a terminal result"
+        changed_terminal = published[-1]
+        assert changed_terminal["operation"]["id"] == changed_receipt["operation"]["id"]; assert changed_terminal["result"]["data"]["files"] == [{"path": "changed.py"}]
+        assert submissions[2]["coalesce_key"] == submissions[0]["coalesce_key"]; assert submissions[2]["fresh_only"] is True
+        assert [item["job_id"] for item in changed_terminal["result"]["producer"]["chain"]] == ["job-session-files-fresh-3"]
+        assert [item["state"] for item in changed_terminal["result"]["producer"]["chain"]] == ["completed"]
+        watch_record = webapp.client_watch_service.event_watcher_record
+        watch_record.filesystem_healthy = True
+        watch_record.filesystem_roots = (str(repo.resolve()),)
+        result_path[0] = "watched.py"
+        watched_receipt = request_session_files(f"{request_path}&force=1")
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+        watched_terminal = published[-1]
+        assert watched_terminal["operation"]["id"] == watched_receipt["operation"]["id"]
+        assert watched_terminal["result"]["data"]["files"] == [{"path": "watched.py"}]
+        assert submissions[3]["fresh_only"] is True
+        assert [item["job_id"] for item in watched_terminal["result"]["producer"]["chain"]] == ["job-session-files-fresh-4"]
+        assert [item["state"] for item in watched_terminal["result"]["producer"]["chain"]] == ["completed"]
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-        connection.request("GET", operation["status_url"])
-        status_response = connection.getresponse()
-        replayed_status = json.loads(status_response.read().decode("utf-8"))
-        connection.close()
-        assert status_response.status == HTTPStatus.OK
-        assert replayed_status == terminal["result"]
-
+        connection.request("GET", operation["status_url"]); status_response = connection.getresponse()
+        replayed_status = json.loads(status_response.read().decode("utf-8")); connection.close()
+        assert status_response.status == HTTPStatus.OK; assert replayed_status == terminal["result"]
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
-        connection.request("GET", operation["events_url"])
-        replay_response = connection.getresponse()
+        connection.request("GET", operation["events_url"]); replay_response = connection.getresponse()
         assert replay_response.status == HTTPStatus.OK
         assert replay_response.readline().decode("utf-8") == "event: ready\n"
-        replay_response.readline()
-        replay_response.readline()
+        replay_response.readline(); replay_response.readline()
         assert replay_response.readline().decode("utf-8") == "event: operation_terminal\n"
-        replay_payload = json.loads(replay_response.readline().decode("utf-8").removeprefix("data: "))
-        connection.close()
+        replay_payload = json.loads(replay_response.readline().decode("utf-8").removeprefix("data: ")); connection.close()
         assert replay_payload["payload"] == terminal
         operation_state_path = tmp_path / "operations" / "session-files.json"
         assert operation_state_path.is_file()
@@ -395,59 +401,430 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert persisted == (terminal["result"], HTTPStatus.OK)
     finally:
         release_result.set()
-        if server is not None:
-            stop_browser_server(server, thread)
+        if server is not None: stop_browser_server(server, thread)
         webapp.control_server.stop()
 
 
-def test_session_files_operation_failure_preserves_exception_type_and_frames(
-    monkeypatch,
-    tmp_path,
-):
-    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+def test_session_files_completion_before_receipt_persistence_terminalizes_after_registration(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
+    webapp = TmuxWebtermApp([])
+    webapp.submit_session_files_job = lambda *_args, **_kwargs: (
+        {"ok": True, "job": {"job_id": "job-completed-before-accept", "status": "queued", "generation": 1}},
+        "completed-before-accept",
+        1,
+    )
+    accept_entered = threading_module.Event()
+    allow_accept = threading_module.Event()
+    product_completed = threading_module.Event()
+    result = {}
+
+    def complete(flight, *_args):
+        flight.future.set_result(({"files": [{"path": "ready.py"}], "repos": [], "errors": []}, HTTPStatus.OK, None))
+        product_completed.set()
+        flight.wait_for_owner()
+        webapp.jobd_operation_service.release_flight(flight)
+
+    original_accept = webapp.queued_delivery_ledger.accept_operation
+
+    def accept_after_product(**kwargs):
+        accept_entered.set()
+        assert allow_accept.wait(timeout=5)
+        return original_accept(**kwargs)
+
+    webapp.complete_session_files_operation = complete
+    webapp.queued_delivery_ledger.accept_operation = accept_after_product
+    starter = threading_module.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            webapp.start_session_files_operation(
+                None,
+                {},
+                24.0,
+                None,
+                None,
+                None,
+                ("request", ()),
+                priority="freshness",
+                requester="test",
+            ),
+        ),
+        name="session-files-delayed-accept",
+    )
+    try:
+        starter.start()
+        assert accept_entered.wait(timeout=5)
+        assert product_completed.wait(timeout=5)
+        assert starter.is_alive()
+        allow_accept.set()
+        starter.join(timeout=5)
+        assert not starter.is_alive()
+
+        receipt, status = result["value"]
+        operation_id = receipt["operation"]["id"]
+        terminal, terminal_status = webapp.queued_delivery_ledger.operation_status(operation_id)
+        assert status == HTTPStatus.ACCEPTED
+        assert terminal_status == HTTPStatus.OK
+        assert terminal["state"] == "ready"
+        assert terminal["data"]["files"] == [{"path": "ready.py"}]
+        assert webapp.queued_delivery_ledger.open_operations() == []
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.jobd_operation_service.flights == {}
+    finally:
+        allow_accept.set()
+        starter.join(timeout=5)
+        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.control_server.stop()
+
+
+def test_session_files_operation_completion_separates_replacement_intent(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
+    webapp = TmuxWebtermApp([])
+    started = []
+    first_started = threading_module.Event()
+    both_started = threading_module.Event()
+    release = threading_module.Event()
+
+    def submit(*_args, **_kwargs):
+        return {"ok": True, "job": {"job_id": "job-shared", "status": "queued", "generation": 1}}, "same-coalesce", 1
+
+    def complete(flight, _job_id, _session, _infos, _hours, _from_ref, _to_ref, _repo_refs, _cache_key, _deadline_at, replace, _priority, _requester):
+        started.append(replace)
+        first_started.set()
+        if len(started) == 2:
+            both_started.set()
+        assert release.wait(timeout=5)
+        flight.future.set_result(({"files": [{"path": f"replace-{replace}.py"}], "repos": [], "errors": []}, HTTPStatus.OK, None))
+        flight.wait_for_owner()
+        webapp.jobd_operation_service.release_flight(flight)
+
+    webapp.submit_session_files_job, webapp.complete_session_files_operation = submit, complete
+    try:
+        first, first_status = webapp.start_session_files_operation(None, {}, 24.0, None, None, None, ("request-a", ()), priority="freshness", requester="test")
+        assert first_started.wait(timeout=1)
+        second, second_status = webapp.start_session_files_operation(None, {}, 24.0, None, None, None, ("request-b", ()), priority="freshness", requester="test", replace=True)
+        assert (first_status, second_status) == (HTTPStatus.ACCEPTED, HTTPStatus.ACCEPTED)
+        assert both_started.wait(timeout=1), started
+        release.set(); assert webapp.jobd_operation_service.wait_for_idle(5)
+        first_result, _ = webapp.queued_delivery_ledger.operation_status(first["operation"]["id"])
+        second_result, _ = webapp.queued_delivery_ledger.operation_status(second["operation"]["id"])
+        assert first_result["data"]["files"] == [{"path": "replace-False.py"}]
+        assert second_result["data"]["files"] == [{"path": "replace-True.py"}]
+    finally:
+        release.set()
+        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.control_server.stop()
+
+
+def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
+    webapp = TmuxWebtermApp([])
+    canonical_key = ("payload", "canonical", (), (("/repo", "canonical"),))
+    ordinary_key = ("payload", "ordinary", (), (("/repo", "deferred-unwatched:ordinary"),))
+    forced_key = ("payload", "forced", (), (("/repo", "deferred-unwatched:forced"),))
+    older_payload = {"files": [{"path": "older.py"}], "repos": [], "errors": []}
+    newer_payload = {"files": [{"path": "newer.py"}], "repos": [], "errors": []}
+    ordinary_canonical_waiting = threading_module.Event()
+    release_ordinary_canonical = threading_module.Event()
+    forced_terminalized = threading_module.Event()
+    submission_counts = {False: 0, True: 0}
+
+    def submit(*_args, replace=False, **_kwargs):
+        submission_counts[replace] += 1
+        stage = "initial" if submission_counts[replace] == 1 else "canonical"
+        mode = "forced" if replace else "ordinary"
+        job_id = f"{mode}-{stage}"
+        return {"ok": True, "job": {"job_id": job_id, "status": "queued", "generation": 1}}, job_id, 1
+
+    def wait_for_product(job_id, _deadline_at):
+        if job_id == "ordinary-canonical":
+            ordinary_canonical_waiting.set()
+            assert release_ordinary_canonical.wait(timeout=5)
+        payload = newer_payload if job_id.startswith("forced-") else older_payload
+        return payload, HTTPStatus.OK
+
+    original_terminalize = webapp.terminalize_operation
+
+    def terminalize(operation_id, result, status):
+        event = original_terminalize(operation_id, result, status)
+        if result.get("data", {}).get("files") == newer_payload["files"]:
+            forced_terminalized.set()
+        return event
+
+    webapp.submit_session_files_job = submit
+    webapp.wait_for_session_files_operation_job = wait_for_product
+    webapp.session_files_cache_key = lambda *_args, **_kwargs: canonical_key
+    webapp.terminalize_operation = terminalize
+    try:
+        ordinary_receipt, ordinary_status = webapp.start_session_files_operation(
+            None,
+            {},
+            24.0,
+            None,
+            None,
+            None,
+            ordinary_key,
+            priority="freshness",
+            requester="test",
+        )
+        assert ordinary_status == HTTPStatus.ACCEPTED
+        assert ordinary_canonical_waiting.wait(timeout=1)
+
+        forced_receipt, forced_status = webapp.start_session_files_operation(
+            None,
+            {},
+            24.0,
+            None,
+            None,
+            None,
+            forced_key,
+            priority="interactive",
+            requester="test",
+            replace=True,
+        )
+        assert forced_status == HTTPStatus.ACCEPTED
+        forced_terminalized.wait()
+        forced_result, forced_terminal_status = webapp.queued_delivery_ledger.operation_status(
+            forced_receipt["operation"]["id"],
+        )
+        assert forced_terminal_status == HTTPStatus.OK
+        assert forced_result["data"]["files"] == newer_payload["files"]
+
+        release_ordinary_canonical.set()
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+
+        ordinary_result, ordinary_terminal_status = webapp.queued_delivery_ledger.operation_status(
+            ordinary_receipt["operation"]["id"],
+        )
+        cached_payload, cached_status, fresh, _age_seconds = webapp.get_session_files_cache(
+            canonical_key,
+            max_age_seconds=app_module.SESSION_FILES_CACHE_SECONDS,
+            allow_stale=False,
+        )
+        assert ordinary_terminal_status == HTTPStatus.OK
+        assert ordinary_result["data"]["files"] == newer_payload["files"]
+        assert (cached_status, fresh) == (HTTPStatus.OK, True)
+        assert cached_payload["files"] == newer_payload["files"]
+        assert submission_counts == {False: 2, True: 2}
+    finally:
+        release_ordinary_canonical.set()
+        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.control_server.stop()
+
+
+def test_forced_synchronous_session_files_replaces_a_fresh_cache(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = TmuxWebtermApp([])
+    old_payload = {"files": [{"path": "old.py"}], "repos": [], "errors": []}
+    new_payload = {"files": [{"path": "new.py"}], "repos": [], "errors": []}
+    cache_key = webapp.session_files_cache_key("payload", {}, None, 24.0, None, None, None)
+    calls = []
+
+    def forced_jobd(*_args, **kwargs):
+        calls.append(kwargs["replace"])
+        return new_payload, HTTPStatus.OK
+
+    try:
+        webapp.compute_session_files_cache_entry(cache_key, lambda: (old_payload, HTTPStatus.OK))
+        webapp.compute_session_files_payload_via_jobd = forced_jobd
+
+        payload, status = webapp.session_files_payload_for_infos(
+            None,
+            {},
+            24.0,
+            force=True,
+            accepted_operation=False,
+        )
+
+        assert status == HTTPStatus.OK
+        assert payload["files"] == new_payload["files"]
+        assert calls == [True]
+    finally:
+        webapp.control_server.stop()
+
+
+def test_session_files_post_accept_failure_terminalizes_receipt_and_releases_owner(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
+    webapp = TmuxWebtermApp([])
+    webapp.submit_session_files_job = lambda *_args, **_kwargs: (
+        {"ok": True, "job": {"job_id": "job-invalid-receipt", "status": "queued", "generation": 1}},
+        "invalid-receipt",
+        1,
+    )
+
+    def complete(flight, *_args):
+        flight.future.set_result(({"files": [], "repos": [], "errors": []}, HTTPStatus.OK, None))
+        flight.wait_for_owner()
+        webapp.jobd_operation_service.release_flight(flight)
+
+    webapp.complete_session_files_operation = complete
+    original_accept = webapp.queued_delivery_ledger.accept_operation
+
+    def accept_nonqueued(**kwargs):
+        receipt = original_accept(**kwargs)
+        receipt["state"] = "invalid"
+        return receipt
+
+    webapp.queued_delivery_ledger.accept_operation = accept_nonqueued
+    try:
+        result, status = webapp.start_session_files_operation(
+            None, {}, 24.0, None, None, None, ("request", ()), priority="freshness", requester="test",
+        )
+        operation_id = result["error"]["details"]["operation_id"]
+        assert status == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert result["state"] == "failed"
+        assert webapp.queued_delivery_ledger.operation_status(operation_id) == (result, status)
+        assert webapp.queued_delivery_ledger.open_operations() == []
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.jobd_operation_service.flights == {}
+    finally:
+        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.control_server.stop()
+
+
+def test_session_files_producer_journal_failure_terminalizes_and_releases_flight(no_control_socket, monkeypatch, tmp_path):
+    state_path = tmp_path / "operations.json"
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", state_path, raising=False)
+    webapp = TmuxWebtermApp([])
+    product_waiting = threading_module.Event()
+    release_product = threading_module.Event()
+    webapp.submit_session_files_job = lambda *_args, **_kwargs: (
+        {"ok": True, "job": {"job_id": "job-journal-failure", "status": "queued", "generation": 1}},
+        "journal-failure",
+        1,
+    )
+
+    def wait_for_product(*_args):
+        product_waiting.set()
+        assert release_product.wait(timeout=5)
+        return {"files": [{"path": "done.py"}], "repos": [], "errors": []}, HTTPStatus.OK
+
+    webapp.wait_for_session_files_operation_job = wait_for_product
+    try:
+        receipt, status = webapp.start_session_files_operation(
+            None,
+            {},
+            24.0,
+            None,
+            None,
+            None,
+            ("request", ()),
+            priority="freshness",
+            requester="test",
+        )
+        operation_id = receipt["operation"]["id"]
+        assert status == HTTPStatus.ACCEPTED
+        assert product_waiting.wait(timeout=1)
+        monkeypatch.setattr(
+            webapp.queued_delivery_ledger,
+            "update_operation_producers",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        release_product.set()
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+
+        result, terminal_status = QueuedDeliveryLedger(state_path=state_path).operation_status(operation_id)
+        assert terminal_status == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert result["state"] == "failed"
+        assert result["error"]["code"] == "producer_failed"
+        assert result["error"]["stack"][-1]["exception"] == {
+            "type": "OSError",
+            "message": "disk full",
+        }
+        assert webapp.queued_delivery_ledger.open_operations() == []
+        assert webapp.jobd_operation_service.flights == {}
+    finally:
+        release_product.set()
+        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.control_server.stop()
+
+
+@pytest.mark.parametrize("change", ["watcher", "policy"])
+def test_session_files_operation_publishes_under_immutable_producer_identity(change, no_control_socket, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir(); init_repo(repo)
+    pane = PaneInfo(session="s1", window="0", pane="0", pane_id="%1", target="s1:0.0", current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=1)
+    infos = {"s1": SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])}
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache"); monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
+    webapp = TmuxWebtermApp([])
+    settings = {"index_exclude_dir_names": [".git"], "index_exclude_paths": []}
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": settings}}
+    watch_record = webapp.client_watch_service.event_watcher_record
+    watch_record.filesystem_healthy, watch_record.filesystem_roots = True, (str(tmp_path.resolve()),)
+    producer_started, release = threading_module.Event(), threading_module.Event()
+    old_payload = {"files": [{"path": "old.py"}], "repos": [], "errors": []}
+    webapp.submit_session_files_job = lambda *_args, **_kwargs: ({"ok": True, "job": {"job_id": "job-old", "status": "queued", "generation": 1}}, "coalesce-old", 1)
+    def wait_for_product(*_args):
+        producer_started.set(); assert release.wait(timeout=5)
+        return old_payload, HTTPStatus.OK
+
+    webapp.wait_for_session_files_operation_job = wait_for_product
+    original_key = webapp.session_files_cache_key("payload", infos, "s1", 24.0, None, None, None)
+    try:
+        _receipt, status = webapp.start_session_files_operation("s1", infos, 24.0, None, None, None, original_key, priority="freshness", requester="test")
+        assert status == HTTPStatus.ACCEPTED; assert producer_started.wait(timeout=5)
+        if change == "watcher":
+            webapp.mark_repo_state_dirty([repo / "changed.py"])
+        else:
+            settings["index_exclude_dir_names"].append("vendorcache")
+        current_key = webapp.session_files_cache_key("payload", infos, "s1", 24.0, None, None, None)
+        assert current_key != original_key
+        release.set(); assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert original_key in webapp.session_files_service.cache; assert current_key not in webapp.session_files_service.cache
+    finally:
+        release.set(); webapp.jobd_operation_service.wait_for_idle(5); webapp.control_server.stop()
+
+
+@pytest.mark.parametrize("failure_stage", ["submit", "result", "deadline"])
+def test_session_files_canonical_failure_attributes_terminal_producer(failure_stage, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    pane = PaneInfo(session="5", window="0", pane="0", pane_id="%1", target="5:0.0", current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=11)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(
-        app_module,
-        "SESSION_FILES_OPERATION_STATE_PATH",
-        tmp_path / "operations" / "session-files.json",
-        raising=False,
-    )
+    if failure_stage == "deadline":
+        monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_JOB_DEADLINE_MS", 25)
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json", raising=False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     terminal_published = threading_module.Event()
-    published = []
-    root_cause = {
-        "exception": {"type": "FileNotFoundError", "message": "service socket is absent"},
-        "frames": [
-            {
-                "file": "yolomux_lib/local_services/rpc.py",
-                "line": 272,
-                "function": "request",
-            },
-        ],
-    }
+    published, submissions = [], []
+    root_cause = {"exception": {"type": "FileNotFoundError", "message": "service socket is absent"}, "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}]}
 
     class FailingJobClient:
         def stop_for_scheduler(self):
             return None
 
-        def submit(self, *_args, **_kwargs):
-            return {
-                "ok": True,
-                "job": {
-                    "job_id": "job-session-files-failed",
-                    "generation": 9,
-                    "status": "queued",
-                },
-            }
+        def submit(self, *_args, **kwargs):
+            submissions.append(kwargs)
+            if len(submissions) == 2 and failure_stage == "submit":
+                return {"ok": False, "error": "canonical submit rejected", "status": "service_busy"}
+            job_id = "job-session-files-initial" if len(submissions) == 1 else "job-session-files-canonical-failed"
+            return {"ok": True, "job": {"job_id": job_id, "generation": 9, "status": "queued"}}
 
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 9}, b""
 
         def result(self, job_id, *, timeout):
-            assert job_id == "job-session-files-failed"
             assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
+            if job_id == "job-session-files-initial":
+                return {
+                    "ok": True,
+                    "job": {
+                        "job_id": job_id,
+                        "status": "completed",
+                        "result": {
+                            "payload": {"files": [{"path": "provisional.py"}], "repos": [], "errors": []},
+                            "status": int(HTTPStatus.OK),
+                        },
+                    },
+                }
+            assert job_id == "job-session-files-canonical-failed"
+            if failure_stage == "deadline":
+                return {"ok": True, "job": {"job_id": job_id, "status": "queued"}}
             return {
                 "ok": False,
                 "error": "service socket is absent",
@@ -459,6 +836,7 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
     webapp = TmuxWebtermApp(["5"])
     webapp.job_client = FailingJobClient()
     webapp.refresh_sessions = lambda: []
+    webapp.shared_git_identity = lambda *_args: (("canonical",), "canonical")
     original_publish = webapp.publish_client_event
 
     def capture_publish(event_type, payload, **kwargs):
@@ -484,24 +862,37 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
         result = terminal["result"]
         assert result["state"] == "failed"
         assert result["request"] == receipt["request"]
-        assert result["error"]["code"] == "service_unavailable"
-        assert result["error"]["stack"][-1]["exception"] == root_cause["exception"]
-        assert result["error"]["stack"][-1]["frames"] == root_cause["frames"]
-
+        expected_status = HTTPStatus.GATEWAY_TIMEOUT if failure_stage == "deadline" else HTTPStatus.SERVICE_UNAVAILABLE
+        expected_code = "deadline_expired" if failure_stage == "deadline" else "service_unavailable"
+        assert terminal["status"] == expected_status
+        assert result["error"]["code"] == expected_code
+        expected_operation = "jobd.canonical-result" if failure_stage == "deadline" else f"jobd.canonical-{failure_stage}"
+        assert result["error"]["stack"][-1]["operation"] == expected_operation
+        if failure_stage == "result":
+            assert result["error"]["stack"][-1]["exception"] == root_cause["exception"]
+            assert result["error"]["stack"][-1]["frames"] == root_cause["frames"]
+        expected_job_id = "" if failure_stage == "submit" else "job-session-files-canonical-failed"
+        assert [item["job_id"] for item in result["producer"]["chain"]] == ["job-session-files-initial", expected_job_id]
+        assert result["producer"]["chain"][0]["state"] == "completed"
+        expected_producer_code = "service_busy" if failure_stage == "submit" else expected_code
+        assert result["producer"]["chain"][1]["state"] == "failed"
+        assert result["producer"]["chain"][1]["code"] == expected_producer_code
         operation_id = receipt["operation"]["id"]
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         connection.request("GET", f"/api/operations/{operation_id}")
         status_response = connection.getresponse()
         replayed = json.loads(status_response.read().decode("utf-8"))
         connection.close()
-        assert status_response.status == HTTPStatus.SERVICE_UNAVAILABLE
+        assert status_response.status == expected_status
         assert replayed == result
+        assert QueuedDeliveryLedger(state_path=tmp_path / "operations" / "session-files.json").operation_status(operation_id) == (result, expected_status)
         retired = retire_expected_session_files_failure_logs(
             server,
             request_id=result["request"]["id"],
             operation_id=operation_id,
-            stack_operation="jobd.result",
+            stack_operation=expected_operation,
             expect_transport=False,
+            expected_code=expected_code,
         )
         assert len(retired) == 2
         webapp.demote_background_owner()
@@ -511,493 +902,25 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
         webapp.control_server.stop()
 
 
-def test_queued_operation_ledger_appends_acceptance_and_terminal_without_snapshot_rewrite(monkeypatch, tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    monkeypatch.setattr("yolomux_lib.observability.queued_delivery.atomic_write_text", lambda *_args, **_kwargs: pytest.fail("request path must not rewrite the full ledger"))
-
-    receipt = ledger.accept_operation(
-        request_id="r-append",
-        route="GET /api/fs/list",
-        deadline_at=10.0,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-append"},
-        kind="filesystem_operation",
-        context={"path": "/repo"},
-    )
-    operation_id = receipt["operation"]["id"]
-    result = {"state": "ready", "request": {"id": "r-append"}, "data": {"entries": []}}
-    terminal = ledger.terminalize_operation(operation_id, result, HTTPStatus.OK)
-
-    recovered = QueuedDeliveryLedger(state_path=path)
-    assert terminal["status"] == HTTPStatus.OK
-    assert recovered.operation_replay_event(operation_id) == terminal
-    assert recovered.operation_status(operation_id) == (result, HTTPStatus.OK)
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
-
-
-def test_queued_operation_ledger_loads_legacy_snapshot(tmp_path):
-    path = tmp_path / "operations.json"
-    result = {"state": "ready", "request": {"id": "r-legacy"}, "data": {"entries": []}}
-    event = {"operation": {"id": "op-legacy", "cursor": {"epoch": "legacy", "seq": 1}}, "result": result}
-    path.write_text(json.dumps({
-        "version": 1,
-        "epoch": "legacy",
-        "operations": [{
-            "id": "op-legacy",
-            "state": "ready",
-            "created_at": time.time(),
-            "terminal_at": time.time(),
-            "terminal_event": event,
-            "http_status": int(HTTPStatus.OK),
-        }],
-    }), encoding="utf-8")
-
-    ledger = QueuedDeliveryLedger(state_path=path)
-
-    assert ledger.operation_replay_event("op-legacy") == event
-    assert ledger.operation_status("op-legacy") == (result, HTTPStatus.OK)
-
-
-def test_queued_operation_ledger_ignores_truncated_trailing_journal_record(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-truncated",
-        route="GET /api/fs/list",
-        deadline_at=10.0,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-truncated"},
-    )
-    operation_id = receipt["operation"]["id"]
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write('{"version":2,"type":"operation"')
-
-    recovered = QueuedDeliveryLedger(state_path=path)
-
-    assert recovered.operation_status(operation_id) == (receipt, HTTPStatus.ACCEPTED)
-
-
-def test_queued_operation_ledger_compacts_only_when_called_out_of_band(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-compact",
-        route="GET /api/fs/list",
-        deadline_at=10.0,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-compact"},
-    )
-    operation_id = receipt["operation"]["id"]
-
-    ledger.compact_operations()
-    ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
-
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
-    assert QueuedDeliveryLedger(state_path=path).operation_status(operation_id) == ({"state": "ready"}, HTTPStatus.OK)
-
-
-def test_terminal_before_receipt_remains_exact_until_delivery_ack_then_bounds_replay(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-bounded-replay",
-        route="GET /api/session-files",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-bounded-replay"},
-    )
-    operation_id = receipt["operation"]["id"]
-    exact_result = {
-        "state": "ready",
-        "request": {"id": "r-bounded-replay"},
-        "data": {"blob": "x" * (512 * 1024)},
-    }
-
-    terminal = ledger.terminalize_operation(operation_id, exact_result, HTTPStatus.OK)
-    assert terminal["result"] == exact_result
-    assert ledger.operation_replay_event(operation_id) == terminal
-
-    ledger.observe_http_response(receipt, HTTPStatus.ACCEPTED)
-
-    replay, status = ledger.operation_status(operation_id)
-    assert status == HTTPStatus.OK
-    assert replay == exact_result
-
-    assert ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"]) is True
-    replay, status = ledger.operation_status(operation_id)
-    assert status == HTTPStatus.GONE
-    assert replay["state"] == "failed"
-    assert replay["request"] == receipt["request"]
-    assert replay["error"]["code"] == "operation_replay_evicted"
-    recovered = QueuedDeliveryLedger(state_path=path)
-    assert recovered.operation_status(operation_id) == (replay, HTTPStatus.GONE)
-
-
-def test_queued_operation_terminal_after_exposed_receipt_remains_exact_until_delivery_ack(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-exposed-replay",
-        route="GET /api/fs/read",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-exposed-replay"},
-    )
-    operation_id = receipt["operation"]["id"]
-    ledger.observe_http_response(receipt, HTTPStatus.ACCEPTED)
-    exact_result = {
-        "state": "ready",
-        "request": {"id": "r-exposed-replay"},
-        "data": {"blob": "y" * (512 * 1024)},
-    }
-
-    terminal = ledger.terminalize_operation(operation_id, exact_result, HTTPStatus.OK)
-
-    assert terminal["result"] == exact_result
-    replay, status = ledger.operation_status(operation_id)
-    assert status == HTTPStatus.OK
-    assert replay == exact_result
-
-    assert ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"]) is True
-    replay, status = ledger.operation_status(operation_id)
-    assert status == HTTPStatus.GONE
-    assert replay["error"]["code"] == "operation_replay_evicted"
-
-
-def test_operation_terminal_batch_ack_is_exact_idempotent_and_bounds_once(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    terminals = []
-    for suffix in ("a", "b"):
-        receipt = ledger.accept_operation(
-            request_id=f"r-batch-{suffix}",
-            route="GET /api/fs/watch-diff",
-            deadline_at=time.time() + 30,
-            progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": f"job-batch-{suffix}"},
-        )
-        terminals.append(ledger.terminalize_operation(
-            receipt["operation"]["id"],
-            {"state": "ready", "request": receipt["request"], "data": {"blob": suffix * (512 * 1024)}},
-            HTTPStatus.OK,
-        ))
-
-    stale = {
-        "id": terminals[0]["operation"]["id"],
-        "cursor": {**terminals[0]["operation"]["cursor"], "seq": 99},
-    }
-    exact = [
-        {"id": terminal["operation"]["id"], "cursor": terminal["operation"]["cursor"]}
-        for terminal in terminals
-    ]
-
-    assert ledger.acknowledge_operation_deliveries([stale]) == []
-    assert ledger.operation_replay_event(stale["id"])["result"]["data"]["blob"].startswith("a")
-    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
-    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
-    for item in exact:
-        replay, status = ledger.operation_status(item["id"])
-        assert status == HTTPStatus.GONE
-        assert replay["error"]["code"] == "operation_replay_evicted"
-
-
-def test_operation_ack_appends_one_durable_v3_record_before_live_mutation(monkeypatch, tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-ack-journal",
-        route="GET /api/fs/read",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-ack-journal"},
-    )
-    operation_id = receipt["operation"]["id"]
-    terminal = ledger.terminalize_operation(
-        operation_id,
-        {"state": "ready", "request": receipt["request"], "data": {"blob": "x" * (512 * 1024)}},
-        HTTPStatus.OK,
-    )
-    before_size = path.stat().st_size
-    original_append = queued_delivery_module.append_fsync_text
-    persisted_before_mutation = []
-
-    def observed_append(target, text, mode=None):
-        persisted_before_mutation.append(ledger._operations[operation_id]["delivery_acknowledged"] is False)
-        original_append(target, text, mode=mode)
-
-    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", observed_append)
-    monkeypatch.setattr(queued_delivery_module, "atomic_write_text", lambda *_args, **_kwargs: pytest.fail("ack request must not rewrite the ledger"))
-
-    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
-    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
-    after_first_ack = path.stat().st_size
-    assert persisted_before_mutation == [True]
-    assert after_first_ack - before_size < 1024
-    entry = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-    assert entry == {
-        "version": 3,
-        "type": "ack",
-        "epoch": terminal["operation"]["cursor"]["epoch"],
-        "acks": exact,
-    }
-    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
-    assert path.stat().st_size == after_first_ack
-
-
-def test_operation_ack_append_failure_keeps_live_transition_retryable(monkeypatch, tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-ack-failure",
-        route="GET /api/fs/read",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-ack-failure"},
-    )
-    operation_id = receipt["operation"]["id"]
-    terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
-    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
-    original_append = queued_delivery_module.append_fsync_text
-    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
-
-    with pytest.raises(OSError, match="disk full"):
-        ledger.acknowledge_operation_deliveries(exact)
-    assert ledger._operations[operation_id]["delivery_acknowledged"] is False
-
-    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", original_append)
-    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
-    assert QueuedDeliveryLedger(state_path=path)._operations[operation_id]["delivery_acknowledged"] is True
-
-
-def test_v3_ack_recovery_bounds_replay_and_ignores_only_a_truncated_final_record(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-v3-recovery",
-        route="GET /api/fs/read",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-v3-recovery"},
-    )
-    operation_id = receipt["operation"]["id"]
-    terminal = ledger.terminalize_operation(
-        operation_id,
-        {"state": "ready", "request": receipt["request"], "data": {"blob": "z" * (512 * 1024)}},
-        HTTPStatus.OK,
-    )
-    before_ack = path.read_text(encoding="utf-8")
-    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
-    ledger.acknowledge_operation_deliveries(exact)
-    after_ack = path.read_text(encoding="utf-8")
-
-    recovered = QueuedDeliveryLedger(state_path=path)
-    replay, status = recovered.operation_status(operation_id)
-    assert status == HTTPStatus.GONE
-    assert replay["error"]["code"] == "operation_replay_evicted"
-
-    path.write_text(before_ack + after_ack[len(before_ack):].rstrip("\n")[:-8], encoding="utf-8")
-    truncated = QueuedDeliveryLedger(state_path=path)
-    replay, status = truncated.operation_status(operation_id)
-    assert status == HTTPStatus.OK
-    assert replay["data"]["blob"].startswith("z")
-
-
-def test_out_of_band_compaction_holds_file_lock_before_read_and_preserves_racing_append(monkeypatch, tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-compact-race",
-        route="GET /api/fs/list",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-compact-race"},
-    )
-    operation_id = receipt["operation"]["id"]
-    compactor_has_lock = threading_module.Event()
-    release_compactor = threading_module.Event()
-    original_write = queued_delivery_module.atomic_write_text
-
-    def blocked_write(target, text, mode=None):
-        compactor_has_lock.set()
-        assert release_compactor.wait(2)
-        original_write(target, text, mode=mode)
-
-    monkeypatch.setattr(queued_delivery_module, "atomic_write_text", blocked_write)
-    compact_thread = threading_module.Thread(target=compact_queued_delivery_journal, args=(path,))
-    compact_thread.start()
-    assert compactor_has_lock.wait(2)
-
-    terminal_result = []
-    terminal_thread = threading_module.Thread(
-        target=lambda: terminal_result.append(ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)),
-    )
-    terminal_thread.start()
-    assert terminal_thread.is_alive()
-    release_compactor.set()
-    compact_thread.join(2)
-    terminal_thread.join(2)
-
-    assert not compact_thread.is_alive()
-    assert not terminal_thread.is_alive()
-    assert terminal_result[0] is not None
-    assert QueuedDeliveryLedger(state_path=path).operation_status(operation_id) == ({"state": "ready"}, HTTPStatus.OK)
-
-
-def test_operation_compaction_watermark_keeps_ack_appended_after_submission_due(monkeypatch, tmp_path):
-    now = [100.0]
-    monkeypatch.setattr(queued_delivery_module, "QUEUED_OPERATION_COMPACT_RECORDS", 3)
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path, compaction_clock=lambda: now[0])
-
-    def terminal(suffix):
-        receipt = ledger.accept_operation(
-            request_id=f"r-watermark-{suffix}",
-            route="GET /api/fs/list",
-            deadline_at=time.time() + 30,
-            progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": f"job-watermark-{suffix}"},
-        )
-        event = ledger.terminalize_operation(receipt["operation"]["id"], {"state": "ready"}, HTTPStatus.OK)
-        ledger.acknowledge_operation_delivery(receipt["operation"]["id"], event["operation"]["cursor"])
-
-    terminal("a")
-    submitted = ledger.operation_compaction_request()
-    assert submitted["due_at"] == now[0]
-    terminal("b")
-
-    ledger.note_operation_compaction_succeeded(submitted)
-
-    remaining = ledger.operation_compaction_request()
-    assert remaining is not None
-    assert remaining["ack_generation"] > submitted["ack_generation"]
-    assert remaining["tail_records"] > 0
-
-
-def test_compaction_owner_submits_one_fresh_maintenance_job_and_clears_due(monkeypatch, tmp_path):
-    monkeypatch.setattr(queued_delivery_module, "QUEUED_OPERATION_COMPACT_RECORDS", 3)
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    submissions = []
-    submitted = threading_module.Event()
-
-    def submit(state_path, coalesce_key):
-        submissions.append((state_path, coalesce_key))
-        submitted.set()
-        return {"ok": True, "job": {"job_id": "compact-1", "status": "completed"}}
-
-    owner = QueuedDeliveryCompactionOwner(
-        ledger,
-        submit,
-        lambda _job_id: pytest.fail("completed receipt must not be polled"),
-    )
-    try:
-        receipt = ledger.accept_operation(
-            request_id="r-owner",
-            route="GET /api/fs/list",
-            deadline_at=time.time() + 30,
-            progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": "job-owner"},
-        )
-        event = ledger.terminalize_operation(receipt["operation"]["id"], {"state": "ready"}, HTTPStatus.OK)
-        ledger.acknowledge_operation_delivery(receipt["operation"]["id"], event["operation"]["cursor"])
-        assert submitted.wait(2)
-        worker = owner._worker
-        if worker is not None:
-            worker.join(2)
-        assert ledger.operation_compaction_request() is None
-        assert len(submissions) == 1
-        assert submissions[0][0] == path
-        assert submissions[0][1].startswith("operation-ledger-compact:")
-    finally:
-        owner.stop()
-
-
-def test_jobd_registered_compactor_replays_current_file_under_the_worker_lock(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = ledger.accept_operation(
-        request_id="r-jobd-compact",
-        route="GET /api/fs/list",
-        deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-jobd-compact"},
-    )
-    operation_id = receipt["operation"]["id"]
-    terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
-    ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"])
-
-    result = json.loads(jobd_module.run_registered_task(
-        "queued_delivery_compact",
-        json.dumps({"state_path": str(path)}).encode("utf-8"),
-    ))
-
-    assert result["operations"] == 1
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
-    assert QueuedDeliveryLedger(state_path=path)._operations[operation_id]["delivery_acknowledged"] is True
-
-
-def test_app_submits_operation_compaction_as_fresh_maintenance_receipt(tmp_path):
-    calls = []
-
-    class JobClient:
-        def produce(self, *args, **kwargs):
-            calls.append((args, kwargs))
-            return {"ok": True, "job": {"job_id": "compact", "status": "queued"}}, b""
-
-    webapp = object.__new__(TmuxWebtermApp)
-    webapp.job_client = JobClient()
-    path = tmp_path / "operations.json"
-
-    response = webapp.submit_queued_delivery_compaction(path, "operation-ledger-compact:test")
-
-    assert response["ok"] is True
-    assert calls == [(('queued_delivery_compact', {"state_path": str(path)}), {
-        "priority": "maintenance",
-        "generation": 1,
-        "coalesce_key": "operation-ledger-compact:test",
-        "delivery": "receipt",
-        "fresh_only": True,
-    })]
-
-
-def test_operation_ack_batch_persists_one_record_for_sixty_four_exact_transitions(tmp_path):
-    path = tmp_path / "operations.json"
-    ledger = QueuedDeliveryLedger(state_path=path)
-    exact = []
-    for index in range(64):
-        receipt = ledger.accept_operation(
-            request_id=f"r-batch-64-{index}",
-            route="GET /api/fs/list",
-            deadline_at=time.time() + 30,
-            progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": f"job-batch-64-{index}"},
-        )
-        operation_id = receipt["operation"]["id"]
-        terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
-        exact.append({"id": operation_id, "cursor": terminal["operation"]["cursor"]})
-    before_lines = len(path.read_text(encoding="utf-8").splitlines())
-
-    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
-
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == before_lines + 1
-    assert json.loads(lines[-1])["acks"] == exact
-
-
 def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch, tmp_path):
     operation_state_path = tmp_path / "operations" / "session-files.json"
     ledger = QueuedDeliveryLedger(state_path=operation_state_path)
+    initial_producer = {"service": "jobd", "chain": [{"stage": "requested", "job_id": "job-abandoned", "state": "completed"}]}
     receipt = ledger.accept_operation(
         request_id="r-recovered-session-files",
         route="GET /api/session-files",
         deadline_at=time.time() + 30,
         progress={"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"},
-        producer={"service": "jobd", "job_id": "job-abandoned"},
+        producer=initial_producer,
         kind="session_files",
         context={"session": "5"},
     )
     operation_id = receipt["operation"]["id"]
+    canonical_producer = {"service": "jobd", "chain": [*initial_producer["chain"], {"stage": "canonical", "job_id": "job-canonical-abandoned", "state": "running"}]}
+    assert ledger.update_operation_producer(operation_id, canonical_producer)
+    queued, queued_status = QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation_id)
+    assert queued_status == HTTPStatus.ACCEPTED
+    assert queued["operation"]["progress"]["producer_stage"] == "canonical"
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", operation_state_path)
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
@@ -1013,13 +936,16 @@ def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch,
     assert result["request"] == {"id": "r-recovered-session-files"}
     assert result["error"]["code"] == "producer_abandoned"
     assert result["error"]["stack"][-1]["code"] == "producer_abandoned"
+    assert result["producer"] == canonical_producer
     assert QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation_id) == (
         result,
         HTTPStatus.SERVICE_UNAVAILABLE,
     )
 
 
-def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch, tmp_path):
+def test_session_files_public_deleted_root_cache_keeps_jobd_serving(
+    isolated_real_jobd_runtime, monkeypatch, tmp_path,
+):
     """A retired worktree cached by transcript scanning must not crash jobd or poison later demands."""
     monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
     retired_root = tmp_path / "retired-worktree"
@@ -1041,6 +967,8 @@ def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch,
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp(["5"])
     webapp.refresh_sessions = lambda: []
+    assert jobd_module.RUNTIME_DIR == isolated_real_jobd_runtime
+    assert webapp.job_client.socket_path == jobd_module.default_socket_path()
     server = thread = None
     try:
         assert webapp.job_client.start_for_scheduler()
@@ -1196,8 +1124,7 @@ def test_newer_session_files_generation_cannot_be_overwritten_by_delayed_old_wor
     old_thread = threading_module.Thread(target=run_old)
     new_thread = threading_module.Thread(target=run_new)
     try:
-        old_thread.start()
-        assert old_started.wait(timeout=5)
+        old_thread.start(); assert old_started.wait(timeout=5)
         new_thread.start()
         release_old.set()
         old_thread.join(timeout=5)
@@ -1217,6 +1144,32 @@ def test_newer_session_files_generation_cannot_be_overwritten_by_delayed_old_wor
         old_thread.join(timeout=1)
         new_thread.join(timeout=1)
         webapp.control_server.stop()
+
+
+def test_replace_waits_for_inflight_owner_then_publishes_fresh_payload(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = TmuxWebtermApp([])
+    key = ("replace-inflight",)
+    old_started, release_old, fresh_computed = threading_module.Event(), threading_module.Event(), threading_module.Event()
+    results = {}
+    def old_compute():
+        old_started.set(); assert release_old.wait(timeout=5)
+        return {"files": [{"path": "old.py"}], "repos": [], "errors": []}, HTTPStatus.OK
+    def fresh_compute():
+        fresh_computed.set()
+        return {"files": [{"path": "fresh.py"}], "repos": [], "errors": []}, HTTPStatus.OK
+    old_thread = threading_module.Thread(target=lambda: results.setdefault("old", webapp.compute_session_files_cache_entry(key, old_compute)))
+    fresh_thread = threading_module.Thread(target=lambda: results.setdefault("fresh", webapp.compute_session_files_cache_entry(key, fresh_compute, replace=True)))
+    try:
+        old_thread.start()
+        assert old_started.wait(timeout=5)
+        fresh_thread.start(); release_old.set()
+        old_thread.join(timeout=5); fresh_thread.join(timeout=5)
+        assert not old_thread.is_alive() and not fresh_thread.is_alive()
+        assert fresh_computed.is_set(); assert results["old"][0]["files"] == [{"path": "old.py"}]
+        assert results["fresh"][0]["files"] == [{"path": "fresh.py"}]
+    finally:
+        release_old.set(); old_thread.join(timeout=1); fresh_thread.join(timeout=1); webapp.control_server.stop()
 
 
 def test_background_reservation_order_not_delayed_worker_start_controls_stable_cache(no_control_socket, monkeypatch, tmp_path):
@@ -3173,8 +3126,9 @@ def test_git_status_parses_renames_and_tab_paths(tmp_path):
     git(repo, "commit", "-m", "base")
     git(repo, "mv", old_name, new_name)
 
-    statuses, error = session_files.git_name_status(repo, "HEAD")
-    counts = session_files.git_numstat(repo, "HEAD")
+    with pinned_test_snapshot_runner(repo) as runner:
+        statuses, error = session_files.git_name_status(repo, runner, "HEAD")
+        counts = session_files.git_numstat(repo, runner, "HEAD")
 
     assert error == ""
     assert old_name not in statuses
@@ -3198,7 +3152,8 @@ def test_git_status_labels_untracked_question_distinct_from_staged_add_A(tmp_pat
     git(repo, "add", "staged.txt")
     (repo / "loose.txt").write_text("loose\n", encoding="utf-8")  # untracked, never added
 
-    statuses, error = session_files.git_name_status(repo, "HEAD")
+    with pinned_test_snapshot_runner(repo) as runner:
+        statuses, error = session_files.git_name_status(repo, runner, "HEAD")
 
     assert error == ""
     assert statuses["staged.txt"] == "A"
@@ -3232,7 +3187,7 @@ def test_session_files_payload_counts_staged_added_file_as_tracked_diff(tmp_path
     assert payload["repos"][0]["removed"] == 0
 
 
-def test_session_files_payload_preserves_untracked_symlink_paths(tmp_path):
+def test_session_files_payload_preserves_untracked_symlink_paths(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -3261,6 +3216,21 @@ def test_session_files_payload_preserves_untracked_symlink_paths(tmp_path):
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
 
+    linux_path_flag = getattr(os, "O_PATH", 0)
+    if linux_path_flag:
+        darwin_symlink_flag = 1 << 29
+        real_open = os.open
+
+        def darwin_open(path, flags, *args, **kwargs):
+            if flags & darwin_symlink_flag:
+                assert not flags & filesystem_paths.nofollow_flag()
+                flags = flags & ~darwin_symlink_flag | linux_path_flag | filesystem_paths.nofollow_flag()
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.delattr(os, "O_PATH")
+        monkeypatch.setattr(os, "O_SYMLINK", darwin_symlink_flag, raising=False)
+        monkeypatch.setattr(os, "open", darwin_open)
+
     payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
     by_path = {item["path"]: item for item in payload["files"]}
 
@@ -3281,7 +3251,8 @@ def test_git_numstat_parses_paths_with_tabs(tmp_path):
     git(repo, "commit", "-m", "base")
     (repo / name).write_text("one\ntwo\n", encoding="utf-8")
 
-    counts = session_files.git_numstat(repo, "HEAD")
+    with pinned_test_snapshot_runner(repo) as runner:
+        counts = session_files.git_numstat(repo, runner, "HEAD")
 
     assert counts[name] == {"added": 1, "removed": 0}
 
@@ -3383,6 +3354,29 @@ def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
     assert payload["repos"][0]["ahead"] == 1
 
 
+def test_explicit_commit_refs_keep_rows_missing_from_the_current_checkout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "deleted.txt").write_text("deleted\n", encoding="utf-8")
+    (repo / "old.txt").write_text("rename\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    older = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "deleted.txt").unlink()
+    git(repo, "mv", "old.txt", "renamed.txt")
+    (repo / "added.txt").write_text("added\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "change paths")
+    newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    for checkout in (older, newer):
+        git(repo, "checkout", checkout)
+        snapshot = session_files.build_git_snapshot(repo, older, newer)
+        assert snapshot["statuses"] == {"added.txt": "A", "deleted.txt": "D", "renamed.txt": "R"}
+        assert set(snapshot["numstat"]) == set(snapshot["statuses"])
+
+
 def test_session_files_payload_explicit_current_ref_includes_untracked_files(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3449,7 +3443,8 @@ def test_git_numstat_does_not_use_copy_detection_for_plain_diff_counts(tmp_path)
     copied.write_text("a\nb\nc\nd\ne\nf\ng\nchanged\nnew\n", encoding="utf-8")
     git(repo, "add", "copied.txt")
 
-    counts = session_files.git_numstat(repo, "HEAD")
+    with pinned_test_snapshot_runner(repo) as runner:
+        counts = session_files.git_numstat(repo, runner, "HEAD")
 
     assert counts["copied.txt"] == {"added": 9, "removed": 0}
 
@@ -3555,7 +3550,8 @@ def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     git(repo, "update-ref", "refs/remotes/origin/topic", "HEAD")
 
-    refs = session_files.git_recent_refs(repo)
+    with pinned_test_snapshot_runner(repo) as runner:
+        refs = session_files.git_recent_refs(repo, runner)
     head_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     head_short = git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
 
@@ -3698,45 +3694,31 @@ def test_session_files_payload_does_not_invent_agent_for_repo_only_change(tmp_pa
     assert payload["files"][0]["source"] == "git"
 
 
-def test_untracked_line_counts_cache_by_identity_and_invalidate_on_change(tmp_path, monkeypatch):
+def test_untracked_line_counts_cache_by_identity_and_invalidate_on_change(tmp_path):
     """Repeated payload assembly must not re-read unchanged untracked files; a
     changed file (size/mtime) is re-read and re-counted."""
     target = tmp_path / "notes.txt"
     target.write_text("one\ntwo\nthree\n", encoding="utf-8")
     session_files._UNTRACKED_LINE_COUNT_CACHE.clear()
 
-    reads = []
-    real_read_bytes = Path.read_bytes
-
-    def counting_read_bytes(self):
-        reads.append(str(self))
-        return real_read_bytes(self)
-
-    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    reads_before = session_files.RUNTIME_COUNTS["untracked_line_count_reads"]
     assert session_files.untracked_added_line_count(target) == 3
     assert session_files.untracked_added_line_count(target) == 3
-    assert len(reads) == 1  # second lookup served from the identity cache
+    assert session_files.RUNTIME_COUNTS["untracked_line_count_reads"] == reads_before + 1
 
     target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
     os.utime(target, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
     assert session_files.untracked_added_line_count(target) == 4  # identity changed -> re-read
-    assert len(reads) == 2
+    assert session_files.RUNTIME_COUNTS["untracked_line_count_reads"] == reads_before + 2
 
 
-def test_untracked_line_counts_invalidate_same_size_rewrite_with_restored_mtime(tmp_path, monkeypatch):
+def test_untracked_line_counts_invalidate_same_size_rewrite_with_restored_mtime(tmp_path):
     """A caller can preserve mtime while replacing content; ctime keeps the count correct."""
     target = tmp_path / "notes.txt"
     target.write_text("one\ntwo\n", encoding="utf-8")
     session_files._UNTRACKED_LINE_COUNT_CACHE.clear()
     original_mtime_ns = target.stat().st_mtime_ns
-    reads = []
-    real_read_bytes = Path.read_bytes
-
-    def counting_read_bytes(self):
-        reads.append(str(self))
-        return real_read_bytes(self)
-
-    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    reads_before = session_files.RUNTIME_COUNTS["untracked_line_count_reads"]
     assert session_files.untracked_added_line_count(target) == 2
 
     # Preserve both byte length and mtime. The filesystem still changes ctime on
@@ -3745,7 +3727,363 @@ def test_untracked_line_counts_invalidate_same_size_rewrite_with_restored_mtime(
     os.utime(target, ns=(original_mtime_ns, original_mtime_ns))
     assert target.stat().st_mtime_ns == original_mtime_ns
     assert session_files.untracked_added_line_count(target) == 1
-    assert len(reads) == 2
+    assert session_files.RUNTIME_COUNTS["untracked_line_count_reads"] == reads_before + 2
+
+
+def test_untracked_line_count_never_reopens_a_repointed_path(tmp_path):
+    target = tmp_path / "notes.txt"
+    target.write_text("safe\n", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    secret = blocked / "id_rsa"
+    secret.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+    parked = tmp_path / "notes-authorized.txt"
+    session_files._UNTRACKED_LINE_COUNT_CACHE.clear()
+    repointed = False
+
+    def swap_to_secret():
+        nonlocal repointed
+        if repointed:
+            return
+        repointed = True
+        target.rename(parked)
+        target.symlink_to(secret)
+
+    class RepointAfterPin:
+        def name_observed(self, operation, requested_path):
+            del operation, requested_path
+
+        def authority_pinned(self, operation, requested_path):
+            if operation == "session_files_untracked_line_count" and requested_path == target:
+                swap_to_secret()
+
+    with filesystem_paths.observe_authorization(RepointAfterPin()):
+        assert session_files.untracked_added_line_count(target) == 1
+
+    assert repointed is True
+    assert secret.read_text(encoding="utf-8") == "one\ntwo\nthree\nfour\nfive\n"
+
+
+def test_session_file_entry_metadata_stays_bound_to_the_authorized_generation(tmp_path):
+    target = tmp_path / "safe.txt"
+    target.write_text("x", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    secret = blocked / "id_rsa"
+    secret.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE" * 4, encoding="utf-8")
+    parked = tmp_path / "safe-authorized.txt"
+    swapped = False
+
+    class RepointAfterPin:
+        def name_observed(self, operation, requested_path):
+            del operation, requested_path
+
+        def authority_pinned(self, operation, requested_path):
+            nonlocal swapped
+            if operation == "session_files_entry" and requested_path == target and not swapped:
+                target.rename(parked)
+                target.symlink_to(secret)
+                swapped = True
+
+    with filesystem_paths.observe_authorization(RepointAfterPin()):
+        entry = session_files.session_file_entry("s1", [], "M", target, tmp_path, "git")
+
+    assert swapped is True
+    assert entry is not None
+    assert entry["missing"] is False
+    assert entry["size"] == 1
+    assert entry["mtime"] == parked.stat().st_mtime
+    assert entry["size"] != secret.stat().st_size
+
+
+def _repository_snapshot_fixture(*, statuses=None, numstat=None, file_identities=None):
+    return {
+        "branch": "main",
+        "statuses": dict(statuses or {}),
+        "numstat": dict(numstat or {}),
+        "file_identities": dict(file_identities or {path: None for path in (statuses or {})}),
+        "selected_from": "",
+        "selected_to": "",
+        "status_error": "",
+        "repo_error": "",
+        "repo_error_message": {"key": "", "params": {}, "fallback": ""},
+        "recent_refs": [
+            {"ref": "HEAD", "short": "HEAD", "subject": "base commit"},
+            {"ref": "current", "short": "current", "subject": "working tree"},
+        ],
+        "ahead_behind": {},
+    }
+
+
+def test_repository_snapshot_and_cache_never_publish_blocked_git_metadata(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    blocked_paths = [
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".ssh/id_rsa",
+        ".aws/credentials",
+    ]
+    for relative_path in [*blocked_paths, "safe.txt"]:
+        target = repo / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "--", *blocked_paths, "safe.txt")
+    git(repo, "commit", "-m", "baseline")
+    for relative_path in [*blocked_paths, "safe.txt"]:
+        (repo / relative_path).write_text("changed\n", encoding="utf-8")
+
+    snapshot = session_files.build_git_snapshot(repo)
+
+    assert snapshot["statuses"] == {"safe.txt": "M"}
+    assert snapshot["numstat"] == {"safe.txt": {"added": 1, "removed": 1}}
+    for relative_path in blocked_paths:
+        assert relative_path not in repr(snapshot)
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    session_files._repository_snapshot_cache_last_pruned_at = 0.0
+    cache_path = session_files.repository_snapshot_cache_path(repo, None, None, 17)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({
+            "schema_version": session_files._REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION,
+            "generation": 17,
+            "verified_at": time.time(),
+            "root_identity": [repo.stat().st_dev, repo.stat().st_ino],
+            "snapshot": {"statuses": {blocked_paths[0]: "M"}, "numstat": {blocked_paths[0]: {"added": 9, "removed": 9}}},
+        }),
+        encoding="utf-8",
+    )
+    cached, hit = session_files.cached_repository_snapshot(repo, None, None, 17)
+
+    assert hit is False
+    assert cached == snapshot
+    cache_record = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert cache_record["snapshot"]["statuses"] == {"safe.txt": "M"}
+    assert cache_record["snapshot"]["numstat"] == {"safe.txt": {"added": 1, "removed": 1}}
+    cached_again, hit_again = session_files.cached_repository_snapshot(repo, None, None, 17)
+    assert hit_again is True
+    assert cached_again == snapshot
+
+
+def test_repository_snapshot_cache_key_includes_authorized_root_identity(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "old-only.txt").write_text("old\n", encoding="utf-8")
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    session_files._repository_snapshot_cache_last_pruned_at = 0.0
+    builds = []
+
+    def build(path, _from_ref, _to_ref):
+        names = sorted(child.name for child in path.iterdir())
+        builds.append(names)
+        return _repository_snapshot_fixture(statuses={name: "M" for name in names})
+
+    first, first_hit = session_files.cached_repository_snapshot(repo, None, None, 9, build)
+    old_repo = tmp_path / "old-repo"
+    repo.rename(old_repo)
+    repo.mkdir()
+    (repo / "new-only.txt").write_text("new\n", encoding="utf-8")
+    second, second_hit = session_files.cached_repository_snapshot(repo, None, None, 9, build)
+
+    assert first_hit is False
+    assert first["statuses"] == {"old-only.txt": "M"}
+    assert second_hit is False
+    assert second["statuses"] == {"new-only.txt": "M"}
+    assert builds == [["old-only.txt"], ["new-only.txt"]]
+
+
+def test_cached_repository_snapshot_stays_authorized_through_session_row_render(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("safe\n", encoding="utf-8")
+    parked = tmp_path / "repo-authorized"
+    replacement_bytes = "BLOCKED_SENTINEL_DO_NOT_EXPOSE" * 4
+    snapshot = _repository_snapshot_fixture(
+        statuses={"tracked.txt": "M"},
+        numstat={"tracked.txt": {"added": 1, "removed": 0}},
+        file_identities={"tracked.txt": [tracked.stat().st_dev, tracked.stat().st_ino]},
+    )
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    session_files.cached_repository_snapshot(repo, None, None, 9, lambda *_args: snapshot)
+    swapped = False
+
+    def cached_then_replace(repo_path, from_ref, to_ref):
+        nonlocal swapped
+        cached, hit = session_files.cached_repository_snapshot(repo_path, from_ref, to_ref, 9, lambda *_args: snapshot)
+        assert hit is True
+        repo.rename(parked)
+        repo.mkdir()
+        (repo / "tracked.txt").write_text(replacement_bytes, encoding="utf-8")
+        swapped = True
+        return cached
+
+    pane = PaneInfo(
+        session="s1", window="0", pane="0", pane_id="%1", target="s1:0.0",
+        current_path=str(repo), command="bash", active=True, window_active=True, title="", pid=1,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(
+        info,
+        hours=24,
+        now=time.time(),
+        git_snapshot_provider=cached_then_replace,
+    )
+
+    assert swapped is True
+    assert len(payload["files"]) == 1
+    assert payload["files"][0]["size"] == (parked / "tracked.txt").stat().st_size
+    assert payload["files"][0]["size"] != len(replacement_bytes)
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(payload)
+
+
+def test_cached_repository_snapshot_refuses_a_replaced_child_before_row_render(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("safe\n", encoding="utf-8")
+    parked = repo / "tracked-authorized.txt"
+    replacement_bytes = "BLOCKED_SENTINEL_DO_NOT_EXPOSE" * 4
+    snapshot = _repository_snapshot_fixture(
+        statuses={"tracked.txt": "M"},
+        numstat={"tracked.txt": {"added": 1, "removed": 0}},
+        file_identities={"tracked.txt": [tracked.stat().st_dev, tracked.stat().st_ino]},
+    )
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    session_files.cached_repository_snapshot(repo, None, None, 9, lambda *_args: snapshot)
+
+    def cached_then_replace(repo_path, from_ref, to_ref):
+        cached, hit = session_files.cached_repository_snapshot(repo_path, from_ref, to_ref, 9, lambda *_args: snapshot)
+        assert hit is True
+        tracked.rename(parked)
+        tracked.write_text(replacement_bytes, encoding="utf-8")
+        return cached
+
+    pane = PaneInfo(
+        session="s1", window="0", pane="0", pane_id="%1", target="s1:0.0",
+        current_path=str(repo), command="bash", active=True, window_active=True, title="", pid=1,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(
+        info,
+        hours=24,
+        now=time.time(),
+        git_snapshot_provider=cached_then_replace,
+    )
+
+    assert payload["files"] == []
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda snapshot: snapshot["statuses"].__setitem__("tracked.txt", "BLOCKED_SENTINEL_DO_NOT_EXPOSE"),
+        lambda snapshot: snapshot["statuses"].__setitem__("tracked.txt", []),
+        lambda snapshot: snapshot.pop("numstat"),
+        lambda snapshot: snapshot["numstat"]["tracked.txt"].__setitem__("added", -1),
+        lambda snapshot: snapshot.__setitem__("recent_refs", ["BLOCKED_SENTINEL_DO_NOT_EXPOSE"]),
+        lambda snapshot: snapshot["repo_error_message"].__setitem__("params", "BLOCKED_SENTINEL_DO_NOT_EXPOSE"),
+        lambda snapshot: snapshot.__setitem__("unknown", "BLOCKED_SENTINEL_DO_NOT_EXPOSE"),
+    ],
+    ids=["status", "unhashable-status", "missing-field", "negative-numstat", "recent-ref", "message", "unknown-field"],
+)
+def test_repository_snapshot_cache_rejects_malformed_current_schema(tmp_path, monkeypatch, mutate):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    canonical = _repository_snapshot_fixture(
+        statuses={"tracked.txt": "M"},
+        numstat={"tracked.txt": {"added": 1, "removed": 0}},
+    )
+    malformed = copy_module.deepcopy(canonical)
+    mutate(malformed)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    session_files._repository_snapshot_cache_last_pruned_at = 0.0
+    cache_path = session_files.repository_snapshot_cache_path(repo, None, None, 17)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({
+            "schema_version": session_files._REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION,
+            "generation": 17,
+            "verified_at": time.time(),
+            "root_identity": [repo.stat().st_dev, repo.stat().st_ino],
+            "snapshot": malformed,
+        }),
+        encoding="utf-8",
+    )
+    builds = []
+
+    def build(*_args):
+        builds.append(1)
+        return canonical
+
+    result, hit = session_files.cached_repository_snapshot(repo, None, None, 17, build)
+
+    assert hit is False
+    assert builds == [1]
+    assert result == canonical
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in cache_path.read_text(encoding="utf-8")
+
+
+def test_pinned_git_index_preserves_racy_clean_detection_for_same_stat_rewrite(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    target = repo / "tracked.txt"
+    target.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "baseline")
+    entry_mtime_ns = target.stat().st_mtime_ns
+    index_path = repo / ".git" / "index"
+    os.utime(index_path, ns=(entry_mtime_ns, entry_mtime_ns))
+    target.write_text("two\n", encoding="utf-8")
+    os.utime(target, ns=(entry_mtime_ns, entry_mtime_ns))
+
+    snapshot = session_files.build_git_snapshot(repo)
+
+    assert snapshot["statuses"] == {"tracked.txt": "M"}
+    assert snapshot["numstat"] == {"tracked.txt": {"added": 1, "removed": 1}}
+
+
+def test_repository_snapshot_drops_an_admitted_name_repointed_to_a_blocked_file(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    target = repo / "safe.txt"
+    target.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "safe.txt")
+    git(repo, "commit", "-m", "baseline")
+    target.write_text("changed\n", encoding="utf-8")
+    secret = repo / ".ssh" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE\n", encoding="utf-8")
+    real_git_numstat = session_files.git_numstat
+    swapped = False
+
+    def numstat_then_swap(*args, **kwargs):
+        nonlocal swapped
+        result = real_git_numstat(*args, **kwargs)
+        target.unlink()
+        target.symlink_to(secret)
+        swapped = True
+        return result
+
+    monkeypatch.setattr(session_files, "git_numstat", numstat_then_swap)
+
+    snapshot = session_files.build_git_snapshot(repo)
+
+    assert swapped is True
+    assert snapshot["statuses"] == {}
+    assert snapshot["numstat"] == {}
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(snapshot)
 
 
 def test_concurrent_views_share_one_git_identity_run(tmp_path, monkeypatch):
@@ -3974,6 +4312,15 @@ def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(
     git(repo, "add", "one.py")
     git(repo, "commit", "-m", "init")
     resolved_repo = repo.resolve()
+    real_git_snapshot_identity = session_files.git_snapshot_identity
+    identity_calls = 0
+
+    def counted_git_snapshot_identity(*args, **kwargs):
+        nonlocal identity_calls
+        identity_calls += 1
+        return real_git_snapshot_identity(*args, **kwargs)
+
+    monkeypatch.setattr(session_files, "git_snapshot_identity", counted_git_snapshot_identity)
 
     monkeypatch.setattr(TmuxWebtermApp, "discover_and_start", lambda self: None, raising=False)
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
@@ -4010,16 +4357,14 @@ def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(
         # A watched change bumps the generation, so the cache key changes with still-no identity spawn.
         (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
         webapp.mark_repo_state_dirty([resolved_repo / "one.py"])
-        spawns_mid = dict(common_module.GIT_COMMAND_COUNTS)
         key_two = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
         assert key_two != key_one
-        assert "status" not in _new_git_verbs(spawns_mid)
+        assert identity_calls == 0
 
         # Watcher unhealthy -> fall back to the git-spawn identity (a tuple, not the int backstop).
         record.filesystem_healthy = False
-        spawns_unhealthy = dict(common_module.GIT_COMMAND_COUNTS)
         key_unhealthy = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
-        assert "status" in _new_git_verbs(spawns_unhealthy)
+        assert identity_calls == 1
         (_repo_text, unhealthy_signature), = dict(key_unhealthy[-1]).items()
         assert isinstance(unhealthy_signature, tuple)
     finally:
@@ -4070,6 +4415,13 @@ def test_session_files_view_coalesce_identity_is_stable_and_source_scoped(tmp_pa
         assert generation_a == generation_b
         coalesce_y, generation_y = webapp_a.session_files_view_coalesce_identity(key_gen_y)
         assert coalesce_y != coalesce_a
+        deferred_a = (*stable_key[:-1], (("repoX", "deferred-unwatched:request-a"),))
+        deferred_b = (*stable_key[:-1], (("repoX", "deferred-unwatched:request-b"),))
+        assert deferred_a != deferred_b
+        assert webapp_a.session_files_view_coalesce_identity(deferred_a) == webapp_a.session_files_view_coalesce_identity(deferred_b)
+        profile_a = webapp_a.session_files_jobd_source_profile(deferred_a, "api-session-files")
+        profile_b = webapp_a.session_files_jobd_source_profile(deferred_b, "api-session-files")
+        assert profile_a["repo_signature"] == profile_b["repo_signature"]
     finally:
         webapp_a.control_server.stop()
         webapp_b.control_server.stop()
@@ -4761,7 +5113,8 @@ def test_configured_exclusion_policy_applies_at_the_git_status_door(tmp_path):
     # Assert against the door's ACTUAL input -- what `git_name_status` hands the snapshot -- not
     # raw `git status --porcelain`, which collapses untracked directories to `?? vendorcache/`
     # and would make the excluded-file assertions below vacuous.
-    door_input = session_files.git_name_status(repo, None)[0]
+    with pinned_test_snapshot_runner(repo) as runner:
+        door_input = session_files.git_name_status(repo, runner, None)[0]
     assert "vendorcache/blob.bin" in door_input, door_input
     assert "src/live.py" in door_input, door_input
     # Git never reports paths inside `.git`, so that one row is structurally out of reach at THIS
@@ -4932,6 +5285,59 @@ def test_worker_reuses_task_local_snapshot_while_deriving_isolated_exact_output(
     assert rows["s2"] == second_row_before
     result["payload"]["refs_by_repo"][str(repo)][0]["name"] = "mutated"
     assert snapshot == snapshot_before
+
+
+def test_worker_snapshot_memo_key_includes_authorized_root_identity(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("safe\n", encoding="utf-8")
+    parked = tmp_path / "repo-authorized"
+    replacement_bytes = "BLOCKED_SENTINEL_DO_NOT_EXPOSE" * 4
+    identities = []
+
+    def cached_snapshot(_repo_path, _from_ref, _to_ref, _generation, _builder):
+        handle = session_files._AUTHORIZED_REPOSITORY_SNAPSHOT_HANDLE.get()
+        identities.append((handle.stat_result.st_dev, handle.stat_result.st_ino))
+        child_stat = os.stat("tracked.txt", dir_fd=handle.descriptor, follow_symlinks=False)
+        snapshot = _repository_snapshot_fixture(
+            statuses={"tracked.txt": "M"},
+            numstat={"tracked.txt": {"added": 1, "removed": 0}},
+            file_identities={"tracked.txt": [child_stat.st_dev, child_stat.st_ino]},
+        )
+        if len(identities) == 1:
+            repo.rename(parked)
+            repo.mkdir()
+            init_repo(repo)
+            (repo / "tracked.txt").write_text(replacement_bytes, encoding="utf-8")
+        return snapshot, False
+
+    def info_for(session, pane_id):
+        pane = PaneInfo(
+            session=session, window="0", pane="0", pane_id=pane_id, target=f"{session}:0.0",
+            current_path=str(repo), command="bash", active=True, window_active=True, title="", pid=1,
+        )
+        return SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=[])
+
+    monkeypatch.setattr(session_files, "cached_repository_snapshot", cached_snapshot)
+    request = {
+        "session": "",
+        "infos": {
+            "s1": dataclasses.asdict(info_for("s1", "%1")),
+            "s2": dataclasses.asdict(info_for("s2", "%2")),
+        },
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+    }
+
+    result = session_files.session_files_view_result(request, max_bytes=8 * 1024 * 1024)
+
+    assert len(identities) == 2
+    assert identities[0] != identities[1]
+    rows = {row["session"]: row for row in result["payload"]["files"]}
+    assert rows["s1"]["size"] == (parked / "tracked.txt").stat().st_size
+    assert rows["s2"]["size"] == len(replacement_bytes)
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(result)
 
 
 def test_worker_falls_back_to_shipped_defaults_when_no_policy_arrives(tmp_path):
