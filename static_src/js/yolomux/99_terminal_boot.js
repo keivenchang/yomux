@@ -5234,6 +5234,7 @@ function updateTypingIndicator(session) {
 }
 
 function updateStatus() {
+  if (layoutStatusSurfaceOwnsMessage()) return;
   if (activeSessions.length === 0) {
     statusEl.textContent = t('terminal.status.noSessionSelected');
     statusEl.removeAttribute('title');
@@ -6202,6 +6203,24 @@ async function refreshSessionMetadata(options = {}) {
   })();
   transcriptMetadataState.request = request;
   return request;
+}
+
+function refreshSessionMetadataAfterCurrent(options = {}) {
+  const current = transcriptMetadataState.request;
+  if (!current) return refreshSessionMetadata(options);
+  const queued = transcriptMetadataState.queuedRefresh;
+  if (queued?.afterRequest === current) return queued.promise;
+  const promise = current.then(
+    () => refreshSessionMetadata(options),
+    () => refreshSessionMetadata(options),
+  );
+  const record = {afterRequest: current, promise};
+  transcriptMetadataState.queuedRefresh = record;
+  const clear = () => {
+    if (transcriptMetadataState.queuedRefresh === record) transcriptMetadataState.queuedRefresh = null;
+  };
+  promise.then(clear, clear);
+  return promise;
 }
 
 async function refreshTranscripts(options = {}) {

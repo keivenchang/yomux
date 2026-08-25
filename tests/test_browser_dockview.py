@@ -4935,6 +4935,7 @@ def test_dockview_refused_move_to_full_pinned_pane_shows_danger_status(browser, 
         setTabPinned('2', true);
         const before = JSON.stringify({left: paneTabs('left'), right: paneTabs('right')});
         moveSessionToSlot('3', 'right', 'left', 2).then(moved => {
+          updateStatus();
           requestAnimationFrame(() => {
             const status = document.getElementById('status');
             const rect = status.getBoundingClientRect();

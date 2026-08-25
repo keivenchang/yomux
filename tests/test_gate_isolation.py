@@ -2103,7 +2103,10 @@ def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_jobd(
         "client-event-watcher",
         "tmux-signal-joined",
         ("session-files", 3),
-        ("jobd-operations", 3),
+        (
+            "jobd-operations",
+            gate_harness_module.FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS,
+        ),
     ]
 
 
@@ -2843,7 +2846,7 @@ def test_fixture_stops_accepted_jobd_operations_before_demoting_local_services()
             calls.append("client-watcher")
 
         def wait_for_jobd_operations_terminal(self, timeout):
-            assert timeout == 3
+            assert timeout == gate_harness_module.FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS
             calls.append("jobd-operations-terminal")
 
         def stop_jobd_operation_service(self):

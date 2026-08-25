@@ -148,6 +148,7 @@ def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
         assert second_response.status == 200
         assert second_response.readline().decode("utf-8") == "event: ready\n"
         assert app.tmux_signal_event_watcher is not stopped_watcher
+        assert app.tmux_signal_event_watcher.wait_for_status("attached", timeout=4.0) is True
         deadline = time.monotonic() + 4.0
         attempt = 0
         while time.monotonic() < deadline:
@@ -177,6 +178,7 @@ def test_readonly_control_attach_starts_on_fixture_default_server(monkeypatch, t
     rows = []
     try:
         assert watcher.start() is True
+        assert watcher.wait_for_status("attached", timeout=4.0) is True
         deadline = time.monotonic() + 4.0
         attempt = 0
         while time.monotonic() < deadline:
@@ -402,6 +404,131 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
     watcher.run_control_client("alpha")
 
     assert captured["kwargs"].get("preexec_fn") is tmux_signals.set_control_client_parent_death_signal
+
+
+def test_stop_terminates_a_spawned_control_client_while_claim_publication_is_pending(monkeypatch):
+    claim_started = threading.Event()
+    release_claim = threading.Event()
+    process_terminated = threading.Event()
+
+    class FakeStdin:
+        def write(self, _text):
+            return None
+
+        def flush(self):
+            return None
+
+    class FakeProcess:
+        pid = 424243
+        stdin = FakeStdin()
+        stdout = iter(())
+
+        def poll(self):
+            return 0 if process_terminated.is_set() else None
+
+        def terminate(self):
+            process_terminated.set()
+
+        def wait(self, timeout=None):
+            assert timeout == 1.0
+            return 0
+
+        def kill(self):
+            raise AssertionError("terminate completed; kill must not run")
+
+    monkeypatch.setattr(tmux_signals.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda _event: None)
+
+    def publish_claim(_pid, _session):
+        claim_started.set()
+        assert release_claim.wait(timeout=2.0)
+        return None
+
+    monkeypatch.setattr(watcher, "publish_client_claim", publish_claim)
+    worker = threading.Thread(target=watcher.run_control_client, args=("alpha",))
+    worker.start()
+    try:
+        assert claim_started.wait(timeout=1.0)
+        watcher.stop()
+        assert process_terminated.is_set()
+    finally:
+        release_claim.set()
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+    assert watcher.wait_for_status("attached", timeout=0.0) is False
+
+    claim_calls = []
+    pre_stopped_watcher = tmux_signals.TmuxSignalEventWatcher(
+        sessions=lambda: ["alpha"],
+        on_event=lambda _event: None,
+    )
+    monkeypatch.setattr(pre_stopped_watcher, "publish_client_claim", lambda *_args: claim_calls.append(True))
+    monkeypatch.setattr(
+        tmux_signals.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("a stopped watcher must not spawn")),
+    )
+    pre_stopped_watcher.stop()
+    pre_stopped_watcher.run_control_client("alpha")
+    assert claim_calls == []
+    assert pre_stopped_watcher.wait_for_status("attached", timeout=0.0) is False
+
+
+def test_spawn_publication_is_fenced_from_stop_and_stop_retires_attached_status(monkeypatch):
+    spawn_started = threading.Event()
+    release_spawn = threading.Event()
+    process_terminated = threading.Event()
+
+    class FakeProcess:
+        pid = 424244
+        stdin = None
+        stdout = iter(())
+
+        def poll(self):
+            return 0 if process_terminated.is_set() else None
+
+        def terminate(self):
+            process_terminated.set()
+
+        def wait(self, timeout=None):
+            assert timeout == 1.0
+            return 0
+
+        def kill(self):
+            raise AssertionError("terminate completed; kill must not run")
+
+    def spawn(*_args, **_kwargs):
+        spawn_started.set()
+        assert release_spawn.wait(timeout=2.0)
+        return FakeProcess()
+
+    monkeypatch.setattr(tmux_signals.subprocess, "Popen", spawn)
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda _event: None)
+    stop_returned = threading.Event()
+
+    def publish_claim(*_args):
+        assert stop_returned.wait(timeout=1.0)
+        return None
+
+    monkeypatch.setattr(watcher, "publish_client_claim", publish_claim)
+    worker = threading.Thread(target=watcher.run_control_client, args=("alpha",))
+    worker.start()
+    assert spawn_started.wait(timeout=1.0)
+
+    stopper = threading.Thread(target=lambda: (watcher.stop(), stop_returned.set()))
+    stopper.start()
+    try:
+        assert stop_returned.wait(timeout=0.1) is False
+    finally:
+        release_spawn.set()
+        stopper.join(timeout=2.0)
+        worker.join(timeout=2.0)
+
+    assert stopper.is_alive() is False
+    assert worker.is_alive() is False
+    assert stop_returned.is_set()
+    assert process_terminated.is_set()
+    assert watcher.status_payload()["state"] == "exited"
 
 
 @pytest.mark.parametrize(

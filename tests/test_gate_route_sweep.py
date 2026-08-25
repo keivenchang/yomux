@@ -148,7 +148,9 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
         "get_websocket": f"session={session}&client=route-sweep",
         "post_self_update": "dryrun=1",
         "post_ensure_session": f"session={session}",
-        "post_create_session": "agent=route-sweep-invalid",
+        # Unknown agents intentionally fall back to Claude, so they are not a safe negative fixture:
+        # the sweep would launch a real process. An unavailable explicit terminal refuses pre-spawn.
+        "post_create_session": "agent=term&terminal=route-sweep-unavailable",
         "post_rename_session": "session=route-sweep-missing&new_name=route-sweep-renamed",
         "post_kill_session": "session=route-sweep-missing",
         "post_upload": f"session={session}",
@@ -872,6 +874,22 @@ def test_authenticated_private_server_exercises_every_registered_route(
     )
     assert activity_summary["outcome"] == "excluded", activity_summary
     assert activity_summary["status"] is None, activity_summary
+    create_session = next(
+        outcome
+        for outcome in outcomes
+        if (outcome["method"], outcome["route"]) == ("POST", "/api/create-session")
+    )
+    assert create_session["status"] == HTTPStatus.NOT_FOUND, create_session
+    assert create_session["typed_error"] is True, create_session
+    sessions_after_sweep = run_isolated_tmux(
+        gate_authenticated_live_server.tmux,
+        "list-sessions",
+        "-F",
+        "#{session_name}",
+        timeout=5,
+    )
+    assert sessions_after_sweep.returncode == 0, sessions_after_sweep.stderr or sessions_after_sweep.stdout
+    assert sessions_after_sweep.stdout.splitlines() == [route_fixture.session]
     _write_report_artifact(outcomes, base_sha="9e4940e2fa5c7372d5e0744a078bb82ea0bf848f")
     try:
         _assert_sweep_passes(outcomes)

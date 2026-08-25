@@ -301,7 +301,7 @@ class TmuxSignalEventWatcher:
         self.on_error = on_error
         self.retry_seconds = max(0.25, float(retry_seconds))
         self.stop_event = threading.Event()
-        self.lock = threading.RLock()
+        self.lock = threading.Condition(threading.RLock())
         self.thread: threading.Thread | None = None
         self.process: subprocess.Popen[str] | None = None
         self.status_state = "never-started"
@@ -361,6 +361,16 @@ class TmuxSignalEventWatcher:
             if sessions is not None:
                 self.status_sessions = [str(session) for session in sessions]
             self.status_error = error
+            self.lock.notify_all()
+
+    def wait_for_status(self, state: str, timeout: float) -> bool:
+        """Wait on the watcher-owned lifecycle transition rather than a process proxy."""
+
+        with self.lock:
+            return self.lock.wait_for(
+                lambda: self.status_state == state,
+                timeout=max(0.0, float(timeout)),
+            )
 
     def claim_ledger(self) -> ProcessClaimLedger:
         """Resolve the reap-authority ledger once per watcher, lazily.
@@ -418,9 +428,11 @@ class TmuxSignalEventWatcher:
             return True
 
     def stop(self) -> None:
-        self.stop_event.set()
         with self.lock:
+            self.stop_event.set()
             process = self.process
+            if process is not None:
+                self._set_status("exited")
         if process is not None and process.poll() is None:
             process.terminate()
             try:
@@ -456,29 +468,35 @@ class TmuxSignalEventWatcher:
             self._set_status("never-started", error=error)
             self.emit_error(error)
             return
-        try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                bufsize=1,
-                preexec_fn=set_control_client_parent_death_signal,
-            )
-        except OSError as exc:
-            error = f"tmux control-mode start failed: {exc}"
-            self._set_status("never-started", error=error)
-            self.emit_error(error)
-            return
-        claim = self.publish_client_claim(process.pid, session)
         with self.lock:
+            if self.stop_event.is_set():
+                return
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                    bufsize=1,
+                    preexec_fn=set_control_client_parent_death_signal,
+                )
+            except OSError as exc:
+                error = f"tmux control-mode start failed: {exc}"
+                self._set_status("never-started", error=error)
+                self.emit_error(error)
+                return
             self.process = process
-            self.claim = claim
-        self._set_status("attached")
-        install_tmux_signal_control_subscriptions(process)
+        claim = None
         try:
+            claim = self.publish_client_claim(process.pid, session)
+            with self.lock:
+                self.claim = claim
+                if self.stop_event.is_set():
+                    return
+                self._set_status("attached")
+            install_tmux_signal_control_subscriptions(process)
             assert process.stdout is not None
             for line in process.stdout:
                 if self.stop_event.is_set():
@@ -497,8 +515,7 @@ class TmuxSignalEventWatcher:
                 released_claim = self.claim if claim is not None and self.claim is claim else None
                 if released_claim is not None:
                     self.claim = None
-            if not self.stop_event.is_set():
-                self._set_status("exited")
+            self._set_status("exited")
             if process.poll() is None:
                 process.terminate()
                 try:

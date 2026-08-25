@@ -86,6 +86,9 @@ UNIX_SOCKET_PATH_LIMIT_BYTES = 107
 GATE_UNIX_SOCKET_PATH_BUDGET_BYTES = 100
 GATE_HTTP_PORT_RANGE = range(7900, 8000)
 GATE_LOCAL_SERVICE_IDLE_SECONDS = "60"
+# Filesystem products may legitimately consume the full ten-second Git view
+# budget before their accepted operation reaches a terminal state.
+FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS = 15
 
 
 def gate_http_port_candidates(
@@ -2096,7 +2099,9 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
     attempt(app.stop_client_event_watcher)
     attempt(signal_metadata_warmer)
     if vars(app).get("queued_delivery_ledger") is not None:
-        attempt(lambda: app.wait_for_jobd_operations_terminal(3))
+        attempt(lambda: app.wait_for_jobd_operations_terminal(
+            FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS,
+        ))
     attempt(app.stop_jobd_operation_service)
     attempt(join_metadata_warmer)
     attempt(seal_local_service_starts)
@@ -2135,7 +2140,7 @@ def settle_fixture_app_evidence_boundary(app: Any, *, label: str) -> None:
             f"{label} session-files work did not settle before the browser evidence boundary"
         )
     if vars(app).get("queued_delivery_ledger") is not None:
-        app.wait_for_jobd_operations_terminal(3)
+        app.wait_for_jobd_operations_terminal(FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS)
 
 
 def stop_fixture_http_app(app: Any, server: TmuxWebtermHTTPServer, thread: threading.Thread, *, label: str) -> None:

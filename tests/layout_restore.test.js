@@ -3305,6 +3305,7 @@ async function runLayoutRestoreSuite() {
     moveSlots.right = api.paneStateWithTabs(['1', '2'], '1');
     api.setPinnedTabsForTest(['1', '2']);
     api.setLayoutSlotsForTest(moveSlots);
+    api.setStatusTitleForTest('1 of 2 terminal sockets connected');
     const refused = await api.moveSessionToSlot('3', 'right', 'left', 2);
     const afterRefusal = api.serialize(api.layoutSlotsForTest());
     assert.equal(refused, false, 'moveSessionToSlot reports a refused full-pinned target');
@@ -3315,6 +3316,11 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.statusKindForTest(), 'danger', 'refused move publishes a visible danger layout status');
     assert.ok(api.statusClassForTest().includes('layout-status-visible'), 'refused move makes the existing status live region visible');
     assert.ok(api.statusClassForTest().includes('layout-status-danger'), 'refused move applies danger status styling');
+    assert.equal(api.statusTitleForTest(), '', 'layout refusal retires the older terminal-connection tooltip owner');
+    api.updateStatusForTest();
+    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'terminal connection refresh cannot erase an active layout refusal');
+    assert.equal(api.statusKindForTest(), 'danger', 'terminal connection refresh preserves the active layout-status owner');
+    assert.equal(api.statusTitleForTest(), '', 'terminal connection refresh cannot restore its stale tooltip over a layout refusal');
     assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a full all-pinned target');
     moveSlots.right = api.paneStateWithTabs(['1', editorItem], '1');
     api.setLayoutSlotsForTest(moveSlots);

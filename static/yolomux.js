@@ -1592,6 +1592,9 @@ const transcriptMetadataState = {
   loaded: false,
   error: null,
   request: null,
+  // Event-driven freshness cannot join bytes requested before the event; retain one follow-up per
+  // exact in-flight request so a burst converges without duplicating cache reads.
+  queuedRefresh: null,
   // Server-stamped identity of the build the rendered model came from, and the highest generation
   // the server has told us to expect. A forced refresh is answered from the server's cache, so the
   // bytes it returns are always older than the request; `pendingGeneration` names the build that
@@ -5654,7 +5657,13 @@ function cycleSessionRepoDisplay(session, info, direction) {
 function resetLayoutStatusSurface() {
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
+  statusEl.removeAttribute('title');
   delete statusEl.dataset.layoutStatusKind;
+}
+
+function layoutStatusSurfaceOwnsMessage() {
+  return statusEl.classList.contains('layout-status-visible')
+    && Boolean(statusEl.dataset.layoutStatusKind);
 }
 
 function statusErr(html) {
@@ -80305,6 +80314,7 @@ function updateTypingIndicator(session) {
 }
 
 function updateStatus() {
+  if (layoutStatusSurfaceOwnsMessage()) return;
   if (activeSessions.length === 0) {
     statusEl.textContent = t('terminal.status.noSessionSelected');
     statusEl.removeAttribute('title');
@@ -81275,6 +81285,24 @@ async function refreshSessionMetadata(options = {}) {
   return request;
 }
 
+function refreshSessionMetadataAfterCurrent(options = {}) {
+  const current = transcriptMetadataState.request;
+  if (!current) return refreshSessionMetadata(options);
+  const queued = transcriptMetadataState.queuedRefresh;
+  if (queued?.afterRequest === current) return queued.promise;
+  const promise = current.then(
+    () => refreshSessionMetadata(options),
+    () => refreshSessionMetadata(options),
+  );
+  const record = {afterRequest: current, promise};
+  transcriptMetadataState.queuedRefresh = record;
+  const clear = () => {
+    if (transcriptMetadataState.queuedRefresh === record) transcriptMetadataState.queuedRefresh = null;
+  };
+  promise.then(clear, clear);
+  return promise;
+}
+
 async function refreshTranscripts(options = {}) {
   return refreshSessionMetadata(options);
 }
@@ -82087,7 +82115,7 @@ function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
   if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
-  if (channels.has('transcripts') && typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
+  if (channels.has('transcripts') && typeof refreshSessionMetadataAfterCurrent === 'function') refreshSessionMetadataAfterCurrent({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
   if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
   if (channels.has('events') && typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs().catch(error => console.warn('client-events ready event-log refresh failed', error));
   if (channels.has('yoagent') && typeof loadYoagentConversation === 'function') loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: false}).catch(error => console.warn('client-events ready YO!agent refresh failed', error));
@@ -82592,12 +82620,15 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     if (payload.data) {
       applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
     } else {
-      refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events transcript refresh failed', error));
+      // A roster revision can arrive while boot metadata is still finishing its render tail. Joining
+      // that older request drops the revision, so retain one follow-up against the exact in-flight
+      // request and read the cache the server just published after it settles.
+      refreshSessionMetadataAfterCurrent({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events transcript refresh failed', error));
     }
     return;
   }
   if (type === 'context_changed') {
-    if (typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events context refresh failed', error));
+    if (typeof refreshSessionMetadataAfterCurrent === 'function') refreshSessionMetadataAfterCurrent({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events context refresh failed', error));
     return;
   }
   if (type === 'context_items_ready') {

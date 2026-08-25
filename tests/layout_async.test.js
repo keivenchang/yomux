@@ -3453,6 +3453,36 @@ async function runLayoutAsyncSuite() {
     assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
   });
 
+  await testAsync('a transcripts revision during an older metadata request owns one follow-up cache read', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const initial = api.refreshSessionMetadataForTest({refreshAuto: false, refreshActivity: false});
+    assert.equal(api.handleClientPushEventForTest(
+      'transcripts_changed',
+      {refresh: true},
+      {epoch: 'server-a', resource: 'transcripts_changed', resource_revision: 1},
+    ), true);
+    await api.flushQueuedClientPushEventsForTest();
+    assert.equal(pending.length, 1, 'the revision waits for the exact older request instead of duplicating it');
+
+    pending[0].resolve(jsonResponse({metadata_identity: {epoch: 'server-a', generation: 1}, marker: 'old', session_order: ['1'], sessions: {'1': {panes: []}}}));
+    await initial;
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, 'the revision starts one cache read after the older request settles');
+    pending[1].resolve(jsonResponse({metadata_identity: {epoch: 'server-a', generation: 2}, marker: 'published', session_order: ['1'], sessions: {'1': {panes: []}}}));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(api.transcriptMetadataStateForTest().payload.marker, 'published', 'the follow-up consumes the revision that arrived during the older request');
+    assert.equal(api.transcriptMetadataStateForTest().request, null);
+  });
+
   await testAsync('forced post-mutation metadata supersedes pre-mutation work and rejects stale ABA apply', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
