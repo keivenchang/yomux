@@ -2002,6 +2002,7 @@
     "tests/i18n_structured_message.test.js": 267,
     "tests/layout_async.test.js": 9189,
     "tests/layout_restore.test.js": 5085,
+    "tests/open_file_413_reason.test.js": 84,
     "tests/open_file_missing_guard.test.js": 368,
     "tests/side_panes.test.js": 728,
     "tests/stats_current_panel.test.js": 4598,

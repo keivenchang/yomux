@@ -20296,6 +20296,8 @@ function rawFileMediaVersion(state) {
 function rawFileFailureFallback(status, path) {
   if (status === 401) return {key: 'auth.error.authenticationRequired', params: {}, fallback: 'Authentication required.'};
   if (status === 404) return {key: 'common.pathNotFound', params: {path}, fallback: `path not found: ${path}`};
+  // Only claim the file is oversized when nothing more specific came back; the server's own message
+  // wins otherwise, so a Git budget refusal is not relabelled as a size problem.
   if (status === 413) return {key: 'editor.fileTooLargeTitle', params: {}, fallback: 'File is too large to preview'};
   return {key: 'common.requestFailed', params: {}, fallback: 'request failed'};
 }
@@ -27834,6 +27836,16 @@ function fileErrorText(error, fallbackKey, fallbackParams = {}) {
   return error && typeof error === 'object' ? userMessageText(error, fallback) : String(error || fallback);
 }
 
+// HTTP 413 means "some limit was exceeded", not "this file is too big". The Git view raises it for
+// its own object-store and deadline budgets, so a 21 KB file in a slow repository was being shown
+// as "File is too large to preview". Only the server saying the file itself is oversized counts.
+const FILE_TOO_LARGE_MESSAGE_KEY = 'fs.error.tooLarge';
+
+function payloadReportsFileTooLarge(error) {
+  const key = String(userMessageSnapshot(error)?.user_message?.key || '');
+  return key === '' || key === FILE_TOO_LARGE_MESSAGE_KEY;
+}
+
 function tooLargeFileState(size = null, message = null) {
   return {
     mtime: 0,
@@ -27843,8 +27855,19 @@ function tooLargeFileState(size = null, message = null) {
     dirty: false,
     size,
     maxBytes: MAX_FILE_PREVIEW_BYTES,
-    error: message ? fileErrorMessageSnapshot(message, 'editor.fileTooLargeDetail') : null,
+    // The detail template names both numbers, so it has to be given both. Passing none rendered the
+    // literal text "{size}; limit is {limit}" to the user.
+    error: message
+      ? fileErrorMessageSnapshot(message, 'editor.fileTooLargeDetail', {
+        size: size == null ? '' : formatFileSize(Number(size)),
+        limit: formatFileSize(MAX_FILE_PREVIEW_BYTES),
+      })
+      : null,
   };
+}
+
+function oversizeOrErrorFileState(size, error) {
+  return payloadReportsFileTooLarge(error) ? tooLargeFileState(size, error) : fileErrorState(error);
 }
 
 function rawPreviewFileState(path, entry = null, options = {}) {
@@ -28614,7 +28637,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(entry?.size ?? null, err)
+          ? oversizeOrErrorFileState(entry?.size ?? null, err)
           : status === 404
             ? missingFileState(err)
             : fileErrorState(err, err?.code === 'deadline_expired' ? '' : 'editor.fileLoadFailed');
@@ -28742,7 +28765,7 @@ async function openFileStateFromDisk(path, entry = null) {
       let state = status === 415 ? await sniffedRawPreviewFileState(path, fileEntry) : null;
       if (!state) {
         state = status === 413
-          ? tooLargeFileState(fileEntry.size ?? null, error)
+          ? oversizeOrErrorFileState(fileEntry.size ?? null, error)
           : status === 404
             ? missingFileState(error)
             : fileErrorState(error);
@@ -73976,7 +73999,7 @@ function loadFileEditorState(path, panel, item) {
       if (status) {
         const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
         setFileState(path, sniffed || (status === 413
-          ? tooLargeFileState(null, err)
+          ? oversizeOrErrorFileState(null, err)
           : status === 404
             ? missingFileState(err)
             : fileErrorState(err)));
