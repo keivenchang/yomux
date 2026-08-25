@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.16 | `v0.7.16` | `v0.7.16^{commit}` | [v0.7.16-evidence.md](v0.7.16-evidence.md) | restores Blame and Differ performance on NFS-backed repositories and reclaims writer slots left by cancelled runs |
 | 0.7.15 | `v0.7.15` | `v0.7.15^{commit}` | [v0.7.15-evidence.md](v0.7.15-evidence.md) | tmux control-client lifecycle ownership, roster metadata convergence, and preserved topbar refusal state and tooltip ownership |
 | 0.7.14 | `v0.7.14` | `v0.7.14^{commit}` | [v0.7.14-evidence.md](v0.7.14-evidence.md) | local-service identity and lease safety, deterministic gate ownership, and YO!stats generation correctness |
 | 0.7.13 | `v0.7.13` | `v0.7.13^{commit}` | [v0.7.13-evidence.md](v0.7.13-evidence.md) | corrects watchd health, YO!stats graph/ring and roster convergence, bounded Codex hot-tail fairness, and session-files request ownership |
