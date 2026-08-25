@@ -2069,7 +2069,7 @@
     "tests/test_e2e_system_status.py": 84,
     "tests/test_events_state.py": 42,
     "tests/test_file_index.py": 1185,
-    "tests/test_filesystem.py": 5168,
+    "tests/test_filesystem.py": 5245,
     "tests/test_filesystem_access_policy.py": 368,
     "tests/test_filesystem_authorize_repoint.py": 1742,
     "tests/test_filesystem_delete_cooperation.py": 244,

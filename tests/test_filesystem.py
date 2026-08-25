@@ -5166,3 +5166,80 @@ def test_loose_objects_are_cached_even_when_they_cannot_be_hardlinked(monkeypatc
     second = filesystem.blame_file(str(repo / "tracked.txt"))
     assert second["lines"] == first["lines"]
     assert reads["count"] == 0, "a copied cache entry must serve the next build"
+
+
+def _git_metadata_that_always_fails(monkeypatch, message_key="fs.error.gitHistoryTooLarge"):
+    """Make every Git view build for a path fail the way an oversized or racing repository does."""
+    def refuse(handle, **kwargs):
+        raise FilesystemError("git view refused", status=413, message_key=message_key)
+    monkeypatch.setattr(git_ops, "pinned_file_git_metadata", refuse)
+
+
+def test_open_returns_a_readable_file_when_git_enrichment_cannot_be_produced(monkeypatch, tmp_path):
+    # Reading a file and describing its Git history are two questions, and the second must not be
+    # able to answer the first. Git enrichment used to propagate out of read_file, so a repository
+    # whose objects are not packed left the user unable to open a file that had already been read.
+    target = tmp_path / "readable.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch)
+
+    payload = filesystem.read_file(str(target))
+
+    assert payload["content"] == "first\nsecond\n"
+    assert payload["size"] == len("first\nsecond\n")
+    assert payload["git_enrichment"] == {"available": False, "reason": "fs.error.gitHistoryTooLarge"}
+    assert payload["git_root"] == ""
+    assert payload["git_history"] == []
+    assert payload["git_has_history"] is False
+
+
+def test_validating_a_path_survives_git_enrichment_that_cannot_be_produced(monkeypatch, tmp_path):
+    # Validation decides whether Open is offered at all, so it carries the same rule as the read.
+    target = tmp_path / "readable.txt"
+    target.write_text("body\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch)
+
+    info = filesystem.path_info(str(target))
+
+    assert info["kind"] == "file"
+    assert info["size"] == len("body\n")
+    assert info["git_enrichment"] == {"available": False, "reason": "fs.error.gitHistoryTooLarge"}
+    assert info["repo_root"] == ""
+
+
+@pytest.mark.parametrize("consumer", ["read", "info"])
+def test_open_still_refuses_when_the_repository_says_it_is_not_the_one_we_authorized(monkeypatch, tmp_path, consumer):
+    # Degrading is scoped to size and budget. A repository reporting that it changed underneath the
+    # pin is how an object store swapped in from elsewhere is caught, and serving the file anyway
+    # would turn that detection into a shrug.
+    target = tmp_path / "readable.txt"
+    target.write_text("body\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch, message_key="fs.error.gitRepositoryChanged")
+
+    with pytest.raises(FilesystemError) as caught:
+        filesystem.read_file(str(target)) if consumer == "read" else filesystem.path_info(str(target))
+
+    assert caught.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_open_reports_git_enrichment_as_available_when_the_repository_answers(tmp_path):
+    # The failure path must not become the only path: a healthy repository still decorates the read.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    payload = filesystem.read_file(str(repo / "tracked.txt"))
+
+    assert payload["content"] == "one\n"
+    assert payload["git_enrichment"] == {"available": True, "reason": ""}
+    assert payload["git_root"] == str(repo)
+    assert payload["git_tracked"] is True
+
+
+def test_git_enrichment_gets_a_shorter_budget_than_a_full_git_view_build(tmp_path):
+    # Open must not inherit the full view-build deadline; a reader who asked for a file is not
+    # asking to wait out a repository's whole object store.
+    assert git_ops.GIT_OPTIONAL_METADATA_TIMEOUT_SECONDS < git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS

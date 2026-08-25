@@ -744,12 +744,15 @@ def pinned_file_git_metadata(
     repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
     history_limit: int = 60,
     operation: str = "",
+    deadline_seconds: float | None = None,
 ) -> tuple[str, bool, list[dict[str, Any]], str, dict[str, Any] | None]:
+    # Resolved here rather than as a default because the budget constants are declared below.
+    budget = GIT_VIEW_BUILD_TIMEOUT_SECONDS if deadline_seconds is None else deadline_seconds
     is_directory = stat.S_ISDIR(handle.stat_result.st_mode)
     if is_directory:
         repo = _pinned_repo_root(
             handle,
-            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + budget,
             operation=operation,
         )
         if repo is None:
@@ -773,7 +776,7 @@ def pinned_file_git_metadata(
             handle,
             target_path=handle.resolved,
             operation=operation,
-            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + budget,
             include_index=True,
         )
         with scope_context as scope:
@@ -832,6 +835,58 @@ def pinned_file_git_metadata(
         if error.message_key != "fs.error.notGitRepo":
             raise
         return "", False, [], "", None
+
+
+
+# Opening a file must not wait on Git. Enrichment gets its own short budget, well under the full
+# view-build deadline, because a reader who asked for a file is not asking for its history.
+GIT_OPTIONAL_METADATA_TIMEOUT_SECONDS = 2.0
+
+# The only failures Open is allowed to shrug off. A repository that is merely too big or too slow
+# says nothing about whether the file is safe to hand over. Everything else -- an object store
+# swapped after the pin, a control directory that moved, a path that escaped its root -- is the
+# repository telling us it is not the repository we authorized, and those must still refuse,
+# because that refusal is what keeps another repository's contents from being served as this one's.
+GIT_OPTIONAL_METADATA_DEGRADABLE_KEYS = frozenset({"fs.error.gitHistoryTooLarge"})
+
+
+def optional_pinned_file_git_metadata(
+    handle: paths.SafePathHandle,
+    *,
+    include_repo_info: bool = False,
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+    history_limit: int = 60,
+    operation: str = "",
+    deadline_seconds: float | None = None,
+) -> tuple[str, bool, list[dict[str, Any]], str, dict[str, Any] | None, str]:
+    """Return Git metadata for a path, or say why there is none, but never fail the caller.
+
+    Reading a file and describing its Git history are two different questions, and the second one
+    must not be able to answer the first. A repository whose objects are not packed, a repository
+    being rewritten underneath us, or a Git view that runs out of budget all used to propagate out
+    of `read_file` and leave the user unable to open a file that had already been read successfully.
+
+    Only a size or budget failure is shrugged off, and it is reported rather than discarded: the
+    sixth element is the empty string on success and the error's own message key otherwise, so a
+    caller can surface exactly why the decoration is absent. A repository that reports it is not the
+    one we authorized still refuses, because that refusal is the thing stopping another repository's
+    contents from being served as this one's.
+    """
+
+    try:
+        repo, tracked, history, relative_path, repo_info = pinned_file_git_metadata(
+            handle,
+            include_repo_info=include_repo_info,
+            repo_info_cache=repo_info_cache,
+            history_limit=history_limit,
+            operation=operation,
+            deadline_seconds=GIT_OPTIONAL_METADATA_TIMEOUT_SECONDS if deadline_seconds is None else deadline_seconds,
+        )
+    except paths.FilesystemError as error:
+        if error.message_key not in GIT_OPTIONAL_METADATA_DEGRADABLE_KEYS:
+            raise
+        return "", False, [], "", None, error.message_key
+    return repo, tracked, history, relative_path, repo_info, ""
 
 
 GIT_HISTORY_DEFAULT_LIMIT = 50
