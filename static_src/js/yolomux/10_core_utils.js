@@ -3162,7 +3162,13 @@ function cycleSessionRepoDisplay(session, info, direction) {
 function resetLayoutStatusSurface() {
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
+  statusEl.removeAttribute('title');
   delete statusEl.dataset.layoutStatusKind;
+}
+
+function layoutStatusSurfaceOwnsMessage() {
+  return statusEl.classList.contains('layout-status-visible')
+    && Boolean(statusEl.dataset.layoutStatusKind);
 }
 
 function statusErr(html) {

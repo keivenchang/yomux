@@ -3189,6 +3189,9 @@ globalThis.__layoutTestApi = {
   statusHtmlForTest() { return statusEl.innerHTML; },
   statusClassForTest() { return statusEl.className; },
   statusKindForTest() { return statusEl.dataset.layoutStatusKind || ''; },
+  statusTitleForTest() { return statusEl.getAttribute('title') || ''; },
+  setStatusTitleForTest(value) { statusEl.setAttribute('title', String(value)); },
+  updateStatusForTest: updateStatus,
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],

@@ -1591,6 +1591,9 @@ const transcriptMetadataState = {
   loaded: false,
   error: null,
   request: null,
+  // Event-driven freshness cannot join bytes requested before the event; retain one follow-up per
+  // exact in-flight request so a burst converges without duplicating cache reads.
+  queuedRefresh: null,
   // Server-stamped identity of the build the rendered model came from, and the highest generation
   // the server has told us to expect. A forced refresh is answered from the server's cache, so the
   // bytes it returns are always older than the request; `pendingGeneration` names the build that
