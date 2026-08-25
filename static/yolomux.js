@@ -57497,8 +57497,20 @@ function debugGraphXAxisHtml(domain) {
   </div>`;
 }
 
+// The yolomux.py web process is a daemon like the other six, so its CPU line belongs on the daemon
+// chart rather than beside unrelated host processes. Only the rendering moves: the CPU family stays
+// the single owner of that PID and samples it at its own cadence, and the service-load family still
+// carries no `web` row, so one process is never sampled twice at two cadences. The consequence is
+// that this line reports a bucket average and does not follow the chart's Avg/Max/Min control,
+// which needs the per-bucket range only the service-load family records.
+function debugGraphSeriesIsWebProcessCpu(series) {
+  return series?.processCpu === true;
+}
+
 function debugGraphGroupSeriesItems(group, seriesItems) {
-  if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
+  if (group.serviceLoad === true) {
+    return seriesItems.filter(series => series.serviceLoad === true || debugGraphSeriesIsWebProcessCpu(series));
+  }
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
   if (group.macMemoryCard === true) {
@@ -57507,14 +57519,15 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return [...hostSeries, ...seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu')];
+      return [...hostSeries, ...seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu')];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
     }
-    // Existing history predates host process sampling. Keep its per-YOLOmux CPU lines readable
-    // until those one-second buckets age out instead of rendering an empty CPU chart.
-    return seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu');
+    // Existing history predates host process sampling. Keep it readable until those one-second
+    // buckets age out instead of rendering an empty CPU chart. The per-YOLOmux lines are not
+    // recalled here; they render on the daemon chart now.
+    return seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu');
   }
   const seriesKeys = new Set(group.series);
   return seriesItems.filter(series => seriesKeys.has(series.chartMetricKey || (series.clientMetric === true ? series.metricKey : series.key)));
