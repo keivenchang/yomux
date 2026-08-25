@@ -19,7 +19,9 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -853,6 +855,10 @@ GIT_SHALLOW_MAX_BYTES = 4 * 1024 * 1024
 GIT_VIEW_BUILD_TIMEOUT_SECONDS = 10.0
 GIT_VIEW_MAX_LOOSE_OBJECTS = 16_384
 GIT_VIEW_MAX_LOOSE_BYTES = 256 * 1024 * 1024
+# Reading loose objects is latency-bound, not CPU-bound: one open+read costs ~2 us on a local
+# disk and ~2.4 ms over NFS, so a 5k-object store costs ~12 s of serial round trips and overruns
+# the view deadline. Overlapping the reads removes the latency without reading anything extra.
+GIT_VIEW_LOOSE_OBJECT_WORKERS = 16
 GIT_LOOSE_OBJECT_CACHE_MAX_ENTRIES = 32_768
 GIT_LOOSE_OBJECT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 GIT_VIEW_MAX_PACK_ENTRIES = 4096
@@ -914,18 +920,25 @@ class GitViewBudget:
     max_bytes: int
     entries: int = 0
     bytes: int = 0
+    # A view build materializes its loose objects from several workers at once, so the running
+    # totals below are shared mutable state and every read-modify-write must be serialized.
+    guard: threading.RLock = dataclasses_field(default_factory=threading.RLock)
 
     def check(self) -> None:
         _ensure_git_view_deadline(self.deadline)
-        if self.entries > self.max_entries or self.bytes > self.max_bytes:
+        with self.guard:
+            exceeded = self.entries > self.max_entries or self.bytes > self.max_bytes
+        if exceeded:
             raise _history_error(
                 "Git repository metadata exceeds the snapshot limit",
                 key="fs.error.gitHistoryTooLarge",
                 status=413,
             )
+
     def consume(self, *, size: int = 0) -> None:
-        self.entries += 1
-        self.bytes += max(0, int(size))
+        with self.guard:
+            self.entries += 1
+            self.bytes += max(0, int(size))
         self.check()
 
 
@@ -961,6 +974,32 @@ def _git_loose_object_cache_root() -> Path:
     return cache_root
 
 
+class GitLooseObjectCacheLease:
+    """Own the shared cache session for one view build, and guard its accounting across workers.
+
+    Taking the cross-process cache lock and flushing its accounting once per object costs one
+    lock cycle and one fsync per object, which measured 3.1 s of a 13.4 s cold build on a
+    5k-object store. A fully cached build publishes nothing, so this opens the session lazily
+    and never contends at all; a cold build opens it once and holds it for that build.
+
+    Only the accounting fields are guarded here. Reading a loose object out of the repository
+    is the expensive part of a cold build and deliberately runs outside this guard, so workers
+    overlap on the network filesystem instead of queueing behind each other.
+    """
+
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self._stack = stack
+        self._session: GitLooseObjectCacheSession | None = None
+        self._guard = threading.Lock()
+
+    @contextlib.contextmanager
+    def accounting(self):
+        with self._guard:
+            if self._session is None:
+                self._session = self._stack.enter_context(_git_loose_object_cache_session())
+            yield self._session
+
+
 @contextlib.contextmanager
 def _git_loose_object_cache_session():
     """Serialize cache publication and accounting, leaving immutable hits lock-free."""
@@ -991,28 +1030,46 @@ def _git_loose_object_cache_session():
                     entries += 1
                     byte_count += metadata.st_size
         session = GitLooseObjectCacheSession(cache_root, entries, byte_count)
-        yield session
-        if session.dirty:
-            state_bytes = json.dumps(
-                {"entries": session.entries, "bytes": session.bytes},
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("ascii")
-            temporary_state = cache_root / f".state-{os.getpid()}-{threading.get_ident()}"
-            state_descriptor = os.open(
-                temporary_state,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-            )
-            try:
-                os.write(state_descriptor, state_bytes)
-                os.fsync(state_descriptor)
-            finally:
-                os.close(state_descriptor)
-            os.replace(temporary_state, state_path)
+        try:
+            yield session
+        finally:
+            _flush_git_loose_object_cache_state(session, cache_root, state_path)
     finally:
         fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         os.close(lock_descriptor)
+
+
+def _flush_git_loose_object_cache_state(
+    session: GitLooseObjectCacheSession,
+    cache_root: Path,
+    state_path: Path,
+) -> None:
+    """Persist cache accounting, including when the build that filled it aborted part-way.
+
+    A build that overruns its deadline still leaves every object it published in the cache, so
+    dropping the accounting would let the cache grow past its own cap.
+    """
+
+    if not session.dirty:
+        return
+    state_bytes = json.dumps(
+        {"entries": session.entries, "bytes": session.bytes},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    temporary_state = cache_root / f".state-{os.getpid()}-{threading.get_ident()}"
+    state_descriptor = os.open(
+        temporary_state,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        os.write(state_descriptor, state_bytes)
+        os.fsync(state_descriptor)
+    finally:
+        os.close(state_descriptor)
+    os.replace(temporary_state, state_path)
+    session.dirty = False
 
 
 @dataclass(frozen=True)
@@ -1563,14 +1620,123 @@ def _snapshot_regular_child(
         ) from error
 
 
+def _pinned_loose_object_cache_name(repo_key: str, prefix: str, suffix: str) -> str:
+    """Name one boot-local cache entry from the repository and the object's own content hash.
+
+    The key is partitioned by repository so a loose object published from one repository can
+    never be republished into another repository's view under the same name.
+    """
+
+    digest = hashlib.sha256(f"{repo_key}:{prefix}/{suffix}".encode("ascii")).hexdigest()
+    return f"object-{digest}"
+
+
+def _publish_cached_loose_object(
+    cache_path: Path,
+    destination: Path,
+    *,
+    budget: GitViewBudget,
+) -> tuple[int, int, int, int, int] | None:
+    """Republish an already-pinned cache entry without touching the source object.
+
+    Returns the published identity, or None when the entry is not usable and the caller must
+    fall back to the full source-verifying path.
+    """
+
+    try:
+        cache_metadata = os.stat(cache_path, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if not stat.S_ISREG(cache_metadata.st_mode):
+        return None
+    budget.consume(size=cache_metadata.st_size)
+    os.symlink(cache_path, destination)
+    destination_metadata = os.stat(destination, follow_symlinks=True)
+    if (destination_metadata.st_dev, destination_metadata.st_ino) != (
+        cache_metadata.st_dev,
+        cache_metadata.st_ino,
+    ):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(destination)
+        raise _history_error(
+            "Git loose object changed during snapshot publication",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    return (
+        destination_metadata.st_dev,
+        destination_metadata.st_ino,
+        destination_metadata.st_size,
+        destination_metadata.st_mtime_ns,
+        destination_metadata.st_ctime_ns,
+    )
+
+
+def _publish_copied_loose_object(
+    source_descriptor: int,
+    cache_path: Path,
+    cache_root: Path,
+    metadata: os.stat_result,
+) -> os.stat_result | None:
+    """Copy one loose object into the boot-local cache when it cannot be hardlinked.
+
+    A hardlink from a network filesystem into the boot-local cache always fails with EXDEV,
+    which previously meant the cache stayed permanently empty for exactly the repositories
+    that need it most. The object's file name is its content hash, so an independently
+    written copy is as authoritative as a link; the caller still re-checks the source
+    generation after the copy, so a source rewritten mid-copy is rejected rather than cached.
+    Returns the published entry's metadata, or None when another writer won the race.
+    """
+
+    temporary = cache_root / f".pending-{os.getpid()}-{threading.get_ident()}-{cache_path.name}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
+        0o400,
+    )
+    try:
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        written = 0
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(descriptor, chunk[offset:])
+        if written != metadata.st_size:
+            raise _history_error(
+                "Git loose object changed during cache publication",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+    except BaseException:
+        os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
+    os.close(descriptor)
+    try:
+        os.link(temporary, cache_path, follow_symlinks=False)
+    except FileExistsError:
+        return None
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+    return os.stat(cache_path, follow_symlinks=False)
+
+
 def _materialize_pinned_loose_object(
     cache_root: Path,
     parent_handle: paths.SafePathHandle,
     source_path: Path,
     destination: Path,
     *,
+    repo_key: str,
     budget: GitViewBudget,
     operation: str,
+    cache_lease: GitLooseObjectCacheLease,
 ) -> tuple[Path, tuple[int, int, int, int, int]]:
     """Pin one loose-object inode into the request view without retaining one fd per object."""
 
@@ -1587,6 +1753,19 @@ def _materialize_pinned_loose_object(
                 key="fs.error.gitRepositoryChanged",
                 status=409,
             )
+        cache_path = cache_root / _pinned_loose_object_cache_name(repo_key, prefix, suffix)
+        # Content-addressed fast path. A loose object's file name is the hash of its own
+        # content, and Git only ever creates one by writing a temporary file and renaming it
+        # into place, so within a single repository that name can never denote two different
+        # payloads. Once this boot has hardlinked the object into the cache we can republish
+        # it from the cache alone. That is what keeps a repository on a network filesystem
+        # usable: opening and fstat-ing the source costs ~2.4 ms per object over NFS, so a
+        # 5k-object store costs ~12 s of pure setup on every request, which overruns both the
+        # server-side snapshot deadline and the browser's own request deadline. Publishing
+        # from the cache instead touches no network filesystem at all.
+        cached_identity = _publish_cached_loose_object(cache_path, destination, budget=budget)
+        if cached_identity is not None:
+            return destination, cached_identity
         source_descriptor = os.open(
             suffix,
             os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
@@ -1601,69 +1780,51 @@ def _materialize_pinned_loose_object(
                     status=409,
                 )
             budget.consume(size=metadata.st_size)
-            cache_key = hashlib.sha256(
-                (
-                    f"{source_path.parent.name}/{source_path.name}:"
-                    f"{metadata.st_dev}:{metadata.st_ino}"
-                ).encode("ascii")
-            ).hexdigest()
-            cache_path = cache_root / f"object-{cache_key}"
-            try:
-                cache_metadata = os.stat(cache_path, follow_symlinks=False)
-            except FileNotFoundError:
-                cache_metadata = None
-            if cache_metadata is not None and (
-                not stat.S_ISREG(cache_metadata.st_mode)
-                or (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
-            ):
-                raise _history_error(
-                    "Git loose-object cache generation changed",
-                    key="fs.error.gitRepositoryChanged",
-                    status=409,
+            with cache_lease.accounting() as cache:
+                may_publish = (
+                    cache.entries < GIT_LOOSE_OBJECT_CACHE_MAX_ENTRIES
+                    and cache.bytes + metadata.st_size <= GIT_LOOSE_OBJECT_CACHE_MAX_BYTES
                 )
-            cached = cache_metadata is not None
-            if not cached:
-                with _git_loose_object_cache_session() as cache:
-                    try:
-                        cache_metadata = os.stat(cache_path, follow_symlinks=False)
-                    except FileNotFoundError:
-                        cache_metadata = None
-                    if cache_metadata is not None and (
-                        not stat.S_ISREG(cache_metadata.st_mode)
-                        or (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
-                    ):
+            cached = False
+            # Only an entry this call hardlinked shares the source inode. A copied entry, or one
+            # another worker published first, is a distinct inode and is verified as a copy.
+            cache_hardlinked = False
+            published_bytes = 0
+            if may_publish:
+                # Deliberately outside the accounting guard: on a network filesystem this is
+                # where a cold build spends nearly all of its time, and serializing it would
+                # undo the concurrency the caller went to the trouble of arranging.
+                try:
+                    os.link(
+                        source_path.name,
+                        cache_path,
+                        src_dir_fd=parent_handle.descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    cached = True
+                except OSError as error:
+                    if error.errno != errno.EXDEV:
+                        raise
+                    if _publish_copied_loose_object(source_descriptor, cache_path, cache_root, metadata) is not None:
+                        published_bytes = metadata.st_size
+                    cached = True
+                else:
+                    cache_metadata = os.stat(cache_path, follow_symlinks=False)
+                    if (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino):
                         raise _history_error(
-                            "Git loose-object cache generation changed",
+                            "Git loose object changed during cache publication",
                             key="fs.error.gitRepositoryChanged",
                             status=409,
                         )
-                    cached = cache_metadata is not None
-                    if not cached and (
-                        cache.entries < GIT_LOOSE_OBJECT_CACHE_MAX_ENTRIES
-                        and cache.bytes + metadata.st_size <= GIT_LOOSE_OBJECT_CACHE_MAX_BYTES
-                    ):
-                        try:
-                            os.link(
-                                source_path.name,
-                                cache_path,
-                                src_dir_fd=parent_handle.descriptor,
-                                follow_symlinks=False,
-                            )
-                        except OSError as error:
-                            if error.errno != errno.EXDEV:
-                                raise
-                        else:
-                            cache_metadata = os.stat(cache_path, follow_symlinks=False)
-                            if (cache_metadata.st_dev, cache_metadata.st_ino) != (metadata.st_dev, metadata.st_ino):
-                                raise _history_error(
-                                    "Git loose object changed during cache publication",
-                                    key="fs.error.gitRepositoryChanged",
-                                    status=409,
-                                )
-                            cache.entries += 1
-                            cache.bytes += metadata.st_size
-                            cache.dirty = True
-                            cached = True
+                    published_bytes = metadata.st_size
+                    cached = True
+                    cache_hardlinked = True
+            if published_bytes:
+                with cache_lease.accounting() as cache:
+                    cache.entries += 1
+                    cache.bytes += published_bytes
+                    cache.dirty = True
             if cached:
                 os.symlink(cache_path, destination)
             else:
@@ -1698,7 +1859,7 @@ def _materialize_pinned_loose_object(
                 destination_metadata.st_mtime_ns,
                 destination_metadata.st_ctime_ns,
             )
-            hardlinked = cached
+            hardlinked = cache_hardlinked
             source_generation_unchanged = current_identity[:4] == source_identity[:4]
             copied_source_unchanged = hardlinked or current_identity[4] == source_identity[4]
             published_generation_matches = not hardlinked or destination_identity == current_identity
@@ -2000,69 +2161,87 @@ def _materialize_pinned_loose_object_store(
     loose_snapshots: list[tuple[Path, tuple[int, int, int, int, int]]] = []
     initial_loose_objects: set[str] = set()
     cache_root = _git_loose_object_cache_root()
-    for prefix_index in range(256):
-        loose_budget.check()
-        name = f"{prefix_index:02x}"
-        try:
-            child_stat = os.stat(name, dir_fd=objects_handle.descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            raise _history_error(
-                "Git loose-object directory is unavailable",
-                key="fs.error.gitRepositoryChanged",
-                status=409,
-                diagnostic=error,
-            ) from error
-        if not stat.S_ISDIR(child_stat.st_mode):
-            raise _history_error(
-                "Git loose-object directory is unsafe",
-                key="fs.error.gitRepositoryChanged",
-                status=409,
-            )
-        child_path = objects_path / name
-        try:
-            with paths.safe_child(
-                objects_handle.descriptor,
-                child_path,
-                child_path,
-                flags=directory_flags,
-                operation=operation,
-                observe_name=False,
-            ) as child_handle:
-                destination_directory = object_directory / name
-                destination_directory.mkdir()
-                with os.scandir(child_handle.descriptor) as entries:
-                    for entry in entries:
-                        if loose_suffix_re.fullmatch(entry.name) is None:
-                            loose_budget.consume()
-                            continue
-                        if not entry.is_file(follow_symlinks=False):
-                            raise _history_error(
-                                "Git loose object is unsafe",
-                                key="fs.error.gitRepositoryChanged",
-                                status=409,
-                            )
-                        loose_snapshots.append(
-                            _materialize_pinned_loose_object(
-                                cache_root,
-                                child_handle,
-                                child_path / entry.name,
-                                destination_directory / entry.name,
-                                budget=loose_budget,
-                                operation=operation,
-                            )
+    # One stat per view, not per object: the object store's own inode identifies the
+    # repository, and every cache entry this view publishes is keyed under it.
+    objects_identity = os.fstat(objects_handle.descriptor)
+    repo_key = f"{objects_identity.st_dev}:{objects_identity.st_ino}"
+    with contextlib.ExitStack() as cache_stack:
+        cache_lease = GitLooseObjectCacheLease(cache_stack)
+        workers = cache_stack.enter_context(
+            ThreadPoolExecutor(max_workers=GIT_VIEW_LOOSE_OBJECT_WORKERS, thread_name_prefix="git-view-loose")
+        )
+        for prefix_index in range(256):
+            loose_budget.check()
+            name = f"{prefix_index:02x}"
+            try:
+                child_stat = os.stat(name, dir_fd=objects_handle.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise _history_error(
+                    "Git loose-object directory is unavailable",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                    diagnostic=error,
+                ) from error
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise _history_error(
+                    "Git loose-object directory is unsafe",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            child_path = objects_path / name
+            try:
+                with paths.safe_child(
+                    objects_handle.descriptor,
+                    child_path,
+                    child_path,
+                    flags=directory_flags,
+                    operation=operation,
+                    observe_name=False,
+                ) as child_handle:
+                    destination_directory = object_directory / name
+                    destination_directory.mkdir()
+                    object_names: list[str] = []
+                    with os.scandir(child_handle.descriptor) as entries:
+                        for entry in entries:
+                            if loose_suffix_re.fullmatch(entry.name) is None:
+                                loose_budget.consume()
+                                continue
+                            if not entry.is_file(follow_symlinks=False):
+                                raise _history_error(
+                                    "Git loose object is unsafe",
+                                    key="fs.error.gitRepositoryChanged",
+                                    status=409,
+                                )
+                            object_names.append(entry.name)
+
+                    def materialize(object_name: str, _child_handle=child_handle, _child_path=child_path, _destination=destination_directory):
+                        return _materialize_pinned_loose_object(
+                            cache_root,
+                            _child_handle,
+                            _child_path / object_name,
+                            _destination / object_name,
+                            repo_key=repo_key,
+                            budget=loose_budget,
+                            operation=operation,
+                            cache_lease=cache_lease,
                         )
-                        initial_loose_objects.add(f"{name}/{entry.name}")
-        except (paths.FilesystemError, OSError) as error:
-            if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
-                raise
-            raise _history_error(
-                "Git object storage changed during history read",
-                key="fs.error.gitRepositoryChanged",
-                status=409,
-                diagnostic=error,
-            ) from error
+
+                    # The directory listing above fixes this layer's membership, so the objects in
+                    # it are independent work; map preserves order and re-raises the first failure.
+                    for object_name, snapshot in zip(object_names, workers.map(materialize, object_names)):
+                        loose_snapshots.append(snapshot)
+                        initial_loose_objects.add(f"{name}/{object_name}")
+            except (paths.FilesystemError, OSError) as error:
+                if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
+                    raise
+                raise _history_error(
+                    "Git object storage changed during history read",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                    diagnostic=error,
+                ) from error
     loose_budget.check()
     return loose_snapshots, initial_loose_objects
 

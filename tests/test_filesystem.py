@@ -1,4 +1,5 @@
 import base64
+import errno
 import fcntl
 import inspect
 import itertools
@@ -5079,3 +5080,89 @@ def test_lexical_path_rule_and_worker_parse_are_one_rule_split_at_the_thread_bou
     assert "expanduser" not in filesystem_paths.validate_request_path_lexical.__code__.co_names
     assert "expanduser" in filesystem_paths.parsed_request_path.__code__.co_names
     assert "validate_request_path_lexical" in filesystem_paths.parsed_request_path.__code__.co_names
+
+
+def _isolated_git_object_cache(monkeypatch, tmp_path):
+    """Point the boot-local loose-object cache at a private root so one test cannot warm another."""
+    root = tmp_path / "object-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(git_ops.tempfile, "tempdir", str(root))
+    return root
+
+
+_LOOSE_OBJECT_NAME = re.compile(r"(?:[0-9a-f]{38}|[0-9a-f]{62})")
+
+
+def _count_loose_object_source_reads(monkeypatch):
+    """Count how many loose objects a view build opens out of the repository itself.
+
+    Deliberately measured at the syscall rather than through an internal helper, so the same
+    assertion is meaningful whatever the view build does underneath.
+    """
+
+    reads = {"count": 0}
+    original = git_ops.os.open
+
+    def counted(path, *args, **kwargs):
+        if isinstance(path, str) and _LOOSE_OBJECT_NAME.fullmatch(path) and "dir_fd" in kwargs:
+            reads["count"] += 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.os, "open", counted)
+    return reads
+
+
+def test_a_repeat_git_view_build_republishes_loose_objects_without_rereading_them(monkeypatch, tmp_path):
+    # Reading every loose object costs ~2.4 ms over NFS, so a repository whose objects are not packed
+    # spent ~12 s rebuilding the same view on every request and overran the view deadline. The second
+    # build of an unchanged store must read nothing from the repository at all.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    _isolated_git_object_cache(monkeypatch, tmp_path)
+    reads = _count_loose_object_source_reads(monkeypatch)
+
+    first = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert first["lines"], "expected the first build to produce blame output"
+    assert reads["count"] > 0, "the first build must read the objects it caches"
+
+    reads["count"] = 0
+    second = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert second["lines"] == first["lines"]
+    assert reads["count"] == 0, "a repeat build must not reread any loose object"
+
+
+def test_loose_objects_are_cached_even_when_they_cannot_be_hardlinked(monkeypatch, tmp_path):
+    # The cache lives on boot-local storage, so a repository on a network filesystem can never be
+    # hardlinked into it. That EXDEV failure used to be swallowed, leaving the cache permanently empty
+    # for exactly the repositories the cache exists to serve.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    _isolated_git_object_cache(monkeypatch, tmp_path)
+    real_link = os.link
+
+    def link_without_cross_device_support(source, target, **kwargs):
+        if "src_dir_fd" in kwargs:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(git_ops.os, "link", link_without_cross_device_support)
+    reads = _count_loose_object_source_reads(monkeypatch)
+
+    first = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert first["lines"], "expected blame output when the objects cannot be hardlinked"
+    assert reads["count"] > 0
+
+    reads["count"] = 0
+    second = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert second["lines"] == first["lines"]
+    assert reads["count"] == 0, "a copied cache entry must serve the next build"
