@@ -418,8 +418,8 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   const context = {result: null};
   vm.runInNewContext(`
     ${sourceFunction('debugGraphSeriesIsWebProcessCpu', 'debugGraphMacMemoryCardAvailable')}
-    const web = {key: 'cpu:port:7220', processCpu: true, currentProcessCpu: true};
-    const peerWeb = {key: 'cpu:port:7771', processCpu: true};
+    const web = {key: 'cpu:port:7442', processCpu: true, currentProcessCpu: true};
+    const peerWeb = {key: 'cpu:port:7001', processCpu: true};
     const systemCpu = {key: 'systemCpu'};
     const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
     const daemon = {key: 'serviceLoad:jobd', serviceLoad: true};
@@ -431,7 +431,7 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   `, context);
   // Membership, not paint order: the daemon chart owns every yolomux.py web line alongside the
   // services, and the CPU chart keeps only the host binaries and the system total.
-  assert.deepEqual([...context.result.daemons], ['cpu:port:7220', 'cpu:port:7771', 'serviceLoad:jobd']);
+  assert.deepEqual([...context.result.daemons], ['cpu:port:7001', 'cpu:port:7442', 'serviceLoad:jobd']);
   assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
 });
 

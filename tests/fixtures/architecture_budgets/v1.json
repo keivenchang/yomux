@@ -2046,7 +2046,7 @@
     "tests/test_browser_finder.py": 4559,
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
-    "tests/test_browser_layout.py": 17551,
+    "tests/test_browser_layout.py": 17562,
     "tests/test_browser_ring_landing_verify.py": 1155,
     "tests/test_browser_stats_coverage.py": 683,
     "tests/test_browser_stats_widen.py": 1429,
