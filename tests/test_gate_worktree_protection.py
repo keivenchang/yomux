@@ -325,3 +325,47 @@ def test_docs_separate_relocated_artifacts_from_single_writer_generated_source()
     assert "generated static" in inventory
     assert "package metadata" in inventory
     assert "GIT_OPTIONAL_LOCKS=0" in development
+
+
+def test_a_writer_killed_mid_heartbeat_does_not_strand_the_next_writer(tmp_path: Path) -> None:
+    # `atomic_write_text` removes its temp sibling on every exit path, so one can only survive if the
+    # writing process was killed between creating it and renaming it -- which is exactly what a
+    # cancelled test run does. Reclaim used to classify that leftover as a foreign entry and abort,
+    # so the run after a cancelled one died with an internal error instead of taking the slot over.
+    identity = _identity("host-a", "lin1")
+    slot = tmp_path / "shared-git" / "writer"
+    _write_slot(slot, _record(identity, token="old-token", heartbeat_at=10.0))
+    abandoned = slot / f".{worktree_writer.WRITER_RECORD_NAME}.401950.140674180654784.1787679736965115809.tmp"
+    abandoned.write_text("{}", encoding="utf-8")
+
+    lease = worktree_writer.acquire_worktree_writer(
+        tmp_path / "worktree",
+        purpose="pytest",
+        host_identity=identity,
+        slot_dir=slot,
+        clock=lambda: 100.0,
+        stale_after_seconds=30.0,
+        heartbeat_interval_seconds=0.0,
+        environ={},
+    )
+
+    assert not abandoned.exists(), "the abandoned heartbeat temp must not survive the reclaim"
+    active = json.loads((slot / "owner.json").read_text(encoding="utf-8"))
+    assert active["token"] == lease.token
+    lease.release()
+    assert not slot.exists()
+
+
+def test_a_genuinely_foreign_entry_still_blocks_removing_a_writer_slot(tmp_path: Path) -> None:
+    # The tolerance above is scoped to this module's own abandoned temporaries by name. Anything
+    # else in the slot is still someone else's file and must stop the slot being deleted.
+    slot = tmp_path / "shared-git" / "writer"
+    slot.mkdir(parents=True)
+    (slot / worktree_writer.WRITER_RECORD_NAME).write_text("{}", encoding="utf-8")
+    (slot / "someone-elses-file").write_text("keep me", encoding="utf-8")
+
+    with pytest.raises(worktree_writer.WorktreeWriterReleaseError) as caught:
+        worktree_writer._remove_exact_slot(slot)
+
+    assert "someone-elses-file" in str(caught.value)
+    assert (slot / "someone-elses-file").exists()
