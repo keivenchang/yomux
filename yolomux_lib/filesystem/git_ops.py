@@ -974,6 +974,29 @@ def _git_loose_object_cache_root() -> Path:
     return cache_root
 
 
+class _LazyLooseObjectWorkers:
+    """Start the loose-object worker pool only once a build actually has to read the repository.
+
+    A fully cached build publishes every object with a local stat and symlink, so starting workers
+    for it is pure overhead; it measured about 0.3 s on a 5k-object store, and the pool would also
+    contend with whatever else the host is running.
+    """
+
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self._stack = stack
+        self._pool: ThreadPoolExecutor | None = None
+
+    def map(self, function, items):
+        if self._pool is None:
+            self._pool = self._stack.enter_context(
+                ThreadPoolExecutor(
+                    max_workers=GIT_VIEW_LOOSE_OBJECT_WORKERS,
+                    thread_name_prefix="git-view-loose",
+                )
+            )
+        return self._pool.map(function, items)
+
+
 class GitLooseObjectCacheLease:
     """Own the shared cache session for one view build, and guard its accounting across workers.
 
@@ -1737,8 +1760,13 @@ def _materialize_pinned_loose_object(
     budget: GitViewBudget,
     operation: str,
     cache_lease: GitLooseObjectCacheLease,
-) -> tuple[Path, tuple[int, int, int, int, int]]:
-    """Pin one loose-object inode into the request view without retaining one fd per object."""
+    cached_only: bool = False,
+) -> tuple[Path, tuple[int, int, int, int, int]] | None:
+    """Pin one loose-object inode into the request view without retaining one fd per object.
+
+    With `cached_only`, return None rather than reading the repository, so a caller can settle
+    every already-cached object inline and reserve its workers for the ones that need the network.
+    """
 
     try:
         prefix = source_path.parent.name
@@ -1766,6 +1794,8 @@ def _materialize_pinned_loose_object(
         cached_identity = _publish_cached_loose_object(cache_path, destination, budget=budget)
         if cached_identity is not None:
             return destination, cached_identity
+        if cached_only:
+            return None
         source_descriptor = os.open(
             suffix,
             os.O_RDONLY | paths.nofollow_flag() | getattr(os, "O_CLOEXEC", 0),
@@ -2167,9 +2197,7 @@ def _materialize_pinned_loose_object_store(
     repo_key = f"{objects_identity.st_dev}:{objects_identity.st_ino}"
     with contextlib.ExitStack() as cache_stack:
         cache_lease = GitLooseObjectCacheLease(cache_stack)
-        workers = cache_stack.enter_context(
-            ThreadPoolExecutor(max_workers=GIT_VIEW_LOOSE_OBJECT_WORKERS, thread_name_prefix="git-view-loose")
-        )
+        workers = _LazyLooseObjectWorkers(cache_stack)
         for prefix_index in range(256):
             loose_budget.check()
             name = f"{prefix_index:02x}"
@@ -2216,7 +2244,7 @@ def _materialize_pinned_loose_object_store(
                                 )
                             object_names.append(entry.name)
 
-                    def materialize(object_name: str, _child_handle=child_handle, _child_path=child_path, _destination=destination_directory):
+                    def materialize(object_name: str, cached_only: bool, _child_handle=child_handle, _child_path=child_path, _destination=destination_directory):
                         return _materialize_pinned_loose_object(
                             cache_root,
                             _child_handle,
@@ -2226,12 +2254,27 @@ def _materialize_pinned_loose_object_store(
                             budget=loose_budget,
                             operation=operation,
                             cache_lease=cache_lease,
+                            cached_only=cached_only,
                         )
 
-                    # The directory listing above fixes this layer's membership, so the objects in
-                    # it are independent work; map preserves order and re-raises the first failure.
-                    for object_name, snapshot in zip(object_names, workers.map(materialize, object_names)):
-                        loose_snapshots.append(snapshot)
+                    # Settle the already-cached objects inline. Publishing one is a local stat and
+                    # symlink, so handing it to a worker costs more than doing it here, and a fully
+                    # cached build should not start a worker at all.
+                    settled: dict[str, tuple[Path, tuple[int, int, int, int, int]]] = {}
+                    uncached: list[str] = []
+                    for object_name in object_names:
+                        snapshot = materialize(object_name, True)
+                        if snapshot is None:
+                            uncached.append(object_name)
+                        else:
+                            settled[object_name] = snapshot
+                    # Whatever is left has to come off the repository, which is latency-bound, so
+                    # overlap it. The listing above fixes this layer's membership, so these are
+                    # independent; map preserves order and re-raises the first failure.
+                    if uncached:
+                        settled.update(zip(uncached, workers.map(lambda n: materialize(n, False), uncached)))
+                    for object_name in object_names:
+                        loose_snapshots.append(settled[object_name])
                         initial_loose_objects.add(f"{name}/{object_name}")
             except (paths.FilesystemError, OSError) as error:
                 if isinstance(error, paths.FilesystemError) and error.message_key.startswith("fs.error.git"):
