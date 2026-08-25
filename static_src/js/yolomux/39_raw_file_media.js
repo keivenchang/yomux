@@ -21,6 +21,8 @@ function rawFileMediaVersion(state) {
 function rawFileFailureFallback(status, path) {
   if (status === 401) return {key: 'auth.error.authenticationRequired', params: {}, fallback: 'Authentication required.'};
   if (status === 404) return {key: 'common.pathNotFound', params: {path}, fallback: `path not found: ${path}`};
+  // Only claim the file is oversized when nothing more specific came back; the server's own message
+  // wins otherwise, so a Git budget refusal is not relabelled as a size problem.
   if (status === 413) return {key: 'editor.fileTooLargeTitle', params: {}, fallback: 'File is too large to preview'};
   return {key: 'common.requestFailed', params: {}, fallback: 'request failed'};
 }

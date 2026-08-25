@@ -10,6 +10,7 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 import hashlib
 import json
+import contextlib
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,7 @@ from typing import Any
 import uuid
 
 from .atomic_file import atomic_write_text
+from .atomic_file import is_atomic_write_temp
 from .host_identity import current_host_identity
 from .host_identity import HostIdentity
 from .host_identity import is_current_local_process
@@ -257,11 +259,24 @@ def inspect_worktree_writer(
 def _remove_exact_slot(slot: Path) -> None:
     record_path = _slot_record_path(slot)
     children = list(slot.iterdir())
-    unexpected = [path for path in children if path.name != WRITER_RECORD_NAME]
+    # A writer killed between creating its heartbeat temp and renaming it leaves that temp behind.
+    # Treating it as a foreign entry made the slot unreclaimable, so every later writer in this
+    # worktree refused to start until someone deleted the file by hand.
+    abandoned = [
+        path
+        for path in children
+        if path.name != WRITER_RECORD_NAME and is_atomic_write_temp(path.name, target_name=WRITER_RECORD_NAME)
+    ]
+    unexpected = [
+        path for path in children if path.name != WRITER_RECORD_NAME and path not in abandoned
+    ]
     if unexpected:
         raise WorktreeWriterReleaseError(
             f"refusing to remove writer slot with unexpected entries: {', '.join(path.name for path in unexpected)}"
         )
+    for path in abandoned:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
     try:
         record_path.unlink()
     except FileNotFoundError:

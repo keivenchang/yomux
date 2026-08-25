@@ -1,4 +1,5 @@
 import base64
+import errno
 import fcntl
 import inspect
 import itertools
@@ -5079,3 +5080,166 @@ def test_lexical_path_rule_and_worker_parse_are_one_rule_split_at_the_thread_bou
     assert "expanduser" not in filesystem_paths.validate_request_path_lexical.__code__.co_names
     assert "expanduser" in filesystem_paths.parsed_request_path.__code__.co_names
     assert "validate_request_path_lexical" in filesystem_paths.parsed_request_path.__code__.co_names
+
+
+def _isolated_git_object_cache(monkeypatch, tmp_path):
+    """Point the boot-local loose-object cache at a private root so one test cannot warm another."""
+    root = tmp_path / "object-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(git_ops.tempfile, "tempdir", str(root))
+    return root
+
+
+_LOOSE_OBJECT_NAME = re.compile(r"(?:[0-9a-f]{38}|[0-9a-f]{62})")
+
+
+def _count_loose_object_source_reads(monkeypatch):
+    """Count how many loose objects a view build opens out of the repository itself.
+
+    Deliberately measured at the syscall rather than through an internal helper, so the same
+    assertion is meaningful whatever the view build does underneath.
+    """
+
+    reads = {"count": 0}
+    original = git_ops.os.open
+
+    def counted(path, *args, **kwargs):
+        if isinstance(path, str) and _LOOSE_OBJECT_NAME.fullmatch(path) and "dir_fd" in kwargs:
+            reads["count"] += 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.os, "open", counted)
+    return reads
+
+
+def test_a_repeat_git_view_build_republishes_loose_objects_without_rereading_them(monkeypatch, tmp_path):
+    # Reading every loose object costs ~2.4 ms over NFS, so a repository whose objects are not packed
+    # spent ~12 s rebuilding the same view on every request and overran the view deadline. The second
+    # build of an unchanged store must read nothing from the repository at all.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    _isolated_git_object_cache(monkeypatch, tmp_path)
+    reads = _count_loose_object_source_reads(monkeypatch)
+
+    first = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert first["lines"], "expected the first build to produce blame output"
+    assert reads["count"] > 0, "the first build must read the objects it caches"
+
+    reads["count"] = 0
+    second = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert second["lines"] == first["lines"]
+    assert reads["count"] == 0, "a repeat build must not reread any loose object"
+
+
+def test_loose_objects_are_cached_even_when_they_cannot_be_hardlinked(monkeypatch, tmp_path):
+    # The cache lives on boot-local storage, so a repository on a network filesystem can never be
+    # hardlinked into it. That EXDEV failure used to be swallowed, leaving the cache permanently empty
+    # for exactly the repositories the cache exists to serve.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    _isolated_git_object_cache(monkeypatch, tmp_path)
+    real_link = os.link
+
+    def link_without_cross_device_support(source, target, **kwargs):
+        if "src_dir_fd" in kwargs:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(git_ops.os, "link", link_without_cross_device_support)
+    reads = _count_loose_object_source_reads(monkeypatch)
+
+    first = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert first["lines"], "expected blame output when the objects cannot be hardlinked"
+    assert reads["count"] > 0
+
+    reads["count"] = 0
+    second = filesystem.blame_file(str(repo / "tracked.txt"))
+    assert second["lines"] == first["lines"]
+    assert reads["count"] == 0, "a copied cache entry must serve the next build"
+
+
+def _git_metadata_that_always_fails(monkeypatch, message_key="fs.error.gitHistoryTooLarge"):
+    """Make every Git view build for a path fail the way an oversized or racing repository does."""
+    def refuse(handle, **kwargs):
+        raise FilesystemError("git view refused", status=413, message_key=message_key)
+    monkeypatch.setattr(git_ops, "pinned_file_git_metadata", refuse)
+
+
+def test_open_returns_a_readable_file_when_git_enrichment_cannot_be_produced(monkeypatch, tmp_path):
+    # Reading a file and describing its Git history are two questions, and the second must not be
+    # able to answer the first. Git enrichment used to propagate out of read_file, so a repository
+    # whose objects are not packed left the user unable to open a file that had already been read.
+    target = tmp_path / "readable.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch)
+
+    payload = filesystem.read_file(str(target))
+
+    assert payload["content"] == "first\nsecond\n"
+    assert payload["size"] == len("first\nsecond\n")
+    assert payload["git_enrichment"] == {"available": False, "reason": "fs.error.gitHistoryTooLarge"}
+    assert payload["git_root"] == ""
+    assert payload["git_history"] == []
+    assert payload["git_has_history"] is False
+
+
+def test_validating_a_path_survives_git_enrichment_that_cannot_be_produced(monkeypatch, tmp_path):
+    # Validation decides whether Open is offered at all, so it carries the same rule as the read.
+    target = tmp_path / "readable.txt"
+    target.write_text("body\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch)
+
+    info = filesystem.path_info(str(target))
+
+    assert info["kind"] == "file"
+    assert info["size"] == len("body\n")
+    assert info["git_enrichment"] == {"available": False, "reason": "fs.error.gitHistoryTooLarge"}
+    assert info["repo_root"] == ""
+
+
+@pytest.mark.parametrize("consumer", ["read", "info"])
+def test_open_still_refuses_when_the_repository_says_it_is_not_the_one_we_authorized(monkeypatch, tmp_path, consumer):
+    # Degrading is scoped to size and budget. A repository reporting that it changed underneath the
+    # pin is how an object store swapped in from elsewhere is caught, and serving the file anyway
+    # would turn that detection into a shrug.
+    target = tmp_path / "readable.txt"
+    target.write_text("body\n", encoding="utf-8")
+    _git_metadata_that_always_fails(monkeypatch, message_key="fs.error.gitRepositoryChanged")
+
+    with pytest.raises(FilesystemError) as caught:
+        filesystem.read_file(str(target)) if consumer == "read" else filesystem.path_info(str(target))
+
+    assert caught.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_open_reports_git_enrichment_as_available_when_the_repository_answers(tmp_path):
+    # The failure path must not become the only path: a healthy repository still decorates the read.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+
+    payload = filesystem.read_file(str(repo / "tracked.txt"))
+
+    assert payload["content"] == "one\n"
+    assert payload["git_enrichment"] == {"available": True, "reason": ""}
+    assert payload["git_root"] == str(repo)
+    assert payload["git_tracked"] is True
+
+
+def test_git_enrichment_gets_a_shorter_budget_than_a_full_git_view_build(tmp_path):
+    # Open must not inherit the full view-build deadline; a reader who asked for a file is not
+    # asking to wait out a repository's whole object store.
+    assert git_ops.GIT_OPTIONAL_METADATA_TIMEOUT_SECONDS < git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS

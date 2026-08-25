@@ -191,9 +191,11 @@ def read_file(raw_path: str) -> dict[str, Any]:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
             content = raw.decode("utf-8", errors="replace")
-        git_root, git_tracked, git_history, _relative_path, _repo_info = git_ops.pinned_file_git_metadata(
-            handle,
-            operation="read_file",
+        # The file has already been read at this point. Git history is decoration on top of that
+        # answer, so a repository that is slow, huge, or being rewritten reports itself in
+        # `git_enrichment` instead of taking the file away from the reader.
+        git_root, git_tracked, git_history, _relative_path, _repo_info, git_reason = (
+            git_ops.optional_pinned_file_git_metadata(handle, operation="read_file")
         )
         return {
             "path": str(path),
@@ -207,6 +209,7 @@ def read_file(raw_path: str) -> dict[str, Any]:
             "git_tracked": git_tracked,
             "git_history": git_history,
             "git_has_history": len(git_history) > 1,
+            "git_enrichment": {"available": not git_reason, "reason": git_reason},
             **paths._physical_file_identity(path, resolved=handle.resolved, stat_result=file_stat),
         }
 
@@ -614,11 +617,15 @@ def _existing_path_info(
                 sample = fh.read(512)
             preview_mime = _sniff_raw_mime(sample) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
             diff_capable = size <= paths.MAX_READ_BYTES and not preview_mime and not paths._looks_binary(sample)
-        repo_root, tracked, history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
-            handle,
-            include_repo_info=True,
-            repo_info_cache=repo_info_cache,
-            operation=operation,
+        # Validating a path is the step that decides whether Open is offered at all, so it carries
+        # the same rule as the read: Git metadata that cannot be produced is reported, not fatal.
+        repo_root, tracked, history, relative_path, repo_info, git_reason = (
+            git_ops.optional_pinned_file_git_metadata(
+                handle,
+                include_repo_info=True,
+                repo_info_cache=repo_info_cache,
+                operation=operation,
+            )
         )
         return {
             "path": str(path),
@@ -634,6 +641,7 @@ def _existing_path_info(
             "git_has_history": bool(history),
             "relative_path": relative_path,
             "repo": repo_info,
+            "git_enrichment": {"available": not git_reason, "reason": git_reason},
             **paths._physical_file_identity(path, resolved=handle.resolved, stat_result=file_stat),
         }
 

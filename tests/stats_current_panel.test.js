@@ -411,6 +411,30 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
 });
 
+test('the yolomux.py web CPU line renders on the daemon chart, not beside host processes', () => {
+  // The web process is a daemon like the other six, so its line belongs with them. Only the
+  // rendering moves: the CPU family still owns and samples that PID, and the service-load family
+  // still carries no `web` row, so one process is never sampled twice at two cadences.
+  const context = {result: null};
+  vm.runInNewContext(`
+    ${sourceFunction('debugGraphSeriesIsWebProcessCpu', 'debugGraphMacMemoryCardAvailable')}
+    const web = {key: 'cpu:port:7220', processCpu: true, currentProcessCpu: true};
+    const peerWeb = {key: 'cpu:port:7771', processCpu: true};
+    const systemCpu = {key: 'systemCpu'};
+    const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
+    const daemon = {key: 'serviceLoad:jobd', serviceLoad: true};
+    const items = [web, peerWeb, systemCpu, hostProcess, daemon];
+    result = {
+      daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true}, items).map(series => series.key).sort(),
+      cpu: debugGraphGroupSeriesItems({key: 'cpu', hostMetric: 'cpu'}, items).map(series => series.key).sort(),
+    };
+  `, context);
+  // Membership, not paint order: the daemon chart owns every yolomux.py web line alongside the
+  // services, and the CPU chart keeps only the host binaries and the system total.
+  assert.deepEqual([...context.result.daemons], ['cpu:port:7220', 'cpu:port:7771', 'serviceLoad:jobd']);
+  assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
+});
+
 test('CPU serving-port series leads the legend and paints after every other line', () => {
   const orderingSource = sourceFunction('debugGraphCurrentProcessCpuOrdered', 'debugGraphLegendSeriesItems');
   const chartSource = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');

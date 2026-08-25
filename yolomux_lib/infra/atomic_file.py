@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -158,13 +159,35 @@ def begin_wal_migration(connection: sqlite3.Connection) -> int:
     return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
 
+_ATOMIC_TEMP_NAME = re.compile(r"\A\.(?P<target>.+)\.\d+\.\d+\.\d+\.tmp\Z")
+
+
+def _atomic_temp_name(target_name: str) -> str:
+    """Build the one temp-sibling name `atomic_write_text` uses, so nothing re-derives the format."""
+
+    return f".{target_name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+
+
+def is_atomic_write_temp(name: str, *, target_name: str) -> bool:
+    """Recognize a temp sibling this module abandoned when its writer was killed mid-write.
+
+    `atomic_write_text` removes its own temp on every exit path, so one can only survive if the
+    process died between creating it and renaming it. A caller cleaning up a directory needs to
+    tell that leftover apart from a file it does not own, because treating it as foreign strands
+    the directory permanently.
+    """
+
+    match = _ATOMIC_TEMP_NAME.fullmatch(name)
+    return match is not None and match.group("target") == target_name
+
+
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     """Write `text` to `path` atomically: unique temp sibling, fsync, then os.replace.
 
     The temp name carries pid + thread id + ns so concurrent writers never collide. `mode` (e.g. 0o600)
     sets permissions on both the temp (at create) and the final file (after replace).
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    tmp = path.with_name(_atomic_temp_name(path.name))
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

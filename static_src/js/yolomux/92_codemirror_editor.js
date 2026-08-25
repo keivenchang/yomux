@@ -1494,7 +1494,7 @@ function loadFileEditorState(path, panel, item) {
       if (status) {
         const sniffed = status === 415 ? await sniffedRawPreviewFileState(path) : null;
         setFileState(path, sniffed || (status === 413
-          ? tooLargeFileState(null, err)
+          ? oversizeOrErrorFileState(null, err)
           : status === 404
             ? missingFileState(err)
             : fileErrorState(err)));
