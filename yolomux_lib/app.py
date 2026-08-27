@@ -650,6 +650,13 @@ SESSION_FILES_OPERATION_POLL_MAX_SECONDS = 0.5
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
+# A prune that jobd DECLINED never ran, so it must not spend the cooldown that exists to space out
+# work that did. Maintenance stopped cold-starting jobd, which means a decline is now the normal
+# answer on an idle instance; charging it the full five minutes could postpone housekeeping
+# indefinitely on exactly the instances that are idle enough to need it. This is the same
+# `next_at` field on the same record - no second timer, no loop, and still a real floor so a
+# declined prune cannot become a retry storm.
+SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS = 30
 SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE = 256
 SESSION_FILES_DISK_CACHE_INDEX_FILENAME = "cache-index.json"
 SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
@@ -4854,6 +4861,7 @@ class SessionFilesCoordinator:
                     "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
                 },
                 priority="maintenance",
+                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
                 generation=1,
                 coalesce_key="session-files-cache-prune",
                 delivery="receipt",
@@ -4866,6 +4874,11 @@ class SessionFilesCoordinator:
             if self.state.disk_prune_record is record:
                 record.running = False
                 record.worker = None
+                if not accepted:
+                    # Pull the cooldown back to the retry floor. The full interval was claimed
+                    # before submitting so a concurrent caller could not race in while this one
+                    # was in flight; now that it is known nothing ran, only the floor applies.
+                    record.next_at = min(record.next_at, now + SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS)
                 record.last_result = {
                     "submitted": accepted,
                     "reason": reason,
@@ -9202,6 +9215,7 @@ class TmuxWebtermApp:
             "queued_delivery_compact",
             {"state_path": str(state_path)},
             priority="maintenance",
+            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
             generation=1,
             coalesce_key=coalesce_key,
             delivery="receipt",
@@ -13395,6 +13409,7 @@ class TmuxWebtermApp:
                 "indexed_repo_roots",
                 {"indexed_dirs": list(indexed_dirs)},
                 priority="maintenance",
+                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
                 generation=generation,
                 coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
                 deadline_ms=120_000,
@@ -13744,6 +13759,7 @@ class TmuxWebtermApp:
             "metadata_warm_view",
             {"sessions": sessions_payload},
             priority="maintenance",
+            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
             generation=generation,
             coalesce_key=coalesce_key,
             deadline_ms=METADATA_WARM_JOBD_JOB_DEADLINE_MS,
@@ -17481,8 +17497,7 @@ class TmuxWebtermApp:
                 payload["timings"] = dict(timings)
             return payload, HTTPStatus.OK
         discover_started = time.perf_counter()
-        discovery = discover_status_sessions if self.status_service_mode else discover_sessions
-        discovered_sessions, discovery_errors = discovery(self.sessions)
+        discovered_sessions, discovery_errors = self.status_session_discovery()
         self.prune_absent_agent_window_transition_state(discovered_sessions)
         add_phase_timing(timings, "discover_sessions", discover_started)
         sessions_started = time.perf_counter()
@@ -17527,6 +17542,10 @@ class TmuxWebtermApp:
         if timings:
             payload["timings"] = dict(timings)
         return payload, HTTPStatus.OK
+
+    def status_session_discovery(self) -> tuple[dict[str, SessionInfo], list[str]]:
+        discovery = discover_status_sessions if self.status_service_mode else discover_sessions
+        return discovery(self.sessions)
 
     def auto_approve_status_bytes(self, session: str | None = None) -> tuple[bytes, HTTPStatus]:
         """Return daemon-owned status bytes without web-side discovery or encoding."""

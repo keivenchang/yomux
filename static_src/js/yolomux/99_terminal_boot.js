@@ -5372,7 +5372,6 @@ function loadAutoStatuses(options = {}) {
       if (!isApiPendingResponse(error)) throw error;
       payload = await waitForApiOperationResult(error, {
         kind: String(error?.operation?.kind || ''),
-        deadlineMs: apiFetchDeadlineMs('/api/auto-approve', {}),
         url: '/api/auto-approve',
         method: 'GET',
       });
@@ -5455,6 +5454,60 @@ function sealedAutoApprovePayloadNeedsMetadata(payload) {
 function deferSealedAutoApprovePayload(payload) {
   const heldRevision = agentWindowSnapshotRevision(deferredSealedAutoApprovePayload);
   if (agentWindowSnapshotRevision(payload) >= heldRevision) deferredSealedAutoApprovePayload = payload;
+}
+
+function heldSealIsFullyOvertaken(held, revision) {
+  // Authority is PER SESSION, never a global maximum. A held seal carries one revision
+  // for every session it names, so a single unrelated or already-advanced session must
+  // not authorise discarding status that another named session never received. Only
+  // complete per-session coverage means the seal carries nothing new.
+  if (!(revision > 0)) return false;
+  const heldSessions = Object.keys(held?.sessions || {});
+  if (!heldSessions.length) return false;
+  return heldSessions.every(session => agentWindowSnapshotRevision(autoApproveStates.get(session)) >= revision);
+}
+
+function reconcileDeferredSealedAutoApprove() {
+  // The ONE owner that resolves a held sealed payload, called from every terminal
+  // session-metadata outcome. A deferred payload used to be released only on the
+  // success tail, so a malformed/superseded/older-generation outcome left it held
+  // with nothing recorded and nothing scheduled to revisit it - the published
+  // consumer revision could then never advance again. Every terminal boundary now
+  // applies it, discards it, or records that it is still legitimately waiting.
+  //
+  // Authority is preserved, not bypassed: a payload is applied only when metadata
+  // genuinely covers its sessions, and is never applied merely to empty the holder.
+  if (!deferredSealedAutoApprovePayload) return {state: 'none', revision: 0};
+  const held = deferredSealedAutoApprovePayload;
+  const revision = agentWindowSnapshotRevision(held);
+  if (heldSealIsFullyOvertaken(held, revision)) {
+    // EVERY session this seal names has already applied that revision or newer, so it
+    // carries no truth any consumer still needs. A partial overtake falls through and
+    // is retained below rather than discarding an unserved session's status.
+    deferredSealedAutoApprovePayload = null;
+    return {state: 'discarded_superseded_revision', revision};
+  }
+  if (sealedAutoApprovePayloadNeedsMetadata(held)) {
+    // Still genuinely waiting on metadata. This retention has NO unconditional local
+    // bound: it is revisited only when a SUBSEQUENT metadata event occurs. Every
+    // terminal outcome of `applySessionMetadataPayload` now re-enters this reconciler,
+    // and that function is re-entered by the server-driven `transcripts_changed` path
+    // and by `refreshSessionMetadata` callers - but if no further metadata event ever
+    // arrives, the payload stays held. Recording the state is what makes that wait
+    // observable; it is not a guarantee that the wait ends.
+    return {state: 'retained_awaiting_metadata', revision};
+  }
+  deferredSealedAutoApprovePayload = null;
+  applyAutoApprovePayload(held, {render: false, deferForMetadata: false});
+  return {state: 'applied', revision};
+}
+
+function finalizeSessionMetadataOutcome(applied, reason, payload, details = {}) {
+  // Single finalization boundary: reuse the existing `lastApply` outcome owner and
+  // attach the deferred-payload disposition to it, so no terminal return needs its
+  // own copy of the reconciliation and no second result map exists.
+  const deferredSealed = reconcileDeferredSealedAutoApprove();
+  return noteSessionMetadataApply(applied, reason, payload, {...details, deferredSealed});
 }
 
 function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
@@ -5941,7 +5994,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // Validate BEFORE adopting anything. A malformed or superseded response must be rejected while it
   // still cannot touch shared identity: a late reply from the server that was just replaced would
   // otherwise flip the epoch back after the replacement's bytes had already landed.
-  if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
+  if (!payload || typeof payload !== 'object') return finalizeSessionMetadataOutcome(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) {
     // A superseded response still carries a true fact about the SERVER's build queue: which build
@@ -5952,7 +6005,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     // epoch adoption above, because the recorder refuses an identity from any other epoch and never
     // lowers the number.
     noteSessionMetadataPendingIdentity(payload);
-    return noteSessionMetadataApply(false, 'superseded_request', payload);
+    return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
@@ -5973,16 +6026,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
     if (nextGeneration > 0 && currentGeneration > nextGeneration) {
-      return noteSessionMetadataApply(false, 'older_work_graph_generation', payload, {session});
+      return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
-  noteSessionMetadataApply(true, 'applied', payload);
-  if (deferredSealedAutoApprovePayload && !sealedAutoApprovePayloadNeedsMetadata(deferredSealedAutoApprovePayload)) {
-    const deferredPayload = deferredSealedAutoApprovePayload;
-    deferredSealedAutoApprovePayload = null;
-    applyAutoApprovePayload(deferredPayload, {render: false, deferForMetadata: false});
-  }
+  finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -6002,7 +6050,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   // The payload is already committed above; only the render tail is abandoned here, so the applied
   // generation stands and the reason says which half stopped.
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'committed_render_superseded', payload, {committed: true});
+  if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The

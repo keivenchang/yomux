@@ -635,6 +635,9 @@ const fileQuickOpenState = {
   // server can stream committed match deltas instead of the client re-issuing the whole query.
   deltaQuery: '',
   deltaRoots: new Map(),
+  // Candidate retention also includes the requested root or path directory; two path queries can
+  // share a filter while naming different directories and must not present each other's rows.
+  candidateQueryIdentity: '',
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -730,6 +733,7 @@ const serverWatchRootsState = {
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
+  debounceStartedAt: null,
   pendingOptions: {},
 };
 let fileExplorerFilesystemWatchToken = '';

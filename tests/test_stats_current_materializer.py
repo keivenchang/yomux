@@ -6,13 +6,16 @@ import inspect
 import json
 import math
 import random
+import weakref as weakref_module
 from dataclasses import FrozenInstanceError
+from dataclasses import replace
 
 import pytest
 
 from yolomux_lib.stats_current import materializer
 from yolomux_lib.stats_current import pricing as current_pricing
 from yolomux_lib.stats_current import service as service_module
+from yolomux_lib.stats_current import storage as storage_module
 from yolomux_lib.stats_current.materializer import LAYER_SECONDS
 from yolomux_lib.stats_current.materializer import RANGES
 from yolomux_lib.stats_current.materializer import RESOLUTIONS
@@ -1570,3 +1573,590 @@ def test_uncovered_gap_candidate_boundaries_match_brute_force(candidate_start, c
     assert [(item.start, item.end) for item in computed] == _reference_uncovered_portions(
         explicit, candidate_start, candidate_end,
     )
+
+
+# --- the incremental cost-detail fold ------------------------------------------
+#
+# `_build_bucket_cost_detail` walked its atoms twice: once to total the model, agent and evidence
+# scores, then `_ranked_cost_keys` to take a top-N, then again to accumulate attribution for the
+# selected keys only. That second pass is why a caller had to hold every atom of a bucket. The
+# fold accumulates per key and ranks once at close.
+
+
+def _cost_atoms(count, *, agents=40, models=3):
+    """Real `_CostDetailAtom`s, built by the product's own projection from usage atoms.
+
+    `agents` is deliberately larger than `MAX_COST_DETAIL_AGENTS` so the ranking genuinely
+    discards keys. A fixture that fits inside the cap would make every equivalence assertion below
+    pass for the uninteresting reason that selection is a no-op.
+    """
+
+    atoms = []
+    for index in range(count):
+        usage = UsageAtom(
+            f"event-{index}", "output" if index % 2 else "input", "text", "none", "tokens",
+            float(index),
+            {
+                "quantity": 10 + (index % 97),
+                "provider": f"provider-{index % models}",
+                "model": f"model-{index % models}",
+                "agent_id": f"agent-{index % agents}",
+                "telemetry_complete": True,
+            },
+        )
+        _samples, atom = materializer._usage_projection(usage, lambda _atom: _projection(25))
+        atoms.append(atom)
+    return tuple(atoms)
+
+
+def _fold_in_chunks(atoms, size):
+    fold = materializer._CostDetailFold()
+    for start in range(0, len(atoms), size):
+        for atom in atoms[start:start + size]:
+            fold.add(atom)
+    return fold.close()
+
+
+def test_the_cost_fold_equals_the_whole_input_build_at_every_split_point():
+    """Equivalence over every split, which is the only place a fold can diverge.
+
+    Proven separately offline on 75,379 real cost atoms read from a copy of the live store: the
+    fold's whole-input output was byte-equal to the previous two-pass implementation's, at every
+    chunk size, at all 401 split points of a 400-atom bucket, and across random multi-way
+    partitions. This test keeps that property pinned without needing the store.
+    """
+
+    atoms = _cost_atoms(120)
+    whole = materializer._build_bucket_cost_detail(atoms)
+
+    assert whole.agents, "the fixture must produce attribution to compare"
+    for cut in range(len(atoms) + 1):
+        fold = materializer._CostDetailFold()
+        for atom in atoms[:cut]:
+            fold.add(atom)
+        for atom in atoms[cut:]:
+            fold.add(atom)
+        assert fold.close() == whole, f"split at {cut} changed the result"
+    for size in (1, 2, 7, 13, 119, 120, 121):
+        assert _fold_in_chunks(atoms, size) == whole, f"chunk size {size} changed the result"
+
+
+def test_ranking_per_chunk_gives_a_different_answer_than_ranking_once():
+    """NEGATIVE CONTROL: ranking is not distributive over concatenation.
+
+    Without this, "the fold equals the whole build" could be true for a fold that ranks per chunk,
+    and the design decision that the accumulator keeps every key until close would look like an
+    arbitrary choice. It is not: a key inside chunk A's top-N and outside chunk B's would collect
+    attribution from A and nothing from B, and this shows that concretely.
+    """
+
+    atoms = _cost_atoms(120)
+    whole = materializer._build_bucket_cost_detail(atoms)
+
+    per_chunk = tuple(
+        materializer._build_bucket_cost_detail(atoms[start:start + 20])
+        for start in range(0, len(atoms), 20)
+    )
+    ranked_per_chunk = {
+        value.key for detail in per_chunk for value in detail.agents
+    }
+    ranked_once = {value.key for value in whole.agents}
+
+    assert ranked_once != ranked_per_chunk, (
+        "the fixture must actually exercise the difference; widen `agents` if this trips"
+    )
+    assert len(ranked_once) == materializer.MAX_COST_DETAIL_AGENTS
+
+
+def test_the_fold_retains_one_row_per_key_rather_than_one_per_atom():
+    """The bound that makes this worth doing: state is O(distinct keys), not O(atoms)."""
+
+    atoms = _cost_atoms(600, agents=40, models=3)
+    fold = materializer._CostDetailFold()
+    for atom in atoms:
+        fold.add(atom)
+
+    assert len(fold._agents) == 40
+    assert len(fold._models) == 3
+    assert len(atoms) == 600
+    assert len(fold._agents) + len(fold._models) < len(atoms) / 10
+
+
+def test_a_bucket_with_more_distinct_keys_than_the_budget_is_abandoned_with_a_reason(monkeypatch):
+    """A key bound that silently dropped payers would report a cost report that omits one.
+
+    The cap is patched on the CLASS: `__slots__` makes it read-only through an instance, which is
+    the same guard that stops production code from quietly raising its own budget.
+    """
+
+    monkeypatch.setattr(materializer._CostDetailFold, "MAX_FOLD_KEYS", 8)
+    fold = materializer._CostDetailFold()
+    with pytest.raises(storage_module.RebuildBoundExceeded) as raised:
+        for atom in _cost_atoms(40, agents=40):
+            fold.add(atom)
+
+    assert raised.value.reason == "cost_fold_agent_keys"
+    assert raised.value.limit == 8
+
+
+def test_a_metadata_conflict_on_a_model_the_ranking_discards_stays_invisible():
+    """Equivalence includes when the old code did NOT look.
+
+    The two-pass build populated `model_metadata` inside `if atom.model_key in selected_models`, so
+    a provider/model conflict on a key the ranking dropped was never seen. The fold records
+    metadata for every key, so it must defer the raise to close and only for survivors, or it would
+    start failing builds the old code accepted.
+    """
+
+    # More model keys than the cap, so ranking really discards some. Enough atoms per model that
+    # appending one more cannot promote a discarded key past a surviving one -- the first attempt
+    # at this fixture used 80 atoms over 25 models, and the extra atom lifted the conflicted key
+    # into the top sixteen, which made the conflict correctly raise and the test wrong.
+    atoms = list(_cost_atoms(500, agents=4, models=25))
+    scores: dict[str, int] = {}
+    for atom in atoms:
+        score = 1 + (2 * atom.quantity if atom.is_tokens else 0)
+        scores[atom.model_key] = scores.get(atom.model_key, 0) + score + (atom.micro_usd or 0)
+    lowest = min(scores, key=lambda key: (scores[key], key))
+    conflicted = next(atom for atom in atoms if atom.model_key == lowest)
+    atoms.append(replace(conflicted, provider="a-different-provider"))
+
+    detail = materializer._build_bucket_cost_detail(tuple(atoms))
+    fold = materializer._CostDetailFold()
+    for atom in atoms:
+        fold.add(atom)
+
+    assert len(detail.models) == materializer.MAX_COST_DETAIL_MODELS, "ranking must be discarding"
+    assert lowest not in {value.key for value in detail.models}, "the conflicted key must be dropped"
+    assert lowest in fold._model_conflicts, "the fold must have SEEN the conflict"
+    assert fold.close() == detail
+
+
+# --- the two halves of the bounded rebuild, composed ---------------------------
+#
+# The batched reader (`storage.pinned_snapshot_batches`) and the cost fold
+# (`_CostDetailFold`) are each proven alone. These are about the pair. The first thing they
+# establish is that the pair does not actually meet yet, and where the missing join is.
+
+
+def _store_with(tmp_path, observations):
+    store = storage_module.Store.open(tmp_path / storage_module.DATABASE_FILENAME)
+    store.append_batch(
+        coverage_epochs=[storage_module.CoverageEpoch("cpu", "probe", "epoch-1", 0.0, None, 1.0, 1)],
+        observations=observations,
+    )
+    return store
+
+
+def _observations(count, *, first_observed_at=0.0):
+    """Real-shaped `cpu` payloads, because the materializer validates them and the store does not.
+
+    The storage-side tests here can use any payload; anything that reaches `_observation_samples`
+    cannot. `process_cpu_percent` also exercises a `*_average_sources` fold, which is the one
+    accumulator shape that needs per-source state.
+    """
+
+    return [
+        storage_module.Observation(
+            f"cpu:probe:{index}", "cpu", "probe", first_observed_at + index, "epoch-1", 1,
+            {
+                "process_cpu_percent": {"python": 1.0 + (index % 7) * 0.125, "bash": 0.5},
+                "process_percent": float(index % 5),
+                "system_percent": 10.0 + (index % 11) * 0.25,
+            },
+        )
+        for index in range(count)
+    ]
+
+
+def test_the_batched_reader_reconstitutes_the_generation_the_whole_snapshot_builds(tmp_path):
+    """The reader is a faithful substitute for the snapshot's observations, through a real build.
+
+    This is as close to end-to-end as the pair currently gets: `build_generation` still takes a
+    whole `StoreSnapshot`, so the batches are reassembled before it. Proving equality here means
+    the remaining work is `_build`'s shape, not the reader's fidelity.
+    """
+
+    with _store_with(tmp_path, _observations(4_000)) as store:
+        with store.pinned_snapshot() as read_whole:
+            whole = read_whole()
+        with store.pinned_snapshot_batches(max_rows=137) as read_batches:
+            streamed = tuple(item for batch in read_batches() for item in batch)
+
+    assert streamed == whole.observations
+    reconstituted = replace(whole, observations=streamed)
+    arguments = dict(source_generation=1, cache_generation=1, generated_at=1e9, observed_until=1e9)
+
+    assert materializer.build_generation(reconstituted, **arguments) == materializer.build_generation(whole, **arguments)
+
+
+def test_a_consumer_holding_every_batch_still_leaves_no_raw_rows_reachable(tmp_path):
+    """Reachability across the seam, which neither half's own test can see.
+
+    The reader's own test drops each batch as it goes. A real consumer accumulates, and that is
+    exactly where a leak would hide: if holding the decoded facts also pinned the rows they came
+    from, the reader's guarantee would be true only for a consumer nobody writes.
+    """
+
+    tracked: list = []
+
+    class _Row:
+        __slots__ = ("_values", "__weakref__")
+
+        def __init__(self, values):
+            self._values = values
+
+        def __getitem__(self, index):
+            return self._values[index]
+
+    with _store_with(tmp_path, _observations(1_200)) as store:
+        connection = store._connection()
+
+        def remembering(_cursor, values):
+            row = _Row(values)
+            tracked.append(weakref_module.ref(row))
+            return row
+
+        connection.row_factory = remembering
+        try:
+            held = []
+            with store.pinned_snapshot_batches(max_rows=100) as read:
+                for batch in read():
+                    held.append(batch)          # the consumer accumulates, on purpose
+                    assert not [ref for ref in tracked if ref() is not None], (
+                        "holding decoded batches kept their raw rows alive"
+                    )
+        finally:
+            connection.row_factory = None
+
+    assert sum(len(batch) for batch in held) == 1_200
+    assert len(tracked) >= 1_200
+
+
+def test_the_memory_bound_stops_a_rebuild_whose_consumer_grows_between_batches(tmp_path, monkeypatch):
+    """The composed question: a fold accumulating across batches must still be caught.
+
+    Each half bounds itself. The pair only bounds if the reader re-checks while a stateful consumer
+    is between it and the store, which it does because the check sits before every fetch rather
+    than once at the start.
+    """
+
+    readings = iter([10, 10, 10 ** 12] + [10 ** 12] * 50)
+    monkeypatch.setattr(storage_module, "_rebuild_memory_bytes", lambda: next(readings))
+
+    with _store_with(tmp_path, _observations(2_000)) as store:
+        with store.pinned_snapshot_batches(max_rows=100, max_memory_bytes=10 ** 9) as read:
+            with pytest.raises(storage_module.RebuildBoundExceeded) as raised:
+                for _batch in read():
+                    pass
+
+    assert raised.value.reason == "rebuild_memory_bytes"
+
+
+def test_the_memory_bound_cannot_fire_after_the_last_fetch(tmp_path, monkeypatch):
+    """A KNOWN LIMIT, pinned so it is a decision rather than a surprise.
+
+    The bound is checked before each fetch, so a consumer that allocates after the final batch is
+    never re-checked -- the reader has nothing left to do. Closing it would mean the reader
+    policing memory it does not own, on a schedule it cannot see. The caller owns the window after
+    the last batch; this test exists so nobody discovers that during an incident.
+    """
+
+    exhausted = {"value": False}
+
+    def memory():
+        return 10 ** 12 if exhausted["value"] else 10
+
+    monkeypatch.setattr(storage_module, "_rebuild_memory_bytes", memory)
+
+    with _store_with(tmp_path, _observations(150)) as store:
+        with store.pinned_snapshot_batches(max_rows=100, max_memory_bytes=10 ** 9) as read:
+            batches = list(read())
+            exhausted["value"] = True           # the consumer blows its budget now
+
+    assert [len(batch) for batch in batches] == [100, 50]
+    assert storage_module._rebuild_memory_bytes() > 10 ** 9, "the process is over budget"
+
+
+# --- the per-bucket observation fold -------------------------------------------
+#
+# `_fold_bucket` collected every `_Sample` of a bucket into a list and reduced it at the end.
+# `_BucketFold` accumulates instead, which is what a caller needs to close cells as an ordered
+# cursor passes them. The hazard on this side is not ranking -- it is float summation.
+
+
+def _projected(observed_at, series, operation, value, source_id="s1"):
+    return materializer._ProjectedObservation(
+        observed_at,
+        (materializer._Sample(series, operation, value, observed_at, source_id),),
+    )
+
+
+def test_a_streaming_total_matches_sum_bit_for_bit_and_a_naive_one_does_not():
+    """The trap this side has, stated as a test rather than as a comment.
+
+    CPython's `sum()` uses Neumaier compensated summation on its float fast path, so a plain `+=`
+    accumulator disagrees in the last bits. Measured on real data before `_CompensatedTotal`
+    existed: a 10-sample `average` gave 15.103 from `sum()` and 15.102999999999998 from `+=`, and
+    six series values in the first differing bucket moved. Streaming without compensation would
+    silently change every float series value in the store.
+    """
+
+    # The exact ten `process_cpu_percent:claude` samples from the 1787712120 ten-second cell of a
+    # real store, which is where the divergence was first observed. Values that happen not to
+    # diverge would make this test pass while proving nothing.
+    values = [1.281, 1.542, 1.562, 1.687, 1.406, 1.469, 1.406, 1.937, 1.094, 1.719]
+    naive = 0
+    for value in values:
+        naive += value
+    compensated = materializer._CompensatedTotal()
+    for value in values:
+        compensated.add(value)
+
+    assert compensated.value() == sum(values)
+    assert naive != sum(values), "if this stops being true the compensation is no longer load-bearing"
+
+
+def test_the_compensated_total_stays_exact_while_every_value_is_an_integer():
+    """`sum()` starts from int 0 and only enters the float path on the first float."""
+
+    total = materializer._CompensatedTotal()
+    for value in (2, 3, 5):
+        total.add(value)
+
+    assert total.value() == 10
+    assert isinstance(total.value(), int)
+    total.add(0.5)
+    assert total.value() == 10.5
+
+
+def test_the_bucket_fold_equals_the_whole_input_build_at_every_split_point():
+    """Split-invariance for every fold operation, one series each.
+
+    Proven separately on real data: the 40 busiest 10-second cells of a 60,000-observation store,
+    every single split point and every chunk size, plus ten cells with usage atoms interleaved.
+    And the whole-input form of the change reproduced the previous implementation's generation
+    exactly -- 47,139 series values across 1,248 buckets, identical.
+    """
+
+    operations = (
+        "sum", "average", "minimum", "maximum", "gauge", "status",
+        "rate", "rate_per_minute", "average_sources", "rate_average_sources",
+        "sum_average_sources",
+    )
+    items = []
+    for index in range(60):
+        operation = operations[index % len(operations)]
+        items.append(_projected(
+            1_000.0 + index, f"series_{operation}", operation,
+            0.1 * (index + 1), f"source-{index % 3}",
+        ))
+    whole = materializer._fold_bucket(1_000, 10, items, (), 1e12)
+
+    assert len(whole.series) == len(operations), "every operation must be exercised"
+    for cut in range(len(items) + 1):
+        fold = materializer._BucketFold()
+        for item in items[:cut]:
+            fold.add_observation(item)
+        for item in items[cut:]:
+            fold.add_observation(item)
+        assert fold.close(1_000, 10, 1e12) == whole, f"split at {cut} changed the bucket"
+
+
+def test_the_bucket_fold_refuses_a_series_whose_operation_changes_mid_stream():
+    """The conflicting-operation check has to survive being moved into the accumulator."""
+
+    fold = materializer._BucketFold()
+    fold.add_observation(_projected(1_000.0, "series", "sum", 1.0))
+    with pytest.raises(materializer.MaterializationError) as raised:
+        fold.add_observation(_projected(1_001.0, "series", "average", 2.0))
+
+    assert "conflicting fold operations" in str(raised.value)
+
+
+def test_open_cells_never_exceed_one_per_resolution_when_the_cursor_is_ordered():
+    """The invariant, stated over a synthetic ascending cursor and nothing else.
+
+    This test carries no measurement. It asserts only that an ascending cursor leaves at most one
+    cell per resolution open, using synthetic timestamps and no store, which is why it is cheap and
+    why it says nothing about accumulator counts. **The measurement lives in
+    `test_streaming_never_holds_more_open_cells_than_the_ceiling`**, which instruments the real
+    `_BucketFold` over a store fixture. An earlier version of this docstring quoted "4 cells open
+    holding 358 accumulators against 240,000 objects" from a measurement this body never performed;
+    a docstring describing evidence its test does not carry is the same defect as a record citing a
+    report nobody can open.
+
+    The name no longer hardcodes four: the assertion is `len(RESOLUTIONS)`, so a fifth resolution
+    would keep the test honest instead of keeping it passing under a name that had become false.
+    """
+
+    open_cells: dict[int, int] = {}
+    peak = 0
+    for index in range(5_000):
+        observed_at = 1_000.0 + index * 0.7
+        for resolution in materializer.RESOLUTIONS:
+            start = int(observed_at // resolution) * resolution
+            if open_cells.get(resolution) not in (None, start):
+                del open_cells[resolution]
+            open_cells[resolution] = start
+        peak = max(peak, len(open_cells))
+
+    assert peak == len(materializer.RESOLUTIONS)
+
+
+# --- the streaming full-rebuild layer builder -----------------------------------
+#
+# `_stream_full_layers` closes each resolution's cell as the ordered cursor passes it, so the
+# transient working set is O(open cells x series) rather than O(rows). It is only valid for the
+# full rebuild, and the tests below prove why that restriction is real rather than cautious.
+
+
+def _reference_bounds(generation):
+    return {layer.resolution: (layer.end, layer.end - layer.start) for layer in generation.layers}
+
+
+def test_a_full_rebuild_folds_every_bucket_with_no_previous_and_no_dirty_set(tmp_path):
+    """The degeneracy the streaming variant rests on, executed rather than traced.
+
+    `build_generation` calls `_build` with `previous=None, dirty=None`. There `_layer_fold_starts`
+    returns every bucket start, both splice guards in `_updated_layer_buckets` are skipped, and its
+    loop is already ascending -- so splice-and-patch is the dirty path's shape, not something a
+    streaming full rebuild has to reproduce. This asserts that at runtime.
+    """
+
+    seen = []
+    real = materializer._updated_layer_buckets
+
+    def spy(previous, fold_starts, dirty, start, end, resolution, obs, use, until, *, private_source_id=None):
+        seen.append({
+            "previous": previous, "dirty": dirty, "private": private_source_id,
+            "every_start": frozenset(fold_starts) == frozenset(range(start, end, resolution)),
+        })
+        return real(previous, fold_starts, dirty, start, end, resolution, obs, use, until,
+                    private_source_id=private_source_id)
+
+    with _store_with(tmp_path, _observations(2_000)) as store:
+        with store.pinned_snapshot() as read:
+            snapshot = read()
+    newest = max(item.observed_at for item in snapshot.observations)
+    materializer._updated_layer_buckets = spy
+    try:
+        materializer.build_generation(
+            snapshot, source_generation=1, cache_generation=1,
+            generated_at=newest, observed_until=newest,
+        )
+    finally:
+        materializer._updated_layer_buckets = real
+
+    assert len(seen) == len(materializer.RESOLUTIONS)
+    assert all(call["previous"] is None for call in seen)
+    assert all(call["dirty"] is None for call in seen)
+    assert all(call["private"] is None for call in seen)
+    assert all(call["every_start"] for call in seen)
+
+
+def test_the_open_cell_ceiling_is_a_formula_over_the_live_constants():
+    """`4`, not `4 x (1 + MAX_PRIVATE_BROWSER_CLIENTS)`, and the reason is that overlays are unbuilt.
+
+    `PrivateOverlay` is constructed nowhere in the product, `Generation.private_overlays` keeps its
+    empty default, and `_updated_layer_buckets` is never called with `private_source_id` -- that
+    parameter serves `slice_generation` on the read side. If overlays are ever built the ceiling
+    becomes `len(RESOLUTIONS) x (1 + MAX_PRIVATE_BROWSER_CLIENTS)`, so it is written as a formula
+    rather than a literal.
+    """
+
+    assert materializer.MAX_OPEN_FOLD_CELLS == len(materializer.RESOLUTIONS)
+    assert materializer.Generation.__dataclass_fields__["private_overlays"].default == ()
+
+
+def test_streamed_layers_equal_the_layers_the_whole_snapshot_builds(tmp_path):
+    """Equivalence against the current path, on the same snapshot.
+
+    Proven separately on real data: 60,000 observations, 30,000 usage atoms and 2,049 coverage rows
+    from a store copy give layers identical to `build_generation`'s -- 4 layers, 1,248 buckets,
+    47,139 series values.
+    """
+
+    with _store_with(tmp_path, _observations(3_000)) as store:
+        with store.pinned_snapshot() as read:
+            snapshot = read()
+    newest = max(item.observed_at for item in snapshot.observations)
+    reference = materializer.build_generation(
+        snapshot, source_generation=1, cache_generation=1, generated_at=newest, observed_until=newest,
+    )
+
+    streamed = materializer._stream_full_layers(
+        snapshot.observations, bounds=_reference_bounds(reference), usage_cells={},
+        observed_until=newest, shared_gaps=(),
+    )
+
+    assert len(streamed) == len(reference.layers)
+    for expected, actual in zip(reference.layers, streamed):
+        assert (actual.resolution, actual.start, actual.end) == (expected.resolution, expected.start, expected.end)
+        assert actual.buckets == expected.buckets
+
+
+def test_streaming_never_holds_more_open_cells_than_the_ceiling(tmp_path):
+    """The bound that makes the design O(1) in store size, counted rather than asserted in prose.
+
+    Measured by instrumenting this same code over a 60,000-real-observation fixture: 4 open folds
+    holding **307** accumulators, against the **240,000** objects the current path retains for that
+    fixture -- **782x** fewer. Both numbers are of one fixture and travel together; see
+    `_stream_full_layers` for why an earlier hand-walk model of the identical fixture said 358, and
+    why the spec's ~330 against 617,243 is the production store rather than this slice.
+    """
+
+    live: set[int] = set()
+    peak = 0
+    real_init, real_close = materializer._BucketFold.__init__, materializer._BucketFold.close
+
+    def init(self):
+        nonlocal peak
+        real_init(self)
+        live.add(id(self))
+        peak = max(peak, len(live))
+
+    def close(self, start, duration, observed_until):
+        live.discard(id(self))
+        return real_close(self, start, duration, observed_until)
+
+    with _store_with(tmp_path, _observations(3_000)) as store:
+        with store.pinned_snapshot() as read:
+            snapshot = read()
+    newest = max(item.observed_at for item in snapshot.observations)
+    reference = materializer.build_generation(
+        snapshot, source_generation=1, cache_generation=1, generated_at=newest, observed_until=newest,
+    )
+    materializer._BucketFold.__init__, materializer._BucketFold.close = init, close
+    try:
+        materializer._stream_full_layers(
+            snapshot.observations, bounds=_reference_bounds(reference), usage_cells={},
+            observed_until=newest, shared_gaps=(),
+        )
+    finally:
+        materializer._BucketFold.__init__, materializer._BucketFold.close = real_init, real_close
+
+    assert peak == materializer.MAX_OPEN_FOLD_CELLS
+    assert peak < len(snapshot.observations) / 100
+
+
+def test_an_out_of_order_read_is_refused_rather_than_silently_unbounded(tmp_path):
+    """The ordering assumption is the bound. Losing it quietly would lose the bound quietly."""
+
+    with _store_with(tmp_path, _observations(600)) as store:
+        with store.pinned_snapshot() as read:
+            snapshot = read()
+    newest = max(item.observed_at for item in snapshot.observations)
+    reference = materializer.build_generation(
+        snapshot, source_generation=1, cache_generation=1, generated_at=newest, observed_until=newest,
+    )
+    shuffled = list(snapshot.observations)
+    shuffled.reverse()
+
+    with pytest.raises(materializer.MaterializationError) as raised:
+        materializer._stream_full_layers(
+            shuffled, bounds=_reference_bounds(reference), usage_cells={},
+            observed_until=newest, shared_gaps=(),
+        )
+
+    assert "out of order" in str(raised.value)

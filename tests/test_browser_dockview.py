@@ -205,6 +205,64 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
     assert metrics["errors"] == [], metrics
 
 
+def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tmp_path):
+    """A queued answer for `t5t.md` must not present the prior `t5t` ranking as its result."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    stale_path = "/home/test/dynamo/queues/DOIT.p1.e5.backend-lifetime-supervision.md"
+    current_path = "/home/test/dynamo/notes/t5t/t5t.md"
+    metrics = browser.execute_async_script(
+        """
+        const stalePath = arguments[0];
+        const currentPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        let releaseCurrent = null;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/fs/search') return originalFetch(input, options);
+          const query = url.searchParams.get('query') || '';
+          if (query === 't5t.md') return new Promise(resolve => { releaseCurrent = resolve; });
+          return new Response(JSON.stringify({
+            root: '/home/test/dynamo',
+            files: [{name: 'DOIT.p1.e5.backend-lifetime-supervision.md', path: stalePath, relative_path: 'queues/DOIT.p1.e5.backend-lifetime-supervision.md', size: 1, mtime_ns: 1}],
+          }), {status: 200, headers: {'Content-Type': 'application/json'}});
+        };
+        const type = value => {
+          const input = document.querySelector('.command-palette-input');
+          input.value = value;
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+        };
+        (async () => {
+          openFileQuickOpen();
+          type('t5t');
+          await waitFor(() => commandPaletteState.items.some(item => item.path === stalePath), {description: 'initial stale Quick Open row'});
+          type('t5t.md');
+          await waitFor(() => fileQuickOpenState.loading && commandPaletteState.query === 't5t.md', {description: 'queued longer Quick Open query'});
+          await waitFor(() => !commandPaletteState.items.some(item => item.path === stalePath), {description: 'stale row cleared before queued answer'});
+          const duringQueue = {
+            staleVisible: Array.from(document.querySelectorAll('.command-palette-row')).some(row => (row.textContent || '').includes('backend-lifetime-supervision')),
+            status: document.querySelector('.command-palette-status')?.textContent || '',
+          };
+          releaseCurrent(new Response(JSON.stringify({
+            root: '/home/test/dynamo',
+            files: [{name: 't5t.md', path: currentPath, relative_path: 'notes/t5t/t5t.md', size: 1, mtime_ns: 2}],
+          }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          await waitFor(() => commandPaletteState.items.some(item => item.path === currentPath), {description: 'queued Quick Open answer'});
+          done({duringQueue, finalPaths: commandPaletteState.items.map(item => item.path), errors: jsDebugFailureEvents('error')});
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        stale_path,
+        current_path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["duringQueue"]["staleVisible"] is False, metrics
+    assert "Searching files" in metrics["duringQueue"]["status"], metrics
+    assert metrics["finalPaths"] == [current_path], metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path):
     """A contiguous directory match must not highlight an earlier scattered subsequence."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])

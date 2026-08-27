@@ -1601,9 +1601,9 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
     assert.equal(api.apiOperationStateForTest().pending, 1);
     assert.equal(api.apiOperationStateForTest().waiters, 1);
-    advance(14999);
+    advance(119999);
     await flushAsyncWork();
-    assert.equal(api.apiOperationStateForTest().pending, 1, '14,999 ms remains inside the caller deadline');
+    assert.equal(api.apiOperationStateForTest().pending, 1, '119,999 ms remains inside the caller deadline');
     advance(1);
     const error = await result;
 
@@ -1617,7 +1617,7 @@ async function runLayoutAsyncSuite() {
     const failures = api.jsDebugFailureEventsForTest('error');
     assert.equal(failures.length, 1);
     assert.equal(failures[0].endpoint, '/api/fs/read');
-    assert.equal(failures[0].error, 'deadline_expired: request exceeded its 15s deadline');
+    assert.equal(failures[0].error, 'deadline_expired: request exceeded its 120s deadline');
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0);
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: 'op-deadline-read', cursor: {epoch: 'deadline-epoch', seq: 1}},
@@ -1632,6 +1632,52 @@ async function runLayoutAsyncSuite() {
       result: {state: 'failed', error: 'conflicting duplicate'},
       status: 500,
     }), false, 'a conflicting duplicate cannot replace the retained terminal');
+  });
+
+  await testAsync('a filesystem operation waiter without an override uses the accepted-operation budget', async () => {
+    let now = 0;
+    let nextTimer = 1;
+    const timers = new Map();
+    const setTimeout = (callback, delay) => {
+      const id = nextTimer++;
+      timers.set(id, {callback, due: now + Number(delay)});
+      return id;
+    };
+    const advance = milliseconds => {
+      now += milliseconds;
+      for (const [id, timer] of [...timers.entries()].sort((left, right) => left[1].due - right[1].due)) {
+        if (timer.due > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    };
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      setTimeout,
+      clearTimeout: id => timers.delete(id),
+      performance: {now: () => now},
+    });
+    const receipt = {
+      state: 'queued',
+      operation: {
+        id: 'op-default-accepted-deadline',
+        kind: 'auto_approve_operation',
+        context: {},
+        cursor: {epoch: 'default-accepted-deadline', seq: 0},
+      },
+    };
+    api.registerApiOperationReceiptForTest(receipt);
+    const result = api.waitForApiOperationResultForTest(receipt, {
+      kind: 'auto_approve_operation',
+    }).then(() => null, error => error);
+
+    advance(119999);
+    await flushAsyncWork();
+    assert.equal(api.apiOperationStateForTest().waiters, 1, 'the default waiter remains live through 119,999 ms');
+    advance(1);
+    const error = await result;
+    assert.equal(error?.code, 'deadline_expired');
+    assert.equal(error?.payload?.timeout_ms, 120000, 'the no-override waiter owns the accepted-operation budget');
+    assert.equal(api.apiOperationStateForTest().waiters, 0);
   });
 
   await testAsync('one filesystem waiter can detach while another retains the accepted operation', async () => {
@@ -2678,6 +2724,123 @@ async function runLayoutAsyncSuite() {
       'the stale response never mutates the current candidate set');
   });
 
+  await testAsync('a superseded query stops presenting its rows once the user types a longer one', async () => {
+    // The reported shape: typing `t5t.md` showed `DOIT.p1.e5.backend-lifetime-supervision.md` at row 1
+    // and no `t5t.md` at all. Measured against the real index, the backend answer for `t5t.md` puts
+    // `notes/t5t/t5t.md` at position 1 and that DOIT file at position 77 -- so the row on screen was
+    // never an answer to `t5t.md`. It was the answer to the shorter `t5t`, still being presented while
+    // the newer, more specific search sat accepted-but-unanswered behind the operation queue.
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const decoy = '/repo/queues/DOIT.p1.e5.backend-lifetime-supervision.md';
+    let answerLongQuery = null;
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      // The longer query is accepted but never answered during this test: the queued 202 case.
+      if (target.includes(encodeURIComponent('t5t.md'))) return new Promise(resolve => { answerLongQuery = resolve; });
+      return Promise.resolve(jsonResponse({
+        root: '/repo', root_realpath: '/repo', query: 't5t', limit: 500,
+        files: [{path: decoy, name: 'DOIT.p1.e5.backend-lifetime-supervision.md',
+                 relative_path: 'queues/DOIT.p1.e5.backend-lifetime-supervision.md', realpath: decoy}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [decoy],
+      'the shorter query legitimately matches the decoy');
+
+    api.setCommandPaletteStateForTest('files', 't5t.md');
+    api.setCommandPaletteQueryForTest('t5t.md');
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('t5t.md');
+    await flushAsyncWork();
+
+    assert.ok(answerLongQuery, 'the longer query reached the backend and is still unanswered');
+    assert.equal(api.fileQuickOpenStateForTest().loading, true, 'the palette reports that it is still searching');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [],
+      'rows belonging to the superseded query are not presented as the newer query\'s ranked answer');
+
+    answerLongQuery(jsonResponse({
+      root: '/repo', root_realpath: '/repo', query: 't5t.md', limit: 500,
+      files: [{path: '/repo/notes/t5t/t5t.md', name: 't5t.md', relative_path: 'notes/t5t/t5t.md', realpath: '/repo/notes/t5t/t5t.md'}],
+    }));
+    await inFlight;
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/repo/notes/t5t/t5t.md'],
+      'the answer for the current query replaces the list once it lands');
+  });
+
+  await testAsync('a same-query refresh keeps its current rows visible until the new answer lands', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const retained = '/repo/notes/t5t/t5t.md';
+    let searchCount = 0;
+    let answerRefresh = null;
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      searchCount += 1;
+      if (searchCount > 1) return new Promise(resolve => { answerRefresh = resolve; });
+      return Promise.resolve(jsonResponse({
+        root: '/repo', root_realpath: '/repo', query: 't5t', limit: 500,
+        files: [{path: retained, name: 't5t.md', relative_path: 'notes/t5t/t5t.md', realpath: retained}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('  t5t  ');
+    await flushAsyncWork();
+    assert.ok(answerRefresh, 'the normalized same-query refresh reached the backend and remains pending');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [retained],
+      'the current answer remains visible during a refresh of the same normalized query');
+
+    answerRefresh(jsonResponse({root: '/repo', root_realpath: '/repo', query: 't5t', limit: 500, files: []}));
+    await inFlight;
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates), [],
+      'the refreshed same-query answer replaces the retained rows once it lands');
+  });
+
+  await testAsync('a path query with the same filter clears rows when its directory changes', async () => {
+    const api = loadYolomux();
+    let listCount = 0;
+    let answerSecondDirectory = null;
+    api.setFetchForTest(url => {
+      if (!String(url).includes('/api/fs/list')) return Promise.resolve(jsonResponse({state: 'building'}));
+      listCount += 1;
+      if (listCount > 1) return new Promise(resolve => { answerSecondDirectory = resolve; });
+      return Promise.resolve(jsonResponse({
+        path: '/repo-a',
+        entries: [{kind: 'file', name: 'foo.md'}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo-a', []);
+    api.setCommandPaletteStateForTest('files', '/repo-a/foo');
+    api.setCommandPaletteQueryForTest('/repo-a/foo');
+    await api.refreshFileQuickOpenCandidatesForTest('/repo-a/foo');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/repo-a/foo.md']);
+
+    api.setCommandPaletteStateForTest('files', '/repo-b/foo');
+    api.setCommandPaletteQueryForTest('/repo-b/foo');
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('/repo-b/foo');
+    await flushAsyncWork();
+    assert.ok(answerSecondDirectory, 'the same-filter query for the second directory remains pending');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates), [],
+      'rows from the prior directory cannot be selected while the new directory is loading');
+
+    answerSecondDirectory(jsonResponse({path: '/repo-b', entries: []}));
+    await inFlight;
+  });
+
   await testAsync('a rebase_required verdict performs one full-snapshot repair, not a mixed merge', async () => {
     const api = loadYolomux();
     const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {
@@ -3623,6 +3786,105 @@ async function runLayoutAsyncSuite() {
     api.commitTmuxSessionLifecycleMutationForTest(mutation, {newName: 'renamed'});
     assert.equal(api.tmuxSessionLifecycleRecordForTest('1').phase, 'retired');
     assert.equal(api.tmuxSessionLifecycleRecordForTest('renamed').phase, 'renaming-in');
+  });
+
+  await testAsync('every terminal metadata outcome accounts for a deferred sealed status payload', async () => {
+    // Regression: `applyAutoApprovePayload` can HOLD a sealed status payload until metadata knows
+    // its sessions, but the only release lived on the success tail of `applySessionMetadataPayload`,
+    // after its terminal early returns. A malformed, superseded, older-generation, or
+    // committed-render-superseded outcome left the payload held with nothing recorded and nothing
+    // scheduled to revisit it, so the published consumer revision could never advance again.
+    const api = loadYolomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const metadataFor = (generation, sessionOrder, extra = {}) => ({
+      metadata_identity: {epoch: 'epoch-a', generation},
+      session_order: sessionOrder,
+      sessions: Object.fromEntries(sessionOrder.map(session => [session, {panes: [], ...extra}])),
+    });
+    const sealed = revision => ({
+      session_order: ['1', '2'],
+      sessions: {
+        '1': {target: '1', enabled: false, last_action: 'off'},
+        '2': {target: '2', enabled: false, last_action: 'off'},
+      },
+      agent_window_snapshot_revision: revision,
+    });
+    const lastApply = () => api.transcriptMetadataStateForTest().lastApply;
+    const hold = label => assert.equal(
+      api.applyAutoApprovePayloadForTest(sealed(9)).deferred, true,
+      `${label}: a seal naming a session metadata does not know must be held`,
+    );
+
+    assert.equal(await api.applySessionMetadataPayloadForTest(metadataFor(1, ['1']), quiet), true);
+    assert.equal(api.transcriptMetadataStateForTest().loaded, true, 'metadata must be loaded before a seal can defer');
+    // A newer work graph so the older-generation refusal has something to be older than.
+    assert.equal(await api.applySessionMetadataPayloadForTest(
+      metadataFor(2, ['1'], {work_graph: {version: 1, generation: 9}}), quiet), true);
+
+    // FINDING 1: all FOUR terminal outcomes, each with a freshly held payload.
+    let committedRenderCalls = 0;
+    const terminalCases = [
+      ['malformed_payload', null, quiet],
+      ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
+      ['older_work_graph_generation', metadataFor(4, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      // The committed-render outcome is current at the entry gate and superseded at the render
+      // gate, which is the only way to reach the fourth terminal exit.
+      ['committed_render_superseded', metadataFor(5, ['1']), {
+        ...quiet,
+        requestIsCurrent: () => {
+          committedRenderCalls += 1;
+          return committedRenderCalls === 1;
+        },
+      }],
+    ];
+    for (const [expectedReason, metadataPayload, options] of terminalCases) {
+      hold(expectedReason);
+      await api.applySessionMetadataPayloadForTest(metadataPayload, options);
+      const last = lastApply();
+      assert.equal(last.reason, expectedReason, `${expectedReason}: the terminal outcome names itself`);
+      assert.ok(last.deferredSealed, `${expectedReason}: the terminal outcome accounts for the held payload`);
+      assert.equal(
+        last.deferredSealed.state, 'retained_awaiting_metadata',
+        `${expectedReason}: metadata still does not cover the held sessions, so retention is recorded rather than silent`,
+      );
+      assert.equal(last.deferredSealed.revision, 9, `${expectedReason}: the held revision is recorded`);
+    }
+
+    // FINDING 4: the retained -> applied transition, through the same owner.
+    assert.equal(await api.applySessionMetadataPayloadForTest(metadataFor(6, ['1', '2']), quiet), true);
+    assert.equal(lastApply().deferredSealed.state, 'applied', 'a covered payload is released, not held');
+    assert.equal(api.autoApproveStateForTest('2').agent_window_snapshot_revision, 9, 'the released payload advanced the consumer revision');
+    assert.equal(lastApply().deferredSealed.revision, 9);
+
+    // FINDING 3: a PARTIAL per-session overtake must RETAIN, not discard. Session '1' is pushed
+    // past the held revision while session '2' is left behind; a global maximum would wrongly
+    // discard status that session '2' never received.
+    const api2 = loadYolomux('', ['1']);
+    assert.equal(await api2.applySessionMetadataPayloadForTest(metadataFor(1, ['1']), quiet), true);
+    assert.equal(api2.applyAutoApprovePayloadForTest(sealed(9)).deferred, true, 'partial: the seal is held');
+    api2.setAutoApproveStateForTest('1', {target: '1', enabled: false, last_action: 'off', agent_window_snapshot_revision: 40});
+    api2.setAutoApproveStateForTest('2', {target: '2', enabled: false, last_action: 'off', agent_window_snapshot_revision: 3});
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    assert.equal(api2.transcriptMetadataStateForTest().lastApply.reason, 'malformed_payload');
+    assert.equal(
+      api2.transcriptMetadataStateForTest().lastApply.deferredSealed.state, 'retained_awaiting_metadata',
+      'a partial overtake must retain: one advanced session cannot discard status another never received',
+    );
+
+    // FINDING 2: a REAL complete overtake discards. Both held sessions are at or past the held
+    // revision, so the seal carries no truth any consumer still needs.
+    api2.setAutoApproveStateForTest('2', {target: '2', enabled: false, last_action: 'off', agent_window_snapshot_revision: 9});
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    const overtaken = api2.transcriptMetadataStateForTest().lastApply;
+    assert.equal(overtaken.reason, 'malformed_payload');
+    assert.equal(overtaken.deferredSealed.state, 'discarded_superseded_revision', 'a fully overtaken seal is discarded');
+    assert.equal(overtaken.deferredSealed.revision, 9);
+    // FINDING 4: retained -> discarded is terminal; nothing is held afterwards.
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    assert.equal(
+      api2.transcriptMetadataStateForTest().lastApply.deferredSealed.state, 'none',
+      'the discard is terminal: no payload remains held',
+    );
   });
 
   await testAsync('metadata apply records the generation it rendered and a machine-readable reason for every drop', async () => {
@@ -5440,6 +5702,48 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.fixtureLifecycleOperationStateForTest().watchRootsPending, false, 'fixture quiescence sees no synthetic watch-root work');
       assert.equal(calls.length, 2, 'unchanged refreshes issue no duplicate registration');
       assert.deepStrictEqual(cleared, [], 'no redundant timer needs cancellation when no descriptor change was queued');
+    });
+
+    await testAsync('pending watch-root descriptor coalesces without restarting its debounce', async () => {
+      let now = 0;
+      let nextTimer = 1;
+      const timers = new Map();
+      const cleared = [];
+      const calls = [];
+      const setTimeout = (callback, delay) => {
+        const id = nextTimer++;
+        timers.set(id, {callback, due: now + delay});
+        return id;
+      };
+      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        setTimeout,
+        clearTimeout(id) { cleared.push(id); timers.delete(id); },
+        performance: {now: () => now},
+      });
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFileExplorerRootForTest('/repo');
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), options});
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+
+      api.syncServerWatchRootsForTest();
+      const initialState = api.serverWatchRootsStateForTest();
+      const initialDescriptor = api.clientServerWatchStateForTest();
+      const timer = initialState.timer;
+      now = 100;
+      api.syncServerWatchRootsForTest();
+      const repeatedState = api.serverWatchRootsStateForTest();
+      const repeatedDescriptor = api.clientServerWatchStateForTest();
+      assert.equal(repeatedState.timer, timer, `the repeated queued descriptor keeps its original timer: ${JSON.stringify({initialState, initialDescriptor, repeatedState, repeatedDescriptor})}`);
+      assert.deepStrictEqual(cleared, [], 'the repeated queued descriptor does not cancel the debounce');
+
+      now = 300;
+      timers.get(timer).callback();
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.equal(calls.filter(call => call.url === '/api/watch/roots').length, 1, 'the original debounce registers exactly once');
+      assert.equal(api.fixtureLifecycleOperationStateForTest().watchRootsPending, false, 'registration completion retires fixture-visible debounce work');
     });
 
     await testAsync('identical forced watch-root generation joins one in-flight registration', async () => {

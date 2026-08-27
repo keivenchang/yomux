@@ -108,6 +108,162 @@ def test_writer_refuses_fresh_foreign_declaration_with_typed_status(tmp_path: Pa
     assert (slot / "owner.json").read_bytes() == original
 
 
+def test_in_container_caller_without_inherited_token_refuses_instead_of_crashing(
+    tmp_path: Path,
+) -> None:
+    # Regression: an in-container caller with no inherited YOLOMUX_WORKTREE_WRITER_TOKEN used to
+    # fall through to the real acquire path and crash with a bare PermissionError deep in a
+    # recursive mkdir, because the writer slot lives under a directory containers only ever get
+    # read-only. Simulate that by pointing at a slot directory whose parent cannot be created
+    # (read-only), matching the read-only git-common bind mount.
+    readonly_root = tmp_path / "readonly-git-common"
+    readonly_root.mkdir()
+    slot = readonly_root / "worktrees" / "some-worktree" / "yolomux" / "worktree-writer"
+    readonly_root.chmod(0o500)
+    try:
+        with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as caught:
+            worktree_writer.acquire_worktree_writer(
+                tmp_path / "worktree",
+                purpose="pytest",
+                slot_dir=slot,
+                clock=lambda: 100.0,
+                heartbeat_interval_seconds=0.0,
+                environ={"YOLOMUX_CHECK_IN_CONTAINER": "1"},
+            )
+        assert not slot.exists()
+    finally:
+        readonly_root.chmod(0o700)
+
+    assert caught.value.reason == worktree_writer.CONTAINER_REFUSAL_NO_TOKEN
+    assert isinstance(caught.value.__cause__, PermissionError)
+    assert worktree_writer.WRITER_TOKEN_ENV in str(caught.value)
+
+
+def test_in_container_caller_refuses_even_when_parent_directory_already_exists(
+    tmp_path: Path,
+) -> None:
+    # Regression: an earlier version of the guard checked only `slot.parent.exists()`, so
+    # when the parent directory was already materialized (e.g. by a prior host run under
+    # the same read-only mount) but the slot leaf itself was not, the guard was skipped and
+    # `slot.mkdir()` still attempted a real write into the read-only tree.
+    readonly_root = tmp_path / "readonly-git-common"
+    readonly_root.mkdir()
+    slot_parent = readonly_root / "worktrees" / "some-worktree" / "yolomux"
+    slot_parent.mkdir(parents=True)
+    slot = slot_parent / "worktree-writer"
+    # A real read-only bind mount denies writes at every level, not just the top -- chmod
+    # only the top ancestor and the OS permission check on `slot_parent` itself (still 0o755)
+    # would let `slot.mkdir()` succeed, since Unix write permission is checked per-directory,
+    # not inherited from an ancestor. Chmod the immediate parent to match the real scenario.
+    slot_parent.chmod(0o500)
+    try:
+        with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as caught:
+            worktree_writer.acquire_worktree_writer(
+                tmp_path / "worktree",
+                purpose="pytest",
+                slot_dir=slot,
+                clock=lambda: 100.0,
+                heartbeat_interval_seconds=0.0,
+                environ={"YOLOMUX_CHECK_IN_CONTAINER": "1"},
+            )
+        assert not slot.exists()
+    finally:
+        slot_parent.chmod(0o700)
+
+    assert isinstance(caught.value.__cause__, PermissionError)
+
+
+def test_in_container_caller_with_a_writable_caller_owned_slot_dir_succeeds(
+    tmp_path: Path,
+) -> None:
+    # Negative control: the refusal must key off the real PermissionError, not off
+    # YOLOMUX_CHECK_IN_CONTAINER alone. A caller that owns a fully writable `slot_dir`
+    # (a test's own `tmp_path`) is never the shared read-only mount, so its mkdir simply
+    # succeeds and the refusal branch is never entered. A real caller
+    # (tests/test_gate_f8_harness.py's writer-lease test) does exactly this while
+    # YOLOMUX_CHECK_IN_CONTAINER=1 is set in the real process environment.
+    slot = tmp_path / "caller-owned" / "worktree-writer"
+
+    lease = worktree_writer.acquire_worktree_writer(
+        tmp_path / "worktree",
+        purpose="pytest",
+        slot_dir=slot,
+        clock=lambda: 100.0,
+        heartbeat_interval_seconds=0.0,
+        environ={"YOLOMUX_CHECK_IN_CONTAINER": "1"},
+    )
+
+    assert lease.borrowed is False
+    assert slot.exists()
+    lease.release()
+
+
+def test_in_container_caller_with_inherited_token_still_borrows_normally(tmp_path: Path) -> None:
+    local = _identity("host-a", "lin1")
+    slot = tmp_path / "shared-git" / "writer"
+    record = _write_slot(slot, _record(local, token="host-token", heartbeat_at=100.0))
+
+    lease = worktree_writer.acquire_worktree_writer(
+        tmp_path / "worktree",
+        purpose="pytest",
+        host_identity=local,
+        slot_dir=slot,
+        clock=lambda: 100.0,
+        heartbeat_interval_seconds=0.0,
+        environ={"YOLOMUX_CHECK_IN_CONTAINER": "1", worktree_writer.WRITER_TOKEN_ENV: "host-token"},
+    )
+
+    assert lease.borrowed
+    assert lease.token == "host-token"
+    assert (slot / "owner.json").read_bytes() == record
+
+
+def test_in_container_refusal_separates_missing_authority_from_stale_authority(
+    tmp_path: Path,
+) -> None:
+    # Regression: the refusal used to be derived purely from YOLOMUX_CHECK_IN_CONTAINER, so a
+    # container that DID inherit a token which no longer matched any live writer record was
+    # told it had "no inherited token" -- false, and it sends the operator to re-export a token
+    # that is already exported instead of re-acquiring the lease on the host.
+    readonly_root = tmp_path / "readonly-git-common"
+    readonly_root.mkdir()
+    slot = readonly_root / "yolomux" / "worktree-writer"
+    readonly_root.chmod(0o500)
+    try:
+        with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as missing:
+            worktree_writer.acquire_worktree_writer(
+                tmp_path / "worktree",
+                purpose="pytest",
+                slot_dir=slot,
+                clock=lambda: 100.0,
+                heartbeat_interval_seconds=0.0,
+                environ={"YOLOMUX_CHECK_IN_CONTAINER": "1"},
+            )
+        with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as stale:
+            worktree_writer.acquire_worktree_writer(
+                tmp_path / "worktree",
+                purpose="pytest",
+                slot_dir=slot,
+                clock=lambda: 100.0,
+                heartbeat_interval_seconds=0.0,
+                environ={
+                    "YOLOMUX_CHECK_IN_CONTAINER": "1",
+                    worktree_writer.WRITER_TOKEN_ENV: "no-longer-live-token",
+                },
+            )
+    finally:
+        readonly_root.chmod(0o700)
+
+    assert missing.value.reason == worktree_writer.CONTAINER_REFUSAL_NO_TOKEN
+    assert stale.value.reason == worktree_writer.CONTAINER_REFUSAL_STALE_TOKEN
+    assert str(missing.value) != str(stale.value)
+    assert "stale or invalid" in str(stale.value)
+    assert "stale or invalid" not in str(missing.value)
+    assert isinstance(missing.value, worktree_writer.WorktreeWriterError)
+    assert isinstance(stale.value, worktree_writer.WorktreeWriterError)
+    assert isinstance(stale.value.__cause__, PermissionError)
+
+
 def test_stale_foreign_declaration_is_reclaimed_and_owned_release_removes_it(tmp_path: Path) -> None:
     local = _identity("host-b", "lin2")
     foreign = _identity("host-a", "lin1")

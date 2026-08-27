@@ -636,6 +636,9 @@ const fileQuickOpenState = {
   // server can stream committed match deltas instead of the client re-issuing the whole query.
   deltaQuery: '',
   deltaRoots: new Map(),
+  // Candidate retention also includes the requested root or path directory; two path queries can
+  // share a filter while naming different directories and must not present each other's rows.
+  candidateQueryIdentity: '',
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -731,6 +734,7 @@ const serverWatchRootsState = {
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
+  debounceStartedAt: null,
   pendingOptions: {},
 };
 let fileExplorerFilesystemWatchToken = '';
@@ -2100,6 +2104,7 @@ const yolomuxTiming = Object.freeze({
   forcedSessionMetadataSettleTimeoutMs: 8000,
   forcedSessionMetadataSettlePollMs: 151,
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
+  serverWatchDebounceMaxDeferralMs: uiDelayMs.serverWatchDebounce * 4,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   // Bounded UI wait for the post-confirmation refreshed frame before the explicit
@@ -2125,6 +2130,7 @@ const {
   forcedSessionMetadataSettleTimeoutMs,
   forcedSessionMetadataSettlePollMs,
   serverWatchDebounceMs,
+  serverWatchDebounceMaxDeferralMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,
@@ -2847,6 +2853,13 @@ function applyApiRequestIdHeader(url, requestOptions) {
 
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
+// A 202 means the server ACCEPTED the work and keeps at it for its own
+// `FS_BATCH_OPERATION_DEADLINE_SECONDS` (app.py). Quitting sooner abandons work that is still
+// running and still succeeding -- on a CPU-oversubscribed host that painted "File could not be
+// opened" over a read the very next retry served. Accepted work waits the server's budget.
+const apiFetchAcceptedOperationDeadlineMs = 120000;
+// Gate-only: lets a browser test prove the expiry path without spending 120s of wall-clock. 0 = off.
+let apiFetchAcceptedOperationDeadlineTestMs = 0;
 // Route-qualified owners still decide whether roots, metadata, Finder, terminal, or stats demand is
 // equivalent. This is the one browser-wide capacity owner beneath them, so independent startup and
 // refresh work remains parallel without letting one page issue an unbounded fetch burst.
@@ -2960,6 +2973,13 @@ function apiFetchDeadlineMs(url, options = {}) {
   const path = String(url || '').split('?', 1)[0];
   if (path.endsWith('/api/self-update')) return apiFetchLongOperationDeadlineMs;
   return apiFetchDefaultDeadlineMs;
+}
+
+// The wait budget for work the server already ACCEPTED. A route that asked for a longer budget
+// (upload, self-update) keeps it; nothing waits less than the server's own budget.
+function apiAcceptedOperationDeadlineMs(routeDeadlineMs = 0) {
+  if (apiFetchAcceptedOperationDeadlineTestMs) return apiFetchAcceptedOperationDeadlineTestMs;
+  return Math.max(Number(routeDeadlineMs) || 0, apiFetchAcceptedOperationDeadlineMs);
 }
 
 function apiFetchDeadlineError(deadlineMs, subject = 'request') {
@@ -3427,7 +3447,7 @@ function waitForApiOperationResult(pending, expected = {}) {
   }
   const deadlineMs = Number.isFinite(Number(expected.deadlineMs)) && Number(expected.deadlineMs) > 0
     ? Number(expected.deadlineMs)
-    : apiFetchDefaultDeadlineMs;
+    : apiAcceptedOperationDeadlineMs();
   const signal = expected.signal || null;
   return new Promise((resolve, reject) => {
     const waiters = apiOperationState.waiters.get(record.id) || new Set();
@@ -3605,7 +3625,7 @@ async function apiFetchJson(url, options = {}, internalOptions = {}) {
     const result = await waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation: String(error?.operation?.context?.operation || ''),
-      deadlineMs: apiFetchDeadlineMs(url, options),
+      deadlineMs: apiAcceptedOperationDeadlineMs(apiFetchDeadlineMs(url, options)),
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
@@ -15050,6 +15070,12 @@ function commandPaletteSearchQuery(query = commandPaletteState.query, mode = com
   return fileQuickOpenSearchText(query);
 }
 
+function fileQuickOpenCandidateQueryIdentity(query, root) {
+  const pathQuery = fileQuickOpenPathQuery(query);
+  if (pathQuery.active) return `path:${pathQuery.directory || '/'}\n${pathQuery.filter}`;
+  return `search:${String(root || '')}\n${commandPaletteSearchQuery(query)}`;
+}
+
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
   const q = commandPaletteState.query.trim();
@@ -15278,6 +15304,7 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  fileQuickOpenState.candidateQueryIdentity = '';
   // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
   // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
   resetFileQuickOpenDeltaCursors('');
@@ -15335,16 +15362,23 @@ function fileQuickOpenWorstFreshness(records) {
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
+  const searchQuery = commandPaletteSearchQuery(query);
+  const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
+  const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
   abortFileQuickOpenSearch();
+  fileQuickOpenState.candidateQueryIdentity = candidateQueryIdentity;
   const requestId = ++fileQuickOpenState.requestId;
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  // Rows retained across a refresh of the same query are still that query's answer, so they stay
+  // visible while the reread lands. Rows retained across a changed query are not its ranked answer.
+  if (candidateQueryIdentity !== previousCandidateQueryIdentity) fileQuickOpenState.candidates = [];
   // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
   // mutate this palette, and the roots/query it belonged to may have changed entirely.
-  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
+  resetFileQuickOpenDeltaCursors(searchQuery);
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -27842,8 +27876,12 @@ function fileErrorText(error, fallbackKey, fallbackParams = {}) {
 const FILE_TOO_LARGE_MESSAGE_KEY = 'fs.error.tooLarge';
 
 function payloadReportsFileTooLarge(error) {
+  // Only the server SAYING the file is oversized counts. A genuine content oversize always carries
+  // this key (`FilesystemError.file_too_large`), so an unlabelled 413 is some other limit and must
+  // not be relabelled as an oversized file: doing that produced "File is too large to preview" with
+  // an empty size, because there was no file size to report for a limit that was not about size.
   const key = String(userMessageSnapshot(error)?.user_message?.key || '');
-  return key === '' || key === FILE_TOO_LARGE_MESSAGE_KEY;
+  return key === FILE_TOO_LARGE_MESSAGE_KEY;
 }
 
 function tooLargeFileState(size = null, message = null) {
@@ -29308,6 +29346,7 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
@@ -29316,22 +29355,28 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
-  const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
   if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
     serverWatchRootsState.scheduledKey = requestKey;
     return;
   }
+  const now = performance.now();
+  if (serverWatchRootsState.debounceStartedAt === null) serverWatchRootsState.debounceStartedAt = now;
+  const deadline = serverWatchRootsState.debounceStartedAt + serverWatchDebounceMaxDeferralMs;
+  const delay = pendingOptions.immediate === true ? 0 : Math.max(0, Math.min(serverWatchDebounceMs, deadline - now));
+  if (serverWatchRootsState.timer && serverWatchRootsState.scheduledKey === requestKey && serverWatchRootsState.timerDelay === delay) return;
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
   serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};
@@ -48787,14 +48832,23 @@ function bindPreferencesPanel(panel) {
   const CURRENT_STATS_ZOOM_THRESHOLD_PX = 8;
   let nextRendererId = 1;
 
-  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}) {
+  // `streamEvidence` is the transport's own first-transition observables. The failure MESSAGE
+  // can only say that nothing arrived; it cannot say which side went quiet, so every artifact a
+  // stall left behind was unclassifiable. Sampling the snapshot here — inside the one owner every
+  // failure already routes through, at the exact moment of the report — attaches that evidence
+  // without adding a second reporting path. It is bounded (a fixed set of scalars) and read-only,
+  // so it changes no product behaviour, no message, and nothing about when a failure fires.
+  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}, streamEvidence = null) {
     let latched = false;
     return Object.freeze({
       report(message) {
         if (latched) return false;
         latched = true;
         const boundedMessage = String(message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
-        onFailure(Object.freeze({message: boundedMessage, source: '/api/stats-stream'}));
+        const evidence = typeof streamEvidence === 'function' ? streamEvidence() : null;
+        onFailure(Object.freeze(evidence
+          ? {message: boundedMessage, source: '/api/stats-stream', evidence}
+          : {message: boundedMessage, source: '/api/stats-stream'}));
         return true;
       },
       // An unload-initiated close is an outcome, not a failure, so it never consumes the
@@ -49514,7 +49568,7 @@ function bindPreferencesPanel(panel) {
     const userOnDelta = controllerOptions.onDelta || userOnGeneration;
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
-    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement);
+    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement, () => streamEvidence());
     const readinessTimeoutMs = positiveInteger(options.readinessTimeoutMs ?? 10_000, 'readinessTimeoutMs');
     const readinessRetryMs = positiveInteger(options.readinessRetryMs ?? 1_000, 'readinessRetryMs');
     const clientId = String(options.clientId ?? controllerOptions.clientId ?? '').trim();
@@ -49536,6 +49590,7 @@ function bindPreferencesPanel(panel) {
     let acceptedDeltaSequence = 0;
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
+    let lastDeliveryEmitMs = 0;
     let lastDeliveryEpoch = 0;
     const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
       && options.pageLifecycle !== undefined;
@@ -49560,7 +49615,13 @@ function bindPreferencesPanel(panel) {
     }
     ensureLifecycleScope();
 
-    function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
+    // `emitId` is the server's monotonic emit clock, carried on the frame's SSE `id:` line and
+    // handed over as `event.lastEventId`. Retaining it next to the arrival time is what separates
+    // "the server never sent it" from "the server sent it and it arrived late": emit spacing stays
+    // on cadence while arrival spacing stretches. It is deliberately read from outside the JSON
+    // body, so no frame body key set changes and `exactFields` never sees it. A server that sends
+    // no id leaves the value at 0 rather than NaN, so the evidence is always numeric.
+    function recordStreamDelivery(kind, epoch, {acceptedDelta = false, emitId = ''} = {}) {
       transportLifecycle.noteDelivery(streamTransportToken);
       streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
@@ -49568,6 +49629,8 @@ function bindPreferencesPanel(panel) {
       lastDeliveryKind = kind;
       lastDeliveryAtMs = Math.max(0, Number(clock.now()) || 0);
       lastDeliveryEpoch = epoch;
+      const emitted = Number(emitId);
+      lastDeliveryEmitMs = Number.isFinite(emitted) && emitted >= 0 ? emitted : 0;
     }
 
     function streamEvidence() {
@@ -49584,6 +49647,7 @@ function bindPreferencesPanel(panel) {
         acceptedDeltaSequence,
         lastDeliveryKind,
         lastDeliveryAtMs,
+        lastDeliveryEmitMs,
         lastDeliveryEpoch,
         rangeSeconds: Number(selection?.range_seconds) || 0,
         resolutionSeconds: Number(generation?.resolution_seconds) || 0,
@@ -49792,7 +49856,7 @@ function bindPreferencesPanel(panel) {
                 || value.range_seconds !== request.range_seconds
                 || String(value.requested_resolution) !== String(request.resolution)) throw new Error('snapshot ack does not match the active request');
             acknowledgement = Object.freeze(value);
-            recordStreamDelivery('ack', epoch);
+            recordStreamDelivery('ack', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -49810,7 +49874,7 @@ function bindPreferencesPanel(panel) {
               if (acknowledgement.chunk_count !== 1 || assembly || fullSnapshot) throw new Error('snapshot stream mixed full and chunked data');
               fullSnapshot = value;
             }
-            recordStreamDelivery('snapshot', epoch);
+            recordStreamDelivery('snapshot', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -49823,7 +49887,7 @@ function bindPreferencesPanel(panel) {
           }
           try {
             if (controller.acceptDelta(JSON.parse(event.data))) {
-              recordStreamDelivery('delta', epoch, {acceptedDelta: true});
+              recordStreamDelivery('delta', epoch, {acceptedDelta: true, emitId: event.lastEventId});
             }
           } catch (_error) {
             routeStreamFailure(candidate, epoch);
@@ -49851,7 +49915,7 @@ function bindPreferencesPanel(panel) {
               if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
                 throw new Error('snapshot cannot be not-modified before an initial generation');
               }
-              recordStreamDelivery('ready', epoch);
+              recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
               finish(value);
               return;
             }
@@ -49862,7 +49926,7 @@ function bindPreferencesPanel(panel) {
                 || ready.revision !== presentation?.delta_revision) {
               throw new Error('ready cursor does not match current generation');
             }
-            recordStreamDelivery('ready', epoch);
+            recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
             controller.noteStreamHeartbeat();
           } catch (error) {
             if (!settled) void fail(error);
@@ -59176,12 +59240,21 @@ function recordJsDebugCurrentStatsFailure(failure) {
   jsDebugCurrentStatsClientState.failureLatched = true;
   const message = String(failure?.message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
   const source = String(failure?.source || '/api/stats-stream').slice(0, 160);
+  // The stall message alone cannot say which side went quiet, so the transport's own
+  // first-transition observables ride along into the retained record. `streamEvidence()`
+  // returns a fixed set of scalars, so this stays bounded; it is dropped rather than
+  // coerced when it is not the object shape this owner expects.
+  const evidence = failure?.evidence;
+  const streamEvidence = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+    ? {...evidence}
+    : null;
   recordJsDebugStatsDiagnostic('warning', message, {
     category: 'stats_stream',
     requestId: String(failure?.requestId || failure?.request_id || '').slice(0, 128),
     route: source,
     eventType: 'stats-generation',
     deliveryOutcome: /(?:stalled|missing)/i.test(message) ? 'stalled' : 'failed',
+    ...(streamEvidence ? {streamEvidence} : {}),
   });
   return true;
 }
@@ -80488,7 +80561,6 @@ function loadAutoStatuses(options = {}) {
       if (!isApiPendingResponse(error)) throw error;
       payload = await waitForApiOperationResult(error, {
         kind: String(error?.operation?.kind || ''),
-        deadlineMs: apiFetchDeadlineMs('/api/auto-approve', {}),
         url: '/api/auto-approve',
         method: 'GET',
       });
@@ -80571,6 +80643,60 @@ function sealedAutoApprovePayloadNeedsMetadata(payload) {
 function deferSealedAutoApprovePayload(payload) {
   const heldRevision = agentWindowSnapshotRevision(deferredSealedAutoApprovePayload);
   if (agentWindowSnapshotRevision(payload) >= heldRevision) deferredSealedAutoApprovePayload = payload;
+}
+
+function heldSealIsFullyOvertaken(held, revision) {
+  // Authority is PER SESSION, never a global maximum. A held seal carries one revision
+  // for every session it names, so a single unrelated or already-advanced session must
+  // not authorise discarding status that another named session never received. Only
+  // complete per-session coverage means the seal carries nothing new.
+  if (!(revision > 0)) return false;
+  const heldSessions = Object.keys(held?.sessions || {});
+  if (!heldSessions.length) return false;
+  return heldSessions.every(session => agentWindowSnapshotRevision(autoApproveStates.get(session)) >= revision);
+}
+
+function reconcileDeferredSealedAutoApprove() {
+  // The ONE owner that resolves a held sealed payload, called from every terminal
+  // session-metadata outcome. A deferred payload used to be released only on the
+  // success tail, so a malformed/superseded/older-generation outcome left it held
+  // with nothing recorded and nothing scheduled to revisit it - the published
+  // consumer revision could then never advance again. Every terminal boundary now
+  // applies it, discards it, or records that it is still legitimately waiting.
+  //
+  // Authority is preserved, not bypassed: a payload is applied only when metadata
+  // genuinely covers its sessions, and is never applied merely to empty the holder.
+  if (!deferredSealedAutoApprovePayload) return {state: 'none', revision: 0};
+  const held = deferredSealedAutoApprovePayload;
+  const revision = agentWindowSnapshotRevision(held);
+  if (heldSealIsFullyOvertaken(held, revision)) {
+    // EVERY session this seal names has already applied that revision or newer, so it
+    // carries no truth any consumer still needs. A partial overtake falls through and
+    // is retained below rather than discarding an unserved session's status.
+    deferredSealedAutoApprovePayload = null;
+    return {state: 'discarded_superseded_revision', revision};
+  }
+  if (sealedAutoApprovePayloadNeedsMetadata(held)) {
+    // Still genuinely waiting on metadata. This retention has NO unconditional local
+    // bound: it is revisited only when a SUBSEQUENT metadata event occurs. Every
+    // terminal outcome of `applySessionMetadataPayload` now re-enters this reconciler,
+    // and that function is re-entered by the server-driven `transcripts_changed` path
+    // and by `refreshSessionMetadata` callers - but if no further metadata event ever
+    // arrives, the payload stays held. Recording the state is what makes that wait
+    // observable; it is not a guarantee that the wait ends.
+    return {state: 'retained_awaiting_metadata', revision};
+  }
+  deferredSealedAutoApprovePayload = null;
+  applyAutoApprovePayload(held, {render: false, deferForMetadata: false});
+  return {state: 'applied', revision};
+}
+
+function finalizeSessionMetadataOutcome(applied, reason, payload, details = {}) {
+  // Single finalization boundary: reuse the existing `lastApply` outcome owner and
+  // attach the deferred-payload disposition to it, so no terminal return needs its
+  // own copy of the reconciliation and no second result map exists.
+  const deferredSealed = reconcileDeferredSealedAutoApprove();
+  return noteSessionMetadataApply(applied, reason, payload, {...details, deferredSealed});
 }
 
 function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
@@ -81057,7 +81183,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // Validate BEFORE adopting anything. A malformed or superseded response must be rejected while it
   // still cannot touch shared identity: a late reply from the server that was just replaced would
   // otherwise flip the epoch back after the replacement's bytes had already landed.
-  if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
+  if (!payload || typeof payload !== 'object') return finalizeSessionMetadataOutcome(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) {
     // A superseded response still carries a true fact about the SERVER's build queue: which build
@@ -81068,7 +81194,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     // epoch adoption above, because the recorder refuses an identity from any other epoch and never
     // lowers the number.
     noteSessionMetadataPendingIdentity(payload);
-    return noteSessionMetadataApply(false, 'superseded_request', payload);
+    return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
@@ -81089,16 +81215,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
     if (nextGeneration > 0 && currentGeneration > nextGeneration) {
-      return noteSessionMetadataApply(false, 'older_work_graph_generation', payload, {session});
+      return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
-  noteSessionMetadataApply(true, 'applied', payload);
-  if (deferredSealedAutoApprovePayload && !sealedAutoApprovePayloadNeedsMetadata(deferredSealedAutoApprovePayload)) {
-    const deferredPayload = deferredSealedAutoApprovePayload;
-    deferredSealedAutoApprovePayload = null;
-    applyAutoApprovePayload(deferredPayload, {render: false, deferForMetadata: false});
-  }
+  finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -81118,7 +81239,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   // The payload is already committed above; only the render tail is abandoned here, so the applied
   // generation stands and the reason says which half stopped.
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'committed_render_superseded', payload, {committed: true});
+  if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The

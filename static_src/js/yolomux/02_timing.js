@@ -24,6 +24,7 @@ const yolomuxTiming = Object.freeze({
   forcedSessionMetadataSettleTimeoutMs: 8000,
   forcedSessionMetadataSettlePollMs: 151,
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
+  serverWatchDebounceMaxDeferralMs: uiDelayMs.serverWatchDebounce * 4,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   // Bounded UI wait for the post-confirmation refreshed frame before the explicit
@@ -49,6 +50,7 @@ const {
   forcedSessionMetadataSettleTimeoutMs,
   forcedSessionMetadataSettlePollMs,
   serverWatchDebounceMs,
+  serverWatchDebounceMaxDeferralMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,

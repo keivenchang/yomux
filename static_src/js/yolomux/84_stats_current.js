@@ -93,14 +93,23 @@
   const CURRENT_STATS_ZOOM_THRESHOLD_PX = 8;
   let nextRendererId = 1;
 
-  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}) {
+  // `streamEvidence` is the transport's own first-transition observables. The failure MESSAGE
+  // can only say that nothing arrived; it cannot say which side went quiet, so every artifact a
+  // stall left behind was unclassifiable. Sampling the snapshot here — inside the one owner every
+  // failure already routes through, at the exact moment of the report — attaches that evidence
+  // without adding a second reporting path. It is bounded (a fixed set of scalars) and read-only,
+  // so it changes no product behaviour, no message, and nothing about when a failure fires.
+  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}, streamEvidence = null) {
     let latched = false;
     return Object.freeze({
       report(message) {
         if (latched) return false;
         latched = true;
         const boundedMessage = String(message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
-        onFailure(Object.freeze({message: boundedMessage, source: '/api/stats-stream'}));
+        const evidence = typeof streamEvidence === 'function' ? streamEvidence() : null;
+        onFailure(Object.freeze(evidence
+          ? {message: boundedMessage, source: '/api/stats-stream', evidence}
+          : {message: boundedMessage, source: '/api/stats-stream'}));
         return true;
       },
       // An unload-initiated close is an outcome, not a failure, so it never consumes the
@@ -820,7 +829,7 @@
     const userOnDelta = controllerOptions.onDelta || userOnGeneration;
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
-    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement);
+    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement, () => streamEvidence());
     const readinessTimeoutMs = positiveInteger(options.readinessTimeoutMs ?? 10_000, 'readinessTimeoutMs');
     const readinessRetryMs = positiveInteger(options.readinessRetryMs ?? 1_000, 'readinessRetryMs');
     const clientId = String(options.clientId ?? controllerOptions.clientId ?? '').trim();
@@ -842,6 +851,7 @@
     let acceptedDeltaSequence = 0;
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
+    let lastDeliveryEmitMs = 0;
     let lastDeliveryEpoch = 0;
     const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
       && options.pageLifecycle !== undefined;
@@ -866,7 +876,13 @@
     }
     ensureLifecycleScope();
 
-    function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
+    // `emitId` is the server's monotonic emit clock, carried on the frame's SSE `id:` line and
+    // handed over as `event.lastEventId`. Retaining it next to the arrival time is what separates
+    // "the server never sent it" from "the server sent it and it arrived late": emit spacing stays
+    // on cadence while arrival spacing stretches. It is deliberately read from outside the JSON
+    // body, so no frame body key set changes and `exactFields` never sees it. A server that sends
+    // no id leaves the value at 0 rather than NaN, so the evidence is always numeric.
+    function recordStreamDelivery(kind, epoch, {acceptedDelta = false, emitId = ''} = {}) {
       transportLifecycle.noteDelivery(streamTransportToken);
       streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
@@ -874,6 +890,8 @@
       lastDeliveryKind = kind;
       lastDeliveryAtMs = Math.max(0, Number(clock.now()) || 0);
       lastDeliveryEpoch = epoch;
+      const emitted = Number(emitId);
+      lastDeliveryEmitMs = Number.isFinite(emitted) && emitted >= 0 ? emitted : 0;
     }
 
     function streamEvidence() {
@@ -890,6 +908,7 @@
         acceptedDeltaSequence,
         lastDeliveryKind,
         lastDeliveryAtMs,
+        lastDeliveryEmitMs,
         lastDeliveryEpoch,
         rangeSeconds: Number(selection?.range_seconds) || 0,
         resolutionSeconds: Number(generation?.resolution_seconds) || 0,
@@ -1098,7 +1117,7 @@
                 || value.range_seconds !== request.range_seconds
                 || String(value.requested_resolution) !== String(request.resolution)) throw new Error('snapshot ack does not match the active request');
             acknowledgement = Object.freeze(value);
-            recordStreamDelivery('ack', epoch);
+            recordStreamDelivery('ack', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -1116,7 +1135,7 @@
               if (acknowledgement.chunk_count !== 1 || assembly || fullSnapshot) throw new Error('snapshot stream mixed full and chunked data');
               fullSnapshot = value;
             }
-            recordStreamDelivery('snapshot', epoch);
+            recordStreamDelivery('snapshot', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -1129,7 +1148,7 @@
           }
           try {
             if (controller.acceptDelta(JSON.parse(event.data))) {
-              recordStreamDelivery('delta', epoch, {acceptedDelta: true});
+              recordStreamDelivery('delta', epoch, {acceptedDelta: true, emitId: event.lastEventId});
             }
           } catch (_error) {
             routeStreamFailure(candidate, epoch);
@@ -1157,7 +1176,7 @@
               if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
                 throw new Error('snapshot cannot be not-modified before an initial generation');
               }
-              recordStreamDelivery('ready', epoch);
+              recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
               finish(value);
               return;
             }
@@ -1168,7 +1187,7 @@
                 || ready.revision !== presentation?.delta_revision) {
               throw new Error('ready cursor does not match current generation');
             }
-            recordStreamDelivery('ready', epoch);
+            recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
             controller.noteStreamHeartbeat();
           } catch (error) {
             if (!settled) void fail(error);

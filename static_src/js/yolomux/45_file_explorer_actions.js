@@ -1445,8 +1445,12 @@ function fileErrorText(error, fallbackKey, fallbackParams = {}) {
 const FILE_TOO_LARGE_MESSAGE_KEY = 'fs.error.tooLarge';
 
 function payloadReportsFileTooLarge(error) {
+  // Only the server SAYING the file is oversized counts. A genuine content oversize always carries
+  // this key (`FilesystemError.file_too_large`), so an unlabelled 413 is some other limit and must
+  // not be relabelled as an oversized file: doing that produced "File is too large to preview" with
+  // an empty size, because there was no file size to report for a limit that was not about size.
   const key = String(userMessageSnapshot(error)?.user_message?.key || '');
-  return key === '' || key === FILE_TOO_LARGE_MESSAGE_KEY;
+  return key === FILE_TOO_LARGE_MESSAGE_KEY;
 }
 
 function tooLargeFileState(size = null, message = null) {
@@ -2911,6 +2915,7 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
@@ -2919,22 +2924,28 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
-  const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
   if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
     serverWatchRootsState.scheduledKey = requestKey;
     return;
   }
+  const now = performance.now();
+  if (serverWatchRootsState.debounceStartedAt === null) serverWatchRootsState.debounceStartedAt = now;
+  const deadline = serverWatchRootsState.debounceStartedAt + serverWatchDebounceMaxDeferralMs;
+  const delay = pendingOptions.immediate === true ? 0 : Math.max(0, Math.min(serverWatchDebounceMs, deadline - now));
+  if (serverWatchRootsState.timer && serverWatchRootsState.scheduledKey === requestKey && serverWatchRootsState.timerDelay === delay) return;
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
   serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};

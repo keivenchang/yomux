@@ -8,9 +8,11 @@ import hashlib
 import json
 import math
 import sqlite3
+import time
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from typing import Iterable
@@ -59,6 +61,15 @@ MIN_WRITER_BUILD = 7
 # data wearing a current timestamp. Two days keeps the whole 24h window plus a
 # day of slack for late-arriving history, clock skew, and a missed nightly prune.
 RETENTION_SECONDS = 2 * 24 * 60 * 60
+# Rows per pass for the retired-invalidation delete, and the ONLY delete here that is bounded.
+# Every other retention delete is unbounded because cadence already bounds it: the cutoff sweep
+# reruns each PRUNE_CHECK_SECONDS, so a healthy store never holds more than a minute of expired
+# facts. `ring_invalidations` had no delete at all, so it starts with a real backlog -- measured
+# 435,835 retired rows past the cutoff on the live store, which one unbounded statement cleared in
+# 0.891 s of write-lock hold. This delete runs inside the service work lock, and the gate fails a
+# YO!stats stream generation stall at 3 s, so a one-time 0.9 s hold is not a defensible bound. At
+# this limit the same backlog measured 0.045 s per pass and drains over roughly 88 sweeps.
+RETIRED_INVALIDATION_PRUNE_LIMIT = 5_000
 WAL_AUTOCHECKPOINT_PAGES = 1000
 # Automatic checkpoints recycle logical frames but do not necessarily shrink
 # the file. This connection policy bounds the retained allocation after a reset;
@@ -73,6 +84,17 @@ DATABASE_FILENAME = common.STATS_DATABASE_FILENAME
 # belonging to one database, and schema 8 is a SIDE-BY-SIDE format: an unversioned name would have
 # a v8 build rewriting the still-running v7 build's prune schedule.
 PRUNE_STATE_FILENAME = f"stats-prune-v{SCHEMA_VERSION}.json"
+# The compaction-benefit baseline, in a sidecar for exactly the reason stated above: schema_meta
+# cannot grow a column without a SCHEMA_VERSION bump, and schema 8 is a SIDE-BY-SIDE format, so a
+# bump would strand the operator's entire existing history to persist one float.
+#
+# The sidecar cannot share the marker's transaction, so it carries the marker VALUE instead and is
+# only believed when the two agree. A crash between the marker and this file leaves a sidecar
+# naming the PREVIOUS vacuum, which no longer matches `schema_meta.last_vacuumed_at`, so the
+# baseline reads as unknown rather than as a stale number quietly presented as current. Detecting
+# the disagreement is what atomicity would have bought; hiding it is what a bare float would have
+# cost.
+VACUUM_BASELINE_FILENAME = f"stats-vacuum-v{SCHEMA_VERSION}.json"
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -193,7 +215,10 @@ _RING_TABLES = frozenset(
 )
 # The fixed-row triggers guard the three tables whose row set is pre-allocated and immutable. The
 # two schema-8 tables are deliberately NOT in that set: the cursor has one row per resolution but
-# the ledger is append-and-retire by nature, so pinning its rows would defeat its purpose.
+# is UPDATE-heavy, so a reject trigger would refuse its normal writes, and the ledger is
+# append-and-retire by nature, so pinning its rows would defeat its purpose. The cursor's row set
+# is still fixed, and `_require_exact_fixed_rows` asserts it during validation instead - a trigger
+# is the wrong instrument for a table that must accept updates.
 _RING_FIXED_ROW_TABLES = frozenset(
     {"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"}
 )
@@ -242,6 +267,138 @@ class StatsCurrentError(RuntimeError):
 
 class SchemaMismatchError(StatsCurrentError):
     """The database is not the exact schema this store understands."""
+
+
+# The four bounds an exact rebuild runs under. Every number is a measurement, not a guess. The
+# long-form derivations live in `docs/specs/STATS_BOUNDED_REBUILD.md`, which arrives with the
+# process-binary-cache work and is absent while this branch stands alone -- the arithmetic below is
+# the whole story until then. Two of these end a BATCH and two of them end the REBUILD, which is
+# the distinction that keeps a bound from becoming a truncation: a full batch is a normal event,
+# an over-budget process is not.
+#
+# 32 MiB is past the knee of the measured chunk-size sweep (397 -> 32.7 -> 28.1 -> 27.2 MiB peak at
+# 600k / 10k / 2.5k / 1k rows) and stays smaller than the 53 MiB retained generation, so a batch can
+# never dominate the thing it is building.
+REBUILD_BATCH_MAX_DECODED_BYTES = 32 * 1024 * 1024
+# 32 MiB / 1.46 KiB, the measured cost of one decoded observation (880.32 MiB for 617,243 of them).
+# A secondary guard so one pathologically wide payload cannot overshoot the byte bound between
+# checks; whichever bound trips first ends the batch.
+REBUILD_BATCH_MAX_ROWS = 22_000
+# How much a rebuild may GROW the process, measured from the value read when the rebuild starts.
+# 106 MiB retained generation with headroom + 32 MiB live batch + 24 MiB encode buffer = 162 MiB,
+# and no term for the interpreter or for anything the process was already holding -- growth is the
+# only part a rebuild is responsible for.
+#
+# The constant is 192 MiB, so 30 MiB of it is headroom above the three growth terms, kept
+# deliberately rather than derived. It is NOT an interpreter term; the comment above means what it
+# says. Tightening the value to 162 MiB is a real option and a real behaviour change -- it can
+# refuse a rebuild that 192 MiB admits -- so it is a decision to take on its own, not a tidy-up to
+# fold into a release subject.
+#
+# This was an ABSOLUTE process bound and that made it non-functional. `RssAnon + VmSwap` on the live
+# daemon measured 623,244 kB + 942,440 kB = 1,529 MiB, permanently past a 192 MiB ceiling, so an
+# absolute check refused every rebuild from the first one after start. It surfaced in a gate worker
+# at 300 MiB holding a 200-observation fixture, which is the same defect in a smaller process.
+# Still checked against RssAnon + VmSwap, never RSS -- see `_rebuild_memory_bytes`.
+REBUILD_MAX_MEMORY_BYTES = 192 * 1024 * 1024
+# A cold build measured 26.80 s at 1.19 M observations on a loaded host, and 2x cardinality measured
+# 2.054x readiness, so ~55 s at 2x. 120 s fires on genuine pathology and never on a slow host.
+REBUILD_MAX_SECONDS = 120.0
+# How many raw rows are pulled from SQLite at a time. Smaller than a batch on purpose: the raw
+# tuples for one fetch are decoded and dropped before the next fetch, so raw rows and decoded facts
+# for a whole batch are never both live. See `pinned_snapshot_batches`.
+_REBUILD_FETCH_ROWS = 2_000
+
+
+class RebuildBoundExceeded(StatsCurrentError):
+    """A rebuild exceeded one of its bounds and abandoned the candidate.
+
+    Carries a machine-readable `reason` so a caller records WHICH bound stopped it rather than a
+    formatted sentence. The rebuild is abandoned, not truncated: a half-built generation served as
+    if it were whole is worse than no new generation at all, and the ledger already treats an
+    unrebuilt bucket as owed rather than as a zero.
+    """
+
+    def __init__(self, reason: str, measured: float, limit: float) -> None:
+        super().__init__(f"rebuild bound {reason} exceeded: {measured} > {limit}")
+        self.reason = reason
+        self.measured = measured
+        self.limit = limit
+
+
+def _rebuild_memory_bytes() -> int:
+    """This process's anonymous memory plus what the kernel paged out of it.
+
+    `RssAnon + VmSwap`, never `VmRSS` and never `Uss`. Both of those FALL when the kernel evicts
+    pages, so a rebuild bound checked against either would let the process grow past its budget and
+    still report healthy: measured on the live daemon, `VmRSS` sat 61.4% below `VmHWM` while
+    `RssAnon + VmSwap` was within 1.1% of it. Anonymous pages are what a rebuild actually allocates,
+    and swapping them out does not give them back.
+
+    Returns 0 where `/proc` is not this shape, which disables the bound rather than inventing a
+    number. A bound that cannot be measured must not be silently assumed satisfied OR violated, so
+    the caller checks for a positive reading before comparing.
+    """
+
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, OSError):
+        return 0
+    anon = swap = None
+    for line in status.splitlines():
+        if line.startswith("RssAnon:"):
+            anon = int(line.split()[1]) * 1024
+        elif line.startswith("VmSwap:"):
+            swap = int(line.split()[1]) * 1024
+    if anon is None or swap is None:
+        return 0
+    return anon + swap
+
+
+def _require_rebuild_within_bounds(
+    started: float,
+    now: Callable[[], float],
+    max_memory_bytes: int,
+    max_seconds: float,
+    memory_baseline: int,
+    memory_reader: Callable[[], int] | None = None,
+) -> None:
+    """Stop a rebuild that has grown past its budget or run too long.
+
+    These are the two bounds that end the REBUILD rather than the batch, so both raise. Checked
+    both before and after every fetch, rather than between batches: a batch is up to 22,000 rows,
+    and a rebuild that is already over budget should not be allowed to decode the rest of one. The
+    check after the fetch is what closes the byte exit, where the batch ends inside the fetch that
+    filled it and the caller would otherwise receive it unmeasured.
+
+    Memory is the rebuild's GROWTH, `_rebuild_memory_bytes()` now minus the value read when the
+    rebuild started, never the absolute reading. An absolute check bounds the whole process, which
+    includes everything the process held before the rebuild existed -- on the live daemon that is
+    1,529 MiB against a 192 MiB ceiling, so every rebuild would be refused forever. Growth is the
+    quantity a rebuild controls and the only one it can be held to.
+
+    A reading of zero at either end means `/proc` did not answer in the shape this expects. The
+    bound is then not checked, and it is not assumed satisfied either -- there is nothing to
+    compare. The lifetime bound still applies, so a runaway rebuild is still stopped on a platform
+    without `RssAnon`.
+
+    `memory_reader` is a seam for the same reason `now` is one on the lifetime bound. Growth is only
+    observable when the allocator asks the kernel for pages, so in a warm process a small rebuild
+    can decode thousands of rows and move `RssAnon` not at all. A test that needs the bound to fire
+    injects a reader rather than allocating until the kernel happens to notice.
+    """
+
+    elapsed = now() - started
+    if elapsed > max_seconds:
+        raise RebuildBoundExceeded("rebuild_seconds", round(elapsed, 3), max_seconds)
+    # Resolved here, not as a def-time default: the module attribute is a documented seam that
+    # tests monkeypatch, and a default bound at definition would ignore the patch.
+    memory = (memory_reader or _rebuild_memory_bytes)()
+    if not memory or not memory_baseline:
+        return
+    grown = memory - memory_baseline
+    if grown > max_memory_bytes:
+        raise RebuildBoundExceeded("rebuild_memory_bytes", grown, max_memory_bytes)
 
 
 class SchemaTooNewError(StatsCurrentError):
@@ -437,9 +594,19 @@ class PruneResult:
     source_generation: int
     unavailable_spans_deleted: int = 0
     unavailable_spans_clipped: int = 0
+    retired_invalidations_deleted: int = 0
 
     @property
     def changed(self) -> int:
+        """Facts removed. `retired_invalidations_deleted` is NOT one, and must never be added.
+
+        Every caller uses this to decide whether to advance `source_generation` and record fresh
+        invalidations. A retired ledger row records work that ALREADY completed -- no fact, no
+        aggregate and no served bucket changes when it goes. Counting it here would advance the
+        generation on every 60-second sweep that removed one row, immediately re-record
+        invalidations for buckets whose facts never changed, and schedule a rebuild for them: the
+        table would grow faster, not slower. Only fact deletion may advance generation.
+        """
         return sum((
             self.observations_deleted,
             self.coverage_epochs_deleted,
@@ -682,6 +849,27 @@ def _encode_json_object(value: Mapping[str, object], name: str) -> str:
         return json.dumps(dict(value), allow_nan=False, separators=(",", ":"), sort_keys=True)
     except (TypeError, ValueError) as error:
         raise StorageValidationError(f"{name} must be a JSON object") from error
+
+
+def _payload_byte_length(payload: object) -> int:
+    """UTF-8 byte length of a stored payload, because the byte bound is named and derived in bytes.
+
+    `len()` on a `str` counts CODE POINTS. SQLite hands TEXT back as `str`, so counting characters
+    against `REBUILD_BATCH_MAX_DECODED_BYTES` admits a batch up to four times the size the budget
+    was derived for.
+
+    This store's own writer cannot produce the gap -- `_encode_json_object` uses `json.dumps` with
+    the default `ensure_ascii=True`, so its payloads are ASCII and the two counts agree. The reader
+    does not choose who wrote the database it opens, and a counter that is correct for exactly one
+    writer is an assumption rather than a bound.
+
+    `isascii()` is a scan with no allocation, so the common case pays no copy.
+    """
+
+    if isinstance(payload, (bytes, bytearray)):
+        return len(payload)
+    text = str(payload)
+    return len(text) if text.isascii() else len(text.encode("utf-8"))
 
 
 def _usage_payloads(
@@ -1756,6 +1944,63 @@ def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
     ) & _RING_TABLES
 
 
+def _coverage_conflict_reason(
+    previous: tuple[object, ...] | None, current: tuple[object, ...],
+) -> str | None:
+    """SOLE owner of "does this offered epoch contradict the stored one".
+
+    Both the applier and the read-only probe route through this. They were separate predicates
+    and diverged: the probe modelled the unavailable-span overlap and an ordinary difference,
+    but none of the three immutability rules below, so a batching caller acknowledged an epoch
+    the commit would later reject -- and took a whole flush interval of other families' already
+    acknowledged facts down with it. One parent, so they cannot drift apart again.
+
+    `previous` is (started_at, ended_at, native_cadence_seconds, owner_generation) as stored, or
+    None for an epoch that does not exist yet. `current` is the same tuple as offered.
+    """
+
+    if previous is None or tuple(previous) == current:
+        return None
+    if previous[0] != current[0] or previous[2] != current[2]:
+        return "coverage epoch start and cadence are immutable"
+    if previous[1] is not None and (current[1] is None or current[1] < previous[1]):
+        return "coverage epoch end cannot move backward"
+    if current[3] < previous[3]:
+        return "coverage owner_generation cannot move backward"
+    return None
+
+
+def _require_exact_fixed_rows(
+    connection: sqlite3.Connection,
+    table: str,
+    key_column: str,
+    expected_keys: Iterable[int],
+) -> None:
+    """One owner for "this pre-allocated table holds exactly these rows, no more and no fewer".
+
+    Several ring tables are seeded once at schema creation and never grow, so their row set is
+    part of the schema rather than data. Each one carried its own hand-written check and
+    `ring_replay_cursor` carried none at all: `_RING_FIXED_ROW_TABLES` excludes it because it is
+    UPDATE-heavy and cannot take the reject triggers, and the validator then never queried it. A
+    v8 file whose cursor rows an external tool dropped or added therefore passed validation and
+    replayed from a wrong fold point. Growth was never the risk here - there is one INSERT site
+    and no product DELETE - drift was, and drift needs an assertion rather than a trigger.
+
+    `table` and `key_column` are module-level schema literals, never caller input.
+    """
+
+    found = tuple(
+        int(row[0])
+        for row in connection.execute(f"SELECT {key_column} FROM {table} ORDER BY {key_column}")
+    )
+    expected = tuple(sorted(expected_keys))
+    if found != expected:
+        raise SchemaMismatchError(
+            f"{table} must hold exactly one row per {key_column} {list(expected)}, "
+            f"found {list(found)}"
+        )
+
+
 def _validate_ring_schema(connection: sqlite3.Connection) -> None:
     tables = _aggregate_tables(connection)
     if tables != _RING_TABLES:
@@ -1768,12 +2013,16 @@ def _validate_ring_schema(connection: sqlite3.Connection) -> None:
     }
     if columns != _RING_COLUMNS:
         raise SchemaMismatchError("aggregate ring columns do not match the exact schema")
-    publication_rows = connection.execute(
-        "SELECT singleton, ring_generation, source_generation, published_at "
-        "FROM aggregate_publication"
-    ).fetchall()
-    if len(publication_rows) != 1 or tuple(publication_rows[0])[:1] != (1,):
-        raise SchemaMismatchError("aggregate publication must contain its one fixed row")
+    _require_exact_fixed_rows(connection, "aggregate_publication", "singleton", (1,))
+    # The cursor names the fold point each ring resumes from, so a dropped row silently refolds
+    # that resolution from zero and an extra one folds a ring that does not exist. Neither is
+    # reachable through the product, and both are reachable through an external tool.
+    _require_exact_fixed_rows(
+        connection, "ring_replay_cursor", "resolution_seconds", stats_resolution.RING_CAPACITIES
+    )
+    _require_exact_fixed_rows(
+        connection, "aggregate_rings", "resolution_seconds", stats_resolution.RING_CAPACITIES
+    )
     ring_rows = connection.execute(
         "SELECT resolution_seconds, slot_count, newest_bucket_start "
         "FROM aggregate_rings ORDER BY resolution_seconds"
@@ -2363,8 +2612,9 @@ class Store:
         buckets: Iterable[RingBucketWrite],
         source_generation: int,
         published_at: float,
+        advance_publication: bool = True,
     ) -> RingPublication:
-        """Replace exact addressed slots in one update-only transaction."""
+        """Replace exact addressed slots, optionally reserving the next public generation."""
 
         if self.read_only:
             raise StatsCurrentError("stats store reader cannot publish ring rows")
@@ -2428,11 +2678,9 @@ class Store:
                     displaced,
                 )
             # Retire each invalidation in the SAME transaction as the republication that answers
-            # it, and only for the exact buckets actually rewritten. This is the whole
-            # crash-safety argument, and it is why no separate replay pass exists: there is no
-            # window where a bucket is both marked clean and not yet rewritten, and none where it
-            # has been rewritten but is still reported stale. A retry re-publishes the same bucket
-            # and retires the same already-retired row, which is idempotent.
+            # it, and only for the exact buckets actually rewritten. This remains true for a
+            # bounded startup repair; its corrected slots reserve the next ring generation while
+            # the public singleton stays on the prior coherent generation until the ordinary flush.
             connection.executemany(
                 "UPDATE ring_invalidations SET applied_at = ? "
                 "WHERE resolution_seconds = ? AND bucket_start = ? AND applied_at IS NULL "
@@ -2475,13 +2723,14 @@ class Store:
                 ).rowcount
                 if changed != 1:
                     raise SchemaMismatchError("aggregate ring metadata row is missing")
-            changed = connection.execute(
-                "UPDATE aggregate_publication SET ring_generation = ?, source_generation = ?, "
-                "published_at = ? WHERE singleton = 1",
-                (ring_generation, source, published),
-            ).rowcount
-            if changed != 1:
-                raise SchemaMismatchError("aggregate publication row is missing")
+            if advance_publication:
+                changed = connection.execute(
+                    "UPDATE aggregate_publication SET ring_generation = ?, source_generation = ?, "
+                    "published_at = ? WHERE singleton = 1",
+                    (ring_generation, source, published),
+                ).rowcount
+                if changed != 1:
+                    raise SchemaMismatchError("aggregate publication row is missing")
         return RingPublication(ring_generation, source, published, len(prepared))
 
     def retire_unrebuildable_ring_cells(
@@ -2688,6 +2937,81 @@ class Store:
         """
         return pending_invalidation_cells(self._connection())
 
+    # Dispositions a caller can learn WITHOUT committing. `_apply_observations` decides
+    # accepted/duplicate/conflict with a SELECT and only then INSERTs; a batching caller that
+    # must answer its RPC before the transaction runs needs the SELECT half on its own.
+    OBSERVATION_ACCEPTED = "accepted"
+    OBSERVATION_DUPLICATE = "duplicate"
+    OBSERVATION_CONFLICT = "conflict"
+
+    def observation_dispositions(
+        self, observations: Iterable[Observation],
+    ) -> tuple[str, ...]:
+        """Report what a commit WOULD decide for each observation, writing nothing.
+
+        Read-only and side-effect free, so it is safe on a reader and safe to call before the
+        decision to commit has been made. The answer is only authoritative while the caller
+        holds the sole-writer lock, because a concurrent commit could otherwise land between
+        this probe and the transaction it is predicting.
+        """
+
+        connection = self._connection()
+        verdicts: list[str] = []
+        for observation in observations:
+            values = _observation_values(observation)
+            previous = connection.execute(
+                "SELECT observed_at, epoch_id, owner_generation, payload_json FROM observations "
+                "WHERE event_id = ? AND family = ? AND source_id = ?", values[:3],
+            ).fetchone()
+            if previous is None:
+                verdicts.append(self.OBSERVATION_ACCEPTED)
+            elif tuple(previous) == values[3:]:
+                verdicts.append(self.OBSERVATION_DUPLICATE)
+            else:
+                verdicts.append(self.OBSERVATION_CONFLICT)
+        return tuple(verdicts)
+
+    COVERAGE_CHANGED = "changed"
+    COVERAGE_UNCHANGED = "unchanged"
+    COVERAGE_CONFLICT = "conflict"
+
+    def coverage_dispositions(
+        self, coverage: Iterable[CoverageEpoch],
+    ) -> tuple[str, ...]:
+        """Report what a commit WOULD decide for each coverage epoch, writing nothing.
+
+        Mirrors `_apply_coverage_epochs`: an offer that matches the stored row changes nothing,
+        and an offer overlapping an unavailable span is rejected. A caller that batches must
+        not report an unchanged re-offer as accepted -- a live collector re-offers its OPEN
+        epoch every cadence tick, so that error would inflate every acknowledgement.
+        """
+
+        connection = self._connection()
+        verdicts: list[str] = []
+        for epoch in coverage:
+            values = _coverage_values(epoch)
+            current = values[3:]
+            conflict = connection.execute(
+                "SELECT 1 FROM unavailable_spans WHERE family = ? AND source_id = ? "
+                "AND ended_at > ? AND (? IS NULL OR started_at < ?) LIMIT 1",
+                (values[0], values[1], current[0], current[1], current[1]),
+            ).fetchone()
+            if conflict is not None:
+                verdicts.append(self.COVERAGE_CONFLICT)
+                continue
+            previous = connection.execute(
+                "SELECT started_at, ended_at, native_cadence_seconds, owner_generation "
+                "FROM coverage_epochs WHERE family = ? AND source_id = ? AND epoch_id = ?",
+                values[:3],
+            ).fetchone()
+            if _coverage_conflict_reason(previous, current) is not None:
+                verdicts.append(self.COVERAGE_CONFLICT)
+            elif previous is not None and tuple(previous) == current:
+                verdicts.append(self.COVERAGE_UNCHANGED)
+            else:
+                verdicts.append(self.COVERAGE_CHANGED)
+        return tuple(verdicts)
+
     def last_vacuumed_at(self) -> float:
         """Return the persisted completion time for the last successful VACUUM."""
         row = self._connection().execute(
@@ -2696,6 +3020,83 @@ class Store:
         if row is None:
             raise SchemaMismatchError("current stats vacuum metadata is missing")
         return float(row[0])
+
+    def reclaimable_ratio(self) -> float:
+        """Fraction of the current file a rewrite could physically hand back, right now.
+
+        Two kinds of waste, and BOTH are needed. `freelist_count` counts pages a delete already
+        released, and `dbstat.unused` counts the slack inside pages that are still live. A metric
+        built on the free list alone reads zero for a database bloated purely by partially-filled
+        B-tree pages, which is what random-key inserts produce and is the exact case this guard
+        exists to catch.
+
+        This is the RAW figure and it is not a compaction forecast on its own. Every schema has a
+        natural fill, so a freshly vacuumed store still reads well above zero -- audited at 3.600%,
+        3.864%, 3.929% and 3.576% on four databases whose truly recoverable space was 0.0000%. Use
+        `reclaimable_ratio() - reclaimable_ratio_at_last_vacuum()` for anything that decides.
+        """
+
+        connection = self._connection()
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        if page_size <= 0 or page_count <= 0:
+            return 0.0
+        freelist_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        # COALESCE because `dbstat` is empty for a database with no pages yet, and SUM of nothing
+        # is NULL rather than 0.
+        unused_bytes = int(connection.execute(
+            "SELECT COALESCE(SUM(unused), 0) FROM dbstat"
+        ).fetchone()[0])
+        return (unused_bytes + freelist_pages * page_size) / (page_count * page_size)
+
+    def reclaimable_ratio_at_last_vacuum(self) -> float:
+        """The baseline the last successful vacuum recorded, or 0.0 when it is not knowable.
+
+        0.0 is the deliberate fallback for a never-vacuumed store, an unreadable or malformed
+        sidecar, and a sidecar that names a different vacuum than the database does. It makes the
+        benefit read as the raw ratio, which OVER-states benefit rather than under-stating it: an
+        unknown baseline can then cost one unnecessary rewrite, which self-corrects because that
+        rewrite writes both halves again, whereas a fabricated high baseline would suppress a
+        needed compaction indefinitely and leave the disk to fill.
+        """
+
+        try:
+            value = read_json_file(
+                self.path.parent / VACUUM_BASELINE_FILENAME, None, exceptions=(FileNotFoundError,)
+            )
+        except (OSError, json.JSONDecodeError):
+            # Maintenance metadata, not facts. Unreadable means "baseline unknown", never "skip".
+            return 0.0
+        if not isinstance(value, dict):
+            return 0.0
+        recorded_marker = value.get("last_vacuumed_at")
+        recorded_ratio = value.get("reclaimable_ratio")
+        for candidate in (recorded_marker, recorded_ratio):
+            if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
+                return 0.0
+            if not math.isfinite(float(candidate)) or float(candidate) < 0:
+                return 0.0
+        # A ratio is a fraction of the file, so above 1.0 is impossible. `_record_vacuum_baseline`
+        # is bounded by construction and cannot write one, which makes this corruption -- and an
+        # unbounded high baseline is exactly the "suppress a needed compaction indefinitely" case
+        # this docstring names. The marker beside it is a timestamp and has no upper bound.
+        if float(recorded_ratio) > 1.0:
+            return 0.0
+        # The agreement check. Without it a crash between the marker and this file would present
+        # the previous rewrite's baseline as though it described the current one.
+        if float(recorded_marker) != self.last_vacuumed_at():
+            return 0.0
+        return float(recorded_ratio)
+
+    def _record_vacuum_baseline(self, completed_at: float, ratio: float) -> None:
+        atomic_write_text(
+            self.path.parent / VACUUM_BASELINE_FILENAME,
+            json.dumps(
+                {"last_vacuumed_at": completed_at, "reclaimable_ratio": ratio},
+                sort_keys=True, separators=(",", ":"),
+            ) + "\n",
+            mode=0o600,
+        )
 
     def vacuum(self, completed_at: float) -> float:
         """Compact the writer database and persist completion only after success.
@@ -2724,6 +3125,12 @@ class Store:
         # truncate. Remove those too so a successful rewrite has one exact
         # physical postcondition rather than a history-dependent allocation.
         _truncate_wal(connection)
+        # LAST, and measured against the final physical state rather than the one before the marker
+        # transaction, so `reclaimable_ratio()` on an untouched store reads back exactly this
+        # number and the benefit is exactly 0.0 rather than a small drift. Ordering it after the
+        # marker is safe precisely because the sidecar carries the marker value: a crash here
+        # leaves a detectable disagreement, not a plausible wrong answer.
+        self._record_vacuum_baseline(timestamp, self.reclaimable_ratio())
         return timestamp
 
     def _apply_observations(
@@ -2793,12 +3200,9 @@ class Store:
                     float(current[0]), None if current[1] is None else float(current[1]),
                 ))
             elif tuple(previous) != current:
-                if previous[0] != current[0] or previous[2] != current[2]:
-                    raise StorageValidationError("coverage epoch start and cadence are immutable")
-                if previous[1] is not None and (current[1] is None or current[1] < previous[1]):
-                    raise StorageValidationError("coverage epoch end cannot move backward")
-                if current[3] < previous[3]:
-                    raise StorageValidationError("coverage owner_generation cannot move backward")
+                reason = _coverage_conflict_reason(previous, current)
+                if reason is not None:
+                    raise StorageValidationError(reason)
                 connection.execute(
                     "UPDATE coverage_epochs SET ended_at = ?, owner_generation = ? "
                     "WHERE family = ? AND source_id = ? AND epoch_id = ?", (current[1], current[3], *key),
@@ -3107,15 +3511,12 @@ class Store:
             (
                 None
                 if retention_prune is None
-                else PruneResult(
-                    retention_prune.observations_deleted,
-                    retention_prune.coverage_epochs_deleted,
-                    retention_prune.coverage_epochs_clipped,
-                    retention_prune.usage_atoms_deleted,
-                    generation,
-                    retention_prune.unavailable_spans_deleted,
-                    retention_prune.unavailable_spans_clipped,
-                )
+                # `replace`, not a field-by-field rebuild. The only thing this restamp changes is
+                # the generation; listing every other field by hand silently dropped
+                # `retired_invalidations_deleted` here and reported zero deletions for a pass that
+                # really had deleted rows. A copy that enumerates its own fields is a copy that
+                # goes stale the next time one is added.
+                else replace(retention_prune, source_generation=generation)
             ),
         )
 
@@ -3301,6 +3702,132 @@ class Store:
             "classification_counts": {"open": len(fingerprints), "fixed": 0, "live_verified": 0},
             "unprovable_states": ("fixed", "live_verified"),
         }
+
+    @contextmanager
+    def pinned_snapshot_batches(
+        self,
+        *,
+        read_window: tuple[int | float, int | float] | None = None,
+        max_rows: int = REBUILD_BATCH_MAX_ROWS,
+        max_decoded_bytes: int = REBUILD_BATCH_MAX_DECODED_BYTES,
+        max_memory_bytes: int = REBUILD_MAX_MEMORY_BYTES,
+        max_seconds: float = REBUILD_MAX_SECONDS,
+        now: Callable[[], float] = time.monotonic,
+        memory: Callable[[], int] | None = None,
+    ) -> Iterator[Callable[[], Iterator[tuple[Observation, ...]]]]:
+        """Pin one WAL generation and stream its observations as bounded decoded batches.
+
+        The sibling of `pinned_snapshot`, for the full rebuild only. `pinned_snapshot` builds one
+        `StoreSnapshot` whose `observations` tuple holds every decoded fact, and it builds that
+        tuple from a `fetchall()` of every raw row -- so the raw SQLite tuples and the decoded
+        `Observation` objects for the WHOLE store are live simultaneously. That is the measured
+        880 MiB, and it is the thing this method exists to make structurally impossible.
+
+        **Nothing here holds two representations of the same fact at once.** Rows arrive
+        `_REBUILD_FETCH_ROWS` at a time, are decoded, and the raw list is cleared before the next
+        fetch, so the peak is one fetch of raw tuples plus one batch of decoded facts -- never one
+        store of each. `test_a_batch_never_holds_raw_rows_and_decoded_facts_together` proves it by
+        weak reference rather than by asserting a peak number, because a peak assertion passes or
+        fails on the chunk size of the day while the reachability claim is the actual invariant.
+
+        Ordering is `observed_at, family, source_id, event_id`, a refinement of `pinned_snapshot`'s
+        order by the primary key's last column, which makes it a strict total order so a keyset
+        cursor is exact. Paging is keyset, never `OFFSET`, so cost per batch stays constant instead
+        of growing with how far in the scan has reached.
+
+        **Scoped to the full rebuild.** There is no `dirty_intervals` parameter on purpose: the
+        multi-clause dirty path concatenates one ordered run per interval, so the stream is ordered
+        within a run and not across runs, and the open-cell bound a caller would rely on is void.
+        The incremental build has no memory problem to solve -- fifty consecutive ones moved traced
+        memory 78.15 to 78.55 MiB. Use `pinned_snapshot` there.
+
+        `max_rows` and `max_decoded_bytes` end a BATCH; whichever trips first. `max_memory_bytes`
+        and `max_seconds` end the REBUILD, by raising `RebuildBoundExceeded` with a reason code.
+        """
+
+        connection = self._connection()
+        window = _read_window(read_window)
+        time_clause = "" if window is None else " WHERE observed_at >= ?"
+        time_parameters: tuple[float, ...] = () if window is None else (float(window[0]),)
+        with _transaction(connection):
+            _read_header(connection)
+            started = now()
+            # Read once, here: the bound is growth from the moment the rebuild began, so a
+            # baseline taken per-check would always measure zero.
+            memory_baseline = (memory or _rebuild_memory_bytes)()
+
+            def read() -> Iterator[tuple[Observation, ...]]:
+                cursor_key: tuple[float, str, str, str] | None = None
+                while True:
+                    if cursor_key is None:
+                        sql = (
+                            "SELECT event_id, family, source_id, observed_at, epoch_id, "
+                            "owner_generation, payload_json FROM observations" + time_clause
+                            + " ORDER BY observed_at, family, source_id, event_id"
+                        )
+                        parameters: tuple[object, ...] = time_parameters
+                    else:
+                        # Keyset, never OFFSET: SQLite would re-walk the prefix on every page.
+                        observed_at, family, source_id, event_id = cursor_key
+                        sql = (
+                            "SELECT event_id, family, source_id, observed_at, epoch_id, "
+                            "owner_generation, payload_json FROM observations WHERE "
+                            "(observed_at, family, source_id, event_id) > (?, ?, ?, ?)"
+                            + ("" if window is None else " AND observed_at >= ?")
+                            + " ORDER BY observed_at, family, source_id, event_id"
+                        )
+                        parameters = (observed_at, family, source_id, event_id, *time_parameters)
+                    cursor = connection.execute(sql, parameters)
+                    decoded: list[Observation] = []
+                    decoded_bytes = 0
+                    while len(decoded) < max_rows and decoded_bytes < max_decoded_bytes:
+                        _require_rebuild_within_bounds(
+                            started, now, max_memory_bytes, max_seconds, memory_baseline, memory,
+                        )
+                        # Never fetch past the row bound: one fetch is 2,000 rows, so asking for a
+                        # full fetch when 40 rows of budget remain would overshoot by 1,960.
+                        raw = cursor.fetchmany(min(_REBUILD_FETCH_ROWS, max_rows - len(decoded)))
+                        if not raw:
+                            break
+                        for row in raw:
+                            decoded.append(
+                                Observation(
+                                    str(row[0]), str(row[1]), str(row[2]), float(row[3]),
+                                    str(row[4]), int(row[5]),
+                                    _decode_json_object(row[6], "observation payload"),
+                                )
+                            )
+                            decoded_bytes += _payload_byte_length(row[6])
+                        last = raw[-1]
+                        cursor_key = (float(last[3]), str(last[1]), str(last[2]), str(last[0]))
+                        # Before the next fetch, and before the yield: the raw tuples for this
+                        # fetch stop being reachable while their decoded facts are still being
+                        # accumulated. This `del` is the invariant, not a tidy-up.
+                        #
+                        # `row` is in it because a `for` loop variable outlives its loop, so
+                        # dropping only the list left the LAST row of every fetch reachable from
+                        # this frame. One row is not a memory problem; a stated invariant that is
+                        # actually false is, and the reachability test caught it here.
+                        del raw, last, row
+                        # After the fetch, not only before the next one. The `while` condition can
+                        # end this batch right here -- `decoded_bytes` may have just crossed
+                        # `max_decoded_bytes` -- and control then goes straight to the yield, so a
+                        # check that runs only at the top of the loop hands the caller a batch whose
+                        # growth was never measured once. Nothing caps `payload_json`, so one fetch
+                        # of 2,000 rows is unbounded above; this is the check that makes "no batch
+                        # is yielded unmeasured" true on every path rather than on most of them.
+                        _require_rebuild_within_bounds(
+                            started, now, max_memory_bytes, max_seconds, memory_baseline, memory,
+                        )
+                    cursor.close()
+                    if not decoded:
+                        return
+                    yield tuple(decoded)
+                    # The caller has the batch; this generator must not also keep it alive across
+                    # the next fetch, or two batches would be live at the hand-off.
+                    del decoded
+
+            yield read
 
     @contextmanager
     def pinned_snapshot(
@@ -3507,15 +4034,8 @@ class Store:
         # Recorded only after the transaction commits: a prune that failed must
         # stay due, or one bad night silently becomes a skipped day.
         self._record_pruned_at(now)
-        return PruneResult(
-            pruned.observations_deleted,
-            pruned.coverage_epochs_deleted,
-            pruned.coverage_epochs_clipped,
-            pruned.usage_atoms_deleted,
-            generation,
-            pruned.unavailable_spans_deleted,
-            pruned.unavailable_spans_clipped,
-        )
+        # Same restamp as the append path, through the same one mechanism.
+        return replace(pruned, source_generation=generation)
 
 
 @contextmanager
@@ -3531,8 +4051,56 @@ def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
             connection.execute("ROLLBACK")
 
 
+def _prune_retired_invalidations(connection: sqlite3.Connection, cutoff: float) -> int:
+    """Delete at most one bounded pass of RETIRED ledger rows older than cutoff.
+
+    `applied_at`, never `created_at`. They are different clocks and the schema comment on the table
+    says so: `created_at` is the OBSERVED instant of the fact that caused the staleness -- data
+    time, which on a store replaying history runs ahead of or behind the wall clock at will --
+    while `applied_at` is the publication's wall clock. Retention is a wall-clock policy, so
+    `applied_at` is the only column that can express it. `applied_at IS NOT NULL` additionally
+    means the row is settled: a PENDING row is outstanding work at any age and must survive every
+    cutoff, which is why no age alone is sufficient here.
+
+    Nothing reads a retired row. Every reader of this table -- `pending_invalidation_cells`,
+    `_retire_unactionable_invalidations`, the displaced and honest-gap deletes, the publication's
+    own retirement, and `read_ring_window`'s stale-bucket set -- filters `applied_at IS NULL`, and
+    the table's only index is partial on exactly that predicate. So a retired row is a record of
+    completed work that no code path can consult, and the facts it shadows are already deleted at
+    the same cutoff. Before this it was the one derived table that outlived its source: measured
+    529,217 rows spanning 151.39 h against 45.87 h of `observations`.
+
+    Bounded per pass because this runs inside the service work lock every PRUNE_CHECK_SECONDS. The
+    table is WITHOUT ROWID, so the usual `DELETE ... WHERE rowid IN (SELECT ... LIMIT n)` form is
+    unavailable and the primary-key triple is selected instead. The DELETE restates the predicate
+    rather than trusting the addresses alone, so a row that stopped qualifying cannot be removed by
+    an address read earlier in the same statement batch.
+    """
+
+    if not _aggregate_tables(connection):
+        return 0
+    addresses = connection.execute(
+        "SELECT resolution_seconds, bucket_start, source_generation FROM ring_invalidations "
+        "WHERE applied_at IS NOT NULL AND applied_at < ? LIMIT ?",
+        (cutoff, RETIRED_INVALIDATION_PRUNE_LIMIT),
+    ).fetchall()
+    if not addresses:
+        return 0
+    connection.executemany(
+        "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+        "AND source_generation = ? AND applied_at IS NOT NULL AND applied_at < ?",
+        [(int(row[0]), int(row[1]), int(row[2]), cutoff) for row in addresses],
+    )
+    return len(addresses)
+
+
 def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> PruneResult:
-    """Delete or clip every retained fact before cutoff on the caller's transaction."""
+    """Delete or clip every retained fact before cutoff on the caller's transaction.
+
+    THE ONE RETENTION OWNER. Both the explicit `Store.prune` and the append-time retention path
+    call this, so a delete added here is enforced by both and a table added to the schema without
+    one here is the only way a shadow can outlive its facts again. Do not add a second scheduler.
+    """
 
     _prune_browser_diagnostics(connection, cutoff)
     observations = connection.execute(
@@ -3558,6 +4126,10 @@ def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> Prun
         "WHERE started_at < ? AND ended_at > ?",
         (cutoff, cutoff, cutoff),
     ).rowcount
+    # Last, and reported separately from every counter above it. The rows removed here are the
+    # ledger's record of completed work, not facts, so they are deliberately absent from
+    # `PruneResult.changed` and must stay absent -- see that property.
+    retired_invalidations = _prune_retired_invalidations(connection, cutoff)
     return PruneResult(
         observations,
         coverage_deleted,
@@ -3566,6 +4138,7 @@ def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> Prun
         0,
         unavailable_deleted,
         unavailable_clipped,
+        retired_invalidations,
     )
 
 

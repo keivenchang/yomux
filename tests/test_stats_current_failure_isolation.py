@@ -2,10 +2,18 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Failure ownership regressions across the browser, client, and stats runtime."""
 
+import json
 import threading
+from http import HTTPStatus
 
-from yolomux_lib.stats_current import collectors, runtime
+from yolomux_lib import common
+from yolomux_lib.stats_current import client as client_module
+from yolomux_lib.stats_current import collectors, protocol, runtime, storage
+from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib.local_services import client as local_service_client
+from yolomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
+from yolomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
+from yolomux_lib.observability.failure_severity import expected_caller_outcome, failure_record_level
 
 
 class _FutureServiceClient:
@@ -81,3 +89,143 @@ def test_stats_release_timeout_keeps_retry_ownership_until_statsd_acknowledges(m
     assert settled.wait(1.0), "the retry owner forgot a timed-out statsd lease release"
     assert releases == [("lease-1", False), ("lease-1", False)]
     assert current.status()["supervisor"]["last_failure"] == "LeaseReleaseFailed"
+
+
+def _stale_browser_upload_body() -> bytes:
+    """One browser batch statsd's payload validator rejects as too old."""
+
+    return json.dumps({
+        "protocol_version": storage.MIN_WRITER_PROTOCOL,
+        "schema_generation": storage.SCHEMA_VERSION - 1,
+        "client_id": "stale-browser",
+        "observations": [],
+    }).encode("utf-8")
+
+
+def _typed_upgrade_failure(details: dict) -> dict:
+    """Build the typed failure record the HTTP writer hands the severity owner for a 426."""
+
+    return common.error_payload(
+        "client or writer is too old",
+        message_key="common.requestFailed",
+        canonical=True,
+        code="upgrade_required",
+        origin="server.http",
+        retryable=False,
+        details=details,
+        stack=[{
+            "component": "server.http",
+            "operation": "POST /api/stats-observations",
+            "code": "upgrade_required",
+        }],
+        request_id="r-upgrade-1",
+    )["error"]
+
+
+def test_statsd_names_itself_when_it_rejects_a_stale_browser_payload(tmp_path):
+    statsd = stats_current_service.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+
+    response = statsd._browser_upload(
+        {"authenticated_username": "alice"},
+        _stale_browser_upload_body(),
+    )
+
+    assert response["status"] == "upgrade_required", response
+    assert response[CALLER_OUTCOME_OWNER_FIELD] == BROWSER_UPLOAD_OUTCOME_OWNER, response
+    # The daemon-wide protocol fence shares the route and must stay unnamed.
+    fence, _binary = statsd.handle_with_binary(
+        {"protocol_version": storage.MIN_WRITER_PROTOCOL - 1, "schema_generation": storage.SCHEMA_VERSION},
+    )
+    assert fence["status"] == "upgrade_required", fence
+    assert CALLER_OUTCOME_OWNER_FIELD not in fence, fence
+
+
+def test_stale_browser_payload_upgrade_does_not_poison_shared_stats_work(tmp_path, monkeypatch):
+    calls = []
+    upgrade = dict(protocol.upgrade_required_response(
+        storage.MIN_WRITER_PROTOCOL,
+        storage.SCHEMA_VERSION,
+        str(storage.MIN_WRITER_BUILD),
+        caller_outcome_owner=BROWSER_UPLOAD_OUTCOME_OWNER,
+    ))
+    upgrade["ok"] = False
+
+    def dispatch(action, payload, *, timeout, request_binary=b""):
+        calls.append((action, payload, timeout, request_binary))
+        if action == "browser_upload":
+            return upgrade, b""
+        if action == "lease":
+            return {"ok": True, "lease_id": "lease-1"}, b""
+        return {"ok": True, "source_generation": 9}, b""
+
+    client = client_module.StatsCurrentClient(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    monkeypatch.setattr(client, "ensure_started", lambda: True)
+    monkeypatch.setattr(client._transport, "dispatch", dispatch)
+
+    assert client.append(
+        browser_upload=_stale_browser_upload_body(),
+        authenticated_username="alice",
+    ) == upgrade
+    assert client._upgrade_required is None
+    assert client.renew_lease("lease-1") == {"ok": True, "lease_id": "lease-1"}
+    assert client.append(observations=[storage.Observation(
+        "cpu-1", "cpu", "host", 1.0, "cpu:1", 1, {"value": 1},
+    )]) == {"ok": True, "source_generation": 9}
+    assert [call[0] for call in calls] == ["browser_upload", "lease", "append"]
+
+
+def test_unmarked_browser_upload_upgrade_fences_shared_stats_work(tmp_path, monkeypatch):
+    calls = []
+    upgrade = {
+        "ok": False,
+        "status": "upgrade_required",
+        "required_protocol_version": protocol.WIRE_PROTOCOL_VERSION + 1,
+    }
+
+    def dispatch(action, payload, *, timeout, request_binary=b""):
+        calls.append((action, payload, timeout, request_binary))
+        return upgrade, b""
+
+    client = client_module.StatsCurrentClient(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    monkeypatch.setattr(client, "ensure_started", lambda: True)
+    monkeypatch.setattr(client._transport, "dispatch", dispatch)
+
+    assert client.append(
+        browser_upload=_stale_browser_upload_body(),
+        authenticated_username="alice",
+    ) == upgrade
+    assert client._upgrade_required == upgrade
+    assert client.renew_lease("lease-1") == upgrade
+    assert len(calls) == 1
+
+
+def test_marked_browser_upload_rejection_is_an_ordinary_caller_outcome():
+    error = _typed_upgrade_failure({CALLER_OUTCOME_OWNER_FIELD: BROWSER_UPLOAD_OUTCOME_OWNER})
+
+    assert expected_caller_outcome(error, status=HTTPStatus.UPGRADE_REQUIRED) is True
+    assert failure_record_level(error, status=HTTPStatus.UPGRADE_REQUIRED) == "info"
+
+
+def test_unmarked_upgrade_fence_stays_an_operator_fault():
+    error = _typed_upgrade_failure({"reason": "reader protocol is too old"})
+
+    assert expected_caller_outcome(error, status=HTTPStatus.UPGRADE_REQUIRED) is False
+    assert failure_record_level(error, status=HTTPStatus.UPGRADE_REQUIRED) == "error"
+
+
+def test_unrecognized_or_misplaced_upgrade_marker_stays_an_operator_fault():
+    foreign = _typed_upgrade_failure({CALLER_OUTCOME_OWNER_FIELD: "statsd.some_other_validator"})
+    assert failure_record_level(foreign, status=HTTPStatus.UPGRADE_REQUIRED) == "error"
+
+    wrong_status = _typed_upgrade_failure({CALLER_OUTCOME_OWNER_FIELD: BROWSER_UPLOAD_OUTCOME_OWNER})
+    assert failure_record_level(wrong_status, status=HTTPStatus.CONFLICT) == "error"
+
+    unstated_status = _typed_upgrade_failure({CALLER_OUTCOME_OWNER_FIELD: BROWSER_UPLOAD_OUTCOME_OWNER})
+    assert failure_record_level(unstated_status) == "error"

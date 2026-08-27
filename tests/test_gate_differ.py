@@ -115,6 +115,8 @@ def _settle_controlled_filesystem_operation(gate_browser_runtime, release):
 
 DIFFER_TERMINAL_STATE_TIMEOUT_MS = 12_000
 DIFFER_STALL_CONTRACT_TIMEOUT_MS = 8_000
+# The gate forces this client budget through `apiFetchAcceptedOperationDeadlineTestMs`; the shipped
+# default is 120 seconds, which is not useful wall-clock time for an expiry regression.
 API_FETCH_DEADLINE_MS = 15_000
 API_FETCH_CONTRACT_TIMEOUT_MS = 18_000
 SLOW_BACKEND_DELAY_SECONDS = 0.25
@@ -837,6 +839,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
             """
             const path = arguments[0];
             const timeoutMs = arguments[1];
+            apiFetchAcceptedOperationDeadlineTestMs = arguments[2];
             const done = arguments[arguments.length - 1];
             (async () => {
               const started = performance.now();
@@ -870,6 +873,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
             """,
             str(target),
             API_FETCH_CONTRACT_TIMEOUT_MS,
+            API_FETCH_DEADLINE_MS,
         )
     finally:
         _settle_controlled_filesystem_operation(gate_browser_runtime, release_backing)
@@ -920,6 +924,7 @@ def test_stalled_fs_read_body_paints_visible_typed_deadline_error(gate_browser_r
             """
             const path = arguments[0];
             const timeoutMs = arguments[1];
+            apiFetchAcceptedOperationDeadlineTestMs = arguments[2];
             const done = arguments[arguments.length - 1];
             (async () => {
               const started = performance.now();
@@ -950,6 +955,7 @@ def test_stalled_fs_read_body_paints_visible_typed_deadline_error(gate_browser_r
             """,
             str(target),
             API_FETCH_CONTRACT_TIMEOUT_MS,
+            API_FETCH_DEADLINE_MS,
         )
     finally:
         release_body.set()
@@ -984,6 +990,7 @@ def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, 
             """
             const path = arguments[0];
             const timeoutMs = arguments[1];
+            apiFetchAcceptedOperationDeadlineTestMs = arguments[2];
             const done = arguments[arguments.length - 1];
             (async () => {
               const started = performance.now();
@@ -1016,6 +1023,7 @@ def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, 
             """,
             str(target),
             API_FETCH_CONTRACT_TIMEOUT_MS,
+            API_FETCH_DEADLINE_MS,
         )
     finally:
         _settle_controlled_filesystem_operation(gate_browser_runtime, release_backing)

@@ -27,6 +27,7 @@ from .state_services import ClientWatchRootValidationError
 from .chat.chat_service import ChatServiceError
 from .chat.chat_store import ChatStoreValidationError
 from .workspace.locales import resolve_locale_preference
+from .stats_current import http as stats_health
 from .web import html_page
 from .web import server_string
 from .web import static_content_type
@@ -346,6 +347,109 @@ def get_healthz(request: Any, parsed: Any, route: Route) -> None:
     """
     del parsed, route
     request.write_json({"ok": True})
+
+
+# The last `/readyz` answer, so `/livez` can read `has_outstanding_work` WITHOUT entering statsd.
+#
+# This cache is the whole reason `/livez` works. It is computed entirely from `/proc` by this
+# process, so it never takes statsd's GIL -- and the worker holds that GIL for the full 800-940 ms
+# build burst, which is exactly the wedge `/livez` exists to detect. An endpoint that asked the
+# daemon "are you busy?" could not answer while the daemon was too busy to reply.
+#
+# DO NOT "simplify" this to a fresh control call. It reads like a stale value being preferred to a
+# live one; it is the opposite -- a live read reacquires the dependency the endpoint is built to
+# avoid, and the endpoint stops detecting the only failure it is for.
+_LAST_READYZ: dict[str, Any] = {}
+
+
+def _statsd_pid(client: Any) -> int:
+    """statsd's pid, learned ONCE and then never asked for again.
+
+    A pid is a constant for the process lifetime, so a single bootstrap call is categorically
+    different from polling the daemon for its state on every probe -- which is the thing `/livez`
+    must never do. After the first `/readyz`, or after this one call, `/livez` asks statsd nothing.
+    """
+    cached = _LAST_READYZ.get("pid")
+    if cached:
+        return int(cached)
+    pid = int(client.resource_state().get("pid") or 0)
+    if pid:
+        _LAST_READYZ["pid"] = pid
+    return pid
+
+
+def _statsd_process_sample(request: Any) -> Any:
+    client = request.server.app.stats_current_http.client
+    return stats_health.read_process_sample(_statsd_pid(client))
+
+
+def get_readyz(request: Any, parsed: Any, route: Route) -> None:
+    """Can statsd serve a CORRECT snapshot right now. Fails closed, and names every cause.
+
+    AUTHENTICATED -- `role="readonly"` on its Route, enforced by `_dispatch_route_handler` before
+    this function is ever called. Do not add an auth check in here; one rule beside another is how
+    the two drift. This answer carries pending cell counts, migration state, failure strings and
+    the process sample, which is internal operational detail about a running daemon and is exactly
+    what must not be world-readable. `/livez` below is the public tier and stays narrow.
+
+    It reaches statsd, unlike `/healthz`, but through `resource_state`, which takes no lock --
+    never `status()`, which opens with `work_lock`, the lock the materializer worker holds across
+    a build. A probe that waits behind the daemon it is checking reports nothing about it.
+
+    Every failing condition is reported, not the first: one cause per poll costs an operator one
+    restart cycle per cause.
+    """
+    del parsed, route
+    client = request.server.app.stats_current_http.client
+    sample = _statsd_process_sample(request)
+    sizes = stats_health.read_store_sizes(client.database_path)
+    # Absent control state is NOT READY. `readyz` treats an empty mapping as unreachable rather
+    # than assuming health, so a daemon that cannot answer never asserts its own readiness.
+    control = client.resource_state()
+    verdict = stats_health.readyz(sample, sizes, control)
+    _LAST_READYZ["sample"] = sample
+    _LAST_READYZ["payload"] = verdict.payload
+    if control.get("pid"):
+        _LAST_READYZ["pid"] = int(control["pid"])
+    request.write_json(verdict.payload, status=verdict.status)
+
+
+def get_livez(request: Any, parsed: Any, route: Route) -> None:
+    """Is statsd capable of making progress. Nothing else, and nothing that enters it.
+
+    PUBLIC, and public for a reason rather than by default: a process supervisor polls a liveness
+    probe **while restarting, before any operator cookie exists**. Authenticating it would break
+    that restart. `get_healthz` above is the same tier for the same reason.
+
+    **DO NOT WIDEN THIS RESPONSE.** Public here means NARROW: `{"ok": ..., "live": ...}` and
+    nothing else. `get_healthz` states the rule -- reporting anything richer leaks system state to
+    an unauthenticated caller -- and that is a rule about CONTENT, not about liveness versus
+    readiness. Reading it the other way is how this endpoint shipped ten keys to unauthenticated
+    callers, six of them process detail: pid, run state, CPU ticks, both IO byte counters and
+    context switches. `verdict.payload` still carries all of that; only the verdict is published.
+    The detailed projection belongs on authenticated `/readyz`, which already returns it.
+
+    Computed from `/proc` alone. `has_outstanding_work` and the previous sample come from the
+    cached prior `/readyz` -- see `_LAST_READYZ`. When no `/readyz` has run yet neither is
+    supplied and `livez()` applies its own documented defaults; a value is not invented here.
+    """
+    del parsed, route
+    sample = _statsd_process_sample(request)
+    previous = _LAST_READYZ.get("sample")
+    cached = _LAST_READYZ.get("payload")
+    if cached is None:
+        verdict = stats_health.livez(sample, previous)
+    else:
+        verdict = stats_health.livez(
+            sample, previous, has_outstanding_work=bool(cached.get("pending_cells")),
+        )
+    # NARROW, because this is unauthenticated. `get_healthz` above sets the terms for every public
+    # health answer in this table: it writes `{"ok": True}` and says reporting anything richer
+    # would leak system state to an unauthenticated caller. `verdict.payload` carries the process
+    # sample -- pid, run state, CPU ticks, IO byte counters, context switches -- so it is exactly
+    # what that sentence forbids. The verdict itself is all a supervisor needs, and the full
+    # projection is available to an authenticated caller on `/readyz`.
+    request.write_json({"ok": verdict.ok, "live": verdict.ok}, status=verdict.status)
 
 
 def get_ping(request: Any, parsed: Any, route: Route) -> None:
@@ -1461,6 +1565,12 @@ CORE_ROUTES = (
     Route("GET", "/login", PUBLIC, get_login, protocol=RESPONSE_HTML, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, protocol=RESPONSE_REDIRECT, group="core"),
     Route("GET", "/healthz", PUBLIC, get_healthz, protocol=RESPONSE_JSON, group="core"),
+    # AUTHENTICATED. `/readyz` reports pending cell counts, migration state and failure
+    # strings -- internal operational detail about a running daemon, which must not be
+    # world-readable. The role is enforced by `_dispatch_route_handler` like every other
+    # authenticated route here; there is deliberately no second auth check in the handler.
+    Route("GET", "/readyz", "readonly", get_readyz, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/livez", PUBLIC, get_livez, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/stats-delta", "readonly", get_stats_delta, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),

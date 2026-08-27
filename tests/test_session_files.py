@@ -515,6 +515,47 @@ def test_session_files_operation_completion_separates_replacement_intent(no_cont
         webapp.control_server.stop()
 
 
+def first_incomplete_forced_transition(*, ledger, operation_id, submissions, started) -> str:
+    """Name the earliest forced transition that did not complete.
+
+    The Event timing out is the LAST symptom and on its own says nothing about cause: the forced
+    job may never have been submitted, never started its product wait, or been queued behind the
+    ordinary canonical operation the target test deliberately holds open. Those are different
+    defects and the failure message has to separate them.
+
+    Module-level and parameterised so the target test and the unreadable-ledger regression exercise
+    THIS implementation rather than a copy: a copy can keep its own catch while the real one is
+    narrowed away, and the regression would still pass.
+    """
+
+    if submissions == 0:
+        return "submission: no replace=True job was submitted"
+    if not started:
+        return (
+            f"job start: {submissions} replace=True submission(s) recorded but no "
+            "forced product wait began, so the forced flight never got a producer"
+        )
+    if "forced-canonical" not in started:
+        return (
+            f"forced canonical wait: only {sorted(started)} started; the "
+            "canonical stage never ran"
+        )
+    try:
+        _result, status = ledger.operation_status(operation_id)
+    except (KeyError, LookupError, RuntimeError, OSError, ValueError, TypeError) as exc:
+        # NARROW on purpose. This read runs while Python is already building the failed
+        # bounded-wait assertion, so an exception here would REPLACE the original failure with an
+        # unrelated traceback and the real defect would never be reported. The cause is carried in
+        # the text instead of being swallowed or re-raised.
+        return f"ledger unreadable: {type(exc).__name__}: {exc}"
+    if status != HTTPStatus.OK:
+        return f"terminalization: forced product returned but the ledger still reports {status}"
+    return (
+        "terminalization: the ledger is OK but the newer payload never reached "
+        "terminalize_operation"
+    )
+
+
 def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(no_control_socket, monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
@@ -527,6 +568,7 @@ def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(n
     ordinary_canonical_waiting = threading_module.Event()
     release_ordinary_canonical = threading_module.Event()
     forced_terminalized = threading_module.Event()
+    forced_product_started: set[str] = set()
     submission_counts = {False: 0, True: 0}
 
     def submit(*_args, replace=False, **_kwargs):
@@ -537,6 +579,8 @@ def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(n
         return {"ok": True, "job": {"job_id": job_id, "status": "queued", "generation": 1}}, job_id, 1
 
     def wait_for_product(job_id, _deadline_at):
+        if job_id.startswith("forced-"):
+            forced_product_started.add(job_id)
         if job_id == "ordinary-canonical":
             ordinary_canonical_waiting.set()
             assert release_ordinary_canonical.wait(timeout=5)
@@ -583,7 +627,21 @@ def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(n
             replace=True,
         )
         assert forced_status == HTTPStatus.ACCEPTED
-        forced_terminalized.wait()
+
+
+        # BOUNDED on purpose. The invariant is that a forced interactive canonical operation
+        # terminalizes WITHOUT waiting for the older ordinary canonical operation to be released,
+        # and `release_ordinary_canonical` is still unset here. An unbounded wait cannot observe
+        # that: if the forced flight were queued behind the ordinary one this would hang until the
+        # runner killed it, reporting a timeout rather than a failed invariant. The separate
+        # completion owners are `JobdOperationFlight.completion_key(job_id, replace)`.
+        assert forced_terminalized.wait(timeout=2), (
+            "forced canonical operation did not terminalize within 2s while the ordinary canonical "
+            f"operation was still held; first incomplete transition -> "
+            f"{first_incomplete_forced_transition(ledger=webapp.queued_delivery_ledger, operation_id=forced_receipt['operation']['id'], submissions=submission_counts[True], started=forced_product_started)}; "
+            f"ordinary_released={release_ordinary_canonical.is_set()} submissions={submission_counts} "
+            f"forced_started={sorted(forced_product_started)}"
+        )
         forced_result, forced_terminal_status = webapp.queued_delivery_ledger.operation_status(
             forced_receipt["operation"]["id"],
         )
@@ -610,6 +668,47 @@ def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(n
         release_ordinary_canonical.set()
         webapp.jobd_operation_service.wait_for_idle(5)
         webapp.control_server.stop()
+
+
+def test_forced_wait_failure_survives_an_unreadable_ledger(monkeypatch):
+    """A failing diagnostic must not replace the failure it was called to explain.
+
+    `first_incomplete_forced_transition()` reads the ledger while Python is already constructing
+    the failed bounded-wait assertion. An exception raised there would surface instead of the
+    original assertion, so the real defect - forced terminalization missing its bound - would
+    never be reported. The narrow catch turns that into a named `ledger unreadable` outcome that
+    carries the cause.
+
+    This exercises the same shape without a live app: the helper is rebuilt here over a ledger
+    that raises, and the assertion it feeds must still be the bounded-wait one.
+    """
+
+    class ExplodingLedger:
+        def operation_status(self, _operation_id):
+            raise RuntimeError("ledger backend unavailable")
+
+    ledger = ExplodingLedger()
+
+    # THE REAL implementation, not a copy: narrowing or removing its catch must break this test.
+    reported = first_incomplete_forced_transition(
+        ledger=ledger,
+        operation_id="op-1",
+        submissions=2,
+        started={"forced-initial", "forced-canonical"},
+    )
+    assert reported == "ledger unreadable: RuntimeError: ledger backend unavailable"
+
+    # The bounded-wait assertion still owns the failure, with the ledger cause carried inside it.
+    never_set = threading_module.Event()
+    with pytest.raises(AssertionError) as raised:
+        assert never_set.wait(timeout=0.01), (
+            "forced canonical operation did not terminalize within 2s; "
+            f"first incomplete transition -> {reported}"
+        )
+    message = str(raised.value)
+    assert "did not terminalize" in message, "the original bounded-wait failure was replaced"
+    assert "ledger unreadable: RuntimeError: ledger backend unavailable" in message
+    assert "Traceback" not in message
 
 
 def test_forced_synchronous_session_files_replaces_a_fresh_cache(no_control_socket, monkeypatch, tmp_path):

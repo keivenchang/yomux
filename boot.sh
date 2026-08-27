@@ -308,7 +308,10 @@ print_detach_prefix() {
 # Delegates to the one shared scanner in startup_common.sh (sourced above), so
 # boot.sh and the supported launcher never carry two copies of this logic.
 port_listener_pids() {
-  yolomux_port_listener_pids "$1" || die "need ss or lsof to find the listener for port $1"
+  # The listener census walks /proc; it needs no external scanner. A failure here is one of the
+  # typed classes it reports: this port's listening inode had no visible owner, several visible
+  # owners, a fatal read, or the walk exceeded its time budget. Its stderr names which.
+  yolomux_port_listener_pids "$1" || die "listener census could not identify a unique owner for port $1"
 }
 
 wait_for_pid_exit() {

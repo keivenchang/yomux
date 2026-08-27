@@ -4206,12 +4206,21 @@ function recordJsDebugCurrentStatsFailure(failure) {
   jsDebugCurrentStatsClientState.failureLatched = true;
   const message = String(failure?.message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
   const source = String(failure?.source || '/api/stats-stream').slice(0, 160);
+  // The stall message alone cannot say which side went quiet, so the transport's own
+  // first-transition observables ride along into the retained record. `streamEvidence()`
+  // returns a fixed set of scalars, so this stays bounded; it is dropped rather than
+  // coerced when it is not the object shape this owner expects.
+  const evidence = failure?.evidence;
+  const streamEvidence = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+    ? {...evidence}
+    : null;
   recordJsDebugStatsDiagnostic('warning', message, {
     category: 'stats_stream',
     requestId: String(failure?.requestId || failure?.request_id || '').slice(0, 128),
     route: source,
     eventType: 'stats-generation',
     deliveryOutcome: /(?:stalled|missing)/i.test(message) ? 'stalled' : 'failed',
+    ...(streamEvidence ? {streamEvidence} : {}),
   });
   return true;
 }

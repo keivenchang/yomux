@@ -731,7 +731,7 @@ def test_m4_ready_queued_and_typed_errors_keep_distinct_http_schemas(gate_live_s
         "level": "error",
         "source": "api-response",
         "category": "api",
-        "code": "request_failed",
+        "code": "upgrade_required",
         "request_id": request_ids["upgrade_required"],
     }
     gate_live_server.server_log_boundary = server_log_current
@@ -791,7 +791,7 @@ def test_m4_ready_queued_and_typed_errors_keep_distinct_http_schemas(gate_live_s
             "state": "failed",
             "request": {"id": request_ids["upgrade_required"]},
             "error": {
-                "code": "request_failed",
+                "code": "upgrade_required",
                 "message": {
                     "key": "common.requestFailed",
                     "params": {},
@@ -803,7 +803,7 @@ def test_m4_ready_queued_and_typed_errors_keep_distinct_http_schemas(gate_live_s
                 "stack": [{
                     "component": "server.http",
                     "operation": "GET /api/stats-delta",
-                    "code": "request_failed",
+                    "code": "upgrade_required",
                 }],
                 "reason": "reader protocol is too old",
             },

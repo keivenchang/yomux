@@ -352,6 +352,13 @@ function applyApiRequestIdHeader(url, requestOptions) {
 
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
+// A 202 means the server ACCEPTED the work and keeps at it for its own
+// `FS_BATCH_OPERATION_DEADLINE_SECONDS` (app.py). Quitting sooner abandons work that is still
+// running and still succeeding -- on a CPU-oversubscribed host that painted "File could not be
+// opened" over a read the very next retry served. Accepted work waits the server's budget.
+const apiFetchAcceptedOperationDeadlineMs = 120000;
+// Gate-only: lets a browser test prove the expiry path without spending 120s of wall-clock. 0 = off.
+let apiFetchAcceptedOperationDeadlineTestMs = 0;
 // Route-qualified owners still decide whether roots, metadata, Finder, terminal, or stats demand is
 // equivalent. This is the one browser-wide capacity owner beneath them, so independent startup and
 // refresh work remains parallel without letting one page issue an unbounded fetch burst.
@@ -465,6 +472,13 @@ function apiFetchDeadlineMs(url, options = {}) {
   const path = String(url || '').split('?', 1)[0];
   if (path.endsWith('/api/self-update')) return apiFetchLongOperationDeadlineMs;
   return apiFetchDefaultDeadlineMs;
+}
+
+// The wait budget for work the server already ACCEPTED. A route that asked for a longer budget
+// (upload, self-update) keeps it; nothing waits less than the server's own budget.
+function apiAcceptedOperationDeadlineMs(routeDeadlineMs = 0) {
+  if (apiFetchAcceptedOperationDeadlineTestMs) return apiFetchAcceptedOperationDeadlineTestMs;
+  return Math.max(Number(routeDeadlineMs) || 0, apiFetchAcceptedOperationDeadlineMs);
 }
 
 function apiFetchDeadlineError(deadlineMs, subject = 'request') {
@@ -932,7 +946,7 @@ function waitForApiOperationResult(pending, expected = {}) {
   }
   const deadlineMs = Number.isFinite(Number(expected.deadlineMs)) && Number(expected.deadlineMs) > 0
     ? Number(expected.deadlineMs)
-    : apiFetchDefaultDeadlineMs;
+    : apiAcceptedOperationDeadlineMs();
   const signal = expected.signal || null;
   return new Promise((resolve, reject) => {
     const waiters = apiOperationState.waiters.get(record.id) || new Set();
@@ -1110,7 +1124,7 @@ async function apiFetchJson(url, options = {}, internalOptions = {}) {
     const result = await waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation: String(error?.operation?.context?.operation || ''),
-      deadlineMs: apiFetchDeadlineMs(url, options),
+      deadlineMs: apiAcceptedOperationDeadlineMs(apiFetchDeadlineMs(url, options)),
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),

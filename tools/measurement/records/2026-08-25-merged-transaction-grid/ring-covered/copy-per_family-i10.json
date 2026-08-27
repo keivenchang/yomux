@@ -1,0 +1,87 @@
+{
+  "acquisition_seconds": 3600,
+  "anchor_observed_at": 1787712534.1632814,
+  "arm_wall_seconds": 7.4597,
+  "commits": 720,
+  "counts_after": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2039,
+    "freelist_count": 733,
+    "observations": 1201842,
+    "page_count": 126817,
+    "page_size": 4096,
+    "ring_invalidations": 530042,
+    "source_generation": 1162665,
+    "unavailable_spans": 1471,
+    "usage_atoms": 74011
+  },
+  "counts_before": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2039,
+    "freelist_count": 1096,
+    "observations": 1194642,
+    "page_count": 126817,
+    "page_size": 4096,
+    "ring_invalidations": 529490,
+    "source_generation": 1161945,
+    "unavailable_spans": 1471,
+    "usage_atoms": 74011
+  },
+  "facts_per_commit": 10.0,
+  "families": [
+    "cpu/cpu-source",
+    "service_load/load-source"
+  ],
+  "family_count": 2,
+  "finished": {
+    "epoch": 1787713944.128487,
+    "monotonic": 2097829.243602827,
+    "pt": "2026-08-25 20:12:24 PDT"
+  },
+  "interval_seconds": 10,
+  "label": "copy-per_family-i10",
+  "main_bytes_after": 519442432,
+  "main_bytes_before": 519442432,
+  "measure_finished": {
+    "epoch": 1787713944.0795784,
+    "monotonic": 2097829.194694433,
+    "pt": "2026-08-25 20:12:24 PDT"
+  },
+  "measure_started": {
+    "epoch": 1787713939.8062384,
+    "monotonic": 2097824.921354282,
+    "pt": "2026-08-25 20:12:19 PDT"
+  },
+  "measure_wall_seconds": 4.27334,
+  "merged": false,
+  "observations_offered": 7200,
+  "observations_stored": 7200,
+  "read_bytes": 0,
+  "ring_buckets_seeded": 1248,
+  "ring_cover": true,
+  "row_delta": {
+    "aggregate_ring_slots": 0,
+    "coverage_epochs": 0,
+    "observations": 7200,
+    "ring_invalidations": 552,
+    "unavailable_spans": 0,
+    "usage_atoms": 0
+  },
+  "shape": "real",
+  "source": "/tmp/yolomux-e3-profile-04/fixture/stats-v8.sqlite3",
+  "started": {
+    "epoch": 1787713936.6687872,
+    "monotonic": 2097821.783903255,
+    "pt": "2026-08-25 20:12:16 PDT"
+  },
+  "syscr": 740,
+  "syscw": 22479,
+  "syscw_per_commit": 31.22,
+  "topology": "copy",
+  "wal_bytes_after": 5335432,
+  "wal_bytes_before": 5335432,
+  "wchar": 47734056,
+  "write_bytes": 65019904,
+  "write_bytes_per_commit": 90305.4,
+  "write_bytes_per_observation": 9030.5
+}

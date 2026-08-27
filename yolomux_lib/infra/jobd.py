@@ -2269,11 +2269,19 @@ class JobClient(LocalServiceClient):
             self._scheduler_lease_id = ""
             return True
 
-    def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0, fresh_only: bool = False) -> dict[str, Any]:
+    def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0, fresh_only: bool = False, launch: bool = True) -> dict[str, Any]:
+        """Submit a job. `launch=False` asks an already-running jobd and never cold-starts one.
+
+        Maintenance must never be the reason a service starts. `result` and `product` already read
+        through the non-launching twin for the same reason - observation is not launch demand - and
+        `launch=False` extends that one rule to submissions whose work is housekeeping. A denied
+        submission is not lost work: the next submission made for real demand runs it, and jobd is
+        up by definition whenever real demand exists.
+        """
         request = {"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms}
         if fresh_only:
             request["fresh_only"] = True
-        return self.request(request)
+        return self.request(request) if launch else self.request_if_running(request)
 
     def result(self, job_id: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> dict[str, Any]:
         return self.request_if_running({"action": "result", "job_id": job_id}, timeout=timeout)
@@ -2319,9 +2327,18 @@ class JobClient(LocalServiceClient):
         allow_stale: bool = False,
         fresh_only: bool = False,
         timeout: float = 0.5,
+        launch: bool = True,
     ) -> tuple[dict[str, Any], bytes]:
-        """Submit once and forward ready product bytes without waiting for cold work."""
-        return self.request_with_binary({
+        """Submit once and forward ready product bytes without waiting for cold work.
+
+        `launch=False` selects the non-launching twin, so a maintenance produce cannot cold-start
+        jobd. That start is not free: measured inside the gate container it took 1.19-1.41 s, and
+        when it happened underneath a forced interactive canonical operation it consumed 61-73% of
+        that operation's two-second terminalization budget while the file itself had already been
+        read. See `JobClient.submit` for why declining is safe.
+        """
+        sender = self.request_with_binary if launch else self.request_with_binary_if_running
+        return sender({
             "action": "produce",
             "task": task,
             "payload": payload,

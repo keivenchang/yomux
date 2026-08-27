@@ -30,6 +30,7 @@ route assembly:
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import math
@@ -48,7 +49,9 @@ from urllib.parse import urlencode
 from http.client import HTTPConnection
 import pytest
 
+from tools import system_status_latency_probe
 from yolomux_lib import common as common_module
+from yolomux_lib.infra import listener_census
 from yolomux_lib.server import Handler
 
 from tests.gate_harness import GateAuthCredentials
@@ -578,3 +581,71 @@ def test_acceptance_uses_nearest_rank_p99_against_the_budget() -> None:
     # Three values at/above the p99 rank fail acceptance; the mean would have hidden them.
     bad = [5.0] * 197 + [25.0, 25.5, 26.0]
     assert acceptance_outcome(bad)["ok"] is False and acceptance_outcome(bad)["p99_ms"] == 25.0
+
+
+def test_probe_error_report_preserves_the_cause_chain_and_errno():
+    """Exit 2 must name the underlying refusal, not just the census summary line.
+
+    Three retained gate artifacts recorded only `cannot enumerate file descriptors for Linux
+    process ...`. That text reads identically whether the kernel refused another user's process
+    or /proc itself was unreadable, and the operator cannot act without the errno.
+    """
+
+    denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), "/proc/456/fd")
+    try:
+        raise listener_census.ListenerCensusError(
+            "cannot enumerate file descriptors for Linux process 456"
+        ) from denied
+    except listener_census.ListenerCensusError as error:
+        rendered = system_status_latency_probe.error_with_cause(error)
+
+    assert "cannot enumerate file descriptors for Linux process 456" in rendered
+    assert "PermissionError" in rendered
+    assert f"errno {errno.EACCES} EACCES" in rendered
+    assert "<- caused by" in rendered
+    # The pre-change report was the summary alone; it must no longer be the whole message.
+    assert rendered != "cannot enumerate file descriptors for Linux process 456"
+
+
+def test_probe_error_report_terminates_on_a_self_referential_cause():
+    """A cause cycle must not spin the renderer on the failure path."""
+
+    first = RuntimeError("outer")
+    second = RuntimeError("inner")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    rendered = system_status_latency_probe.error_with_cause(first)
+    assert rendered.count("<- caused by") == 1
+
+
+def test_probe_error_report_honours_a_suppressed_context():
+    """`raise ... from None` is an instruction to hide the context; the report must obey it."""
+
+    try:
+        try:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), "/proc/456/fd")
+        except PermissionError:
+            raise RuntimeError("listener census failed") from None
+    except RuntimeError as error:
+        rendered = system_status_latency_probe.error_with_cause(error)
+
+    assert rendered == "RuntimeError: listener census failed"
+    assert "PermissionError" not in rendered
+    assert "EACCES" not in rendered
+
+
+def test_probe_error_report_still_follows_an_unsuppressed_context():
+    """An implicit context is not suppressed, so it is still reported with its errno."""
+
+    try:
+        try:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), "/proc/456/fd")
+        except PermissionError:
+            raise RuntimeError("listener census failed")
+    except RuntimeError as error:
+        rendered = system_status_latency_probe.error_with_cause(error)
+
+    assert "RuntimeError: listener census failed" in rendered
+    assert "PermissionError" in rendered
+    assert f"errno {errno.EACCES} EACCES" in rendered

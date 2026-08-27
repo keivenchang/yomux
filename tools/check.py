@@ -55,7 +55,9 @@ import time
 import uuid
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -97,6 +99,11 @@ from tools import docker_image
 from tools import static_build
 from yolomux_lib.infra.atomic_file import atomic_write_text
 from yolomux_lib.background_owner import pid_is_alive
+# Reuse the repo's existing ANSI owner rather than growing a second copy in the
+# gate. It sits here, below `validate_product_root_environment`, because that
+# gate is what establishes the environment; importing the product/TUI chain
+# above it would claim safety before the check that is meant to prove it.
+from yolomux_lib.tmux.agent_tui import strip_ansi_sgr
 from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.infra import worktree_writer
 from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
@@ -209,6 +216,7 @@ class LaneResult:
     steps: tuple["StepResult", ...] = ()
     output_artifact: "LaneOutputArtifact | None" = None
     output_retention_failure: "LaneOutputRetentionFailure | None" = None
+    failed_nodes: "FailedNodes | None" = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +226,27 @@ class LaneOutputArtifact:
     path: str
     sha256: str
     bytes: int
+
+
+@dataclass(frozen=True)
+class FailedNodes:
+    """Which pytest node IDs a failed lane reported, or a bounded reason none are available.
+
+    A failed lane that yields nothing must say so explicitly. Reporting an empty
+    list would be indistinguishable from a lane that failed with zero failed
+    tests, which is exactly the ambiguity that made the retained gate outputs
+    unusable for measuring a real in-gate denominator.
+    """
+
+    node_ids: tuple[str, ...] = ()
+    total: int = 0
+    truncated: bool = False
+    oversize_dropped: int = 0
+    # Summary rows that named a failure the run's own duration table did not
+    # publish. Never silently dropped: an unexplained row is reported as a count
+    # so a consumer can see the evidence is incomplete.
+    unresolved_rows: int = 0
+    unavailable: str = ""
 
 
 @dataclass(frozen=True)
@@ -694,6 +723,7 @@ def run_lane(lane: Lane, *, output_root: Path | None = None) -> LaneResult:
         tuple(step_results),
         artifact,
         retention_failure,
+        lane_failed_nodes(lane, ok, output),
     )
 
 
@@ -711,21 +741,222 @@ def child_usage_snapshot() -> dict[str, float | int | str]:
 
 _PYTEST_DURATION_RE = re.compile(r"^\s*([0-9.]+)s\s+(call|setup|teardown)\s+(.+)$", re.MULTILINE)
 
+# A lane inheriting PY_COLORS=1 captures colored pytest output, and the escapes
+# do not merely prefix the summary row - they also wrap the test name INSIDE the
+# node ID, e.g.
+#   '\x1b[31mFAILED\x1b[0m path.py::\x1b[1mtest_name\x1b[0m - assert ...'
+# so a lenient anchor would still yield an ID with escapes embedded in it.
+# Normalization therefore runs before extraction, on the whole text, through the
+# repo's existing `strip_ansi_sgr` owner. Retained lane transcripts keep their
+# ANSI on purpose; only the two parsers below read through the normalizer.
+
 
 def pytest_duration_phases(output: str) -> tuple[dict[str, object], ...]:
     """Extract every pytest duration row for the persistent per-run report."""
 
     return tuple(
         {"seconds": float(seconds), "phase": phase, "nodeid": nodeid.strip()}
-        for seconds, phase, nodeid in _PYTEST_DURATION_RE.findall(output)
+        for seconds, phase, nodeid in _PYTEST_DURATION_RE.findall(strip_ansi_sgr(output))
     )
+
+
+# pytest's short-summary block is the canonical durable source for WHICH tests
+# failed. The `--durations` table above names every test that ran, passed and
+# failed alike, so it cannot answer that question. Measured against pytest under
+# the exact `-q` the lanes use: the summary is emitted by default, node IDs keep
+# their parameters verbatim, and an over-wide line drops the trailing reason
+# rather than truncating the node ID.
+_PYTEST_SUMMARY_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S[^\n]*)$", re.MULTILINE)
+
+# Bounds against malformed or hostile output. Neither is a normal-run limit: a
+# gate lane that legitimately fails 200 distinct tests is already a red wall.
+MAX_FAILED_NODE_IDS = 200
+MAX_FAILED_NODE_ID_BYTES = 512
+
+
+def is_pytest_step(step: Step) -> bool:
+    """One predicate for `is this step a pytest invocation`, shared by every caller."""
+
+    return list(step.args[:3]) == ["python3", "-m", "pytest"]
+
+
+def pytest_known_node_ids(output: str) -> frozenset[str]:
+    """Every node ID the run itself reported, taken from the duration table.
+
+    This is the exact producer. A duration row is `<seconds>s <phase> <nodeid>`
+    with the ID running to end of line and nothing appended after it, so the ID
+    is unambiguous no matter what characters the parameters contain. Measured:
+    the rows carry `test_bracket[has ] - dash]` intact, and xdist emits the same
+    rows for every worker.
+    """
+
+    return frozenset(str(row["nodeid"]) for row in pytest_duration_phases(output) if row["nodeid"])
+
+
+def resolve_failed_node_ids(output: str) -> tuple[tuple[str, ...], int]:
+    """Resolve each failure summary row against the exact node IDs the run reported.
+
+    pytest composes a summary row as an unescaped node ID followed by an optional
+    unescaped ` - <reason>` (`_pytest/terminal.py`), so the row ALONE cannot say
+    where the ID ends: a parameter may contain ` - `, `[` or `]`, and a reason may
+    end in `]`. Every bracket-balancing or trailing-character heuristic is wrong
+    on some measured real row, and a wrong node ID is worse than no node ID,
+    because it silently corrupts any later query.
+
+    So the row is never parsed for identity. It is matched against the IDs the
+    run already published, longest first so an ID that prefixes another cannot
+    win by accident. A row that matches nothing is counted as unresolved rather
+    than guessed at.
+
+    Returns the resolved IDs and the number of rows that could not be resolved.
+    """
+
+    plain = strip_ansi_sgr(output)
+    known = sorted(pytest_known_node_ids(plain), key=len, reverse=True)
+    resolved: set[str] = set()
+    unresolved = 0
+    for rest in _PYTEST_SUMMARY_RE.findall(plain):
+        match = _resolved_summary_row(rest, known)
+        if match is None:
+            unresolved += 1
+        else:
+            resolved.add(match)
+    return tuple(sorted(resolved)), unresolved
+
+
+def _resolved_summary_row(rest: str, known: list[str]) -> str | None:
+    """Find where a summary row's node ID ends, anchored on an ID the run published.
+
+    The two producers do not always spell the path the same way. Measured with a
+    probe outside the repo: the duration table printed
+    `test_probe.py::test_bad` while the summary row printed
+    `../../../../tmp/.../test_probe.py::test_bad` for the same test, because the
+    summary is rendered relative to pytest's rootdir. So a published ID is
+    matched as a SUFFIX of the row's identity, not by equality.
+
+    The row's own text is still never used to decide where the ID ends: the end
+    is wherever a published ID finishes and the row either stops or continues
+    with pytest's ` - ` reason separator. Returns the row's full spelling of the
+    ID, which is what a reader can paste back into pytest.
+    """
+
+    for node_id in known:
+        start = rest.find(node_id)
+        while start != -1:
+            prefix = rest[:start]
+            # The identity must begin where the row begins, or exactly after a
+            # path separator that is still part of the row's leading path. Once
+            # ` - ` has appeared the remainder is pytest's reason, and a
+            # published ID quoted inside a reason is not this row's identity.
+            at_identity_boundary = (start == 0 or prefix.endswith("/")) and " - " not in prefix
+            if at_identity_boundary:
+                end = start + len(node_id)
+                if end == len(rest) or rest[end:].startswith(" - "):
+                    return rest[:end]
+            start = rest.find(node_id, start + 1)
+    return None
+
+
+def pytest_failed_node_ids(output: str) -> tuple[str, ...]:
+    """The exactly-resolved failed/errored node IDs, deduplicated and ordered.
+
+    Deduplication is exact, so two parameters of one test remain two entries; a
+    node reported as both ERROR and FAILED collapses to one. Sorting makes the
+    field stable under xdist, which completes tests in nondeterministic order.
+    """
+
+    return resolve_failed_node_ids(output)[0]
+
+
+def bounded_failed_nodes(node_ids: tuple[str, ...], *, unresolved_rows: int = 0) -> FailedNodes:
+    """Apply the cardinality and per-ID byte bounds. One owner for every producer.
+
+    An over-long ID is dropped and counted rather than truncated, because a
+    truncated node ID is a wrong node ID that silently poisons a later query.
+    """
+
+    bounded = [node_id for node_id in node_ids if len(node_id.encode("utf-8")) <= MAX_FAILED_NODE_ID_BYTES]
+    return FailedNodes(
+        node_ids=tuple(bounded[:MAX_FAILED_NODE_IDS]),
+        total=len(node_ids),
+        truncated=len(bounded) > MAX_FAILED_NODE_IDS,
+        oversize_dropped=len(node_ids) - len(bounded),
+        unresolved_rows=unresolved_rows,
+    )
+
+
+def junit_failed_node_ids(junit_path: Path) -> tuple[tuple[str, ...], str]:
+    """Exact failed/errored node IDs from a JUnit document, or a typed reason there are none.
+
+    JUnit carries identity structurally in the `file` and `name` attributes, so
+    no text is parsed and no parameter content can be misread. `junit_family` is
+    pinned to xunit1 by the certification step precisely because xunit2 omits
+    `file`; a document without that attribute is refused rather than guessed at.
+    """
+
+    if not junit_path.exists():
+        return (), "junit_absent"
+    try:
+        tree = ElementTree.parse(junit_path)
+    except ElementTree.ParseError:
+        return (), "junit_malformed"
+    failed: set[str] = set()
+    for case in tree.iter("testcase"):
+        file_attr = case.get("file")
+        name_attr = case.get("name")
+        if not file_attr or not name_attr:
+            return (), "junit_missing_identity"
+        if any(child.tag in {"failure", "error"} for child in case):
+            failed.add(f"{file_attr}::{name_attr}")
+    return tuple(sorted(failed)), ""
+
+
+def certification_failed_nodes(junit_path: Path, lane_ok: bool) -> FailedNodes | None:
+    """The certification lane's failed IDs, taken from its JUnit rather than its text.
+
+    The functional-lane performance wrapper never instruments this lane, so the
+    duration table that resolves the other lanes does not exist here. JUnit is
+    this phase's own unambiguous producer and is already written for admission.
+    """
+
+    if lane_ok:
+        return None
+    node_ids, reason = junit_failed_node_ids(junit_path)
+    if reason:
+        return FailedNodes(unavailable=reason)
+    if not node_ids:
+        return FailedNodes(unavailable="junit_named_no_failure")
+    return bounded_failed_nodes(node_ids)
+
+
+def lane_failed_nodes(lane: Lane, result_ok: bool, output: str) -> FailedNodes | None:
+    """Decide the one failed-node outcome for a completed lane.
+
+    A passing lane carries nothing. A failed lane that cannot run pytest at all
+    carries a distinct not-applicable state, so a consumer can tell "this lane
+    could never name node IDs" apart from "this pytest lane lost them".
+    """
+
+    if result_ok:
+        return None
+    if not any(is_pytest_step(step) for step in lane.steps):
+        return FailedNodes(unavailable="lane_is_not_pytest")
+    node_ids, unresolved = resolve_failed_node_ids(output)
+    if not node_ids:
+        # Rows present but none resolvable means the exact producer is missing -
+        # an uninstrumented lane, a collection error that never ran a test, or an
+        # interrupted lane. Say which; do not infer an ID from an ambiguous row.
+        if unresolved:
+            return FailedNodes(unavailable="no_exact_node_id_source", unresolved_rows=unresolved)
+        return FailedNodes(unavailable="no_pytest_summary_in_output")
+    return bounded_failed_nodes(node_ids, unresolved_rows=unresolved)
 
 
 def instrument_lane_for_performance(lane: Lane) -> Lane:
     """Ask every pytest step for the timing table persisted in the run report."""
 
     steps = tuple(
-        Step(step.label, [*step.args, "--durations=0", "--durations-min=0"] if step.args[:3] == ["python3", "-m", "pytest"] else step.args, step.env)
+        Step(step.label, [*step.args, "--durations=0", "--durations-min=0"] if is_pytest_step(step) else step.args, step.env)
         for step in lane.steps
     )
     return Lane(lane.name, lane.label, steps, lane.default, lane.run_last)
@@ -742,32 +973,55 @@ def child_usage_delta(before: dict[str, float | int | str], after: dict[str, flo
     }
 
 
+def failed_nodes_report_field(result: LaneResult | None) -> dict[str, object]:
+    """Serialize the failed-node outcome, or nothing when the lane carries none."""
+
+    if result is None or result.failed_nodes is None:
+        return {}
+    failed = result.failed_nodes
+    if failed.unavailable:
+        return {"failed_nodes": {"unavailable": failed.unavailable, "unresolved_rows": failed.unresolved_rows}}
+    return {
+        "failed_nodes": {
+            "node_ids": list(failed.node_ids),
+            "total": failed.total,
+            "truncated": failed.truncated,
+            "oversize_dropped": failed.oversize_dropped,
+            "unresolved_rows": failed.unresolved_rows,
+        }
+    }
+
+
 def lane_output_report_fields(result: LaneResult | None) -> dict[str, object]:
-    """Serialize one retained-output outcome without embedding raw lane output."""
+    """Serialize one lane's output-derived evidence without embedding raw lane output.
+
+    This is the single owner reached by the final, interrupted, and certification
+    report payloads, so extending it here is what makes failed node IDs appear in
+    all three rather than only the path someone remembered to update.
+    """
 
     if result is None:
         return {}
+    fields: dict[str, object] = dict(failed_nodes_report_field(result))
     if result.output_artifact is not None:
-        return {
-            "output_artifact": {
-                "path": result.output_artifact.path,
-                "sha256": result.output_artifact.sha256,
-                "bytes": result.output_artifact.bytes,
-            }
+        fields["output_artifact"] = {
+            "path": result.output_artifact.path,
+            "sha256": result.output_artifact.sha256,
+            "bytes": result.output_artifact.bytes,
         }
+        return fields
     failure = result.output_retention_failure
     if failure is None:
-        return {}
-    return {
-        "output_retention_failure": {
-            "reason": failure.reason,
-            "error_type": failure.error_type,
-            "detail": failure.detail,
-            "attempted_bytes": failure.attempted_bytes,
-            "free_bytes": failure.free_bytes,
-            "reserve_bytes": failure.reserve_bytes,
-        }
+        return fields
+    fields["output_retention_failure"] = {
+        "reason": failure.reason,
+        "error_type": failure.error_type,
+        "detail": failure.detail,
+        "attempted_bytes": failure.attempted_bytes,
+        "free_bytes": failure.free_bytes,
+        "reserve_bytes": failure.reserve_bytes,
     }
+    return fields
 
 
 def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None) -> dict[str, object]:
@@ -775,7 +1029,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
 
     worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial, cpu_percent=cpu_percent), strict=True))
     return {
-        "schema": 4,
+        "schema": 5,
         "certification": certification,
         "interrupted": interrupted,
         "mode": "serial" if serial else "parallel",
@@ -997,6 +1251,7 @@ def retire_owned_processes(
     deadline_seconds: float = RETIREMENT_DEADLINE_SECONDS,
     expected_containers: bool = False,
     identity_fn: Callable[[int | None], str | None] = process_start_key,
+    inherited_descendants: dict[int, str | None] | None = None,
 ) -> dict[str, object]:
     """Join everything the parallel lanes started before anything is measured.
 
@@ -1006,7 +1261,12 @@ def retire_owned_processes(
     I/O rather than waiting for the kernel to get around to it. A deadline breach is a
     machine-readable refusal carrying the survivors, never a longer wait and never a silent continue.
 
-    The survivor set is decided by the SAME per-member proof the WebDriver lease uses, not a bare
+    An exec-ing login shell can leave an ambient helper as a child of the process slot that becomes
+    this runner. `inherited_descendants` is the identity snapshot taken before the gate starts; a
+    matching member is ambient rather than gate-owned. If its PID is reused, its identity no longer
+    matches and the new process is tracked normally.
+
+    The survivor set is otherwise decided by the SAME per-member proof the WebDriver lease uses, not a bare
     PID walk. Each descendant's immutable start key is captured the first time we see that PID and is
     never recaptured; a member is authorized as a live owned survivor only while `identity_fn` still
     reads that exact key. A PID whose key changed was reused by another process - the one we owned
@@ -1024,6 +1284,7 @@ def retire_owned_processes(
 
     owner = os.getpid() if pid is None else pid
     started = time.monotonic()
+    inherited = dict(inherited_descendants or {})
     # pid -> the one immutable proof captured the first time we saw that number, never recomputed.
     proofs: dict[int, dict[str, object]] = {}
 
@@ -1032,6 +1293,8 @@ def retire_owned_processes(
 
     def proven_survivors() -> list[dict[str, object]]:
         for member in descendant_processes(owner):
+            if inherited.get(member["pid"]) == member.get("start_key"):
+                continue
             proofs.setdefault(member["pid"], member)
         live: list[dict[str, object]] = []
         for member_pid, proof in proofs.items():
@@ -1262,6 +1525,26 @@ def git_head_sha(repo_root: Path = REPO_ROOT) -> str | None:
     return sha if completed.returncode == 0 and sha else None
 
 
+# Local, transient progress scratchpads: a STATUS-REPORT the agent keeps its own progress in, and the
+# DOIT work-queue files. An untracked one is not an input to any build or test. Tracked modifications
+# are deliberately not excused because those do change the subject the SHA names.
+CERTIFICATION_TRANSIENT_UNTRACKED_PREFIXES = ("STATUS-REPORT", "DOIT")
+
+
+def untracked_path_is_transient_scratchpad(path: str) -> bool:
+    """Return whether an untracked path is a transient release scratchpad.
+
+    The prefix must end at a name boundary, so `DOIT.7.md` and `STATUS-REPORT-old.txt` are excused
+    while an unrelated `DOITNOT` directory is not. Matched on the basename, at any depth.
+    """
+
+    name = PurePosixPath(path.rstrip("/")).name
+    return any(
+        name == prefix or name.startswith(f"{prefix}.") or name.startswith(f"{prefix}-") or name.startswith(f"{prefix}_")
+        for prefix in CERTIFICATION_TRANSIENT_UNTRACKED_PREFIXES
+    )
+
+
 def working_tree_clean_state(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     """Every tracked modification and every untracked path, so clean is a proven fact not a hope.
 
@@ -1271,19 +1554,33 @@ def working_tree_clean_state(repo_root: Path = REPO_ROOT) -> dict[str, object]:
     """
 
     try:
-        completed = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain"], capture_output=True, text=True, check=False)
+        completed = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True, check=False)
     except OSError as exc:
         return {"observable": False, "clean": False, "reason": f"git status unavailable: {exc}", "tracked": [], "untracked": []}
     if completed.returncode != 0:
         return {"observable": False, "clean": False, "reason": (completed.stderr or "git status failed").strip()[:500], "tracked": [], "untracked": []}
     tracked: list[str] = []
     untracked: list[str] = []
+    transient_untracked: list[str] = []
     for line in completed.stdout.splitlines():
         if not line.strip():
             continue
         path = line[3:]
-        (untracked if line.startswith("??") else tracked).append(path)
-    return {"observable": True, "clean": not tracked and not untracked, "reason": "", "tracked": tracked, "untracked": untracked}
+        if not line.startswith("??"):
+            tracked.append(path)
+        elif untracked_path_is_transient_scratchpad(path):
+            transient_untracked.append(path)
+        else:
+            untracked.append(path)
+    # Reported, never silently dropped: the evidence still names every excused path.
+    return {
+        "observable": True,
+        "clean": not tracked and not untracked,
+        "reason": "",
+        "tracked": tracked,
+        "untracked": untracked,
+        "transient_untracked": transient_untracked,
+    }
 
 
 def generated_bundle_hashes(repo_root: Path = REPO_ROOT) -> dict[str, str | None]:
@@ -1328,13 +1625,21 @@ def exact_sha_certification_admission(*, start_state: dict[str, object], end_sta
     return {"admitted": True, "reason": ""}
 
 
-def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = False) -> tuple[dict[str, object], LaneResult | None]:
+def run_certification_phase(
+    *,
+    evidence_dir: Path,
+    expected_containers: bool = False,
+    inherited_descendants: dict[int, str | None] | None = None,
+) -> tuple[dict[str, object], LaneResult | None]:
     """Retire, qualify, certify serially, qualify again. Exclusive by construction, never by hope."""
 
     evidence_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     start_clean_state = working_tree_clean_state()
-    retirement = retire_owned_processes(expected_containers=expected_containers)
+    retirement = retire_owned_processes(
+        expected_containers=expected_containers,
+        inherited_descendants=inherited_descendants,
+    )
     preflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
     lane_result: LaneResult | None = None
     postflight: dict[str, object] | None = None
@@ -1347,6 +1652,12 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
             output_root=_tmp_only_path(
                 evidence_dir / "lane-output", label="certification lane output root"
             ),
+        )
+        # This lane is not instrumented with `--durations=0`, so its failed IDs
+        # come from its own JUnit rather than from summary text.
+        lane_result = replace(
+            lane_result,
+            failed_nodes=certification_failed_nodes(evidence_dir / CERTIFICATION_JUNIT_NAME, lane_result.ok),
         )
         returncode = lane_result.steps[-1].returncode if lane_result.steps else None
         postflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
@@ -1417,6 +1728,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--certification-only", action="store_true", help="run only the exclusive latency-certification phase, skipping every functional lane")
     parser.add_argument("--certification-evidence-dir", default=None, metavar="/tmp/DIR", help="override the automatic certification evidence directory under /tmp")
     args = parser.parse_args(argv)
+    # Capture children inherited from the invoking login shell before this runner creates any work.
+    # Some desktop helpers survive `bash` -> Python exec and retain the runner PID as their parent.
+    inherited_descendants = {
+        int(member["pid"]): member.get("start_key")
+        for member in descendant_processes(os.getpid())
+    }
 
     if args.certification_only and args.lane:
         parser.error("--certification-only runs no lanes; drop --lane")
@@ -1509,7 +1826,11 @@ def main(argv: list[str] | None = None) -> int:
                 # regressions would never be observed.
                 if certify:
                     print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
-                    certification, certification_lane = run_certification_phase(evidence_dir=evidence_dir, expected_containers=expected_containers)
+                    certification, certification_lane = run_certification_phase(
+                        evidence_dir=evidence_dir,
+                        expected_containers=expected_containers,
+                        inherited_descendants=inherited_descendants,
+                    )
                     print_certification(certification, certification_lane)
                 elapsed = time.monotonic() - started
     except worktree_writer.WorktreeWriterBusy as exc:

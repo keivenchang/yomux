@@ -25,6 +25,8 @@ from http import HTTPStatus
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Barrier
+from threading import Event
+from threading import Lock
 from typing import Any
 
 import pytest
@@ -66,6 +68,7 @@ OLD_SQLITE_ARTIFACTS = (
 OLD_JSON_ARTIFACTS = ("activity.json", "events.jsonl")
 OLD_ARTIFACTS = (*OLD_SQLITE_ARTIFACTS, *OLD_JSON_ARTIFACTS)
 STATS_ARTIFACT_RE = re.compile(r"^stats-v(?P<schema>[0-9]+)\.sqlite3$")
+CONCURRENT_CAPTURE_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,7 @@ class RunningBuild:
     output: list[str] = field(default_factory=list)
     captured_services: tuple[CapturedFixtureService, ...] = ()
     stopped: bool = False
+    service_capture_lock: Lock = field(default_factory=Lock, repr=False)
 
     def request(self, path: str) -> tuple[int, dict[str, str], bytes]:
         connection = HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -103,20 +107,24 @@ class RunningBuild:
             self.refresh_service_ownership()
 
     def refresh_service_ownership(self) -> None:
-        if self.stopped or not self.server_start_identity:
-            return
-        current_identity = process_start_identity(self.process.pid)
-        if current_identity is None:
-            return
-        assert current_identity == self.server_start_identity, (
-            f"{self.label} launcher {self.process.pid} identity changed during local-service capture"
-        )
-        captured = _capture_fixture_services(
-            self.process.pid,
-            self.server_start_identity,
-            allow_legacy=self.allow_legacy_service_capture,
-        )
-        self.captured_services = _merge_captured_fixture_services(self.captured_services, captured)
+        # Concurrent health requests prove that the servers can serve together. Their
+        # fixture-only process-table snapshots are not part of that request contract,
+        # so one RunningBuild owns this mutable capture ledger at a time.
+        with self.service_capture_lock:
+            if self.stopped or not self.server_start_identity:
+                return
+            current_identity = process_start_identity(self.process.pid)
+            if current_identity is None:
+                return
+            assert current_identity == self.server_start_identity, (
+                f"{self.label} launcher {self.process.pid} identity changed during local-service capture"
+            )
+            captured = _capture_fixture_services(
+                self.process.pid,
+                self.server_start_identity,
+                allow_legacy=self.allow_legacy_service_capture,
+            )
+            self.captured_services = _merge_captured_fixture_services(self.captured_services, captured)
 
     def signal_server(self, signal_number: int) -> None:
         signal_server_exactly(
@@ -563,6 +571,47 @@ def _assert_survivor_does_not_touch_stopped_peer(stopped: RunningBuild, survivor
     }
     assert not changed, f"{survivor.label} touched {stopped.label}'s stopped runtime tree: {changed}"
     _assert_created_paths_confined(survivor)
+
+
+def test_o1_service_capture_is_serialized_while_health_requests_converge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capture bookkeeping cannot race the requests used to prove concurrent health."""
+
+    first_capture = Event()
+    second_attempted = Event()
+    release_capture = Event()
+    overlap = Event()
+    active = 0
+    active_lock = Lock()
+
+    class Process:
+        pid = 43210
+
+    def capture(*_args: Any, **_kwargs: Any) -> tuple[CapturedFixtureService, ...]:
+        nonlocal active
+        with active_lock:
+            active += 1
+            if active > 1:
+                overlap.set()
+        first_capture.set()
+        assert second_attempted.wait(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+        assert release_capture.wait(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+        with active_lock:
+            active -= 1
+        return ()
+
+    monkeypatch.setattr(f"{__name__}.process_start_identity", lambda _pid: "proc:stable")
+    monkeypatch.setattr(f"{__name__}._capture_fixture_services", capture)
+    build = RunningBuild("capture", REPO_ROOT, None, None, 0, Process(), "proc:stable", frozenset())
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(build.refresh_service_ownership)
+        assert first_capture.wait(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+        second = executor.submit(lambda: (second_attempted.set(), build.refresh_service_ownership()))
+        assert second_attempted.wait(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+        release_capture.set()
+        first.result(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+        second.result(timeout=CONCURRENT_CAPTURE_TIMEOUT_SECONDS)
+
+    assert not overlap.is_set()
 
 
 def _wait_until_serving(build: RunningBuild) -> None:

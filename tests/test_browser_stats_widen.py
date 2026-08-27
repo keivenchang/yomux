@@ -1022,12 +1022,24 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
               message: event.message,
               marked: Object.prototype.hasOwnProperty.call(event, 'provenance'),
               capabilities,
+              streamEvidence: event.streamEvidence ?? null,
+              liveEvidenceKeys: Object.keys(
+                jsDebugCurrentStatsClientState?.client?.streamEvidence?.() || {}
+              ).sort(),
             };
             """
         )
     )
     assert failed["source"] == "/api/stats-stream", failed
     assert failed["marked"] is False, failed
+    # A retained stream failure that records only its message string cannot be classified
+    # afterwards. The transport samples its own first-transition observables at report time,
+    # so the retained record must carry that whole snapshot, not a hand-picked subset.
+    assert isinstance(failed["streamEvidence"], dict), failed
+    assert sorted(failed["streamEvidence"]) == failed["liveEvidenceKeys"], failed
+    assert failed["streamEvidence"]["running"] is True, failed
+    assert isinstance(failed["streamEvidence"]["deliverySequence"], int), failed
+    assert isinstance(failed["streamEvidence"]["streamEpoch"], int), failed
 
     receipt = WebDriverWait(authenticated_e2e_browser.driver, 18, poll_frequency=0.2).until(
         lambda driver: driver.execute_async_script(
@@ -1167,6 +1179,8 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
               sourceGeneration: generation.source_generation,
               failureLatched: jsDebugCurrentStatsClientState.failureLatched,
               streamEpoch: evidence.streamEpoch,
+              lastDeliveryEmitMs: evidence.lastDeliveryEmitMs,
+              lastDeliveryAtMs: evidence.lastDeliveryAtMs,
             };
             """,
             streamed_source_generation,
@@ -1176,6 +1190,12 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
     assert accepted_push["sourceGeneration"] == streamed_source_generation, accepted_push
     assert accepted_push["failureLatched"] is False, accepted_push
     assert accepted_push["streamEpoch"] == stream_base["streamEpoch"], accepted_push
+    # The server's emit clock rides the SSE `id:` line, so a real Chrome EventSource surfaces it
+    # as `event.lastEventId`. Without it the browser knows only when a frame arrived, and a stall
+    # artifact cannot separate "the server never sent it" from "it arrived late".
+    assert isinstance(accepted_push["lastDeliveryEmitMs"], int), accepted_push
+    assert accepted_push["lastDeliveryEmitMs"] > 0, accepted_push
+    assert accepted_push["lastDeliveryAtMs"] > 0, accepted_push
     accepted_failures = authenticated_e2e_browser.driver.execute_script(
         """
             const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();

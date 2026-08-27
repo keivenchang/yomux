@@ -2,7 +2,7 @@
 
 ## Goal
 
-Retain evidence work deliberately removed from the filesystem descriptor landing path on 2026-08-23. This queue is not part of the current `STATUS-REPORT.md` inventory and must not block landing `DOIT.p2.e2.filesystem-descriptor-authorization.md`.
+Retain evidence work deliberately removed from the filesystem descriptor landing path on 2026-08-23. The active v0.7.17 `STATUS-REPORT.md` explicitly includes this queue, so its three checkboxes remain release-scoped even though the queue does not block the narrower `DOIT.p2.e2.filesystem-descriptor-authorization.md` implementation path.
 
 ## Queue
 

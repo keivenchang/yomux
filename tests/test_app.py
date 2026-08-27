@@ -20,6 +20,9 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 
+from tests.source_inventory import parsed_python_source
+from tests.source_inventory import python_source_paths
+
 import yaml
 
 from yolomux_lib import activity_summary
@@ -32,6 +35,7 @@ from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
+from yolomux_lib.infra import jobd as infra_jobd
 from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
 from tests.gate_harness import gate_auth_credentials  # noqa: F401 - fixture import
 from tests.gate_harness import gate_authenticated_live_server  # noqa: F401 - fixture import
@@ -75,14 +79,19 @@ from _git_helpers import init_repo
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
-# The browser abandons an accepted operation at `apiFetchDefaultDeadlineMs`, not at the backend's
-# 120s budget, so that is the deadline a user-visible editor open has to beat.  Read from the
-# checked-in source rather than restated, so raising one and not the other cannot pass silently.
+# The browser abandons an accepted operation at `apiFetchAcceptedOperationDeadlineMs`, read from
+# source rather than restated so raising one and not the other cannot pass silently.  It may never
+# sit below the server's own budget: under it the browser quits on work that is still running and
+# still succeeding, painting "File could not be opened" over a read the next retry serves.
 BROWSER_OPERATION_DEADLINE_SECONDS = int(re.search(
-    r"^const apiFetchDefaultDeadlineMs = (\d+);$",
+    r"^const apiFetchAcceptedOperationDeadlineMs = (\d+);$",
     (Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "10_core_utils.js").read_text(encoding="utf-8"),
     re.MULTILINE,
 ).group(1)) / 1000.0
+assert BROWSER_OPERATION_DEADLINE_SECONDS >= app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS
+# The reserved point lane must serve an editor open PROMPTLY under saturation -- a server property,
+# independent of how long the browser is then willing to wait.
+POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS = 15.0
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
@@ -3855,9 +3864,6 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     discover_calls = []
     capture_calls = []
     pane_text = {"5": "working pane", "6": "idle pane", "6:1.0": "approval pane"}
-    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5", "6"], None))
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (discover_calls.append(tuple(sessions)) or {"5": info5, "6": info6}, []))
-
     def fake_capture(session, *_args, **kwargs):
         capture_calls.append((session, kwargs.get("visible_only")))
         return pane_text.get(session, "")
@@ -3878,6 +3884,8 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     monkeypatch.setattr(app_module, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda maintenance=False: [])
+    monkeypatch.setattr(webapp, "status_session_discovery", lambda: (discover_calls.append(tuple(webapp.sessions)) or {"5": info5, "6": info6}, []))
     monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
     discover_calls.clear()
     capture_calls.clear()
@@ -7985,6 +7993,59 @@ def test_session_files_disk_prune_record_coalesces_and_tracks_completion(monkeyp
         webapp.control_server.stop()
 
 
+def test_declined_prune_does_not_consume_the_accepted_work_cooldown(monkeypatch):
+    """A prune jobd declined never ran, so it must not spend the cooldown that spaces out work.
+
+    Maintenance stopped cold-starting jobd, so on an idle instance a decline is the NORMAL answer.
+    Charging it the full five minutes would postpone housekeeping indefinitely on exactly the
+    instances idle enough to need it. All four properties are asserted here: the decline itself,
+    the bounded retry floor, the untouched cooldown for accepted work, and eventual execution once
+    jobd answers.
+    """
+
+    now = [100.0]
+    submissions = []
+    running = [False]
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
+
+    def produce(*args, **kwargs):
+        submissions.append(kwargs.get("launch"))
+        if not running[0]:
+            # The non-launching twin's answer when no service is up: no job, nothing ran.
+            return {"ok": False, "_transport_error": "not_running"}, b""
+        return {"ok": True, "job": {"job_id": f"prune-{len(submissions)}", "status": "queued"}}, b""
+
+    webapp.job_client = SimpleNamespace(produce=produce)
+    record = webapp.session_files_service.disk_prune_record
+    try:
+        # 1. absent jobd -> declined. The return value is "was it accepted", so it is False here.
+        assert webapp.request_session_files_disk_cache_prune("declined") is False
+        assert submissions == [False], "the maintenance prune must still refuse to launch"
+        assert record.last_result["submitted"] is False, record.last_result
+
+        # 2. bounded retry eligibility: the retry floor, not the full interval, and not immediate.
+        assert record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS
+        assert app_module.SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS > 0, "no retry storm"
+        assert (
+            app_module.SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS
+            < app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        )
+        assert webapp.request_session_files_disk_cache_prune("still-too-early") is False
+
+        # 3. eventual execution once jobd is available.
+        now[0] = record.next_at
+        running[0] = True
+        assert webapp.request_session_files_disk_cache_prune("jobd-up") is True
+        assert record.last_result["submitted"] is True, record.last_result
+
+        # 4. accepted work keeps the full cooldown.
+        assert record.next_at == now[0] + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        assert webapp.request_session_files_disk_cache_prune("after-accept") is False
+    finally:
+        webapp.control_server.stop()
+
+
 def test_session_files_disk_prune_record_clears_running_after_failure(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "prune_session_files_disk_cache", lambda: (_ for _ in ()).throw(OSError("disk failed")))
@@ -8031,7 +8092,134 @@ def test_session_files_disk_prune_submits_to_jobd_without_a_web_worker_thread(mo
         "generation": 1,
         "coalesce_key": "session-files-cache-prune",
         "delivery": "receipt",
+        # Maintenance must never be the reason jobd starts. This prune is reached from
+        # `after_write` on the durable-cache write, which sits inside the forced interactive
+        # terminalization window; a cold start there consumed 61-73% of that operation's
+        # two-second budget while the file had already been read.
+        "launch": False,
     }
+
+
+def test_maintenance_submission_never_cold_starts_jobd(monkeypatch):
+    """Deterministic: a maintenance produce asks an already-running jobd and never launches one.
+
+    The forced interactive canonical operation has a two-second terminalization bound. Reaching it
+    used to run a maintenance disk-cache prune synchronously from `after_write`, and that prune
+    cold-started jobd inside the window: measured in the gate container, `ensure_started` took
+    1.19-1.41 s of a 1.22-1.46 s wait while the file itself had already been read.
+    """
+
+    calls = []
+
+    class RecordingClient(infra_jobd.JobClient):
+        def __init__(self):
+            pass
+
+        def request_with_binary(self, payload, timeout=0.5, **_kwargs):
+            calls.append(("launching", payload.get("task")))
+            return {"ok": True, "job": {"job_id": "j1", "status": "queued"}}, b""
+
+        def request_with_binary_if_running(self, payload, timeout=0.5, **_kwargs):
+            calls.append(("non-launching", payload.get("task")))
+            return {"ok": True, "job": {"job_id": "j1", "status": "queued"}}, b""
+
+    client = RecordingClient()
+    client.produce("session_files_cache_prune", {}, priority="maintenance", launch=False)
+    assert calls == [("non-launching", "session_files_cache_prune")], calls
+
+    # The default is unchanged for everything that legitimately needs a service.
+    calls.clear()
+    client.produce("session_files", {}, priority="interactive")
+    assert calls == [("launching", "session_files")], calls
+
+
+def maintenance_job_client_calls():
+    """Every `JobClient.submit`/`produce` call in the product carrying priority="maintenance".
+
+    Structure-aware and repository-wide, over the suite's shared AST inventory
+    (`tests/source_inventory`) rather than a file-local source window: a three-line text scan is
+    blind to a maintenance call in another module and to any reformatting that moves the keyword.
+    """
+
+    found = []
+    for path in python_source_paths(str(Path(app_module.__file__).resolve().parent)):
+        source, tree = parsed_python_source(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"submit", "produce"}:
+                continue
+            # Only JobClient submissions. The preflight `new_envelope(...)` maintenance envelope is
+            # a direct socket status read and is correctly excluded by this receiver check.
+            receiver = ast.unparse(node.func.value)
+            if not receiver.endswith("job_client"):
+                continue
+            keywords = {kw.arg: kw for kw in node.keywords if kw.arg}
+            priority = keywords.get("priority")
+            if priority is None or not isinstance(priority.value, ast.Constant):
+                continue
+            if priority.value.value != "maintenance":
+                continue
+            launch = keywords.get("launch")
+            declines = (
+                launch is not None
+                and isinstance(launch.value, ast.Constant)
+                and launch.value.value is False
+            )
+            found.append((path.name, node.lineno, receiver, declines))
+    return found
+
+
+def test_every_maintenance_submission_declines_to_launch():
+    """Property: no maintenance JobClient submission anywhere may cold-start jobd.
+
+    One corrected call site would leave the next maintenance sibling - in this module or any
+    other - free to cold-start jobd inside the forced interactive terminalization window, where a
+    start measured 1.19-1.41 s against a two-second bound.
+    """
+
+    calls = maintenance_job_client_calls()
+    assert calls, "the maintenance JobClient submissions this property describes must exist"
+
+    launching = [(name, line, receiver) for name, line, receiver, declines in calls if not declines]
+    assert launching == [], f"maintenance submissions still able to cold-start jobd: {launching}"
+
+
+def test_the_maintenance_property_sees_other_modules_and_ignores_non_job_client_calls():
+    """The property must catch a sibling elsewhere and must not fire on the preflight envelope."""
+
+    scanned = {name for name, _line, _receiver, _declines in maintenance_job_client_calls()}
+    # Every match is a real JobClient receiver, so a maintenance envelope built by any other API
+    # cannot be counted. `local_services/preflight.py` builds one via `new_envelope`.
+    preflight = Path(app_module.__file__).resolve().parent / "local_services" / "preflight.py"
+    preflight_source, _tree = parsed_python_source(preflight)
+    assert 'priority="maintenance"' in preflight_source, "the excluded envelope must still exist"
+    assert "preflight.py" not in scanned, "a non-JobClient maintenance envelope must not be counted"
+
+    # The scan is not confined to app.py: it walks the whole package inventory.
+    inventory = python_source_paths(str(Path(app_module.__file__).resolve().parent))
+    assert len(inventory) > 50, "the property must scan the package, not one file"
+    assert any(path.name == "preflight.py" for path in inventory), "the inventory reaches submodules"
+
+
+def test_maintenance_work_still_runs_when_the_service_is_already_up(monkeypatch):
+    """The maintenance request is declined, not deleted: a running jobd still receives it."""
+
+    seen = []
+
+    class RunningClient(infra_jobd.JobClient):
+        def __init__(self):
+            pass
+
+        def request_with_binary_if_running(self, payload, timeout=0.5, **_kwargs):
+            seen.append(payload.get("task"))
+            return {"ok": True, "job": {"job_id": "j2", "status": "queued"}}, b""
+
+    response, _binary = RunningClient().produce(
+        "session_files_cache_prune", {"cache_dir": "/tmp/x"}, priority="maintenance", launch=False,
+    )
+    assert seen == ["session_files_cache_prune"], seen
+    assert response["job"]["status"] == "queued", response
 
 
 def test_session_files_disk_prune_parallel_state_is_retired():
@@ -11929,7 +12117,8 @@ def test_real_producer_terminal_states_still_fail_the_operation_immediately(monk
 def test_editor_open_of_a_12353_byte_file_completes_while_bulk_lanes_are_saturated(monkeypatch, tmp_path):
     """The reported user shape: open one 12,353-byte file while batch/watch fanout holds the
     bulk lanes.  The read must terminalize ready, with content, while every bulk holder is still
-    occupied -- and inside the browser's own 15s operation deadline, not the backend's 120s budget.
+    occupied -- and inside the point lane's own budget, which is what makes an editor open immune
+    to bulk saturation no matter how long the browser is willing to wait.
     """
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     target = tmp_path / "DOIT.release-audit.md"
@@ -11993,7 +12182,7 @@ def test_editor_open_of_a_12353_byte_file_completes_while_bulk_lanes_are_saturat
         )
         assert response.status == HTTPStatus.ACCEPTED
         assert response.payload["operation"]["kind"] == "filesystem_operation"
-        assert terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        assert terminal.wait(POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS)
         elapsed = time.monotonic() - started
         operation_id = response.payload["operation"]["id"]
         terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
@@ -12010,7 +12199,7 @@ def test_editor_open_of_a_12353_byte_file_completes_while_bulk_lanes_are_saturat
     assert terminal_status == HTTPStatus.OK, terminal_result
     assert terminal_result["state"] == "ready"
     assert terminal_result["data"]["content"] == content
-    assert elapsed < BROWSER_OPERATION_DEADLINE_SECONDS, f"editor open took {elapsed:.3f}s, past the browser deadline"
+    assert elapsed < POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS, f"editor open took {elapsed:.3f}s, past the point-lane budget"
     # The holders never completed, so the read was served by the reserved point lane, not by
     # capacity that happened to free up.
     assert lanes_after["bulk"]["active"] == service.general_worker_count
@@ -12092,7 +12281,7 @@ def test_editor_open_still_stalls_when_the_point_lane_itself_is_held(monkeypatch
         hold_point.clear()
         for future in held_point_futures:
             future.set_result(b'{"released":true}')
-        recovered = terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        recovered = terminal.wait(POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS)
         operation_id = response.payload["operation"]["id"]
         _terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
     finally:

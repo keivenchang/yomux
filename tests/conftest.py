@@ -9,11 +9,13 @@ general.language) can leave a *persistent* shared config dir mutated across runs
 """
 
 import importlib
+import json
 import os
 from pathlib import Path
 import re
 import socket
 import tempfile
+import time
 
 import pytest
 
@@ -210,3 +212,50 @@ def pytest_runtest_setup(item):
     socket_ok, reason = local_socket_capability()
     if not socket_ok:
         pytest.skip(reason)
+
+
+# Defect 2 attribution. Browser reuse is one Chrome per xdist worker for the whole session, so the
+# predecessors a test actually shares a browser with are decided by xdist sharding, not by file
+# order -- and nothing in a normal run records that. This hook is the only route that crosses the
+# test-container boundary: docker/run-tests.sh forwards a fixed environment allowlist, and
+# YOLOMUX_E2E_EVIDENCE_DIR is the one path bind-mounted at an identical absolute path on both
+# sides. It is off unless tools/defect2_harness.py has created the directory, so an ordinary run
+# writes nothing and pays one directory check per test.
+def _defect2_attribution_path():
+    evidence_dir = os.environ.get("YOLOMUX_E2E_EVIDENCE_DIR", "")
+    if not evidence_dir:
+        return None
+    directory = Path(evidence_dir) / "defect2-attempt"
+    if not directory.is_dir():
+        return None
+    return directory / f"worker-{os.environ.get('PYTEST_XDIST_WORKER') or 'master'}.jsonl"
+
+
+def pytest_runtest_logreport(report):
+    if report.when != "call" and not (report.when == "setup" and report.outcome != "passed"):
+        return
+    # Under xdist the controller ALSO receives every worker's report, with `node` set to the
+    # worker it came from. Writing there would duplicate every row into a `master` file that
+    # carries no worker attribution -- which is the one thing this hook exists to record. Only
+    # the process that actually ran the test writes.
+    if getattr(report, "node", None) is not None:
+        return
+    path = _defect2_attribution_path()
+    if path is None:
+        return
+    row = {
+        "nodeid": report.nodeid,
+        "worker": os.environ.get("PYTEST_XDIST_WORKER") or "master",
+        "phase": report.when,
+        "outcome": report.outcome,
+        "duration": round(float(getattr(report, "duration", 0.0)), 6),
+        "start": float(getattr(report, "start", 0.0)) or time.time(),
+        "pid": os.getpid(),
+    }
+    # Never let attribution break the run it is observing: a full disk or a vanished mount is a
+    # lost record, not a failed test.
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        return

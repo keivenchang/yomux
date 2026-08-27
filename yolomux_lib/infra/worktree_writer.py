@@ -41,6 +41,23 @@ WRITER_SCHEMA = 1
 DEFAULT_STALE_SECONDS = 30.0
 DEFAULT_HEARTBEAT_SECONDS = 5.0
 
+CONTAINER_REFUSAL_NO_TOKEN = "no_inherited_token"
+CONTAINER_REFUSAL_STALE_TOKEN = "stale_inherited_token"
+
+_CONTAINER_REFUSAL_MESSAGES = {
+    CONTAINER_REFUSAL_NO_TOKEN: (
+        f"in-container caller inherited no {WRITER_TOKEN_ENV} and the writer slot is read-only; "
+        "the host process must acquire the worktree writer lease and forward its "
+        f"{WRITER_TOKEN_ENV} before starting a container"
+    ),
+    CONTAINER_REFUSAL_STALE_TOKEN: (
+        f"in-container caller inherited a {WRITER_TOKEN_ENV} that matches no live writer record, "
+        "so its borrowed authority is stale or invalid, and the writer slot is read-only; the "
+        "host process must re-acquire the worktree writer lease and forward its current "
+        f"{WRITER_TOKEN_ENV} before starting a container"
+    ),
+}
+
 @dataclass(frozen=True)
 class WorktreeWriterStatus:
     state: str
@@ -78,6 +95,28 @@ class WorktreeWriterReleaseError(WorktreeWriterError):
     """An owned declaration could not be refreshed or released safely."""
 
 
+class WorktreeWriterContainerRefusal(WorktreeWriterError):
+    """An in-container caller cannot mint a declaration on the read-only slot mount.
+
+    The writer slot lives under the git-common directory, which containers only
+    ever get bind-mounted read-only. A host process is the sole declaration
+    minter (`tools/check.py`); an in-container caller is only ever supposed to
+    borrow the host's already-exported token. Attempting the real acquire path
+    there always fails on the read-only mount, previously with an
+    unrelated-looking `PermissionError` deep in a `mkdir` chain instead of a
+    clear refusal.
+
+    `reason` separates the two failing authorities, because they need different
+    operator actions: nothing was inherited at all, or a non-empty inherited
+    token matched no live writer record.
+    """
+
+    def __init__(self, reason: str, *, inherited_token: str = "") -> None:
+        self.reason = reason
+        self.inherited_token = inherited_token
+        super().__init__(_CONTAINER_REFUSAL_MESSAGES[reason])
+
+
 class WorktreeArtifactError(WorktreeWriterError):
     """A generated artifact path resolves inside the shared worktree."""
 
@@ -110,6 +149,16 @@ def worktree_declaration_slot(worktree_root: Path) -> Path:
     else:
         raise WorktreeWriterError(f"{root} is not a Git worktree")
     return _resolved(git_dir) / "yolomux" / "worktree-writer"
+
+
+def _claim_slot_leaf(slot: Path) -> bool:
+    """Create the exclusive slot leaf, reporting whether this caller won the race."""
+
+    try:
+        slot.mkdir(mode=0o700)
+    except FileExistsError:
+        return False
+    return True
 
 
 def _slot_record_path(slot_dir: Path) -> Path:
@@ -443,10 +492,24 @@ def acquire_worktree_writer(
                 _reclaim_stale_slot(slot, token)
             except FileNotFoundError:
                 continue
-        slot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            slot.mkdir(mode=0o700)
-        except FileExistsError:
+            slot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            claimed = _claim_slot_leaf(slot)
+        except PermissionError as error:
+            # React to the real failure rather than guessing from the environment alone. A busy
+            # or stale existing slot never reaches here (it was raised or reclaimed above without
+            # creating anything new), and a caller-owned writable `slot_dir` such as a test's own
+            # `tmp_path` is never the shared read-only mount, so its mkdir simply succeeds. Only a
+            # genuinely fresh declaration against a read-only directory lands here, which is the
+            # in-container case this refusal exists for. `environ` is injectable, so read the
+            # marker off `values` rather than `tools.docker_image.running_inside_container`.
+            if values.get("YOLOMUX_CHECK_IN_CONTAINER") == "1":
+                raise WorktreeWriterContainerRefusal(
+                    CONTAINER_REFUSAL_STALE_TOKEN if inherited_token else CONTAINER_REFUSAL_NO_TOKEN,
+                    inherited_token=inherited_token,
+                ) from error
+            raise
+        if not claimed:
             continue
         record = _writer_record(identity, token=token, purpose=purpose, now=now)
         try:

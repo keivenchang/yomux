@@ -11,6 +11,7 @@ import math
 import multiprocessing
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
+from yolomux_lib.stats_current import service as service_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -282,6 +284,13 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
         "tests/test_jobd.py::test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window",
         "tests/test_jobd.py::test_jobd_control_plane_is_ready_before_blocked_data_plane_setup",
         "tests/test_jobd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
+        "tests/test_stats_current_service_performance.py::test_batched_recording_holds_the_joint_cost_ceilings",
+        "tests/test_stats_current_service_performance.py::test_per_fact_commits_breach_the_ceiling_that_batching_clears",
+        "tests/test_stats_current_service_performance.py::test_recording_facts_holds_the_joint_cost_ceilings_on_a_production_store",
+        "tests/test_stats_current_service_performance.py::test_the_cost_gate_states_the_smallest_regression_it_can_resolve",
+        "tests/test_stats_current_service_performance.py::test_the_probe_publishes_a_ring_head_before_it_measures",
+        "tests/test_stats_current_service_performance.py::test_the_probe_still_covers_the_products_real_append_path",
+        "tests/test_stats_current_service_performance.py::test_whole_history_cold_start_breaches_the_peak_ceiling",
     }
 
     default_step_owners = {}
@@ -806,7 +815,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         events.append(("serial", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
-    def fake_certification_phase(*, evidence_dir, expected_containers=False):
+    def fake_certification_phase(*, evidence_dir, expected_containers=False, inherited_descendants=None):
         events.append(("certify", str(evidence_dir)))
         return {
             "result": "certified",
@@ -847,7 +856,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     monkeypatch.setattr(
         check,
         "run_certification_phase",
-        lambda *, evidence_dir, expected_containers=False: (
+        lambda *, evidence_dir, expected_containers=False, inherited_descendants=None: (
             {
                 "result": "not-certifiable",
                 "reason": "host_unqualified_preflight",
@@ -874,7 +883,7 @@ def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeyp
     monkeypatch.setattr(
         check,
         "run_certification_phase",
-        lambda *, evidence_dir, expected_containers=False: (
+        lambda *, evidence_dir, expected_containers=False, inherited_descendants=None: (
             {
                 "result": "certified",
                 "reason": "all_units_certified_on_a_qualified_host",
@@ -920,7 +929,7 @@ def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
 
     assert events == [("lock", False)]
     payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["schema"] == 4
+    assert payload["schema"] == 5
     assert payload["certification"] is None
     assert payload["selected_lanes"] == ["whitespace"]
 
@@ -956,7 +965,7 @@ def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path)
         "lanes": [{"label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "test_durations": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
         "mode": "parallel",
         "pytest_workers": {"browser": check.pytest_worker_counts()[1], "e2e": check.pytest_worker_counts()[2], "nonbrowser": check.pytest_worker_counts()[0]},
-        "schema": 4,
+        "schema": 5,
         "selected_lanes": ["demo"],
         "wall_seconds": 1.5,
     }
@@ -1419,6 +1428,56 @@ def test_docker_run_tests_forwards_every_certification_admission_variable():
     # The pre-existing forwards must survive; the loop replaced two hand-written ifs.
     assert {"YOLOMUX_TEST_MOCK_TRANSCRIPTS", "YOLOMUX_WORKTREE_WRITER_TOKEN"} <= set(allowlist), allowlist
     assert len(allowlist) == len(set(allowlist)), allowlist
+
+
+def _forwarding_loop(allowlist: list[str], environ: dict[str, str]) -> list[str]:
+    """Run docker/run-tests.sh's OWN forwarding loop against a supplied allowlist.
+
+    The loop is extracted from the script rather than restated, so this exercises the real
+    admission logic. Only the allowlist differs between the two calls below.
+    """
+
+    text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    loop = re.search(r"^(test_env=\(\)$(?:.|\n)*?^done)$", text, re.MULTILINE)
+    assert loop, text
+    script = (
+        "set -u\n"
+        + "FORWARDED_TEST_ENV=(" + " ".join(shlex.quote(name) for name in allowlist) + ")\n"
+        + loop.group(1) + "\n"
+        + 'printf "%s\\n" "${test_env[@]:-}"\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **environ},
+    )
+    return [line for line in completed.stdout.split("\n") if line]
+
+
+def test_docker_run_tests_forwards_the_stats_persistence_arm_variable():
+    """The persistence A/B selects its arm at statsd start, inside the test container.
+
+    An arm variable missing from the allowlist does not fail loudly: both arms run identical
+    code and the experiment reports a clean null, which at a low base rate is indistinguishable
+    from a real null. The name is read from its sole owner rather than restated here.
+    """
+
+    assert service_module.APPEND_FLUSH_ENV_NAME in _certification_env_allowlist()
+
+
+def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():
+    """The control the allowlist doc names: one input, two allowlists, only that differing.
+
+    This proves the forwarding MECHANISM rather than asserting it. It does not launch a
+    container, so it does not prove the container then honours `-e`; that half is docker's
+    contract and is exercised by every containerised run.
+    """
+
+    name = service_module.APPEND_FLUSH_ENV_NAME
+    environ = {name: "0"}
+    with_name = _forwarding_loop(["YOLOMUX_TEST_MOCK_TRANSCRIPTS", name], environ)
+    without_name = _forwarding_loop(["YOLOMUX_TEST_MOCK_TRANSCRIPTS"], environ)
+    assert with_name == ["-e", name], with_name
+    assert without_name == [], without_name
 
 
 def test_certification_step_runs_every_named_unit_serially_with_its_admission_env():
@@ -2681,6 +2740,32 @@ def test_retirement_proves_a_reparented_or_exited_member_gone_without_a_bare_pid
     assert retirement["survivors"] == [], retirement
 
 
+def test_retirement_excludes_an_inherited_login_shell_child_but_not_its_reused_pid(monkeypatch):
+    """An exec-preserved shell child predates the gate; a later PID occupant does not."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "running_test_containers", lambda: {"available": True, "reason": "", "image": "probe", "containers": []})
+    member = {"pid": 5000, "ppid": 999, "command": "ambient-helper", "start_key": "old-life"}
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [member])
+
+    inherited = check.retire_owned_processes(
+        pid=999,
+        deadline_seconds=0.3,
+        identity_fn=lambda _pid: "old-life",
+        inherited_descendants={5000: "old-life"},
+    )
+    assert inherited["retired"] is True and inherited["survivors"] == [], inherited
+
+    member["start_key"] = "new-life"
+    reused = check.retire_owned_processes(
+        pid=999,
+        deadline_seconds=0.3,
+        identity_fn=lambda _pid: "new-life",
+        inherited_descendants={5000: "old-life"},
+    )
+    assert reused["retired"] is False and [row["pid"] for row in reused["survivors"]] == [5000], reused
+
+
 def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
     """One owner of which signals a platform certifies. Linux keeps them; Darwin omits and refuses."""
 
@@ -2768,13 +2853,53 @@ def test_working_tree_clean_state_names_every_tracked_and_untracked_path(tmp_pat
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
 
     clean = check.working_tree_clean_state(repo)
-    assert clean == {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}, clean
+    assert clean == {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": [], "transient_untracked": []}, clean
 
     (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
     (repo / "new.txt").write_text("x\n", encoding="utf-8")
     dirty = check.working_tree_clean_state(repo)
     assert dirty["clean"] is False and dirty["observable"] is True, dirty
     assert dirty["tracked"] == ["tracked.txt"] and dirty["untracked"] == ["new.txt"], dirty
+
+
+def test_release_certification_ignores_untracked_progress_scratchpads(tmp_path):
+    """A STATUS-REPORT or DOIT file the agent keeps its own progress in is not a build input, so an
+    UNTRACKED one must not cost a release its exact-SHA certificate. Refusing over it bought no
+    safety: the operator's only remedy was to move the file out of the tree and put it back after.
+    A tracked modification is still refused -- that one really does change what the SHA names."""
+
+    check = load_check_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+    assert check.working_tree_clean_state(repo)["clean"] is True
+
+    (repo / "STATUS-REPORT.md").write_text("progress\n", encoding="utf-8")
+    (repo / "queues").mkdir()
+    (repo / "queues" / "DOIT.7.md").write_text("queue\n", encoding="utf-8")
+    excused = check.working_tree_clean_state(repo)
+    assert excused["clean"] is True, excused
+    # Excused, never hidden: the evidence still names every path the certificate chose to ignore.
+    assert sorted(excused["transient_untracked"]) == ["STATUS-REPORT.md", "queues/DOIT.7.md"], excused
+    assert excused["untracked"] == [], excused
+
+    # A name that merely starts with the same letters is NOT a scratchpad, and still refuses.
+    (repo / "DOITNOT.py").write_text("real = 1\n", encoding="utf-8")
+    assert check.working_tree_clean_state(repo)["clean"] is False
+
+    # A tracked edit changes what the SHA names, so it refuses even for a scratchpad name.
+    (repo / "DOITNOT.py").unlink()
+    subprocess.run(["git", "-C", str(repo), "add", "STATUS-REPORT.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "track it"], check=True)
+    (repo / "STATUS-REPORT.md").write_text("edited\n", encoding="utf-8")
+    tracked_edit = check.working_tree_clean_state(repo)
+    assert tracked_edit["clean"] is False, tracked_edit
+    assert tracked_edit["tracked"] == ["STATUS-REPORT.md"], tracked_edit
 
 
 def test_exact_sha_certification_requires_a_fresh_checkout_at_both_ends():
@@ -2861,3 +2986,341 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
     documentation = " ".join((REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split())
     assert f"Linux makes {percent}% of that capacity available to pytest" in documentation
     assert f"32 logical but 24 schedulable Linux CPUs produce {counts[0]}/{counts[1]}/{counts[2]}" in documentation
+
+
+def _instr_lane(check, probe, extra=()):
+    """A pytest lane carrying the duration instrumentation the gate applies.
+
+    `--durations=0` publishes the exact node IDs the report resolves against, so
+    a lane without it cannot yield exact identity by design.
+    """
+    lane = check.Lane("pytest", "pytest probe", (check.Step(
+        "pytest", ["python3", "-m", "pytest", str(probe), "-q", "-p", "no:randomly", *extra]),))
+    return check.instrument_lane_for_performance(lane)
+
+
+def _probe(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _run_output(node_ids, failed, reasons=True):
+    """One synthetic transcript: duration table (exact IDs) plus summary rows."""
+    return ("".join(f"0.01s call {n}\n" for n in node_ids)
+            + "=========================== short test summary info ====================\n"
+            + "".join(f"FAILED {n}{' - boom' if reasons else ''}\n" for n in failed))
+
+
+def _tails(node_ids, stem):
+    return {n.split(stem + "::")[-1] for n in node_ids}
+
+
+def _usage():
+    return {"user_seconds": 0.0, "system_seconds": 0.0, "max_rss": 0, "max_rss_unit": "KiB"}
+
+
+def test_failed_pytest_lane_persists_exact_ordered_node_ids_with_parameters(tmp_path):
+    """Params survive verbatim, including one containing pytest's own ` - ` separator."""
+    check = load_check_module()
+    probe = _probe(tmp_path, "test_np.py",
+                   "import pytest\n"
+                   "@pytest.mark.parametrize('v', [1, 2, 'a-b c', 'has - dash'])\n"
+                   "def test_param(v):\n    assert v == 1\n"
+                   "def test_plain():\n    assert False\n"
+                   "def test_passes():\n    assert True\n")
+    result = check.run_lane(_instr_lane(check, probe))
+    failed = result.failed_nodes
+    assert result.ok is False and failed is not None and failed.unavailable == ""
+    # Sorted, so the field is stable under xdist's nondeterministic completion order.
+    assert list(failed.node_ids) == sorted(failed.node_ids)
+    assert _tails(failed.node_ids, "test_np.py") == {
+        "test_param[2]", "test_param[a-b c]", "test_param[has - dash]", "test_plain"}
+    assert not any(n.endswith("::test_passes") for n in failed.node_ids)
+    assert (failed.total, failed.unresolved_rows) == (4, 0)
+
+
+def test_failed_node_ids_survive_ansi_colored_lane_output(tmp_path):
+    """Escapes wrap the test name INSIDE the node ID, not merely the row prefix."""
+    check = load_check_module()
+    probe = _probe(tmp_path, "test_ansi.py",
+                   "import pytest\n@pytest.mark.parametrize('v', [1, 'has - dash'])\n"
+                   "def test_param(v):\n    assert v == 0\n"
+                   "def test_plain():\n    assert False\n")
+    result = check.run_lane(_instr_lane(check, probe, ("--color=yes",)))
+    failed = result.failed_nodes
+    # The retained transcript keeps its ANSI on purpose; only the parsers normalize.
+    assert "\x1b[" in result.output and result.ok is False
+    assert failed is not None and failed.unavailable == ""
+    assert _tails(failed.node_ids, "test_ansi.py") == {"test_param[1]", "test_param[has - dash]", "test_plain"}
+    # No escape may survive into a node ID, or every later query silently misses.
+    assert all("\x1b" not in n for n in failed.node_ids) and failed.unresolved_rows == 0
+
+
+def test_bracket_characters_in_parameters_survive_byte_for_byte(tmp_path):
+    """No text heuristic can split these; identity comes from the duration table."""
+    check = load_check_module()
+    probe = _probe(tmp_path, "test_br.py",
+                   "import pytest\n"
+                   "@pytest.mark.parametrize('v', ['a', 'b'], ids=['has ] - dash', 'has [ - dash'])\n"
+                   "def test_bracket(v):\n    assert False\n")
+    failed = check.run_lane(_instr_lane(check, probe)).failed_nodes
+    assert failed is not None and failed.unavailable == ""
+    assert _tails(failed.node_ids, "test_br.py") == {"test_bracket[has ] - dash]", "test_bracket[has [ - dash]"}
+    assert failed.unresolved_rows == 0
+
+
+def test_failed_node_ids_resolve_only_against_ids_the_run_published():
+    """Dedup across FAILED/ERROR, keep distinct params, never split on a param's ` - `."""
+    check = load_check_module()
+    ids = ["t.py::test_one", "t.py::test_two[a]", "t.py::test_two[b]", "t.py::test_three[has - dash]", "t.py::test_four"]
+    output = _run_output(ids, ids) + "ERROR t.py::test_one - teardown too\n"
+    assert check.resolve_failed_node_ids(output) == (tuple(sorted(ids)), 0)
+
+
+def test_an_unresolvable_summary_row_is_counted_never_guessed():
+    """A row naming a node the run never published is counted, not invented."""
+    check = load_check_module()
+    output = _run_output(["t.py::test_known"], ["t.py::test_known"]) + "FAILED t.py::test_ghost[who - knows] - boom\n"
+    assert check.resolve_failed_node_ids(output) == (("t.py::test_known",), 1)
+
+
+def test_a_published_id_quoted_inside_a_failure_reason_is_not_the_identity():
+    """Searching from the right matched the copy in the reason and kept the whole row."""
+    check = load_check_module()
+    output = ("0.01s call test_probe.py::test_bad\n"
+              "FAILED ../../../../tmp/probe/test_probe.py::test_bad"
+              " - AssertionError: expected test_probe.py::test_bad\n")
+    assert check.resolve_failed_node_ids(output) == (("../../../../tmp/probe/test_probe.py::test_bad",), 0)
+
+
+def test_relative_path_spelling_difference_between_producers_still_resolves():
+    """Durations print the short spelling; the summary prints the rootdir-relative one."""
+    check = load_check_module()
+    output = "0.01s call test_probe.py::test_bad\nFAILED ../../../../tmp/probe/test_probe.py::test_bad - boom\n"
+    assert check.resolve_failed_node_ids(output) == (("../../../../tmp/probe/test_probe.py::test_bad",), 0)
+
+
+def test_failed_node_extraction_ignores_banner_and_indented_rows():
+    """Section banners and indented traceback echoes are not summary rows at all."""
+    check = load_check_module()
+    output = _run_output(["tests/test_real.py::test_real"], []) + (
+        "==================================== ERRORS ==========================\n"
+        "______________________ ERROR at setup of test_setup_error ____________\n"
+        "    FAILED indented/not/a/row.py::test_indented - boom\n"
+        "FAILED tests/test_real.py::test_real - boom\n")
+    assert check.resolve_failed_node_ids(output) == (("tests/test_real.py::test_real",), 0)
+
+
+def test_summary_rows_without_an_exact_producer_report_unavailable():
+    """Uninstrumented lane, collection error, or interrupt: say so, never guess."""
+    check = load_check_module()
+    lane = check.Lane("pytest", "pytest", (check.Step("pytest", ["python3", "-m", "pytest"]),))
+    for output in ("FAILED tests/t.py::test_one - boom\n", "ERROR tests/test_broken_import.py\n"):
+        failed = check.lane_failed_nodes(lane, False, output)
+        assert failed is not None
+        assert (failed.unavailable, failed.unresolved_rows, failed.node_ids) == ("no_exact_node_id_source", 1, ())
+
+
+def test_failed_pytest_lane_without_a_summary_reports_an_explicit_unavailable_reason():
+    """Distinct from "rows we refused to guess at": there were no rows at all."""
+    check = load_check_module()
+    lane = check.Lane("pytest", "pytest probe", (check.Step(
+        "pytest", ["python3", "-m", "pytest", "--this-flag-does-not-exist"]),))
+    result = check.run_lane(lane)
+    assert result.ok is False and result.failed_nodes is not None
+    assert result.failed_nodes.unavailable == "no_pytest_summary_in_output"
+    assert check.failed_nodes_report_field(result) == {
+        "failed_nodes": {"unavailable": "no_pytest_summary_in_output", "unresolved_rows": 0}}
+
+
+def test_failed_non_pytest_lane_uses_a_distinct_not_applicable_state():
+    """"Could never name node IDs" must not read like "should have and did not"."""
+    check = load_check_module()
+    lane = check.Lane("whitespace", "whitespace", (check.Step("p", [sys.executable, "-c", "raise SystemExit(3)"]),))
+    result = check.run_lane(lane)
+    assert result.ok is False and result.failed_nodes is not None
+    assert result.failed_nodes.unavailable == "lane_is_not_pytest"
+
+
+def test_passing_lane_carries_no_failed_node_field(tmp_path):
+    check = load_check_module()
+    probe = _probe(tmp_path, "test_green.py", "def test_ok():\n    assert True\n")
+    result = check.run_lane(_instr_lane(check, probe))
+    assert result.ok is True and result.failed_nodes is None
+    assert check.failed_nodes_report_field(result) == {}
+    assert "failed_nodes" not in check.lane_output_report_fields(result)
+
+
+def test_failed_node_bounds_are_enforced_and_their_counters_are_independent():
+    """An over-long ID is dropped and counted, never truncated into a wrong ID."""
+    check = load_check_module()
+    lane = check.Lane("pytest", "pytest", (check.Step("pytest", ["python3", "-m", "pytest"]),))
+    oversize = "tests/t.py::test_big[" + "x" * check.MAX_FAILED_NODE_ID_BYTES + "]"
+    many = [f"tests/t.py::test_{i}" for i in range(check.MAX_FAILED_NODE_IDS + 25)] + [oversize]
+    over = check.lane_failed_nodes(lane, False, _run_output(many, many))
+    assert over is not None and over.unavailable == ""
+    assert len(over.node_ids) == check.MAX_FAILED_NODE_IDS and over.truncated is True
+    assert over.oversize_dropped == 1 and oversize not in over.node_ids
+    assert over.total == check.MAX_FAILED_NODE_IDS + 26
+    assert all(len(n.encode("utf-8")) <= check.MAX_FAILED_NODE_ID_BYTES for n in over.node_ids)
+    # Under the cardinality cap, dropped is set while truncated stays false.
+    few = ["tests/t.py::test_small", oversize]
+    under = check.lane_failed_nodes(lane, False, _run_output(few, few))
+    assert under is not None and under.node_ids == ("tests/t.py::test_small",)
+    assert (under.total, under.oversize_dropped, under.truncated) == (2, 1, False)
+
+
+def test_failed_nodes_reach_both_final_and_interrupted_report_payloads():
+    """One serializer feeds both paths, so neither can silently lose the field."""
+    check = load_check_module()
+    lane = check.Lane("pytest", "pytest", (check.Step("pytest", ["python3", "-m", "pytest"]),))
+    result = check.LaneResult("pytest", "pytest", False, 1.0, "", (), None, None,
+                              check.FailedNodes(node_ids=("tests/t.py::test_one",), total=1))
+    expected = {"node_ids": ["tests/t.py::test_one"], "total": 1, "truncated": False,
+                "oversize_dropped": 0, "unresolved_rows": 0}
+    payloads = [check.performance_report_payload(selected=[lane], results=[result], serial=True,
+                                                 elapsed=1.0, child_usage=_usage(), interrupted=flag)
+                for flag in (False, True)]
+    assert [p["lanes"][0]["failed_nodes"] for p in payloads] == [expected, expected]
+    assert payloads[1]["interrupted"] is True
+
+
+def test_failed_nodes_do_not_disturb_retained_artifact_fields_or_verdicts(tmp_path):
+    """The pre-existing artifact contract is unchanged; the new field rides alongside."""
+    check = load_check_module()
+    root = check.lane_output_root(tmp_path / "runtime.json")
+    probe = _probe(tmp_path, "test_ret.py", "def test_bad():\n    assert False\n")
+    result = check.run_lane(_instr_lane(check, probe), output_root=root)
+    fields = check.lane_output_report_fields(result)
+    art = result.output_artifact
+    assert result.ok is False and art is not None
+    assert fields["output_artifact"] == {"path": art.path, "sha256": art.sha256, "bytes": art.bytes}
+    assert "output_retention_failure" not in fields
+    ids = fields["failed_nodes"]["node_ids"]
+    assert len(ids) == 1 and ids[0].endswith("test_ret.py::test_bad")
+
+
+def test_both_extractors_normalize_through_the_repo_wide_ansi_owner():
+    """The gate must not grow a second ANSI stripper beside `strip_ansi_sgr`."""
+    check = load_check_module()
+    # The bound function IS the repo-wide owner, proven by where it is defined.
+    assert check.strip_ansi_sgr.__module__ == "yolomux_lib.tmux.agent_tui"
+    assert not hasattr(check, "strip_ansi"), "a second ANSI helper reappeared in the check runner"
+    colored = "\x1b[31mFAILED\x1b[0m tests/t.py::\x1b[1mtest_one\x1b[0m - boom\n"
+    assert check.strip_ansi_sgr(colored) == "FAILED tests/t.py::test_one - boom\n"
+    assert check.pytest_duration_phases("\x1b[32m0.52s\x1b[0m call tests/t.py::test_one\n") == (
+        {"seconds": 0.52, "phase": "call", "nodeid": "tests/t.py::test_one"},)
+    assert check.pytest_failed_node_ids("\x1b[32m0.01s\x1b[0m call tests/t.py::test_one\n" + colored) == (
+        "tests/t.py::test_one",)
+
+
+def test_pytest_step_predicate_is_one_shared_owner():
+    """Instrumentation routes through the predicate rather than re-spelling it."""
+    check = load_check_module()
+    pytest_step = check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"])
+    other = check.Step("node", ["node", "--check", "static/yolomux.js"])
+    assert check.is_pytest_step(pytest_step) is True and check.is_pytest_step(other) is False
+    instrumented = check.instrument_lane_for_performance(check.Lane("d", "d", (pytest_step, other)))
+    assert instrumented.steps[0].args[-2:] == ["--durations=0", "--durations-min=0"]
+    assert instrumented.steps[1] == other
+
+
+def test_schema_is_five_and_no_retired_owner_was_revived():
+    """Owner identity is asserted through the module, never through its source text."""
+    check = load_check_module()
+    assert check.performance_report_payload(
+        selected=[], results=[], serial=True, elapsed=0.0, child_usage=_usage())["schema"] == 5
+    # The removed text heuristic and the parallel ANSI helper must stay removed.
+    for retired in ("strip_ansi", "_failed_node_id"):
+        assert not hasattr(check, retired), f"{retired} was revived in the check runner"
+    assert callable(check.is_pytest_step) and callable(check.strip_ansi_sgr)
+
+
+def test_no_duplicate_module_level_helper_shadows_another():
+    """A late duplicate definition silently rebinds the earlier one.
+
+    A second `_junit_document` here made `passed` an XML child and changed three
+    certification-admission tests without touching them.
+    """
+    for path in (Path(__file__), CHECK_PATH):
+        names = [n.name for n in ast.parse(path.read_text(encoding="utf-8")).body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        assert sorted({n for n in names if names.count(n) > 1}) == [], f"{path.name} rebinds a module-level name"
+
+
+def test_certification_failed_nodes_come_from_its_junit_not_summary_text(tmp_path):
+    """Certification is never instrumented, so JUnit attributes carry its identity."""
+    check = load_check_module()
+    junit = tmp_path / check.CERTIFICATION_JUNIT_NAME
+    junit.write_text(_junit_document([("tests/t.py", "test_slow[has ] - dash]", "failure"),
+                                      ("tests/t.py", "test_broken", "error"),
+                                      ("tests/t.py", "test_fine", "passed")]), encoding="utf-8")
+    failed = check.certification_failed_nodes(junit, lane_ok=False)
+    assert failed is not None and failed.unavailable == ""
+    assert failed.node_ids == ("tests/t.py::test_broken", "tests/t.py::test_slow[has ] - dash]")
+    assert (failed.total, failed.unresolved_rows) == (2, 0)
+    assert check.certification_failed_nodes(junit, lane_ok=True) is None
+
+
+def test_certification_junit_problems_report_typed_reasons(tmp_path):
+    """xunit2 drops `file`, which is why the step pins xunit1; refuse, never half-read."""
+    check = load_check_module()
+    cases = {}
+    cases["junit_absent"] = tmp_path / "absent.xml"
+    for name, text in (("junit_malformed", "<testsuites><testsuite>"),
+                       ("junit_missing_identity",
+                        '<testsuites><testsuite><testcase name="t"><failure/></testcase></testsuite></testsuites>'),
+                       ("junit_named_no_failure", _junit_document([("tests/t.py", "test_ok", "passed")]))):
+        path = tmp_path / f"{name}.xml"
+        path.write_text(text, encoding="utf-8")
+        cases[name] = path
+    for reason, path in cases.items():
+        assert check.certification_failed_nodes(path, lane_ok=False).unavailable == reason
+
+
+def test_run_certification_phase_payload_carries_exact_failed_nodes_from_its_junit(monkeypatch, tmp_path):
+    """The real certification path with bounded stubs, not a serializer spread."""
+    check = load_check_module()
+    evidence = tmp_path / "cert"
+    evidence.mkdir(parents=True, exist_ok=True)
+    failing = check.CERTIFICATION_NODE_IDS[0]
+    rows = [(n.split("::")[0], n.split("::", 1)[1], "failure" if n == failing else "passed")
+            for n in dict.fromkeys(check.CERTIFICATION_NODE_IDS)]
+    (evidence / check.CERTIFICATION_JUNIT_NAME).write_text(_junit_document(rows), encoding="utf-8")
+    clean = {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}
+    monkeypatch.setattr(check, "working_tree_clean_state", lambda: clean)
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_k: {"retired": True, "survivors": []})
+    monkeypatch.setattr(check.latency_calibration, "certification_host_qualification",
+                        lambda **_k: {"qualified": True, "reasons": []})
+    monkeypatch.setattr(check, "run_lane", lambda _l, **_k: check.LaneResult(
+        "certification", "latency certification", False, 1.0, f"FAILED {failing} - boom\n",
+        (check.StepResult("s", "c", 1.0, 1),)))
+    payload, lane_result = check.run_certification_phase(evidence_dir=evidence)
+    # Identity came from JUnit attributes, never from the lane's summary text.
+    assert lane_result is not None and lane_result.failed_nodes is not None
+    assert payload["failed_nodes"] == {"node_ids": [failing], "total": 1, "truncated": False,
+                                       "oversize_dropped": 0, "unresolved_rows": 0}
+
+
+def test_main_interrupted_inside_lanes_writes_a_report_with_no_lanes_and_exits_130(monkeypatch, tmp_path, capsys):
+    """`main()` binds `results` only when `run_functional_lanes` RETURNS.
+
+    An interrupt inside it leaves the initial empty list, so the written report is
+    honest but lane-less: partial lane results are NOT persisted. This regression
+    keeps that limitation visible rather than implied.
+    """
+    check = load_check_module()
+    report = tmp_path / "interrupted.json"
+
+    def _interrupt(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
+    monkeypatch.setattr(check, "run_functional_lanes", _interrupt)
+    exit_code = check.main(["--no-tool-guard", "--lane", "whitespace", "--performance-report", str(report)])
+    assert exit_code == 130 and "CHECK INTERRUPTED" in capsys.readouterr().err
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["interrupted"] is True and payload["selected_lanes"] == ["whitespace"]
+    # No lane returned, so no failed node IDs can exist for work already done.
+    assert payload["lanes"] == []

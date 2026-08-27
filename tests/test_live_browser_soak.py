@@ -3477,7 +3477,12 @@ def test_success_artifact_rejects_missing_or_malformed_final_boundary(monkeypatc
 
 def test_listener_identity_uses_shared_unique_owner(monkeypatch):
     calls = []
-    monkeypatch.setattr(soak, "unique_listener_pid", lambda port: calls.append(("census", port)) or 3364478)
+    def unique(port, *, strict):
+        assert strict is False, strict
+        calls.append(("census", port))
+        return 3364478
+
+    monkeypatch.setattr(soak, "unique_listener_pid", unique)
     monkeypatch.setattr(soak, "process_cwd", lambda pid: calls.append(("cwd", pid)) or "/repo")
 
     def run(command, **_kwargs):
@@ -3497,7 +3502,7 @@ def test_listener_identity_uses_shared_unique_owner(monkeypatch):
 
 
 def test_listener_identity_rejects_raw_fork_parent_and_child(monkeypatch):
-    monkeypatch.setattr(listener_census, "listener_pids", lambda *_args, **_kwargs: [101, 202])
+    monkeypatch.setattr(listener_census, "listener_census", lambda *_a, **_k: listener_census.ListenerCensus(pids=(101, 202)))
 
     with pytest.raises(RuntimeError, match=r"found \[101, 202\]"):
         soak.listener_identity(19771)
