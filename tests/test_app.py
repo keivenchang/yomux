@@ -11465,14 +11465,15 @@ def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_
     assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
         assert app_module.filesystem_operation_priority(operation) == "point"
-    for operation in sorted(app_module.FILESYSTEM_RETAINED_READ_OPERATIONS - app_module.FILESYSTEM_POINT_OPERATIONS):
+    for operation in sorted(app_module.FILESYSTEM_RETAINED_READ_OPERATIONS - app_module.FILESYSTEM_POINT_OPERATIONS - {"git_commit"}):
         assert app_module.filesystem_operation_priority(operation) == "interactive"
+    assert app_module.filesystem_operation_priority("git_commit") == "maintenance"
     assert app_module.filesystem_operation_priority("raw") == "interactive"
     # Every priority this module can emit must be one jobd accepts and owns with a bounded lane.
     emitted = {app_module.filesystem_operation_priority(operation) for operation in app_module.FILESYSTEM_RETAINED_READ_OPERATIONS | {"raw"}}
-    assert emitted == {"point", "interactive"}
+    assert emitted == {"point", "interactive", "maintenance"}
     assert emitted <= set(jobd.JOBD_PRIORITIES)
-    assert {jobd.JOBD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive"}
+    assert {jobd.JOBD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive", "bulk"}
 
 
 def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():

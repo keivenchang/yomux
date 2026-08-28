@@ -2129,10 +2129,13 @@ def test_handle_fs_git_history_and_commit_validate_and_submit_retained_reads():
         )
         assert calls[-1] == ("GET /api/fs/git-history", "git_history", "/repo", {"limit": 1, "cursor": ""})
 
+    Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=999"))
+    assert calls[-1] == ("GET /api/fs/git-history", "git_history", "/repo", {"limit": 40, "cursor": ""})
+
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=many"))
     assert len(writes) == 1
     assert writes[0][0] == HTTPStatus.BAD_REQUEST
-    assert len(calls) == 4
+    assert len(calls) == 5
 
 
 def test_git_history_routes_are_registered_as_readonly_json():

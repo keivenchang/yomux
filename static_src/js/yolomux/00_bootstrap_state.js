@@ -899,7 +899,13 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-const gitDiffHistoryPageSize = 50;
+// The history panel paints one bounded page, with a small local reserve so the first
+// "Load older" action does not wait on another Git walk. Keep all consumers on these
+// one-source limits: Git history includes numstat work and must never expand with the
+// repository's complete history just because a directory has many commits.
+const gitDiffHistoryVisiblePageSize = 30;
+const gitDiffHistoryPrefetchSize = 10;
+const gitDiffHistoryFetchSize = gitDiffHistoryVisiblePageSize + gitDiffHistoryPrefetchSize;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;

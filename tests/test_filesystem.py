@@ -2955,6 +2955,7 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
     first = filesystem.git_history(str(repo.root), limit=2)
     root_call_count = len(calls)
+    history_log_args = next(args for args in calls if "log" in args)
     calls.clear()
     scoped = filesystem.git_history(str(repo.scope), limit=50)
     scoped_call_count = len(calls)
@@ -2968,15 +2969,19 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert first["next_cursor"]
     assert first["truncated"] is False
     assert all(
-        {"sha", "short", "parents", "subject", "author", "authored_at", "files", "added", "removed", "binary_files"}
+        {"sha", "short", "parents", "subject", "author", "authored_at", "summary_pending"}
         <= item.keys()
         for item in first["commits"]
     )
     assert repo.outside_sha not in {item["sha"] for item in scoped["commits"]}
     assert scoped["relative_path"] == "scope"
-    assert next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)["files"] > 0
+    assert next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)["summary_pending"] is True
     assert root_call_count == scoped_call_count
     assert root_call_count <= 4
+    assert "--no-patch" in history_log_args
+    assert "--numstat" not in history_log_args
+    assert "--find-renames" not in history_log_args
+    assert "--find-copies-harder" not in history_log_args
 
     (repo.root / "new-head.txt").write_text("new head\n", encoding="utf-8")
     repo.git("add", "--", "new-head.txt")
@@ -3137,7 +3142,7 @@ def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_
 
     limited = filesystem.git_history(str(repo.root), limit=999)
     clamped = filesystem.git_history(str(repo.root), limit=0)
-    assert len(limited["commits"]) <= 50
+    assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 40
     assert len(clamped["commits"]) == 1
 
     monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1400)
@@ -4400,9 +4405,9 @@ def test_git_history_does_not_mask_fatal_stderr_after_output_cap(tmp_path, monke
 @pytest.mark.parametrize(
     ("parser", "raw", "expected_key"),
     [
-        (git_ops._parse_history_numstat, b"commit\0deadbeef", "fs.error.gitHistoryFailed"),
+        (git_ops._parse_history_metadata, b"commit\0deadbeef", "fs.error.gitHistoryFailed"),
         (
-            git_ops._parse_history_numstat,
+            git_ops._parse_history_metadata,
             b"\0".join(
                 [
                     b"commit",
@@ -4412,8 +4417,7 @@ def test_git_history_does_not_mask_fatal_stderr_after_output_cap(tmp_path, monke
                     b"author",
                     b"1",
                     b"subject",
-                    b"\n1\t2\t",
-                    b"old",
+                    b"unexpected",
                 ]
             ),
             "fs.error.gitHistoryFailed",
@@ -4434,7 +4438,7 @@ def test_git_history_parsers_reject_incomplete_nontruncated_output(parser, raw, 
     ("parser", "raw", "expected_key"),
     [
         (
-            git_ops._parse_history_numstat,
+            git_ops._parse_history_metadata,
             b"\0".join(
                 [
                     b"commit",
@@ -4444,7 +4448,6 @@ def test_git_history_parsers_reject_incomplete_nontruncated_output(parser, raw, 
                     b"author",
                     b"1",
                     b"subject",
-                    b"\n1\t2\tscope/file.txt",
                 ]
             ),
             "fs.error.gitHistoryFailed",
@@ -4481,22 +4484,8 @@ def test_git_commit_parsers_reject_duplicate_file_identities(parser, raw):
     assert failed.value.message_key == "fs.error.gitCommitFailed"
 
 
-def test_git_history_numstat_rejects_empty_rename_endpoints():
-    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
-
-    for rename in (b"\n1\t2\t\0\0scope/new.txt\0", b"\n1\t2\t\0scope/old.txt\0\0"):
-        with pytest.raises(FilesystemError) as failed:
-            git_ops._parse_history_numstat(prefix + b"\0" + rename, output_truncated=False)
-
-        assert failed.value.status == 500
-        assert failed.value.message_key == "fs.error.gitHistoryFailed"
-
-
 def test_git_numstat_parsers_reject_mixed_binary_markers():
-    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
     cases = (
-        (git_ops._parse_history_numstat, prefix + b"\0\n-\t2\tscope/file.bin\0", "fs.error.gitHistoryFailed"),
-        (git_ops._parse_history_numstat, prefix + b"\0\n2\t-\tscope/file.bin\0", "fs.error.gitHistoryFailed"),
         (git_ops._parse_detail_numstat, b"-\t2\tscope/file.bin\0", "fs.error.gitCommitFailed"),
         (git_ops._parse_detail_numstat, b"2\t-\tscope/file.bin\0", "fs.error.gitCommitFailed"),
     )
@@ -4510,10 +4499,7 @@ def test_git_numstat_parsers_reject_mixed_binary_markers():
 
 
 def test_git_numstat_parsers_reject_negative_counts():
-    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
     cases = (
-        (git_ops._parse_history_numstat, prefix + b"\0\n-1\t2\tscope/file.txt\0", "fs.error.gitHistoryFailed"),
-        (git_ops._parse_history_numstat, prefix + b"\0\n2\t-1\tscope/file.txt\0", "fs.error.gitHistoryFailed"),
         (git_ops._parse_detail_numstat, b"-1\t2\tscope/file.txt\0", "fs.error.gitCommitFailed"),
         (git_ops._parse_detail_numstat, b"2\t-1\tscope/file.txt\0", "fs.error.gitCommitFailed"),
     )

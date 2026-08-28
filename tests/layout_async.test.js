@@ -140,7 +140,7 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const first = 'a'.repeat(40), second = 'b'.repeat(40);
-    api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], loaded: true, loadAttempted: true});
+    api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], visibleCommitCount: 2, loaded: true, loadAttempted: true});
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
     api.renderGitDiffPanelForTest(item, {panel});
@@ -174,6 +174,27 @@ async function runLayoutAsyncSuite() {
     assert.equal(refreshed.detailCollapsedDirectories.has(oldSha), false, 'Refresh retires stale per-SHA folder state');
   });
 
+  await testAsync('Git history paints 30 rows and exposes its 10-row reserve without another Git request', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 40}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: 'next-page', truncated: false}));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 30, 'the first paint is the visible 30-row page');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=40'], 'one request carries exactly the 30-row page plus its 10-row reserve');
+    assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 40, 'Load older paints the retained reserve immediately');
+    assert.equal(requests.length, 1, 'the retained reserve does not submit another Git history request');
+  });
+
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
@@ -196,7 +217,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=50$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=40$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -343,7 +364,7 @@ async function runLayoutAsyncSuite() {
     const enDate = enApi.gitDiffCommitRowForTest(enApi.gitDiffItemFor('/repo'), commit).querySelector('.git-diff-commit-date').textContent;
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
     const item = api.gitDiffItemFor('/repo');
-    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], loaded: true, loadAttempted: true});
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
     state.expanded.add(commit.sha);
     state.details.set(commit.sha, {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []});
     const panel = api.createGitDiffPanelForTest(item);

@@ -1939,6 +1939,11 @@ FILESYSTEM_RECURSIVE_MUTATION = "delete"
 def filesystem_operation_priority(operation: str, args: Mapping[str, Any] | None = None) -> str:
     """Return the one jobd lane priority that owns a filesystem operation and its arguments."""
     name = str(operation)
+    # A directory Diff first paints its metadata-only history index. Per-commit file and diff
+    # materialization starts only after an explicit disclosure, and must not queue ahead of a
+    # different user's first history paint or ordinary interactive filesystem work.
+    if name == "git_commit":
+        return "maintenance"
     if name in FILESYSTEM_POINT_OPERATIONS:
         return "point"
     if name in FILESYSTEM_BOUNDED_MUTATIONS:

@@ -596,8 +596,9 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           descriptionOpensDetail,
           detailClosesOnTerminalEngagement,
           directionalLabels: Array.from(keyboardMenu?.querySelectorAll('.tab-split-action') || []).map(button => button.getAttribute('aria-label') || ''),
-          directionalGeometry: Array.from(keyboardMenu?.querySelectorAll('.tab-split-actions') || []).map(group => Object.fromEntries(
-            Array.from(group.querySelectorAll('.tab-split-action')).map(button => {
+          directionalGeometry: Array.from(keyboardMenu?.querySelectorAll('.tab-split-actions') || []).map(group => ({
+            title: (() => { const rect = group.querySelector('.tab-directional-actions-title')?.getBoundingClientRect(); return {left: rect?.left || 0, right: rect?.right || 0, top: rect?.top || 0, bottom: rect?.bottom || 0}; })(),
+            actions: Object.fromEntries(Array.from(group.querySelectorAll('.tab-split-action')).map(button => {
               const rect = button.getBoundingClientRect();
               const icon = button.querySelector('.tab-directional-action-icon');
               const iconRect = icon?.getBoundingClientRect();
@@ -612,8 +613,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
                 paneBorderRadius: paneStyle?.borderTopLeftRadius || '',
                 left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
               }];
-            }),
-          )),
+            })),
+          })),
           keyboardDescription: keyboardMenu?.querySelector('.tab-action-description')?.textContent.trim() || '',
         };
         """
@@ -631,14 +632,15 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert all(f"Swap {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert len(result["directionalGeometry"]) == 2, result
     for geometry in result["directionalGeometry"]:
+        assert geometry["title"]["bottom"] <= min(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")), geometry
         for zone in ("left", "right", "top", "bottom"):
-            assert f"tab-directional-action-icon--{zone}" in geometry[zone]["iconClass"], geometry
-            assert geometry[zone]["iconWidth"] > geometry[zone]["iconHeight"] > 0, geometry
-            assert geometry[zone]["iconBorderWidth"] == "2px", geometry
-            assert geometry[zone]["iconBorderRadius"] == "4px", geometry
-            assert geometry[zone]["paneBorderRadius"] == "2px", geometry
-        assert max(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
-        assert geometry["left"]["left"] < geometry["right"]["left"] < geometry["top"]["left"] < geometry["bottom"]["left"], geometry
+            assert f"tab-directional-action-icon--{zone}" in geometry["actions"][zone]["iconClass"], geometry
+            assert geometry["actions"][zone]["iconWidth"] > geometry["actions"][zone]["iconHeight"] > 0, geometry
+            assert geometry["actions"][zone]["iconBorderWidth"] == "2px", geometry
+            assert geometry["actions"][zone]["iconBorderRadius"] == "4px", geometry
+            assert geometry["actions"][zone]["paneBorderRadius"] == "2px", geometry
+        assert max(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
+        assert geometry["actions"]["left"]["left"] < geometry["actions"]["right"]["left"] < geometry["actions"]["top"]["left"] < geometry["actions"]["bottom"]["left"], geometry
 
 
 def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, tmp_path):

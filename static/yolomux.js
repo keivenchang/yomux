@@ -900,7 +900,13 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-const gitDiffHistoryPageSize = 50;
+// The history panel paints one bounded page, with a small local reserve so the first
+// "Load older" action does not wait on another Git walk. Keep all consumers on these
+// one-source limits: Git history includes numstat work and must never expand with the
+// repository's complete history just because a directory has many commits.
+const gitDiffHistoryVisiblePageSize = 30;
+const gitDiffHistoryPrefetchSize = 10;
+const gitDiffHistoryFetchSize = gitDiffHistoryVisiblePageSize + gitDiffHistoryPrefetchSize;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -63627,6 +63633,7 @@ function newGitDiffTabState(item, defaults = {}) {
     head: '',
     snapshotCursor: '',
     commits: [],
+    visibleCommitCount: 0,
     nextCursor: '',
     truncated: false,
     truncationReason: '',
@@ -63680,7 +63687,7 @@ function cleanupGitDiffTab(item) {
 
 function gitDiffHistoryUrl(path, cursor = '') {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryPageSize}${suffix}`;
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryFetchSize}${suffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head) {
@@ -63780,6 +63787,8 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
+    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
+    else state.visibleCommitCount = Math.min(state.commits.length, gitDiffHistoryVisiblePageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
@@ -63808,7 +63817,30 @@ async function refreshGitDiffHistory(item, options = {}) {
 }
 
 function loadOlderGitDiffHistory(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return false;
+  // Expose the bounded reserve synchronously. Only after it is exhausted do we submit
+  // the next 30-visible-plus-10-reserve Git history walk.
+  if (state.visibleCommitCount < state.commits.length) {
+    state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
+    renderGitDiffPanel(item);
+    return true;
+  }
   return refreshGitDiffHistory(item, {append: true});
+}
+
+function gitDiffHistoryNearEnd(body) {
+  if (!body) return false;
+  return body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+}
+
+function bindGitDiffHistoryInfiniteScroll(item, body) {
+  bindScopedOnce(body, 'git-diff-history-infinite-scroll', scope => {
+    scope.ownEvent('scroll', body, 'scroll', () => {
+      if (!gitDiffHistoryNearEnd(body)) return;
+      void loadOlderGitDiffHistory(item);
+    }, {passive: true});
+  });
 }
 
 function gitDiffDetailGuard(state, sha) {
@@ -63883,6 +63915,11 @@ function gitDiffTextNode(className, text = '') {
 }
 
 function gitDiffCommitChangesNode(commit) {
+  if (commit?.summary_pending === true) {
+    const node = gitDiffTextNode('git-diff-commit-changes git-diff-commit-changes-pending', '…');
+    node.setAttribute('aria-label', t('common.loading'));
+    return node;
+  }
   const files = Math.max(0, Number(commit?.files) || 0);
   const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
   const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
@@ -64217,7 +64254,7 @@ function renderGitDiffCommitList(item, list, state) {
   const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
   const existing = new Map(Array.from(list.children || []).map(group => [group.dataset?.gitDiffCommitGroup || '', group]));
   const groups = [];
-  for (const commit of state.commits) {
+  for (const commit of state.commits.slice(0, state.visibleCommitCount)) {
     const sha = String(commit?.sha || '');
     if (!sha) continue;
     const group = existing.get(sha) || document.createElement('section');
@@ -64256,6 +64293,7 @@ function createGitDiffPanel(item) {
   const body = document.createElement('div');
   body.className = 'git-diff-panel-body';
   body.setAttribute('aria-label', gitDiffTabLabel(item));
+  bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
   ensureGitDiffTabState(item);
   return panel;
@@ -64280,7 +64318,7 @@ function renderGitDiffPanel(item, options = {}) {
   const meta = panel.querySelector?.('.git-diff-meta');
   if (meta) {
     const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
-    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.commits.length || gitDiffHistoryPageSize})}`;
+    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryVisiblePageSize})}`;
   }
   const body = panel.querySelector?.('.git-diff-panel-body');
   if (!body) return state;
@@ -64294,14 +64332,8 @@ function renderGitDiffPanel(item, options = {}) {
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
   if (state.commits.length) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
-  if (state.nextCursor) {
-    nodes.push(makeButton({
-      className: 'git-diff-load-older',
-      label: state.loadingOlder ? t('common.loading') : t('gitDiff.loadOlder'),
-      disabled: state.loadingOlder,
-      onClick: () => void loadOlderGitDiffHistory(item),
-    }));
-  } else if (state.truncated) {
+  if (state.loadingOlder) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
+  else if (state.truncated && state.visibleCommitCount >= state.commits.length && !state.nextCursor) {
     nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
   }
   body.replaceChildren(...nodes);
@@ -64332,10 +64364,10 @@ function layoutUrlGitDiffStateSnapshot() {
       item,
       head: state.head,
       snapshotCursor: state.snapshotCursor,
-      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryPageSize),
+      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryVisiblePageSize),
       focusedSha: state.focusedSha || '',
-      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryPageSize),
-      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryPageSize),
+      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryVisiblePageSize),
+      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryVisiblePageSize),
     });
     if (result.length >= 32) break;
   }
@@ -64358,20 +64390,21 @@ function applyLayoutUrlGitDiffState(entries) {
     state.head = head;
     state.snapshotCursor = snapshotCursor;
     state.commits = [];
+    state.visibleCommitCount = 0;
     state.nextCursor = '';
     state.loaded = false;
     state.loadAttempted = false;
     state.error = null;
-    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryPageSize));
+    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryVisiblePageSize));
     state.focusedSha = gitDiffLayoutOid(entry.focusedSha);
     state.details.clear();
     state.detailErrors.clear();
-    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const paths = Array.isArray(pair?.[1]) ? pair[1].map(path => normalizeDirectoryPath(String(path || ''))).filter(Boolean).slice(0, 500) : [];
       return sha ? [[sha, new Set(paths)]] : [];
     }));
-    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const path = normalizeDirectoryPath(String(pair?.[1] || ''));
       return sha && path ? [[sha, path]] : [];
