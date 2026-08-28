@@ -1311,6 +1311,12 @@ class PersistentJobBroker:
     def _quarantined_predecessor_count(self) -> int:
         return sum(len(slot.predecessors) for slots in self.executor_slots.values() for slot in slots)
 
+    @staticmethod
+    def _executor_workers(executor: ProcessPoolExecutor) -> list[Any]:
+        """Return workers still owned by an executor, including none after shutdown."""
+        processes = executor._processes
+        return list(processes.values()) if processes is not None else []
+
     def _quarantine_slot(self, record: JobRecord) -> bool:
         """Fence one unresponsive worker and make only its slot eligible for replacement."""
         lane = self._lane_for_priority(record.priority)
@@ -1360,7 +1366,7 @@ class PersistentJobBroker:
             for slot in slots:
                 retained: list[tuple[int, ProcessPoolExecutor]] = []
                 for generation, executor in slot.predecessors:
-                    workers = list(executor._processes.values())
+                    workers = self._executor_workers(executor)
                     if any(worker.is_alive() for worker in workers):
                         retained.append((generation, executor))
                 slot.predecessors = retained
@@ -1392,7 +1398,7 @@ class PersistentJobBroker:
             slot.predecessors = []
             slot.generation += 1
         for executor in executors:
-            workers = list(executor._processes.values())
+            workers = self._executor_workers(executor)
             executor.shutdown(wait=False, cancel_futures=True)
             for worker in workers:
                 if worker.is_alive():
@@ -2035,13 +2041,13 @@ class PersistentJobBroker:
             for slot in slots
             for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors])
             if executor is not None
-            for process in executor._processes.values()
+            for process in self._executor_workers(executor)
             if process.pid is not None
         } | {
             int(process.pid)
             for executor in self.executors.values()
             if executor is not None
-            for process in executor._processes.values()
+            for process in self._executor_workers(executor)
             if process.pid is not None
         })
         status = {
@@ -2070,7 +2076,7 @@ class PersistentJobBroker:
                     {
                         "generation": slot.generation,
                         "quarantined_predecessors": len(slot.predecessors),
-                        "worker_pids": sorted(int(process.pid) for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors]) if executor is not None for process in executor._processes.values() if process.pid is not None),
+                        "worker_pids": sorted(int(process.pid) for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors]) if executor is not None for process in self._executor_workers(executor) if process.pid is not None),
                     }
                     for slot in self.executor_slots[lane]
                 ]

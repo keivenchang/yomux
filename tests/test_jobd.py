@@ -3799,6 +3799,20 @@ def test_jobd_quarantines_one_slot_and_fences_its_late_result(tmp_path):
     assert held.status == "timed_out"
 
 
+def test_jobd_status_drops_a_shutdown_quarantined_predecessor(tmp_path):
+    """A quarantined executor has no process map after shutdown, but status stays available."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    executor = ProcessPoolExecutor(max_workers=1)
+    executor.shutdown()
+    assert executor._processes is None
+    service.executor_slots["point"][0].predecessors.append((0, executor))
+
+    status = service.common_status()
+
+    assert status["ok"] is True
+    assert service.executor_slots["point"][0].predecessors == []
+
+
 def test_jobd_replacement_budget_is_daemon_wide(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
 
