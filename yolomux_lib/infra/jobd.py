@@ -113,8 +113,10 @@ from ..web import html_preview_document
 # v24: queued-delivery journal compaction runs as registered maintenance work rather than burning
 # request-thread CPU. A v23 daemon rejects that task, so an upgraded web process must retire it.
 # v25: shutdown admission refusal identifies itself as pre-handler busy so clients can retry it.
+# v26: each scheduler lane owns independently replaceable one-worker slots.  A deadline-backstop
+# quarantine fences a kernel-stuck slot without taking its healthy lane siblings down.
 # A v24 daemon returns an indistinguishable generic busy response and must not remain attached.
-JOBD_PROTOCOL_VERSION = 25
+JOBD_PROTOCOL_VERSION = 26
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
 
@@ -218,6 +220,10 @@ JOBD_SCHEDULER_POLL_SECONDS = 0.05
 # When a directory IS large enough to blow through this, the backstop fires and the worker's partial
 # evidence is retained instead of discarded -- that retention is what makes an imperfect bound safe.
 JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS = 2.0
+# At most this many unkillable predecessors may remain alive across the whole broker.  This is a
+# daemon-wide memory bound, not a per-lane convenience limit: allowing two stuck workers in every
+# lane would turn one wedged mount into an unbounded replacement storm.
+JOBD_MAX_QUARANTINED_PREDECESSORS = 2
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
 JOBD_BROKER_ACTIONS = frozenset({
@@ -773,6 +779,17 @@ class JobRecord:
     running_started_at: float = 0.0
     running_started_monotonic: float = 0.0
     artifact_finalizing: bool = False
+    executor_slot: int = -1
+    executor_generation: int = 0
+
+
+@dataclass
+class ExecutorSlot:
+    """One independently replaceable worker slot owned by a scheduler lane."""
+
+    executor: ProcessPoolExecutor | None = None
+    generation: int = 0
+    predecessors: list[tuple[int, ProcessPoolExecutor]] = field(default_factory=list)
 
 
 class JobProductStore:
@@ -1112,6 +1129,15 @@ class PersistentJobBroker:
         self.request_counter_lock = threading.Lock()
         self.scheduler_pump_failures = 0
         self.scheduler_pump_last_failure: dict[str, str] = {}
+        # A multi-worker ProcessPoolExecutor cannot retire one NFS/D-state worker: replacing it
+        # tears down healthy siblings.  Slots keep the broker queues central while each worker has
+        # one disposable executor and a monotonically increasing publication generation.
+        self.executor_slots: dict[str, list[ExecutorSlot]] = {
+            lane: [ExecutorSlot() for _ in range(self._lane_capacity(lane))]
+            for lane in JOBD_LANE_PRIORITIES
+        }
+        # Compatibility projection for control-plane callers and old status consumers.  It always
+        # names slot zero; scheduling exclusively uses executor_slots.
         self.executors: dict[str, ProcessPoolExecutor | None] = {lane: None for lane in JOBD_LANE_PRIORITIES}
         self.state_lock = threading.RLock()
         # Submission acceptance and shutdown share this short critical section. A shutdown that
@@ -1271,13 +1297,73 @@ class PersistentJobBroker:
     def _new_executor(worker_count: int) -> ProcessPoolExecutor:
         return ProcessPoolExecutor(max_workers=worker_count, mp_context=multiprocessing.get_context("spawn"))
 
-    def _executor(self, priority: str = "freshness") -> ProcessPoolExecutor:
+    def _executor(self, priority: str = "freshness", slot_index: int = 0) -> ProcessPoolExecutor:
         lane = self._lane_for_priority(priority)
-        executor = self.executors[lane]
+        slot = self.executor_slots[lane][slot_index]
+        executor = slot.executor
         if executor is None:
-            executor = self._new_executor(self._lane_capacity(lane))
-            self.executors[lane] = executor
+            executor = self._new_executor(1)
+            slot.executor = executor
+            if slot_index == 0:
+                self.executors[lane] = executor
         return executor
+
+    def _quarantined_predecessor_count(self) -> int:
+        return sum(len(slot.predecessors) for slots in self.executor_slots.values() for slot in slots)
+
+    def _quarantine_slot(self, record: JobRecord) -> bool:
+        """Fence one unresponsive worker and make only its slot eligible for replacement."""
+        lane = self._lane_for_priority(record.priority)
+        if record.executor_slot < 0:
+            return False
+        slot = self.executor_slots[lane][record.executor_slot]
+        if slot.generation != record.executor_generation or slot.executor is None:
+            return False
+        if self._quarantined_predecessor_count() >= JOBD_MAX_QUARANTINED_PREDECESSORS:
+            return False
+        predecessor = slot.executor
+        predecessor.shutdown(wait=False, cancel_futures=True)
+        slot.predecessors.append((slot.generation, predecessor))
+        slot.executor = None
+        slot.generation += 1
+        if record.executor_slot == 0:
+            self.executors[lane] = None
+        return True
+
+    def _retire_broken_slot(self, record: JobRecord) -> None:
+        """Fence only the slot whose executor has already failed.
+
+        ``BrokenProcessPool`` is a per-executor failure.  Retiring a whole lane here would change
+        the generation of healthy sibling slots and discard work that the broker already accepted.
+        """
+        lane = self._lane_for_priority(record.priority)
+        if record.executor_slot < 0:
+            # Compatibility records created by pre-slot tests and legacy recovery callers have no
+            # slot identity. They cannot prove a healthy sibling exists, so preserve the old safe
+            # all-lane cleanup only for that un-attributed path.
+            self._shutdown_executor(lane=lane)
+            return
+        slot = self.executor_slots[lane][record.executor_slot]
+        if slot.generation != record.executor_generation:
+            return
+        executor = slot.executor
+        slot.executor = None
+        slot.generation += 1
+        if record.executor_slot == 0:
+            self.executors[lane] = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _reap_slot_predecessors(self) -> None:
+        """Drop exactly the predecessor tokens whose worker groups have actually exited."""
+        for slots in self.executor_slots.values():
+            for slot in slots:
+                retained: list[tuple[int, ProcessPoolExecutor]] = []
+                for generation, executor in slot.predecessors:
+                    workers = list(executor._processes.values())
+                    if any(worker.is_alive() for worker in workers):
+                        retained.append((generation, executor))
+                slot.predecessors = retained
 
     def _shutdown_executor(self, *, lane: str) -> None:
         """Shut down one lane's process pool and prove every worker process is actually gone.
@@ -1294,20 +1380,28 @@ class PersistentJobBroker:
         (then killing, if needed) every worker here, synchronously and with bounded timeouts, means
         no active child is left for that atexit hook to hang on, regardless of what it was doing.
         """
-        executor = self.executors.get(lane)
+        slots = self.executor_slots[lane]
+        # Include the compatibility projection if a legacy caller supplied a test executor.
+        legacy = self.executors.get(lane)
+        executors = [executor for slot in slots for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors]) if executor is not None]
+        if legacy is not None and legacy not in executors:
+            executors.append(legacy)
         self.executors[lane] = None
-        if executor is None:
-            return
-        workers = list(executor._processes.values())
-        executor.shutdown(wait=False, cancel_futures=True)
-        for worker in workers:
-            if worker.is_alive():
-                worker.terminate()
-        for worker in workers:
-            worker.join(timeout=2.0)
-            if worker.is_alive():
-                worker.kill()
-                worker.join(timeout=1.0)
+        for slot in slots:
+            slot.executor = None
+            slot.predecessors = []
+            slot.generation += 1
+        for executor in executors:
+            workers = list(executor._processes.values())
+            executor.shutdown(wait=False, cancel_futures=True)
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+            for worker in workers:
+                worker.join(timeout=2.0)
+                if worker.is_alive():
+                    worker.kill()
+                    worker.join(timeout=1.0)
 
     def _record_payload(self, record: JobRecord, *, include_result: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1372,19 +1466,27 @@ class PersistentJobBroker:
             else:
                 if now < record.deadline_at + JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS:
                     continue
-                # ProcessPoolExecutor cannot safely cancel an already-running task.  Keep
-                # its future occupying a slot until it exits so a deadline cannot create
-                # unbounded hidden CPU work behind the broker's capacity accounting.
                 self._mark_terminal(record, "timed_out", "deadline exceeded while executing")
+                self._quarantine_slot(record)
             self._bump_counter(record.task, "timed_out")
 
     def _handle_finished_futures(self, *, finalize_artifacts: bool) -> list[tuple[JobRecord, JobdArtifactResult]]:
-        restart_executors: set[str] = set()
+        restart_slots: list[JobRecord] = []
         pending_artifacts: list[tuple[JobRecord, JobdArtifactResult]] = []
         for record in self.records.values():
             if record.future is None or not record.future.done() or record.artifact_finalizing:
                 continue
             future = record.future
+            lane = self._lane_for_priority(record.priority)
+            if record.executor_slot >= 0 and record.executor_generation != self.executor_slots[lane][record.executor_slot].generation:
+                try:
+                    abandoned = future.result()
+                    if isinstance(abandoned, JobdArtifactResult):
+                        self.product_store.discard_artifact_result(abandoned)
+                except Exception:
+                    pass
+                record.future = None
+                continue
             if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}:
                 try:
                     abandoned = future.result()
@@ -1454,7 +1556,7 @@ class PersistentJobBroker:
                     self._bump_counter(record.task, "failed")
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
-                restart_executors.add(self._lane_for_priority(record.priority))
+                restart_slots.append(record)
             except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(
@@ -1480,8 +1582,8 @@ class PersistentJobBroker:
                     self._bump_counter(record.task, "failed")
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
-        for lane in restart_executors:
-            self._shutdown_executor(lane=lane)
+        for record in restart_slots:
+            self._retire_broken_slot(record)
         return pending_artifacts
 
     def _finalize_artifact(self, record: JobRecord, task_result: JobdArtifactResult) -> None:
@@ -1568,6 +1670,7 @@ class PersistentJobBroker:
         capacity is recounted, which can only let more queued work start in the same pump.
         """
         pending_artifacts = self._handle_finished_futures(finalize_artifacts=finalize_artifacts)
+        self._reap_slot_predecessors()
         self._expire_deadlines(time.monotonic())
         self._prune_records()
         self.product_store.prune_leases()
@@ -1580,9 +1683,19 @@ class PersistentJobBroker:
             pending_artifacts = self._refresh_records(finalize_artifacts=True)
             now = time.monotonic()
             for lane, priorities in JOBD_LANE_PRIORITIES.items():
-                capacity = self._lane_capacity(lane)
-                active = self._future_slots(lane=lane)
-                while active < capacity:
+                slots = self.executor_slots[lane]
+                active_slots = {
+                    record.executor_slot
+                    for record in self.records.values()
+                    if record.status == "running" and self._lane_for_priority(record.priority) == lane
+                    and record.executor_slot >= 0 and record.executor_generation == slots[record.executor_slot].generation
+                }
+                legacy_active = sum(
+                    1 for record in self.records.values()
+                    if record.future is not None and not record.future.done()
+                    and self._lane_for_priority(record.priority) == lane and record.executor_slot < 0
+                )
+                while len(active_slots) + legacy_active < len(slots):
                     record = self._next_queued_record(priorities)
                     if record is None:
                         break
@@ -1593,18 +1706,33 @@ class PersistentJobBroker:
                     if record.deadline_at > 0 and now >= record.deadline_at:
                         self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
                         continue
+                    slot_index = next(index for index in range(len(slots)) if index not in active_slots)
+                    slot = slots[slot_index]
+                    if slot.executor is None and self._quarantined_predecessor_count() >= JOBD_MAX_QUARANTINED_PREDECESSORS:
+                        error = "filesystem_worker_quarantined" if lane in {"point", "mutation", "interactive"} else "journal_worker_quarantined"
+                        self._mark_terminal(record, "failed", error, {"reason": error})
+                        self._bump_counter(record.task, "failed")
+                        continue
                     # Mark the record in flight before starting cold process capacity. Product reads
                     # can now return `pending` without waiting for ProcessPoolExecutor startup.
                     record.status = "running"
                     record.running_started_at = time.time()
                     record.running_started_monotonic = time.monotonic()
+                    record.executor_slot = slot_index
+                    record.executor_generation = slot.generation
                     dispatch.append(record)
-                    active += 1
+                    active_slots.add(slot_index)
         for record, task_result in pending_artifacts:
             self._finalize_artifact(record, task_result)
         for record in dispatch:
             try:
-                future = self._executor(record.priority).submit(
+                try:
+                    executor = self._executor(record.priority, record.executor_slot)
+                except TypeError:
+                    # Focused test doubles from before slot ownership deliberately expose the old
+                    # one-argument seam; retain it while production always chooses a concrete slot.
+                    executor = self._executor(record.priority)
+                future = executor.submit(
                     run_registered_task_result,
                     record.task,
                     record.payload,
@@ -1620,7 +1748,7 @@ class PersistentJobBroker:
                     )
                     self._bump_counter(record.task, "failed")
                     if isinstance(exc, BrokenProcessPool):
-                        self._shutdown_executor(lane=self._lane_for_priority(record.priority))
+                        self._retire_broken_slot(record)
                 continue
             with self.state_lock:
                 record.future = future
@@ -1903,6 +2031,14 @@ class PersistentJobBroker:
         ]
         worker_pids = sorted({
             int(process.pid)
+            for slots in self.executor_slots.values()
+            for slot in slots
+            for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors])
+            if executor is not None
+            for process in executor._processes.values()
+            if process.pid is not None
+        } | {
+            int(process.pid)
             for executor in self.executors.values()
             if executor is not None
             for process in executor._processes.values()
@@ -1928,6 +2064,17 @@ class PersistentJobBroker:
                     ),
                 }
                 for lane, priorities in JOBD_LANE_PRIORITIES.items()
+            },
+            "executor_slots": {
+                lane: [
+                    {
+                        "generation": slot.generation,
+                        "quarantined_predecessors": len(slot.predecessors),
+                        "worker_pids": sorted(int(process.pid) for executor in ([slot.executor] + [predecessor for _generation, predecessor in slot.predecessors]) if executor is not None for process in executor._processes.values() if process.pid is not None),
+                    }
+                    for slot in self.executor_slots[lane]
+                ]
+                for lane in JOBD_LANE_PRIORITIES
             },
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
@@ -2144,7 +2291,7 @@ class PersistentJobBroker:
                 self._record_scheduler_pump_failure(exc, traceback.format_exc())
 
     def _has_active_work(self) -> bool:
-        return bool(self._queued_count()) or any(record.status == "running" for record in self.records.values())
+        return bool(self._queued_count()) or any(record.status == "running" for record in self.records.values()) or self._quarantined_predecessor_count() > 0
 
     def _finish_requested_shutdown_if_drained(self) -> bool:
         if self.shutdown_requested.is_set() and not self._has_active_work():

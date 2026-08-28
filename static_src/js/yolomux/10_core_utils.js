@@ -6632,7 +6632,7 @@ function requestFileEditorLineTarget(item, line) {
 
 async function openTerminalFileReference(target) {
   if (!target?.path) return;
-  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {viewMode: 'edit', userInitiated: true});
+  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {userInitiated: true});
   if (item && target.line) requestFileEditorLineTarget(item, target.line);
 }
 

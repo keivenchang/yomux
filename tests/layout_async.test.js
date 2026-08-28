@@ -7079,6 +7079,40 @@ async function runLayoutAsyncSuite() {
 
     {
       const api = loadYolomux('', ['1']);
+      const path = '/repo/app/keep-preview.md';
+      const aliasPath = '/repo/app/keep-preview-alias.md';
+      const calls = [];
+      api.setFetchForTest(url => {
+        const request = String(url);
+        calls.push(request);
+        const requestedPath = decodeURIComponent((request.match(/path=([^&]+)/) || [])[1] || '');
+        return Promise.resolve(jsonResponse({
+          path: requestedPath,
+          content: '# preview\n',
+          size: 10,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:22',
+        }));
+      });
+
+      const item = await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}, {viewMode: 'preview'});
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'the initial explicit Preview action selects Preview');
+      assert.equal(await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}), item, 'an implicit reopen focuses the existing tab');
+      assert.equal(api.currentFileStateForTest(path).kind, 'text', 'an implicit reopen keeps the loaded file state');
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'an implicit reopen preserves the selected Preview mode');
+      assert.equal(await api.openFileInEditorForTest(aliasPath, {name: 'keep-preview-alias.md', realpath: path, file_id: 'dev:10:ino:22'}), item, 'an implicit physical-file alias focuses the same tab');
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'an implicit physical-file alias preserves the selected Preview mode');
+      await api.openTerminalFileReferenceForTest({path, info: {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}});
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'terminal Open also preserves the selected Preview mode');
+      assert.equal(await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}, {viewMode: 'edit'}), item, 'an explicit reopen still focuses the existing tab');
+      assert.equal(api.editorViewModeFor(path, item), 'edit', 'an explicit view action still overrides the preserved mode');
+      assert.equal(calls.filter(url => url.startsWith('/api/fs/read?') && !url.includes('include_git=1')).length, 1, 'reopens and aliases do not start another base read');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
       const path = '/repo/app/src/stale-git.md';
       const deferredGit = deferredFetch();
       api.setFetchForTest(url => {

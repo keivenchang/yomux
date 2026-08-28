@@ -13,8 +13,8 @@
       "self_fields": 2
     },
     "yolomux_lib/infra/jobd.py:PersistentJobBroker": {
-      "methods": 57,
-      "self_fields": 37
+      "methods": 61,
+      "self_fields": 38
     },
     "yolomux_lib/infra/state_services.py:SessionFilesOperationLifecycle": {
       "methods": 6,
@@ -2001,7 +2001,7 @@
     "tests/helpers/fixture_http_server.py": 161,
     "tests/i18n_locale_registry.test.js": 270,
     "tests/i18n_structured_message.test.js": 267,
-    "tests/layout_async.test.js": 9636,
+    "tests/layout_async.test.js": 9670,
     "tests/layout_restore.test.js": 5085,
     "tests/open_file_413_reason.test.js": 154,
     "tests/open_file_missing_guard.test.js": 368,
@@ -2137,7 +2137,7 @@
     "tests/test_inotify_capacity.py": 181,
     "tests/test_install_metadata.py": 31,
     "tests/test_instance_isolation.py": 413,
-    "tests/test_jobd.py": 3781,
+    "tests/test_jobd.py": 3933,
     "tests/test_jobd_failure_isolation.py": 346,
     "tests/test_journey_phase_contracts.py": 60,
     "tests/test_launcher_ephemeral_server.py": 78,

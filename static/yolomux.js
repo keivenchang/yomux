@@ -9133,7 +9133,7 @@ function requestFileEditorLineTarget(item, line) {
 
 async function openTerminalFileReference(target) {
   if (!target?.path) return;
-  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {viewMode: 'edit', userInitiated: true});
+  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {userInitiated: true});
   if (item && target.line) requestFileEditorLineTarget(item, target.line);
 }
 
@@ -28403,6 +28403,12 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A new tab has no file state until this point. Select its requested/default mode only after
+  // installing that state, so Preview capability is evaluated against the real file type. An
+  // ordinary reopen deliberately has no initialViewMode and keeps its existing per-tab choice.
+  if (options.initialViewMode && !fileEditorViewModesForPath(path).has(editorViewModeKey(path, item))) {
+    setFileEditorViewMode(path, options.initialViewMode, item);
+  }
   // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
   // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
   if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
@@ -28461,7 +28467,6 @@ async function focusExistingPhysicalFileEditor(requestedPath, existingPath, opti
   const item = primaryEditorItemForPath(existingPath, options.item || null);
   foldDuplicateEditorItemsForPath(existingPath, item);
   if (options.viewMode) setFileEditorViewMode(existingPath, options.viewMode, item);
-  else setFileEditorViewMode(existingPath, 'edit', item);
   recordEditorNav(item);
   const openOptions = {
     ...options,
@@ -28695,10 +28700,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
-  if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
     applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
     if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
@@ -28706,6 +28710,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     renderOpenFilePath(fullPath);
     return item;
   }
+  // A default is only for a new tab. Reopening an error/Loading tab may retry its read, but its
+  // existing per-item view mode remains the user's choice unless this action requested a mode.
+  openOptions.initialViewMode = options.viewMode || defaultFileEditorViewModeForPath(fullPath, kind);
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = fileEntryMtime(entry);

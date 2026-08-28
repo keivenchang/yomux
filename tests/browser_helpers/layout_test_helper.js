@@ -2455,6 +2455,7 @@ globalThis.__layoutTestApi = {
   tooLargeFileStateForTest: tooLargeFileState,
   fileErrorTextForTest: fileErrorText,
   fileInspectionErrorMessageForTest: fileInspectionErrorMessage,
+  openTerminalFileReferenceForTest: openTerminalFileReference,
   setOpenFileOwner,
   renderTransportWarning,
   captureFileEditorPanelViewStateForTest: captureFileEditorPanelViewState,

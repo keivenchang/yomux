@@ -2539,7 +2539,7 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
     # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, v22 retires the blocking `relay` action, v23 adds private file-backed artifacts, v24 registers queued-delivery compaction, and v25 classifies shutdown admission refusal as retryable pre-handler busy.
-    assert jobd.JOBD_PROTOCOL_VERSION == 25
+    assert jobd.JOBD_PROTOCOL_VERSION == 26
     assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
@@ -3762,6 +3762,158 @@ def test_work_that_never_answers_still_hits_the_backstop_after_the_reorder(tmp_p
     assert record.status == "timed_out"
     assert record.future is not None, "an unfinished future keeps holding its slot"
     assert service._future_slots(lane=service._lane_for_priority(record.priority)) == 1
+
+
+def test_jobd_quarantines_one_slot_and_fences_its_late_result(tmp_path):
+    """A kernel-stuck predecessor cannot overwrite the replacement generation's product."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    class Executor:
+        def __init__(self):
+            self._processes = {}
+            self.shutdown_calls = 0
+
+        def shutdown(self, **_kwargs):
+            self.shutdown_calls += 1
+
+    slot = service.executor_slots["point"][0]
+    slot.executor = Executor()  # type: ignore[assignment]
+    held = service._queue_record(
+        "text_facts", {"text": "held"}, "point", 1, "held",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    held.status = "running"
+    held.future = Future()
+    held.executor_slot = 0
+    held.executor_generation = 0
+
+    service._pump()
+
+    assert held.status == "timed_out"
+    assert slot.executor is None
+    assert slot.generation == 1
+    assert len(slot.predecessors) == 1
+    held.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
+    service._pump()
+    assert held.result == b""
+    assert held.status == "timed_out"
+
+
+def test_jobd_replacement_budget_is_daemon_wide(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    class Executor:
+        def __init__(self):
+            self._processes = {}
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    for index, lane in enumerate(("point", "mutation", "bulk")):
+        slot = service.executor_slots[lane][0]
+        slot.executor = Executor()  # type: ignore[assignment]
+        priority = jobd.JOBD_LANE_PRIORITIES[lane][0]
+        record = service._queue_record(
+            "text_facts", {"text": lane}, priority, index, lane,
+            deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+        )
+        record.status = "running"
+        record.future = Future()
+        record.executor_slot = 0
+        record.executor_generation = 0
+
+    service._pump()
+
+    assert service._quarantined_predecessor_count() == jobd.JOBD_MAX_QUARANTINED_PREDECESSORS
+    assert service.executor_slots["bulk"][0].generation == 0
+
+
+def test_jobd_broken_slot_does_not_fence_a_healthy_point_sibling(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    failed = service._queue_record("text_facts", {"text": "failed"}, "point", 1, "failed")
+    sibling = service._queue_record("text_facts", {"text": "healthy"}, "point", 1, "healthy")
+    failed.status = sibling.status = "running"
+    failed.future = Future()
+    sibling.future = Future()
+    failed.executor_slot = 0
+    sibling.executor_slot = 1
+    failed.future.set_exception(BrokenProcessPool("slot zero exited"))
+    sibling.future.set_result(b'{"bytes":7,"lines":1,"nonempty_lines":1}')
+
+    service._pump()
+
+    assert failed.status == "failed"
+    assert sibling.status == "completed"
+    assert service.executor_slots["point"][0].generation == 1
+    assert service.executor_slots["point"][1].generation == 0
+
+
+def test_jobd_submit_time_broken_slot_does_not_fence_a_healthy_point_sibling(tmp_path, monkeypatch):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    healthy_future = Future()
+
+    class BrokenExecutor:
+        def submit(self, *_args):
+            raise BrokenProcessPool("slot zero exited before submit")
+
+    class HealthyExecutor:
+        def submit(self, *_args):
+            return healthy_future
+
+    def executor_for_slot(_priority, slot_index):
+        return BrokenExecutor() if slot_index == 0 else HealthyExecutor()
+
+    monkeypatch.setattr(service, "_executor", executor_for_slot)
+    failed = service._queue_record("text_facts", {"text": "failed"}, "point", 1, "failed")
+    sibling = service._queue_record("text_facts", {"text": "healthy"}, "point", 1, "healthy")
+
+    service._pump()
+    healthy_future.set_result(b'{"bytes":7,"lines":1,"nonempty_lines":1}')
+    service._pump()
+
+    assert failed.status == "failed"
+    assert sibling.status == "completed"
+    assert service.executor_slots["point"][0].generation == 1
+    assert service.executor_slots["point"][1].generation == 0
+
+
+def test_jobd_quarantined_predecessor_blocks_idle_and_is_shutdown(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    class Process:
+        pid = 4321
+
+        def __init__(self):
+            self.alive = True
+            self.terminated = False
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            del timeout
+
+    class Executor:
+        def __init__(self, process):
+            self._processes = {process.pid: process}
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    process = Process()
+    service.executor_slots["point"][0].predecessors.append((0, Executor(process)))  # type: ignore[arg-type]
+
+    assert service._has_active_work() is True
+    assert service._idle_should_stop() is False
+    service._on_shutdown()
+    assert process.terminated is True
 
 
 def test_queued_expiry_is_unchanged_by_processing_finished_futures_first(tmp_path):
