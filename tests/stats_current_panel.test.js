@@ -418,8 +418,8 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   const context = {result: null};
   vm.runInNewContext(`
     ${sourceFunction('debugGraphSeriesIsWebProcessCpu', 'debugGraphMacMemoryCardAvailable')}
-    const web = {key: 'cpu:port:7220', processCpu: true, currentProcessCpu: true};
-    const peerWeb = {key: 'cpu:port:7771', processCpu: true};
+    const web = {key: 'cpu:port:7442', processCpu: true, currentProcessCpu: true};
+    const peerWeb = {key: 'cpu:port:7001', processCpu: true};
     const systemCpu = {key: 'systemCpu'};
     const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
     const daemon = {key: 'serviceLoad:jobd', serviceLoad: true};
@@ -431,7 +431,7 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   `, context);
   // Membership, not paint order: the daemon chart owns every yolomux.py web line alongside the
   // services, and the CPU chart keeps only the host binaries and the system total.
-  assert.deepEqual([...context.result.daemons], ['cpu:port:7220', 'cpu:port:7771', 'serviceLoad:jobd']);
+  assert.deepEqual([...context.result.daemons], ['cpu:port:7001', 'cpu:port:7442', 'serviceLoad:jobd']);
   assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
 });
 
@@ -2630,6 +2630,49 @@ test('current stream failures emit one provenance-bearing warning record per fai
   assert.equal(context.result.diagnostics[0].details.deliveryOutcome, 'stalled');
   assert.equal(context.result.events.length, 0, 'the producer must not create a second article for one stall');
   assert.ok(context.result.diagnostics[0].message.length <= 160);
+});
+
+// A stall artifact that records only the message string cannot be classified after the fact.
+// The transport samples `streamEvidence()` at report time; this proves that snapshot survives
+// into the retained event the browser harness reads, instead of stopping at the panel.
+test('a stall failure retains the stream evidence snapshot alongside its unchanged message', () => {
+  const recorders = sourceFunction('recordJsDebugCurrentStatsFailure', 'jsDebugStatsPanelVisible');
+  const diagnostic = sourceFunction('recordJsDebugStatsDiagnostic', 'debugClientLogRecord');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const events = [];
+    const jsDebugCurrentStatsClientState = {failureLatched: false};
+    function jsDebugFailureSource(value) { return String(value || '/'); }
+    function jsDebugFailureSignature() { return 'jsf-test'; }
+    function recordJsDebugEvent(type, payload) { events.push({id: events.length + 1, type, ...payload}); }
+    ${diagnostic}
+    ${recorders}
+    recordJsDebugCurrentStatsFailure({
+      message: 'YO!stats stream generation stalled for more than 3s',
+      source: '/api/stats-stream',
+      evidence: {
+        running: true, visible: true, healthy: true, streamOpen: true, streamEpoch: 4,
+        deliverySequence: 11, acceptedDeltaSequence: 9, lastDeliveryKind: 'ready',
+        lastDeliveryAtMs: 1200, lastDeliveryEmitMs: 900, lastDeliveryEpoch: 4, rangeSeconds: 300,
+        resolutionSeconds: 1, sourceGeneration: 77, cacheGeneration: 78, deltaRevision: 5,
+      },
+    });
+    acceptJsDebugCurrentStatsPushProof();
+    recordJsDebugCurrentStatsFailure({message: 'YO!stats stream unavailable', source: '/api/stats-stream'});
+    result = {events};
+  `, context);
+  const [stall, plain] = context.result.events;
+  assert.equal(stall.message, 'YO!stats stream generation stalled for more than 3s', 'the classification predicate string is byte-identical');
+  assert.equal(stall.deliveryOutcome, 'stalled');
+  assert.ok(stall.streamEvidence, 'the retained stall record carries the stream evidence snapshot');
+  assert.equal(stall.streamEvidence.deliverySequence, 11);
+  assert.equal(stall.streamEvidence.streamEpoch, 4);
+  assert.equal(stall.streamEvidence.streamOpen, true);
+  assert.equal(stall.streamEvidence.lastDeliveryKind, 'ready');
+  assert.equal(stall.streamEvidence.lastDeliveryAtMs, 1200);
+  assert.equal(stall.streamEvidence.lastDeliveryEmitMs, 900, 'the server emit clock rides into the retained record');
+  assert.equal(Object.keys(stall.streamEvidence).length, 16, 'the whole snapshot is retained, not a subset');
+  assert.equal(plain.streamEvidence, undefined, 'a failure with no evidence gains no empty placeholder field');
 });
 
 test('an unload retirement records a non-blocking info observation while a genuine failure stays release-blocking', () => {

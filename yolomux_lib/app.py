@@ -650,6 +650,13 @@ SESSION_FILES_OPERATION_POLL_MAX_SECONDS = 0.5
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
+# A prune that jobd DECLINED never ran, so it must not spend the cooldown that exists to space out
+# work that did. Maintenance stopped cold-starting jobd, which means a decline is now the normal
+# answer on an idle instance; charging it the full five minutes could postpone housekeeping
+# indefinitely on exactly the instances that are idle enough to need it. This is the same
+# `next_at` field on the same record - no second timer, no loop, and still a real floor so a
+# declined prune cannot become a retry storm.
+SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS = 30
 SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE = 256
 SESSION_FILES_DISK_CACHE_INDEX_FILENAME = "cache-index.json"
 SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
@@ -1891,7 +1898,7 @@ def filesystem_batch_submission(
 
 FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
     "list", "read", "info", "search", "index_status", "count", "diff", "git_history",
-    "git_commit", "blame",
+    "git_commit", "blame", "resolve_file_candidates",
 })
 
 # Ref-only changes can precede watchd's periodic reconciliation, so separate requests for these
@@ -1904,7 +1911,7 @@ FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 # `count`, `diff`, `blame`, recursive `delete`, Finder batches, watch-diff fanouts, forced
 # session-files transforms -- stays on the shared `interactive` lane, because its cost is unbounded
 # in the input and it is exactly the work that used to put an editor open behind it head-of-line.
-FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
+FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status", "resolve_file_candidates"})
 
 # The write-side half of that same principle, and the half that was missed when `point` was drawn:
 # one path in, one bounded side effect, a browser waiting on it right now.  These satisfy exactly
@@ -1932,6 +1939,11 @@ FILESYSTEM_RECURSIVE_MUTATION = "delete"
 def filesystem_operation_priority(operation: str, args: Mapping[str, Any] | None = None) -> str:
     """Return the one jobd lane priority that owns a filesystem operation and its arguments."""
     name = str(operation)
+    # A directory Diff first paints its metadata-only history index. Per-commit file and diff
+    # materialization starts only after an explicit disclosure, and must not queue ahead of a
+    # different user's first history paint or ordinary interactive filesystem work.
+    if name == "git_commit":
+        return "maintenance"
     if name in FILESYSTEM_POINT_OPERATIONS:
         return "point"
     if name in FILESYSTEM_BOUNDED_MUTATIONS:
@@ -4224,6 +4236,10 @@ class WatchBridge:
                 # coalesce instead of turning every watcher notification into interactive Git.
                 force=False,
                 requester="background-refresh",
+                # A watcher notification is invalidation evidence, not permission to perform
+                # an unbounded Git snapshot in the watcher thread.  Return a receipt now; jobd
+                # owns the bounded, coalesced materialization after this revision is published.
+                accepted_operation=True,
             )
             event_payload = {"request": item, "status": int(status), "data": payload}
             stable_event_payload = copy.deepcopy(event_payload)
@@ -4854,6 +4870,7 @@ class SessionFilesCoordinator:
                     "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
                 },
                 priority="maintenance",
+                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
                 generation=1,
                 coalesce_key="session-files-cache-prune",
                 delivery="receipt",
@@ -4866,6 +4883,11 @@ class SessionFilesCoordinator:
             if self.state.disk_prune_record is record:
                 record.running = False
                 record.worker = None
+                if not accepted:
+                    # Pull the cooldown back to the retry floor. The full interval was claimed
+                    # before submitting so a concurrent caller could not race in while this one
+                    # was in flight; now that it is known nothing ran, only the floor applies.
+                    record.next_at = min(record.next_at, now + SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS)
                 record.last_result = {
                     "submitted": accepted,
                     "reason": reason,
@@ -8745,7 +8767,11 @@ class TmuxWebtermApp:
         self.pricing_refresh_coordinator.start_periodic()
         self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
-        self.warm_start_session_files_payload_cache()
+        # Startup must bind before any repository snapshot work.  The old warm-cache probe
+        # constructed a session-files cache key synchronously; an uncovered repository turns
+        # that key into a full pinned Git object-store snapshot.  That made a large repository
+        # keep the whole HTTP listener unavailable during startup.  Session-files requests own
+        # their deferred jobd refresh after the listener is live instead.
         self.warm_start_tabber_activity_cache()
         self.start_tabber_activity_cache_warmer()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
@@ -9202,6 +9228,7 @@ class TmuxWebtermApp:
             "queued_delivery_compact",
             {"state_path": str(state_path)},
             priority="maintenance",
+            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
             generation=1,
             coalesce_key=coalesce_key,
             delivery="receipt",
@@ -13395,6 +13422,7 @@ class TmuxWebtermApp:
                 "indexed_repo_roots",
                 {"indexed_dirs": list(indexed_dirs)},
                 priority="maintenance",
+                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
                 generation=generation,
                 coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
                 deadline_ms=120_000,
@@ -13744,6 +13772,7 @@ class TmuxWebtermApp:
             "metadata_warm_view",
             {"sessions": sessions_payload},
             priority="maintenance",
+            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
             generation=generation,
             coalesce_key=coalesce_key,
             deadline_ms=METADATA_WARM_JOBD_JOB_DEADLINE_MS,
@@ -17481,8 +17510,7 @@ class TmuxWebtermApp:
                 payload["timings"] = dict(timings)
             return payload, HTTPStatus.OK
         discover_started = time.perf_counter()
-        discovery = discover_status_sessions if self.status_service_mode else discover_sessions
-        discovered_sessions, discovery_errors = discovery(self.sessions)
+        discovered_sessions, discovery_errors = self.status_session_discovery()
         self.prune_absent_agent_window_transition_state(discovered_sessions)
         add_phase_timing(timings, "discover_sessions", discover_started)
         sessions_started = time.perf_counter()
@@ -17527,6 +17555,10 @@ class TmuxWebtermApp:
         if timings:
             payload["timings"] = dict(timings)
         return payload, HTTPStatus.OK
+
+    def status_session_discovery(self) -> tuple[dict[str, SessionInfo], list[str]]:
+        discovery = discover_status_sessions if self.status_service_mode else discover_sessions
+        return discovery(self.sessions)
 
     def auto_approve_status_bytes(self, session: str | None = None) -> tuple[bytes, HTTPStatus]:
         """Return daemon-owned status bytes without web-side discovery or encoding."""

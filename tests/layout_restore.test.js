@@ -4507,7 +4507,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme');
     assert.ok(source.includes('function defaultFileEditorViewModeForPath(path, kind)')
       && source.includes("return previewRendererForPath(path)?.defaultMode || 'edit';")
-      && source.includes('else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);'), 'plain file opens reset stale diff mode back to edit while media and Mermaid source open in Preview');
+      && source.includes('openOptions.initialViewMode = options.viewMode || defaultFileEditorViewModeForPath(fullPath, kind);'), 'new tabs choose their requested/default mode after state installation while ordinary reopens keep their selected mode');
     assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
     assert.ok(source.includes('function codeMirrorMarkdownFallbackSyntaxExtension'), 'Markdown edit mode has a parser-independent CodeMirror coloring fallback');
     assert.ok(/function codeMirrorThemeExtensions[\s\S]*codeMirrorMarkdownFallbackSyntaxExtension\(api, path\)/.test(source), 'Markdown fallback coloring is wired into live CodeMirror edit views');

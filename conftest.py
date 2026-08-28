@@ -186,7 +186,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     global _SESSION_WRITER_LEASE
     try:
         _SESSION_WRITER_LEASE = worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest")
-    except worktree_writer.WorktreeWriterBusy as error:
+    except (worktree_writer.WorktreeWriterBusy, worktree_writer.WorktreeWriterContainerRefusal) as error:
         pytest.exit(f"PYTEST REFUSED: {error}", returncode=3)
 
 

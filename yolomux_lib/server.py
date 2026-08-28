@@ -56,6 +56,7 @@ from .common import codex_event_kind
 from .common import codex_exec_argv
 from .common import codex_runtime_env
 from .common import error_payload
+from .common import product_filename
 from .common import ready_response_envelope_bytes
 from .common import terminate_process_group
 from .common import validated_product_metadata
@@ -420,12 +421,31 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path)
+        if query_bool(qs, "include_git"):
+            self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path, {"include_git": True})
+            return
+        # A first editor open needs only one authorized descriptor walk, stat, bounded read, and
+        # binary check. Keep that small operation in this request thread instead of sending it
+        # through jobd's point queue and receipt polling. Git is explicitly deferred to the
+        # include_git path because repository snapshots can be arbitrarily slow.
+        try:
+            payload = filesystem.read_file(raw_path, include_git=False)
+        except filesystem.FilesystemError as error:
+            payload = error.payload()
+            # Preserve the long-standing file-open contract. The generic HTTP envelope maps a
+            # bare 404 to ``not_found``; callers use this finer code to keep an expected missing
+            # file distinct from a transport failure.
+            if error.status == HTTPStatus.NOT_FOUND:
+                payload["error_code"] = "path_not_found"
+                payload["path"] = raw_path
+            self.write_json(payload, status=HTTPStatus(error.status))
+            return
+        self.write_json(payload, status=HTTPStatus.OK)
 
     def handle_fs_info(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path)
+        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path, {"include_git": query_bool(qs, "include_git")})
 
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -437,7 +457,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_git_history(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        limit, error = parse_query_int(qs, "limit", 50, max_value=50, clamp_min=True)
+        limit, error = parse_query_int(qs, "limit", 40, max_value=40, clamp_min=True)
         if error:
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
@@ -493,15 +513,24 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         self.write_json(response.payload, status=response.status)
 
     def handle_fs_raw(self, parsed: Any) -> None:
+        """Serve one bounded authorized file directly; raw media must not wait behind jobd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
-        self.submit_filesystem_relay(
-            "GET /api/fs/raw",
-            "raw",
-            raw_path,
-            {"download": download, "max_bytes": self.file_transfer_max_bytes()},
-        )
+        try:
+            body, content_type = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
+            return
+        disposition = "attachment" if download else "inline"
+        self.write_product_bytes(body, {
+            "format": "opaque_bytes",
+            "content_type": content_type,
+            "length": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "disposition": disposition,
+            "filename": product_filename(Path(raw_path).name, fallback="download") if disposition == "attachment" else "",
+        })
 
     def handle_fs_zip(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -824,6 +853,17 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         }
         self.write_json(response, status=status)
 
+    def handle_fs_resolve_file_candidates(self, parsed: Any) -> None:
+        del parsed
+        payload = self.read_json_body(8 * 4096)
+        if payload is None:
+            return
+        raw_paths = payload.get("paths")
+        if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 8 or any(not isinstance(path, str) for path in raw_paths):
+            self.write_json(error_payload("paths must contain 1 to 8 strings", message_key="request.error.jsonObject", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.submit_filesystem_operation("POST /api/fs/resolve-file-candidates", "resolve_file_candidates", raw_paths[0], {"paths": raw_paths})
+
     def file_transfer_max_bytes(self) -> int:
         getter = getattr(self.server.app, "file_transfer_max_bytes", None)
         if callable(getter):
@@ -859,18 +899,81 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             )
         return self.server.app.upload_files(session, files, auth_username=auth_username)
 
+# SSE carries an optional `id:` line that `EventSource` hands the browser as
+# `event.lastEventId`. It sits outside the JSON payload, so the frame body key sets stay
+# byte-identical and the browser's `exactFields` validators never see it -- which is the whole
+# reason the emit timestamp travels here instead of inside the body, where adding a key would
+# make every browser on a stale bundle reject the frame. An empty id writes no line at all, so
+# every route that does not opt in is byte-identical on the wire.
+def sse_id_line(event_id: str) -> bytes:
+    text = str(event_id or "")
+    if not text:
+        return b""
+    if not text.isascii() or any(character.isspace() or ord(character) < 33 for character in text):
+        raise ValueError("SSE event id is invalid")
+    return f"id: {text}\n".encode("ascii")
+
+
+# The emit timestamp itself. `time.monotonic()` cannot go backwards, so successive frames on one
+# connection carry non-decreasing ids and the browser can compare emit spacing against arrival
+# spacing to tell "the server never sent it" from "the server sent it and it arrived late". It is
+# process-relative on purpose: a wall clock can step, and an absolute epoch is not needed to
+# compare two frames from the same server. Integer milliseconds keeps it about ten bytes a frame.
+def stats_stream_emit_id() -> str:
+    return str(int(time.monotonic() * 1000))
+
+
+# One record per boundary per client per this window. The operator ring is capacity-bounded and
+# its drop counter is a browser-test failure gate, so a per-cadence record would evict unrelated
+# diagnostics and turn a slow host into a new flake. A stall needs ONE record naming the boundary,
+# not one per second, so the window is deliberately much coarser than the cadence.
+_STATS_STREAM_BOUNDARY_DEDUPE_SECONDS = 30.0
+
+
+# Diagnostic capture for the YO!stats stall investigation. Every record is anomaly-only and
+# deduped per client, so a healthy stream writes nothing and one client can never evict the
+# bounded operator ring. `info` on purpose: a late tick is evidence, not a
+# release-blocking failure, and must not change any test's pass/fail outcome. The bound client
+# id is used only as a dedupe key and is never retained in the entry.
+def _record_stats_stream_boundary(
+    boundary: str,
+    event: str,
+    client_key: str,
+    cadence_seconds: float,
+    details: dict[str, Any],
+) -> None:
+    payload: dict[str, Any] = {"boundary": boundary, "cadence_seconds": cadence_seconds}
+    payload.update(details)
+    # `status` is the discriminator between two records of the same kind, so it belongs in the
+    # dedupe key: without it a CONFLICT arriving within a cadence of an ACCEPTED is suppressed
+    # by it, and the transition that actually ended the stream is the one that goes missing.
+    status = details.get("status")
+    dedupe_status = "" if status is None else f":{int(status)}"
+    emit_server_log(
+        "info",
+        "stats-stream",
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        category="stats_stream",
+        route="/api/stats-stream",
+        event=event,
+        dedupe_key=f"stats-stream:{boundary}:{event}{dedupe_status}:{client_key}",
+        dedupe_seconds=max(_STATS_STREAM_BOUNDARY_DEDUPE_SECONDS, float(cadence_seconds)),
+    )
+
+
 class ApiResponseWriter(_HandlerAdapter):
     """Composed owner for ApiResponseWriter."""
 
-    def write_sse_json(self, event: str, value: Any) -> None:
+    def write_sse_json(self, event: str, value: Any, *, event_id: str = "") -> None:
         data = json.dumps(value, ensure_ascii=False)
+        self.wfile.write(sse_id_line(event_id))
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
         for line in data.splitlines() or [""]:
             self.wfile.write(f"data: {line}\n".encode("utf-8"))
         self.wfile.write(b"\n")
         self.wfile.flush()
 
-    def write_sse_bytes(self, event: str, value: bytes) -> None:
+    def write_sse_bytes(self, event: str, value: bytes, *, event_id: str = "") -> None:
         """Write an already-validated compact JSON payload without decoding it."""
 
         if not isinstance(value, bytes) or not value:
@@ -880,6 +983,7 @@ class ApiResponseWriter(_HandlerAdapter):
             character.isspace() or ord(character) < 33 for character in event_name
         ):
             raise ValueError("SSE event name is invalid")
+        self.wfile.write(sse_id_line(event_id))
         self.wfile.write(f"event: {event_name}\n".encode("ascii"))
         for line in value.splitlines() or [b""]:
             self.wfile.write(b"data: " + line + b"\n")
@@ -1273,6 +1377,7 @@ class ApiResponseWriter(_HandlerAdapter):
                 HTTPStatus.FAILED_DEPENDENCY: "dependency_failed",
                 HTTPStatus.SERVICE_UNAVAILABLE: "service_unavailable",
                 HTTPStatus.GATEWAY_TIMEOUT: "deadline_expired",
+                HTTPStatus.UPGRADE_REQUIRED: "upgrade_required",
             }
             code = normalized_code or status_codes.get(status_code, "request_failed")
             cause = legacy.get("cause") if isinstance(legacy.get("cause"), dict) else None
@@ -2067,6 +2172,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_fs_info(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_info(self, parsed)
 
+    def handle_fs_resolve_file_candidates(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_resolve_file_candidates(self, parsed)
+
     def handle_fs_diff(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_diff(self, parsed)
 
@@ -2429,15 +2537,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_auth_cookie_if_needed()
         self.end_headers()
         if result.status == HTTPStatus.ACCEPTED:
-            self.write_sse_json("pending", result.metadata)
+            self.write_sse_json("pending", result.metadata, event_id=stats_stream_emit_id())
             self.close_connection = True
             return
         if result.status == HTTPStatus.UPGRADE_REQUIRED:
-            self.write_sse_json("upgrade_required", result.metadata)
+            self.write_sse_json("upgrade_required", result.metadata, event_id=stats_stream_emit_id())
             self.close_connection = True
             return
         if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
-            self.write_sse_json("unavailable", result.metadata)
+            self.write_sse_json("unavailable", result.metadata, event_id=stats_stream_emit_id())
             self.close_connection = True
             return
 
@@ -2450,9 +2558,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "range_seconds": cursor.range_seconds,
             "requested_resolution": cursor.resolution,
             "resolution_seconds": cursor.resolution_seconds,
-        })
+        }, event_id=stats_stream_emit_id())
         if result.status == HTTPStatus.OK:
-            self.write_sse_bytes("snapshot", result.body)
+            self.write_sse_bytes("snapshot", result.body, event_id=stats_stream_emit_id())
             for chunk_index in range(1, chunk_count):
                 chunk_query = urlencode({
                     "range_seconds": cursor.range_seconds,
@@ -2468,19 +2576,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 )
                 if chunk.status != HTTPStatus.OK:
                     event = "pending" if chunk.status == HTTPStatus.ACCEPTED else "unavailable"
-                    self.write_sse_json(event, chunk.metadata)
+                    self.write_sse_json(event, chunk.metadata, event_id=stats_stream_emit_id())
                     return
-                self.write_sse_bytes("snapshot", chunk.body)
+                self.write_sse_bytes("snapshot", chunk.body, event_id=stats_stream_emit_id())
         self.write_sse_json("ready", {
             "cache_generation": cache_generation,
             "revision": 0,
-        })
+        }, event_id=stats_stream_emit_id())
 
         revision_number = 0
         cadence_seconds = stats_current_protocol.live_cadence_seconds(
             cursor.resolution_seconds,
         )
         next_deadline = time.monotonic() + cadence_seconds
+        stream_started_at = time.monotonic()
+        last_anomalous_status = 0
+        client_key = str(cursor.client_id or "")
         try:
             while True:
                 if self.server.persistent_request_stop.wait(
@@ -2488,8 +2599,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 ):
                     return
                 now = time.monotonic()
+                scheduled_deadline = next_deadline
                 while next_deadline <= now:
                     next_deadline += cadence_seconds
+                # The browser's stall watchdog can only report that nothing arrived; it cannot
+                # say whether this emit loop stopped producing. A tick that woke a whole cadence
+                # late means the frame the browser was waiting for was never produced here.
+                slip_seconds = now - scheduled_deadline
+                if slip_seconds >= cadence_seconds:
+                    _record_stats_stream_boundary(
+                        "frame_production",
+                        "tick-late",
+                        client_key,
+                        cadence_seconds,
+                        {
+                            "slip_seconds": round(slip_seconds, 3),
+                            "cache_generation": cache_generation,
+                            "revision": revision_number,
+                            "stream_age_seconds": round(now - stream_started_at, 3),
+                        },
+                    )
                 query = urlencode({
                     "range_seconds": cursor.range_seconds,
                     "resolution_seconds": cursor.resolution_seconds,
@@ -2497,22 +2626,80 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     "after_cache_generation": cache_generation,
                     "after_revision": revision_number,
                 })
+                rpc_started_at = time.monotonic()
                 result = self.server.app.stats_current_http.delta_stream(
                     query,
                     authenticated_username=authenticated_username,
                 )
+                rpc_seconds = time.monotonic() - rpc_started_at
+                # An RPC that outruns the cadence is the statsd boundary going quiet, not this
+                # loop and not the transport, so it separates the two upstream suspects.
+                if rpc_seconds >= cadence_seconds:
+                    _record_stats_stream_boundary(
+                        "statsd_delta_rpc",
+                        "rpc-slow",
+                        client_key,
+                        cadence_seconds,
+                        {
+                            "rpc_seconds": round(rpc_seconds, 3),
+                            "status": int(result.status),
+                            "cache_generation": cache_generation,
+                            "revision": revision_number,
+                        },
+                    )
+                # OK and NOT_MODIFIED alternate on a healthy stream, so recording every tick
+                # would flood the bounded ring. Only entry into an unusual status is retained.
+                if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+                    if int(result.status) != last_anomalous_status:
+                        last_anomalous_status = int(result.status)
+                        _record_stats_stream_boundary(
+                            "delta_stream_status",
+                            "status-change",
+                            client_key,
+                            cadence_seconds,
+                            {
+                                "status": int(result.status),
+                                "cache_generation": cache_generation,
+                                "revision": revision_number,
+                            },
+                        )
+                else:
+                    last_anomalous_status = 0
                 if result.status == HTTPStatus.CONFLICT:
-                    self.write_sse_json("repair", result.metadata)
+                    self.write_sse_json("repair", result.metadata, event_id=stats_stream_emit_id())
+                    _record_stats_stream_boundary(
+                        "frame_production",
+                        "repair",
+                        client_key,
+                        cadence_seconds,
+                        {
+                            "cache_generation": cache_generation,
+                            "revision": revision_number,
+                            "stream_age_seconds": round(time.monotonic() - stream_started_at, 3),
+                        },
+                    )
                     return
                 if result.status not in {
                     HTTPStatus.OK,
                     HTTPStatus.NOT_MODIFIED,
                     HTTPStatus.ACCEPTED,
                 }:
-                    self.write_sse_json("unavailable", result.metadata)
+                    self.write_sse_json("unavailable", result.metadata, event_id=stats_stream_emit_id())
+                    _record_stats_stream_boundary(
+                        "frame_production",
+                        "unavailable",
+                        client_key,
+                        cadence_seconds,
+                        {
+                            "status": int(result.status),
+                            "cache_generation": cache_generation,
+                            "revision": revision_number,
+                            "stream_age_seconds": round(time.monotonic() - stream_started_at, 3),
+                        },
+                    )
                     return
                 if result.status == HTTPStatus.OK:
-                    self.write_sse_bytes("delta", result.body)
+                    self.write_sse_bytes("delta", result.body, event_id=stats_stream_emit_id())
                     cache_generation = int(result.metadata["cache_generation"])
                     revision_number = int(result.metadata["revision"])
                 elif result.status == HTTPStatus.NOT_MODIFIED:
@@ -2522,7 +2709,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.write_sse_json("ready", {
                         "cache_generation": cache_generation,
                         "revision": revision_number,
-                    })
+                    }, event_id=stats_stream_emit_id())
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
             return
 
@@ -2836,11 +3023,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     last_ping = now
                 time.sleep(0.2)
 
-    def write_sse_json(self, event: str, value: Any) -> None:
-        return ApiResponseWriter.write_sse_json(self, event, value)
+    def write_sse_json(self, event: str, value: Any, *, event_id: str = "") -> None:
+        return ApiResponseWriter.write_sse_json(self, event, value, event_id=event_id)
 
-    def write_sse_bytes(self, event: str, value: bytes) -> None:
-        return ApiResponseWriter.write_sse_bytes(self, event, value)
+    def write_sse_bytes(self, event: str, value: bytes, *, event_id: str = "") -> None:
+        return ApiResponseWriter.write_sse_bytes(self, event, value, event_id=event_id)
 
     def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         return ApiResponseWriter.write_html(self, body, status)

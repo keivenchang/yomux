@@ -50,6 +50,19 @@ REPORT_ENV = "YOLOMUX_ROUTE_SWEEP_OUTPUT"
 EXCLUDED_ROUTES = {
     ("GET", "/api/session-files"): "Owned by yo7775; response-contract semantics are intentionally outside this sweep.",
     ("GET", "/api/activity-summary"): "The synchronous endpoint remains disabled until its asynchronous replacement exists.",
+    # `/readyz` and `/livez` FAIL CLOSED when they cannot read the statsd process. That is the
+    # behaviour they exist to provide, not a bug to route around. This sweep exercises the route
+    # registry against a web server started WITHOUT a statsd daemon, so the handler resolves pid 0
+    # and reports `FileNotFoundError: [Errno 2] ... '/proc/0/status'` with
+    # `failures: ["process: not readable", "control: resource_state unavailable"]`. The 503 is a
+    # correct answer about a genuinely absent subject, and a 200 from either endpoint in that state
+    # would be the real defect - it would mean the health surface reported ready while blind.
+    #
+    # Do NOT "fix" this by relaxing the handlers, and do NOT give the fixture a live daemon: a
+    # route-registry sweep that starts a real statsd is no longer a route-registry sweep. The
+    # handlers are correct; only their exercisability under this fixture is out of scope.
+    ("GET", "/readyz"): "Fails closed by design when the statsd process is unreadable. This sweep's fixture has no statsd, so 503 is the correct answer and a 200 would be the defect.",
+    ("GET", "/livez"): "Same reason as /readyz. It answers from the cached prior readiness result, and with no statsd there has never been one, so it fails closed. 503 is correct under this fixture.",
 }
 TRACEBACK_MARKERS = ("Traceback (most recent call last):", "Exception in thread")
 # The same bound the fixture teardown already holds accepted operations to in

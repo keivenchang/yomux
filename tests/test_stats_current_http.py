@@ -4,7 +4,10 @@
 
 from http import HTTPStatus
 import hashlib
+import ast
 import io
+import json
+import re
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -13,6 +16,7 @@ import pytest
 
 from yolomux_lib import http_routes
 from yolomux_lib import server
+from yolomux_lib import server_logs
 from yolomux_lib.stats_current import http, protocol, resolution as stats_resolution
 from tests.terminal_state_guard import assert_terminal_transition
 
@@ -579,8 +583,8 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
         send_auth_cookie_if_needed=lambda: None,
         end_headers=lambda: None,
         write_json=lambda _payload, status: None,
-        write_sse_bytes=lambda name, body: events.append((name, body)),
-        write_sse_json=lambda name, payload: events.append((name, payload)),
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
     )
 
     server.Handler.stream_stats_current(
@@ -593,6 +597,458 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
     assert events[-1] == (
         "repair", {"status": "repair_required", "cache_generation": 12},
     )
+
+
+STATS_CLIENT_SOURCE = (
+    Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "84_stats_current.js"
+).read_text(encoding="utf-8")
+
+
+def _browser_exact_fields(name: str) -> set[str]:
+    """Return the exact key set the browser demands for one frame, read from its own validator.
+
+    `exactFields` throws a contract violation on ANY key-set difference, in either direction, so
+    an extra server-side body key makes every browser on a not-yet-reloaded bundle reject the
+    frame and paint the reload banner. This reads the browser's list rather than restating it, so
+    the two layers cannot drift apart silently.
+    """
+
+    match = re.search(
+        r"exactFields\(\s*\w+\s*,\s*\[([^\]]*)\]\s*,\s*'" + re.escape(name) + r"'\s*\)",
+        STATS_CLIENT_SOURCE,
+    )
+    assert match is not None, f"no exactFields call for {name!r} in 84_stats_current.js"
+    return {field.strip().strip("'\"") for field in match.group(1).split(",") if field.strip()}
+
+
+def _run_stream_capturing_frames(monkeypatch, *, extra_request_fields=None):
+    """Drive one stream to its terminal frame, returning (frames, emit_ids)."""
+
+    current = [0.0]
+    frames = []
+    emit_ids = []
+
+    class Waiter:
+        def wait(self, delay):
+            current[0] += delay
+            return False
+
+    class Forwarder:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.calls += 1
+            if self.calls > 2:
+                return http.DeltaStreamResult(
+                    HTTPStatus.CONFLICT,
+                    {"status": "repair_required", "cache_generation": 12},
+                )
+            return http.DeltaStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
+    def record_json(name, payload, event_id=""):
+        frames.append((name, payload))
+        emit_ids.append(event_id)
+
+    def record_bytes(name, body, event_id=""):
+        frames.append((name, body))
+        emit_ids.append(event_id)
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
+    fields = {
+        "server": SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
+        "send_response": lambda _status: None,
+        "send_header": lambda _name, _value: None,
+        "send_auth_cookie_if_needed": lambda: None,
+        "end_headers": lambda: None,
+        "write_json": lambda _payload, status: None,
+        "write_sse_bytes": record_bytes,
+        "write_sse_json": record_json,
+    }
+    fields.update(extra_request_fields or {})
+    server.Handler.stream_stats_current(
+        SimpleNamespace(**fields),
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
+        authenticated_username="alice",
+    )
+    return frames, emit_ids
+
+
+def test_emit_timestamp_rides_the_sse_id_line_and_never_the_frame_body(monkeypatch):
+    """The emit clock must reach the browser without touching any frame body key set.
+
+    This is the constraint that ruled out an in-body timestamp: `exactFields` in
+    84_stats_current.js rejects any key-set difference, so a body field would make every browser
+    on a stale bundle reject the frame. The key sets below are read from that validator, so this
+    fails if either layer drifts.
+    """
+
+    frames, emit_ids = _run_stream_capturing_frames(monkeypatch)
+
+    assert [name for name, _payload in frames] == ["ack", "snapshot", "ready", "ready", "ready", "repair"]
+    # Every frame carries an emit id, and the clock never runs backwards across the connection.
+    assert all(value for value in emit_ids), emit_ids
+    numeric = [int(value) for value in emit_ids]
+    assert numeric == sorted(numeric), numeric
+
+    bodies = {name: payload for name, payload in frames if isinstance(payload, dict)}
+    assert set(bodies["ack"]) == _browser_exact_fields("snapshot ack"), bodies["ack"]
+    assert set(bodies["ready"]) == _browser_exact_fields("ready"), bodies["ready"]
+    # The id lives outside the payload; nothing named it inside one.
+    assert not any("id" in payload for payload in bodies.values()), bodies
+    assert not any(
+        "emit" in key for payload in bodies.values() for key in payload
+    ), bodies
+
+
+def test_sse_id_line_is_written_before_the_event_and_omitted_entirely_when_unset():
+    """An opted-out route must stay byte-identical on the wire."""
+
+    class Sink:
+        def __init__(self):
+            self.buffer = io.BytesIO()
+
+        @property
+        def wfile(self):
+            return self.buffer
+
+        def flush(self):
+            return None
+
+    with_id = Sink()
+    server.ApiResponseWriter.write_sse_json(with_id, "ready", {"a": 1}, event_id="12345")
+    assert with_id.buffer.getvalue() == b"id: 12345\nevent: ready\ndata: {\"a\": 1}\n\n"
+
+    without_id = Sink()
+    server.ApiResponseWriter.write_sse_json(without_id, "ready", {"a": 1})
+    assert without_id.buffer.getvalue() == b"event: ready\ndata: {\"a\": 1}\n\n"
+
+    raw = Sink()
+    server.ApiResponseWriter.write_sse_bytes(raw, "delta", b'{"b":2}', event_id="7")
+    assert raw.buffer.getvalue() == b'id: 7\nevent: delta\ndata: {"b":2}\n\n'
+
+    # An id that could break out of the line grammar is refused, not written.
+    for bad in ("1 2", "1\n2", "\u00e9"):
+        with pytest.raises(ValueError):
+            server.sse_id_line(bad)
+
+
+def test_reconnect_last_event_id_header_is_inert(monkeypatch):
+    """EventSource sends `Last-Event-ID` when it reconnects. Prove the server ignores it.
+
+    Two halves, because either alone is weak. First: no server source reads the header at all,
+    so a future reader has to break this test to appear. Second: the emitted frame sequence is a
+    pure function of the query string, so a reconnect replays from the top with no resume state
+    to be influenced -- and the handler never consults a request header while doing it.
+    """
+
+    library = Path(__file__).resolve().parents[1] / "yolomux_lib"
+    pattern = re.compile(r"last[-_ ]?event[-_ ]?id", re.IGNORECASE)
+    readers = []
+    for path in sorted(library.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            # Reading the header needs its name as a string literal or an identifier. Comments
+            # are absent from the AST, so prose about this decision cannot trip the guard while
+            # any real read still does.
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and pattern.search(node.value):
+                readers.append(f"{path.relative_to(library)}:{node.lineno} literal")
+            elif isinstance(node, ast.Name) and pattern.search(node.id):
+                readers.append(f"{path.relative_to(library)}:{node.lineno} name")
+            elif isinstance(node, ast.Attribute) and pattern.search(node.attr):
+                readers.append(f"{path.relative_to(library)}:{node.lineno} attribute")
+    assert readers == [], readers
+
+    class RecordingHeaders(dict):
+        def __init__(self):
+            super().__init__()
+            self.lookups = []
+
+        def get(self, key, default=None):
+            self.lookups.append(str(key))
+            return default
+
+        def __getitem__(self, key):
+            self.lookups.append(str(key))
+            raise KeyError(key)
+
+    first_headers = RecordingHeaders()
+    first, first_ids = _run_stream_capturing_frames(
+        monkeypatch, extra_request_fields={"headers": first_headers}
+    )
+    second_headers = RecordingHeaders()
+    second, second_ids = _run_stream_capturing_frames(
+        monkeypatch, extra_request_fields={"headers": second_headers}
+    )
+
+    assert first == second, (first, second)
+    assert first_headers.lookups == [] and second_headers.lookups == []
+    assert [name for name, _payload in second] == ["ack", "snapshot", "ready", "ready", "ready", "repair"]
+    # A reconnect replays from the top: same frames, same bodies, no resume cursor anywhere for
+    # a `Last-Event-ID` to select. Only the emit clock advances, and it never runs backwards.
+    assert all(value for value in first_ids + second_ids)
+    assert [int(value) for value in second_ids] == sorted(int(value) for value in second_ids)
+
+
+def test_stream_records_which_server_boundary_went_quiet(monkeypatch):
+    """A stall artifact must name the server boundary, not just say nothing arrived.
+
+    The browser watchdog can only report silence. These records separate "this emit loop
+    woke a cadence late", "the statsd delta RPC outran the cadence", and "the loop ended on
+    an unusual status" -- the three server-side ways a frame the browser waited for is never
+    produced. They are anomaly-only, so the healthy ticks in this test record nothing.
+    """
+
+    current = [0.0]
+    events = []
+    server_logs.SERVER_LOGS.clear()
+
+    class Waiter:
+        def wait(self, delay):
+            current[0] += delay
+            return False
+
+    class Forwarder:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.calls += 1
+            if self.calls == 1:
+                # Healthy tick: on cadence, fast RPC, ordinary status. Records nothing.
+                return http.DeltaStreamResult(
+                    HTTPStatus.NOT_MODIFIED,
+                    {"ok": True, "not_modified": True, "cache_generation": 10},
+                )
+            if self.calls == 2:
+                # The statsd boundary goes quiet: the RPC itself outruns the cadence.
+                current[0] += 5.0
+                return http.DeltaStreamResult(
+                    HTTPStatus.ACCEPTED,
+                    {"status": "pending", "reason": "statsd is refreshing"},
+                )
+            return http.DeltaStreamResult(
+                HTTPStatus.FAILED_DEPENDENCY,
+                {"status": "unavailable", "reason": "statsd unavailable"},
+            )
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
+    request = SimpleNamespace(
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        send_auth_cookie_if_needed=lambda: None,
+        end_headers=lambda: None,
+        write_json=lambda _payload, status: None,
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
+    )
+
+    server.Handler.stream_stats_current(
+        request,
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
+        authenticated_username="alice",
+    )
+
+    assert [name for name, _payload in events] == ["ack", "snapshot", "ready", "ready", "unavailable"]
+    records = [
+        entry for entry in server_logs.SERVER_LOGS.payload()["logs"]
+        if entry.get("category") == "stats_stream"
+    ]
+    assert [entry["event"] for entry in records] == [
+        "rpc-slow", "status-change", "tick-late", "status-change", "unavailable",
+    ], records
+    decoded = [json.loads(entry["message"]) for entry in records]
+    assert all(entry["level"] == "info" for entry in records), records
+    assert all(entry["route"] == "/api/stats-stream" for entry in records), records
+    # The RPC record names the statsd boundary and how far past the cadence it ran.
+    assert decoded[0]["boundary"] == "statsd_delta_rpc"
+    assert decoded[0]["rpc_seconds"] >= 5.0
+    assert decoded[0]["status"] == int(HTTPStatus.ACCEPTED)
+    # The late tick names this emit loop, so it is not confused with the RPC above.
+    assert decoded[2]["boundary"] == "frame_production"
+    assert decoded[2]["slip_seconds"] >= 1.0
+    assert decoded[2]["cadence_seconds"] == 1.0
+    assert decoded[2]["cache_generation"] == 10
+    assert decoded[2]["revision"] == 0
+    assert decoded[4]["boundary"] == "frame_production"
+    assert decoded[4]["status"] == int(HTTPStatus.FAILED_DEPENDENCY)
+    # The bound client id is a dedupe key only; it must never be retained in an entry.
+    assert not any("browser-a" in entry["message"] for entry in records), records
+    server_logs.SERVER_LOGS.clear()
+
+
+def test_repeated_boundary_slips_record_once_instead_of_flooding_the_bounded_ring(monkeypatch):
+    """A slow host must not turn this telemetry into a new flake.
+
+    The operator ring is capacity-bounded and its drop counter fails browser tests, so a
+    per-cadence record would evict unrelated diagnostics. Six consecutive late ticks are one
+    episode and must leave exactly one record.
+    """
+
+    current = [0.0]
+    server_logs.SERVER_LOGS.clear()
+
+    class Waiter:
+        def wait(self, delay):
+            current[0] += delay
+            return False
+
+    class Forwarder:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.calls += 1
+            # Every tick overruns its cadence, so every following tick wakes late.
+            current[0] += 4.0
+            if self.calls > 6:
+                return http.DeltaStreamResult(
+                    HTTPStatus.CONFLICT,
+                    {"status": "repair_required", "cache_generation": 12},
+                )
+            return http.DeltaStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
+    request = SimpleNamespace(
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        send_auth_cookie_if_needed=lambda: None,
+        end_headers=lambda: None,
+        write_json=lambda _payload, status: None,
+        write_sse_bytes=lambda _name, _body, event_id="": None,
+        write_sse_json=lambda _name, _payload, event_id="": None,
+    )
+
+    server.Handler.stream_stats_current(
+        request,
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
+        authenticated_username="alice",
+    )
+
+    payload = server_logs.SERVER_LOGS.payload()
+    records = [entry for entry in payload["logs"] if entry.get("category") == "stats_stream"]
+    events = [entry["event"] for entry in records]
+    # Six consecutive late ticks are one episode and collapse to one record.
+    assert events.count("tick-late") == 1, records
+    # `rpc-slow` keeps one record per distinct HTTP status, so the 304 ticks and the terminal
+    # 409 are each visible while the seven repeats behind them are not.
+    assert events == ["rpc-slow", "tick-late", "rpc-slow", "status-change", "repair"], records
+    assert {json.loads(entry["message"])["status"] for entry in records if entry["event"] == "rpc-slow"} == {
+        int(HTTPStatus.NOT_MODIFIED), int(HTTPStatus.CONFLICT),
+    }, records
+    assert payload["dropped"]["count"] == 0, payload["dropped"]
+    server_logs.SERVER_LOGS.clear()
+
+
+def test_healthy_stream_records_no_boundary_telemetry(monkeypatch):
+    """A stream that never slips must write nothing, or the bounded ring would be flooded."""
+
+    current = [0.0]
+    events = []
+    server_logs.SERVER_LOGS.clear()
+
+    class Waiter:
+        def wait(self, delay):
+            current[0] += delay
+            return False
+
+    class Forwarder:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.calls += 1
+            if self.calls > 4:
+                return http.DeltaStreamResult(
+                    HTTPStatus.CONFLICT,
+                    {"status": "repair_required", "cache_generation": 12},
+                )
+            return http.DeltaStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
+    request = SimpleNamespace(
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        send_auth_cookie_if_needed=lambda: None,
+        end_headers=lambda: None,
+        write_json=lambda _payload, status: None,
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
+    )
+
+    server.Handler.stream_stats_current(
+        request,
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
+        authenticated_username="alice",
+    )
+
+    records = [
+        entry for entry in server_logs.SERVER_LOGS.payload()["logs"]
+        if entry.get("category") == "stats_stream"
+    ]
+    # Four on-cadence ticks record nothing; only the terminal repair is retained.
+    assert [entry["event"] for entry in records] == ["status-change", "repair"], records
+    server_logs.SERVER_LOGS.clear()
 
 
 def test_established_stream_keeps_cursor_open_across_transient_materialization_lag(monkeypatch):
@@ -648,8 +1104,8 @@ def test_established_stream_keeps_cursor_open_across_transient_materialization_l
         send_auth_cookie_if_needed=lambda: None,
         end_headers=lambda: None,
         write_json=lambda _payload, status: None,
-        write_sse_bytes=lambda name, body: events.append((name, body)),
-        write_sse_json=lambda name, payload: events.append((name, payload)),
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
     )
 
     server.Handler.stream_stats_current(
@@ -686,8 +1142,8 @@ def test_stream_initial_snapshot_failure_is_a_typed_sse_terminal_not_bare_http()
         send_auth_cookie_if_needed=lambda: writes.append(("cookie",)),
         end_headers=lambda: writes.append(("end",)),
         write_json=lambda payload, status: writes.append(("json", status, payload)),
-        write_sse_bytes=lambda name, body: events.append((name, body)),
-        write_sse_json=lambda name, payload: events.append((name, payload)),
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
     )
 
     server.Handler.stream_stats_current(
@@ -747,8 +1203,8 @@ def test_stream_initial_not_modified_opens_one_sse_and_emits_ack_then_ready():
         send_auth_cookie_if_needed=lambda: writes.append(("cookie",)),
         end_headers=lambda: writes.append(("end",)),
         write_json=lambda payload, status: writes.append(("json", status, payload)),
-        write_sse_bytes=lambda name, body: events.append((name, body)),
-        write_sse_json=lambda name, payload: events.append((name, payload)),
+        write_sse_bytes=lambda name, body, event_id="": events.append((name, body)),
+        write_sse_json=lambda name, payload, event_id="": events.append((name, payload)),
     )
 
     server.Handler.stream_stats_current(
@@ -827,8 +1283,8 @@ def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
         send_auth_cookie_if_needed=lambda: None,
         end_headers=lambda: None,
         write_json=lambda _payload, status: None,
-        write_sse_bytes=lambda _name, _body: None,
-        write_sse_json=lambda _name, _payload: None,
+        write_sse_bytes=lambda _name, _body, event_id="": None,
+        write_sse_json=lambda _name, _payload, event_id="": None,
     )
     stream_thread = threading.Thread(
         target=server.Handler.stream_stats_current,
@@ -909,3 +1365,57 @@ def test_forwarder_source_has_no_storage_payload_transform_or_old_runtime_depend
         "max_points",
     ):
         assert retired not in source
+
+
+def test_only_the_stats_stream_emits_an_sse_id_line():
+    """NEGATIVE SEARCH: no stream other than `/api/stats-stream` can emit an SSE `id:` line.
+
+    The writer puts `id:` BEFORE `event:` (`server.py:929`, `:946`), so any test that reads one
+    line of a stream and looks for the event name reads the id line instead. That is exactly
+    what broke `tests/subsystems/stats_24h_http.py` on a healthy endpoint -- status 200,
+    `b'id: 2129409927\n'`, `b'event: ack\n'`.
+
+    Three other single-line readers exist in this suite and all of them assert the event name
+    directly: `tests/test_tmux_signals.py:138` and `:149`, and `tests/test_session_files.py:393`
+    and `:395`. They are safe ONLY because `sse_id_line` returns `b""` for an empty id and their
+    streams pass none. This test is what keeps that true: add an `event_id` to any other SSE
+    writer and it goes red here, before those three do.
+    """
+
+    source = Path(server.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    stats_stream_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "stream_stats_current":
+            stats_stream_lines = set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    assert stats_stream_lines, "stream_stats_current not found; this guard is measuring nothing"
+
+    with_event_id: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "attr", None)
+        if name not in {"write_sse_json", "write_sse_bytes"}:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "event_id":
+                continue
+            expression = ast.unparse(keyword.value)
+            # `event_id=event_id` is the delegating wrapper forwarding its own parameter
+            # (`server.py:2983`, `:2986`), not a site that MINTS an id. Only minting sites
+            # decide which streams carry one, so only they are the guard's subject.
+            if expression == "event_id":
+                continue
+            with_event_id.append((node.lineno, expression))
+
+    assert with_event_id, "no SSE writer passes an event_id; this guard is measuring nothing"
+
+    outside = [line for line, _ in with_event_id if line not in stats_stream_lines]
+    assert outside == [], (
+        f"SSE id lines are emitted outside stream_stats_current at {outside}; every "
+        "single-line stream reader in the suite now needs to skip an id line"
+    )
+
+    foreign = sorted({expr for _, expr in with_event_id if expr != "stats_stream_emit_id()"})
+    assert foreign == [], f"unexpected SSE id sources: {foreign}"

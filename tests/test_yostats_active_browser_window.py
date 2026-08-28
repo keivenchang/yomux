@@ -63,7 +63,10 @@ def test_active_browser_window_uses_two_second_listener_census(monkeypatch):
     class CensusObserved(Exception):
         pass
 
-    def census(port, *, timeout_seconds):
+    def census(port, *, timeout_seconds, strict):
+        # The caller must name its mode. Default is target-scoped operational identity; strict
+        # whole-host visibility cannot succeed on a shared host and is not what this measures.
+        assert strict is False, strict
         observed.append((port, timeout_seconds))
         raise CensusObserved
 
@@ -80,7 +83,7 @@ def test_active_browser_window_rejects_raw_fork_parent_and_child(monkeypatch):
     tool = load_tool_module()
     monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT))
     monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(listener_census, "listener_pids", lambda *_args, **_kwargs: [101, 202])
+    monkeypatch.setattr(listener_census, "listener_census", lambda *_a, **_k: listener_census.ListenerCensus(pids=(101, 202)))
 
     with pytest.raises(RuntimeError, match=r"found \[101, 202\]"):
         tool.main()

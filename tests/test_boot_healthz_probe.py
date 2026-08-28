@@ -65,7 +65,14 @@ PUBLIC_ROUTES_BEFORE_LIVENESS = {
     ("GET", "/logout"),
     ("POST", "/login"),
 }
-EXPECTED_PUBLIC_ROUTES = PUBLIC_ROUTES_BEFORE_LIVENESS | {("GET", "/healthz")}
+# The health tier. Both are public for ONE stated reason: a supervisor polls them while
+# restarting, before any operator cookie exists, so authenticating them would break the
+# restart they exist to observe. `/healthz` answers for the HTTP listener, `/livez` for the
+# statsd daemon -- different subjects, so neither substitutes for the other. Both are narrow
+# by content: anything richer than a verdict leaks system state to an unauthenticated caller.
+# Nothing else joins this set without that same justification.
+PUBLIC_HEALTH_ROUTES = {("GET", "/healthz"), ("GET", "/livez")}
+EXPECTED_PUBLIC_ROUTES = PUBLIC_ROUTES_BEFORE_LIVENESS | PUBLIC_HEALTH_ROUTES
 
 # Attribute lookups the shared response parent makes on the app for every request. A liveness
 # probe must never grow this: anything else means /healthz started consulting a subsystem.
@@ -325,10 +332,18 @@ def test_public_route_set_contains_exactly_one_liveness_route():
     }
 
     assert public == EXPECTED_PUBLIC_ROUTES
-    # The public set grew by exactly one exact-match route and lost none.
-    assert public - PUBLIC_ROUTES_BEFORE_LIVENESS == {("GET", LIVENESS_PATH)}
+    # The public set grew by exactly the health tier and lost none.
+    assert public - PUBLIC_ROUTES_BEFORE_LIVENESS == PUBLIC_HEALTH_ROUTES
     assert PUBLIC_ROUTES_BEFORE_LIVENESS - public == set()
-    assert len(public) == len(PUBLIC_ROUTES_BEFORE_LIVENESS) + 1
+    assert len(public) == len(PUBLIC_ROUTES_BEFORE_LIVENESS) + len(PUBLIC_HEALTH_ROUTES)
+
+    # Every public route is exact-match: a wildcard would hand the unauthenticated tier a subtree.
+    for method, path in PUBLIC_HEALTH_ROUTES:
+        entry = [route for route in http_routes.ALL_ROUTES if route.path == path]
+        assert len(entry) == 1, path
+        assert entry[0].method == method
+        assert entry[0].role == http_routes.PUBLIC
+        assert "*" not in entry[0].path
 
     liveness = [route for route in http_routes.ALL_ROUTES if route.path == LIVENESS_PATH]
     assert len(liveness) == 1

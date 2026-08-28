@@ -122,9 +122,8 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
-function finderPathActionDisabledReason(primaryInfo) {
+function finderPathActionDisabledReason() {
   if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
-  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
   return '';
 }
 
@@ -136,8 +135,10 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    if (!primaryInfo?.repo_root) return [];
-    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    // Directory listings already derive this marker from the pinned directory descriptor.  It is
+    // enough to offer the Git history tab now; the tab owns the slower Git history load.
+    if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
+    const disabledReason = readOnlyMode ? t('contextmenu.readOnlyUnavailable') : '';
     const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
@@ -148,7 +149,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     }];
   }
   if (entry.kind !== 'file') return [];
-  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabledReason = finderPathActionDisabledReason();
   const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
   const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
   const diffCapabilityReason = !primaryInfo?.repo_root
@@ -175,28 +176,14 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   ];
 }
 
-async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
-  closeFileContextMenu();
-  closeTerminalContextMenu();
-  closeSessionContextMenu();
-  closeFileImagePreview();
-  closeOtherSessionPopovers(null);
-  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
-  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
-  // pointermove over the row can reopen it right behind the context menu. Route through its own
-  // controller when bound so timers and state are reset the same way any other dismissal is.
-  row?.__yolomuxRepoHoverController?.closeNow?.();
-  hideFileTreeRepoPopover();
-  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
-  const selectedPaths = fileTreeActionPaths(fullPath);
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
-    console.warn('fs info failed', path, error);
-    return null;
-  })));
-  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu file-context-menu';
-  menu.setAttribute('role', 'menu');
+function sameFileTreeContextMenuSelection(fullPath, selectedPaths) {
+  const currentPaths = fileTreeActionPaths(fullPath);
+  return currentPaths.length === selectedPaths.length && currentPaths.every((path, index) => path === selectedPaths[index]);
+}
+
+function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options = {}) {
+  if (!menu) return;
+  menu.replaceChildren();
   const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
   const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
@@ -230,7 +217,39 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   }
   appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
+}
+
+async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+    console.warn('fs info failed', path, error);
+    return null;
+  })));
+  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
+  if (!menu.isConnected || !sameFileTreeContextMenuSelection(fullPath, selectedPaths)) return;
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options);
+}
+
+function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
+  closeFileContextMenu();
+  closeTerminalContextMenu();
+  closeSessionContextMenu();
+  closeFileImagePreview();
+  closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
+  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
+  const selectedPaths = fileTreeActionPaths(fullPath);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  const pendingRelativeCopyEntries = selectedPaths.map(() => ({available: false, text: '', reason: 'pending'}));
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, [], pendingRelativeCopyEntries, options);
   fileContextMenu.open(menu, x, y);
+  void refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options);
 }
 
 function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
@@ -1445,8 +1464,12 @@ function fileErrorText(error, fallbackKey, fallbackParams = {}) {
 const FILE_TOO_LARGE_MESSAGE_KEY = 'fs.error.tooLarge';
 
 function payloadReportsFileTooLarge(error) {
+  // Only the server SAYING the file is oversized counts. A genuine content oversize always carries
+  // this key (`FilesystemError.file_too_large`), so an unlabelled 413 is some other limit and must
+  // not be relabelled as an oversized file: doing that produced "File is too large to preview" with
+  // an empty size, because there was no file size to report for a limit that was not about size.
   const key = String(userMessageSnapshot(error)?.user_message?.key || '');
-  return key === '' || key === FILE_TOO_LARGE_MESSAGE_KEY;
+  return key === FILE_TOO_LARGE_MESSAGE_KEY;
 }
 
 function tooLargeFileState(size = null, message = null) {
@@ -1909,6 +1932,12 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A new tab has no file state until this point. Select its requested/default mode only after
+  // installing that state, so Preview capability is evaluated against the real file type. An
+  // ordinary reopen deliberately has no initialViewMode and keeps its existing per-tab choice.
+  if (options.initialViewMode && !fileEditorViewModesForPath(path).has(editorViewModeKey(path, item))) {
+    setFileEditorViewMode(path, options.initialViewMode, item);
+  }
   // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
   // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
   if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
@@ -1920,6 +1949,10 @@ function openFilesSetAndShow(path, state, options = {}) {
 
 function openFileStateHasLoadedEditorPayload(state) {
   return Boolean(state?.kind && state.loading !== true && state.kind !== 'file' && state.kind !== 'error');
+}
+
+function openFileLoadingStateStillCurrent(path, state) {
+  return fileState.get(path) === state && openFilePathHasOwner(path);
 }
 
 function refreshOpenFileDiffDecorations(path) {
@@ -1963,7 +1996,6 @@ async function focusExistingPhysicalFileEditor(requestedPath, existingPath, opti
   const item = primaryEditorItemForPath(existingPath, options.item || null);
   foldDuplicateEditorItemsForPath(existingPath, item);
   if (options.viewMode) setFileEditorViewMode(existingPath, options.viewMode, item);
-  else setFileEditorViewMode(existingPath, 'edit', item);
   recordEditorNav(item);
   const openOptions = {
     ...options,
@@ -2114,22 +2146,24 @@ async function refreshOpenFileDiff(path, options = {}) {
   return state._diffLoadingPromise;
 }
 
-async function refreshOpenFileGitMetadata(path) {
+async function refreshOpenFileGitMetadata(path, expectedState = null) {
   const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  if (!state || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   try {
-    const payload = await fetchFileReadPayload(path);
+    const payload = await fetchFileReadPayload(path, {includeGit: true});
     const current = fileState.get(path);
-    if (!current || current.kind !== 'text') return false;
+    if (!current || current.kind !== 'text' || (expectedState && current !== expectedState)) return false;
     applyFileGitMetadata(current, payload);
+    renderOpenFilePath(path);
     return true;
   } catch (_error) {
     const current = fileState.get(path);
-    if (current && current.kind === 'text') {
+    if (current && current.kind === 'text' && (!expectedState || current === expectedState)) {
       current.gitRoot = '';
       current.gitTracked = false;
       current.gitHistory = [];
       current.gitHasHistory = false;
+      renderOpenFilePath(path);
     }
     return false;
   }
@@ -2149,8 +2183,17 @@ async function fetchFilesystemOperationPayload(url, operation, options = {}) {
 }
 
 async function fetchFileReadPayload(path, options = {}) {
+  const url = `/api/fs/read?path=${encodeURIComponent(path)}${options.includeGit === true ? '&include_git=1' : ''}`;
+  // The first content read is a browser-owned direct lifecycle: it paints into the already-open
+  // tab and resolves to bytes or a typed file state without a jobd receipt. Git enrichment stays
+  // on the retained-operation path because it may inspect repository history.
+  if (options.includeGit !== true) {
+    return apiFetchJson(url, {startupImmediate: true, ...(options.signal ? {signal: options.signal} : {})}, {
+      quietStatuses: options.quietStatuses || [404, 413, 415],
+    });
+  }
   return fetchFilesystemOperationPayload(
-    `/api/fs/read?path=${encodeURIComponent(path)}`,
+    url,
     'read',
     options,
   );
@@ -2164,6 +2207,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   if (identityDedupe) {
     const pendingOpen = fileOpenPromiseFor(fullPath);
     if (pendingOpen) {
+      if (fileState.has(fullPath)) return focusExistingPhysicalFileEditor(fullPath, fullPath, options);
       await pendingOpen.catch(() => null);
       const existingAfterPending = openPathForPhysicalFile(fullPath, entry) || (fileState.has(fullPath) ? fullPath : '');
       if (existingAfterPending) return focusExistingPhysicalFileEditor(fullPath, existingAfterPending, options);
@@ -2185,18 +2229,19 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
-  if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
     applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
     if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
-    await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
     renderOpenFilePath(fullPath);
     return item;
   }
+  // A default is only for a new tab. Reopening an error/Loading tab may retry its read, but its
+  // existing per-item view mode remains the user's choice unless this action requested a mode.
+  openOptions.initialViewMode = options.viewMode || defaultFileEditorViewModeForPath(fullPath, kind);
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = fileEntryMtime(entry);
@@ -2212,8 +2257,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     await openFilesSetAndShow(fullPath, applyFileIdentityMetadata(rawPreviewFileState(fullPath, entry), entry), openOptions);
     return item;
   }
+  // Make the editor selection visible before the filesystem work begins.  The read completion
+  // replaces this exact path state with text or a typed error, so a slow backend never makes the
+  // user's Open action appear ignored.
+  const loadingState = applyFileIdentityMetadata({
+    mtime: fileEntryMtime(entry),
+    kind: 'text',
+    original: '',
+    content: '',
+    dirty: false,
+    loading: true,
+  }, entry);
   const openPromise = (async () => {
     const payload = await fetchFileReadPayload(fullPath);
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
       if (existingIdentityPath && existingIdentityPath !== fullPath) {
@@ -2229,12 +2286,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       dirty: false,
     }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
+    // Base content is the interactive path. Git status/history is useful decoration, but never
+    // delays the newly-created tab; discard its result if this state has since been replaced.
+    void refreshOpenFileGitMetadata(fullPath, state);
     return item;
   })();
+  // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
+  // read, so publish the same promise before rendering to prevent a duplicate request.
+  loadingState.loadingPromise = openPromise;
+  openFilesSetAndShow(fullPath, loadingState, openOptions);
   if (identityDedupe) setFileOpenPromise(fullPath, openPromise);
   try {
     return await openPromise;
   } catch (err) {
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     const status = Number(err?.status) || 0;
     if (status) {
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
@@ -2911,6 +2976,7 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
@@ -2919,22 +2985,28 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
-  const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
   if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
     serverWatchRootsState.scheduledKey = requestKey;
     return;
   }
+  const now = performance.now();
+  if (serverWatchRootsState.debounceStartedAt === null) serverWatchRootsState.debounceStartedAt = now;
+  const deadline = serverWatchRootsState.debounceStartedAt + serverWatchDebounceMaxDeferralMs;
+  const delay = pendingOptions.immediate === true ? 0 : Math.max(0, Math.min(serverWatchDebounceMs, deadline - now));
+  if (serverWatchRootsState.timer && serverWatchRootsState.scheduledKey === requestKey && serverWatchRootsState.timerDelay === delay) return;
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
   serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};

@@ -37,6 +37,9 @@ async function fetchRawFileBlob(path, options = {}) {
   try {
     const response = await apiFetch(rawFileUrl(path, options.params || {}), {
       cache: 'no-store',
+      // Visible preview bytes are a user-facing point read. They must not sit behind long-poll
+      // startup work in the browser-wide refresh coordinator.
+      startupImmediate: true,
       deadlineMs: options.deadlineMs || apiFetchLongOperationDeadlineMs,
       ...(options.signal ? {signal: options.signal} : {}),
     }, {returnUnauthorizedResponse: true, abortRetirementReason: 'raw_file_media_replaced'});

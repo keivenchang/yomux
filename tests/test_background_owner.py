@@ -650,9 +650,9 @@ def test_managed_instance_starts_private_workers_through_the_local_owner_adapter
     webapp.warm_start_tabber_activity_cache = lambda: calls.append("tabber")
     webapp.start_tabber_activity_cache_warmer = lambda: calls.append("tabber-worker")
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
-    # Item 1 (Slice B): owner acquisition also leases indexd for configured roots via
-    # refresh_search_indexer_schedule(), between stats start and the cache-warm calls. With no
-    # configured roots the lease is a bounded no-op; the private-worker startup order is the contract.
+    # Owner acquisition also leases indexd for configured roots.  Session-files cache warming is
+    # deliberately excluded: constructing an uncovered repository cache key can snapshot its
+    # object store, so it must never delay the listener binding during startup.
     webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": []}}}
     webapp.indexed_repo_discovery_dirs = lambda _fe: []
     webapp.search_indexer = type(
@@ -666,7 +666,7 @@ def test_managed_instance_starts_private_workers_through_the_local_owner_adapter
         assert isinstance(webapp.background_owner, app_module.DisabledBackgroundOwner)
         assert webapp.background_owner.status_payload()["status"] == "local"
         assert webapp.background_owner.owner_payload()["port"] == 9911
-        assert calls == ["event", "job", "pricing", "stats", "search-indexer", "session-files", "tabber", "tabber-worker", "publish"]
+        assert calls == ["event", "job", "pricing", "stats", "search-indexer", "tabber", "tabber-worker", "publish"]
     finally:
         file_index.set_background_owner_checker(None)
 

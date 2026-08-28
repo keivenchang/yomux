@@ -5104,6 +5104,12 @@ function commandPaletteSearchQuery(query = commandPaletteState.query, mode = com
   return fileQuickOpenSearchText(query);
 }
 
+function fileQuickOpenCandidateQueryIdentity(query, root) {
+  const pathQuery = fileQuickOpenPathQuery(query);
+  if (pathQuery.active) return `path:${pathQuery.directory || '/'}\n${pathQuery.filter}`;
+  return `search:${String(root || '')}\n${commandPaletteSearchQuery(query)}`;
+}
+
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
   const q = commandPaletteState.query.trim();
@@ -5332,6 +5338,7 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  fileQuickOpenState.candidateQueryIdentity = '';
   // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
   // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
   resetFileQuickOpenDeltaCursors('');
@@ -5389,16 +5396,23 @@ function fileQuickOpenWorstFreshness(records) {
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
+  const searchQuery = commandPaletteSearchQuery(query);
+  const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
+  const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
   abortFileQuickOpenSearch();
+  fileQuickOpenState.candidateQueryIdentity = candidateQueryIdentity;
   const requestId = ++fileQuickOpenState.requestId;
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  // Rows retained across a refresh of the same query are still that query's answer, so they stay
+  // visible while the reread lands. Rows retained across a changed query are not its ranked answer.
+  if (candidateQueryIdentity !== previousCandidateQueryIdentity) fileQuickOpenState.candidates = [];
   // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
   // mutate this palette, and the roots/query it belonged to may have changed entirely.
-  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
+  resetFileQuickOpenDeltaCursors(searchQuery);
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);

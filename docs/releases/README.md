@@ -4,7 +4,11 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
-| 0.7.16 | `v0.7.16` | `v0.7.16^{commit}` | [v0.7.16-evidence.md](v0.7.16-evidence.md) | restores Blame and Differ performance on NFS-backed repositories and reclaims writer slots left by cancelled runs |
+| 0.7.20 | `v0.7.20` | `v0.7.20^{commit}` | [v0.7.20-evidence.md](v0.7.20-evidence.md) | Finder right-click paints before metadata; Git-directory Diff opens its tab immediately with animated loading |
+| 0.7.19 | `v0.7.19` | `v0.7.19^{commit}` | [v0.7.19-evidence.md](v0.7.19-evidence.md) | instant file reopening retains its selected mode, and jobd replaces only a bounded failed or stuck worker slot |
+| 0.7.18 | `v0.7.18` | `v0.7.18^{commit}` | [v0.7.18-evidence.md](v0.7.18-evidence.md) | immediate file tabs and direct descriptor-authorized base reads, with Git decoration deferred from content paint |
+| 0.7.17 | `v0.7.17` | `v0.7.17^{commit}` | [v0.7.17-evidence.md](v0.7.17-evidence.md) | bounded YO!stats rebuild and persistence work, authenticated service health endpoints, and gate ownership/cost stability repairs |
+| 0.7.16 | `v0.7.16` | `v0.7.16^{commit}` | [v0.7.16-evidence.md](v0.7.16-evidence.md) | restores Blame and Differ on NFS-backed repositories, opens files when Git cannot describe them, and reclaims writer slots left by cancelled runs |
 | 0.7.15 | `v0.7.15` | `v0.7.15^{commit}` | [v0.7.15-evidence.md](v0.7.15-evidence.md) | tmux control-client lifecycle ownership, roster metadata convergence, and preserved topbar refusal state and tooltip ownership |
 | 0.7.14 | `v0.7.14` | `v0.7.14^{commit}` | [v0.7.14-evidence.md](v0.7.14-evidence.md) | local-service identity and lease safety, deterministic gate ownership, and YO!stats generation correctness |
 | 0.7.13 | `v0.7.13` | `v0.7.13^{commit}` | [v0.7.13-evidence.md](v0.7.13-evidence.md) | corrects watchd health, YO!stats graph/ring and roster convergence, bounded Codex hot-tail fairness, and session-files request ownership |

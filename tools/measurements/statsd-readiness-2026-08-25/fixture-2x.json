@@ -1,0 +1,122 @@
+{
+ "after": {
+  "application_id": 1498370900,
+  "bytes": 1117831168,
+  "distinct_family_source": 54,
+  "distinct_sources": 52,
+  "journal_mode": "wal",
+  "observation_payload_bytes": 184795638,
+  "observed_at_range": [
+   1787547090.5401437,
+   1787713913.2659495
+  ],
+  "page_count": 272908,
+  "page_size": 4096,
+  "path": "/tmp/yolomux-e3-readiness-10/masters/2x.sqlite3",
+  "rows": {
+   "aggregate_publication": 1,
+   "aggregate_ring_slots": 1248,
+   "aggregate_rings": 4,
+   "coverage_epochs": 4098,
+   "migration_reconciliation": 1,
+   "observations": 2409456,
+   "ring_invalidations": 530630,
+   "ring_replay_cursor": 4,
+   "schema_meta": 1,
+   "unavailable_spans": 2966,
+   "usage_atoms": 150758
+  },
+  "usage_payload_bytes": 50396716,
+  "user_version": 8,
+  "wal_bytes": 0,
+  "wal_present": true
+ },
+ "before": {
+  "application_id": 1498370900,
+  "bytes": 552484864,
+  "distinct_family_source": 27,
+  "distinct_sources": 26,
+  "journal_mode": "wal",
+  "observation_payload_bytes": 92397819,
+  "observed_at_range": [
+   1787547090.5401437,
+   1787713913.2659495
+  ],
+  "page_count": 134884,
+  "page_size": 4096,
+  "path": "/tmp/yolomux-e3-readiness-10/masters/2x.sqlite3",
+  "rows": {
+   "aggregate_publication": 1,
+   "aggregate_ring_slots": 1248,
+   "aggregate_rings": 4,
+   "coverage_epochs": 2049,
+   "migration_reconciliation": 1,
+   "observations": 1204728,
+   "ring_invalidations": 530630,
+   "ring_replay_cursor": 4,
+   "schema_meta": 1,
+   "unavailable_spans": 1483,
+   "usage_atoms": 75379
+  },
+  "usage_payload_bytes": 25198358,
+  "user_version": 8,
+  "wal_bytes": 0,
+  "wal_present": true
+ },
+ "build_seconds": 21.644,
+ "distinct_family_source_ratio": 2.0,
+ "inserted": {
+  "coverage_epochs": 2049,
+  "observations": 1204728,
+  "unavailable_spans": 1483,
+  "usage_atoms": 75379
+ },
+ "integrity": "ok",
+ "observation_payload_ratio": 2.0,
+ "ratios": {
+  "aggregate_publication": 1.0,
+  "aggregate_ring_slots": 1.0,
+  "aggregate_rings": 1.0,
+  "coverage_epochs": 2.0,
+  "migration_reconciliation": 1.0,
+  "observations": 2.0,
+  "ring_invalidations": 1.0,
+  "ring_replay_cursor": 1.0,
+  "schema_meta": 1.0,
+  "unavailable_spans": 2.0,
+  "usage_atoms": 2.0
+ },
+ "source": {
+  "application_id": 1498370900,
+  "bytes": 552484864,
+  "distinct_family_source": 27,
+  "distinct_sources": 26,
+  "journal_mode": "wal",
+  "observation_payload_bytes": 92397819,
+  "observed_at_range": [
+   1787547090.5401437,
+   1787713913.2659495
+  ],
+  "page_count": 134884,
+  "page_size": 4096,
+  "path": "/tmp/yolomux-e3-readiness-10/masters/1x-checkpointed.sqlite3",
+  "rows": {
+   "aggregate_publication": 1,
+   "aggregate_ring_slots": 1248,
+   "aggregate_rings": 4,
+   "coverage_epochs": 2049,
+   "migration_reconciliation": 1,
+   "observations": 1204728,
+   "ring_invalidations": 530630,
+   "ring_replay_cursor": 4,
+   "schema_meta": 1,
+   "unavailable_spans": 1483,
+   "usage_atoms": 75379
+  },
+  "usage_payload_bytes": 25198358,
+  "user_version": 8,
+  "wal_bytes": 0,
+  "wal_present": true
+ },
+ "usage_payload_ratio": 2.0
+}

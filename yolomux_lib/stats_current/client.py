@@ -17,6 +17,8 @@ from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.rpc import LocalRpcError, new_envelope, request as local_service_request
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES, encode_metadata
 from yolomux_lib.local_services.runtime import redact_local_service_text
+from yolomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
+from yolomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
 from yolomux_lib.stats_current import protocol, revision, storage
 
 SERVICE_NAME = "statsd"
@@ -498,6 +500,24 @@ class StatsCurrentClient:
             return self._transport.registry.failure_response()
         return response
 
+    def resource_state(self) -> dict[str, Any]:
+        """Lock-free control state for `/readyz`. Deliberately NOT `status()`.
+
+        `status()` reaches `_status()`, which opens with `work_lock` -- the lock the materializer
+        worker holds across a build. A readiness probe that waits behind the daemon it is checking
+        reports nothing about it. This action's handler takes no lock at all.
+
+        A public method rather than callers reaching through `_call`, so the owner boundary stays
+        one method wide and a future transport change has one place to happen. "Public" here is
+        Python visibility, NOT an HTTP tier: this payload carries pending cell counts, migration
+        state and failure strings, and its only route is authenticated `/readyz`. Do not wire it
+        to an unauthenticated endpoint.
+        """
+        response = self._call("resource_state", timeout=STATUS_TIMEOUT_SECONDS)
+        if response.get("_transport_error"):
+            return {}
+        return response
+
     def browser_diagnostics(self) -> dict[str, Any]:
         return self._call("browser_profiles", timeout=BROWSER_PROFILES_TIMEOUT_SECONDS)
 
@@ -561,6 +581,12 @@ class StatsCurrentClient:
                 timeout=3.0,
                 request_binary=browser_upload,
             )
+            # Only statsd's browser-payload validator can fence one stale tab without poisoning
+            # this shared client, which every lease and typed append also goes through. An
+            # unmarked upgrade response is a real daemon protocol fence and must still be
+            # remembered so it stops those callers too.
+            if response.get(CALLER_OUTCOME_OWNER_FIELD) == BROWSER_UPLOAD_OUTCOME_OWNER:
+                return response
             return self._remember(response)
         if total < 1 or total > protocol.MAX_APPEND_RECORDS:
             raise ValueError(f"append requires 1..{protocol.MAX_APPEND_RECORDS} records")

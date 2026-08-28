@@ -16,11 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.stats_replay import replay_observation as _observation
+from tests.helpers.stats_replay import ring_slot_state as _slot_state
 from yolomux_lib.stats_current import materializer
 from yolomux_lib.stats_current import service as service_module
 from yolomux_lib.stats_current import storage
 from yolomux_lib.stats_current.storage import CoverageEpoch
-from yolomux_lib.stats_current.storage import Observation
 from yolomux_lib.stats_current.storage import UnavailableSpan
 from yolomux_lib.stats_current.storage import UsageAtom
 from yolomux_lib.stats_current.storage import UsageAtomTombstone
@@ -77,14 +78,6 @@ def _cursor(store_obj: storage.Store) -> dict[int, tuple[float, int]]:
             "FROM ring_replay_cursor"
         )
     }
-
-
-def _observation(event_id: str, observed_at: float) -> Observation:
-    return Observation(
-        event_id=event_id, family="cpu", source_id="host", observed_at=observed_at,
-        epoch_id="epoch-a", owner_generation=1,
-        payload={"process_percent": 1, "system_percent": 2},
-    )
 
 
 def _usage(event_id: str, observed_at: float, thread_id: str = "t1") -> UsageAtom:
@@ -206,6 +199,161 @@ def test_append_time_retention_prune_invalidates_the_deleted_range_not_the_offer
     assert (RESOLUTION, int(old // RESOLUTION) * RESOLUTION) in recorded, (
         "the retention prune deleted an old fact without invalidating its bucket"
     )
+
+
+def _source_generation(store_obj: storage.Store) -> int:
+    return int(store_obj._connection().execute(
+        "SELECT source_generation FROM schema_meta WHERE singleton = 1"
+    ).fetchone()[0])
+
+
+def _stage_retired_ledger(store_obj: storage.Store) -> tuple[float, float, tuple[int, int, int]]:
+    """Stage three rows: retired before the cutoff, retired inside it, and still pending.
+
+    `applied_at` is the publication's WALL CLOCK, so `published_at` is the only way to place a
+    retired row on either side of the retention cutoff. Every fact stays well inside the window,
+    which is what makes `PruneResult.changed` zero and isolates the retired-row delete from the
+    generation advance that fact deletion is allowed to cause.
+    """
+    now = 1_787_000_000.0
+    cutoff = now - storage.RETENTION_SECONDS
+    instants = (now - 600.0, now - 400.0, now - 200.0)
+    _publish_for(store_obj, *instants)
+    buckets = tuple(int(instant // RESOLUTION) * RESOLUTION for instant in instants)
+    assert len(set(buckets)) == 3, "the fixture must stage three distinct buckets"
+    for bucket, instant, applied_at in (
+        (buckets[0], instants[0], cutoff - 1_000.0),
+        (buckets[1], instants[1], cutoff + 1_000.0),
+    ):
+        store_obj.append_batch(observations=[_observation(f"e-{bucket}", instant)])
+        store_obj.publish_ring_buckets(
+            buckets=[_bucket(bucket)],
+            source_generation=_source_generation(store_obj),
+            published_at=applied_at,
+        )
+    # Left pending on purpose, and its slot is still populated, so neither the actionability sweep
+    # nor a publication can remove it. Only a predicate that ignores `applied_at IS NOT NULL`
+    # would.
+    store_obj.append_batch(observations=[_observation(f"e-{buckets[2]}", instants[2])])
+    staged = {(bucket, applied) for _r, bucket, _g, applied in _ledger(store_obj)}
+    assert (buckets[0], cutoff - 1_000.0) in staged, staged
+    assert (buckets[1], cutoff + 1_000.0) in staged, staged
+    assert (buckets[2], None) in staged, staged
+    return now, cutoff, buckets
+
+
+def test_an_explicit_prune_deletes_retired_invalidations_past_the_cutoff(store):
+    """The measured defect: 529,217 rows, 82% past retention, because nothing deleted them.
+
+    Every reader of this table filters `applied_at IS NULL`, so a retired row carries no
+    information any code path can use -- it is a record of work that already completed. The source
+    facts it shadows are deleted at `RETENTION_SECONDS`; before this, the shadow outlived them by
+    days. Measured on the live store on 2026-08-25: `observations` spanned 45.87 h while
+    `ring_invalidations` spanned 151.39 h.
+    """
+    now, cutoff, buckets = _stage_retired_ledger(store)
+    generation_before = _source_generation(store)
+    pending_before = _pending_rows(store)
+
+    result = store.prune(now=now)
+
+    assert result.changed == 0, (
+        f"the fixture deleted facts, so this no longer isolates the retired delete: {result}"
+    )
+    surviving = {(bucket, applied) for _r, bucket, _g, applied in _ledger(store)}
+    assert (buckets[0], cutoff - 1_000.0) not in surviving, (
+        f"a retired row older than the cutoff survived the prune: {sorted(surviving)}"
+    )
+    assert (buckets[1], cutoff + 1_000.0) in surviving, (
+        "a retired row still inside the retention window was deleted"
+    )
+    assert (buckets[2], None) in surviving, "an unapplied row was deleted"
+    # THE HAZARD. Deleting a record of already-completed work changes no fact and no aggregate, so
+    # it must not advance the generation. If it did, `_record_invalidations` would fire on the very
+    # next line of `Store.prune` and manufacture fresh pending rows for buckets whose facts never
+    # changed -- making this table grow faster, not slower, on every 60-second sweep.
+    assert _source_generation(store) == generation_before, (
+        "deleting retired invalidations advanced source_generation"
+    )
+    assert _pending_rows(store) == pending_before, (
+        f"the prune manufactured pending rows: {sorted(_pending_rows(store) - pending_before)}"
+    )
+    assert result.retired_invalidations_deleted == 1, result
+
+
+def test_append_time_retention_prune_deletes_retired_invalidations_past_the_cutoff(store):
+    """`_prune_retained_facts` has two callers; proving one leaves the other unproven.
+
+    The append path at `storage.py` reaches the same owner through `retention_now`. This offers no
+    facts at all, so `changed` stays zero here too and the generation assertion is exact.
+    """
+    now, cutoff, buckets = _stage_retired_ledger(store)
+    generation_before = _source_generation(store)
+    pending_before = _pending_rows(store)
+
+    result = store.append_batch(retention_now=now)
+
+    assert result.source_generation == generation_before, (
+        "an append that only deleted retired invalidations advanced source_generation"
+    )
+    surviving = {(bucket, applied) for _r, bucket, _g, applied in _ledger(store)}
+    assert (buckets[0], cutoff - 1_000.0) not in surviving, (
+        f"a retired row older than the cutoff survived the append-time prune: {sorted(surviving)}"
+    )
+    assert (buckets[1], cutoff + 1_000.0) in surviving, (
+        "a retired row still inside the retention window was deleted"
+    )
+    assert (buckets[2], None) in surviving, "an unapplied row was deleted"
+    assert _pending_rows(store) == pending_before, (
+        f"the append-time prune manufactured pending rows: "
+        f"{sorted(_pending_rows(store) - pending_before)}"
+    )
+    assert result.retention_prune is not None
+    assert result.retention_prune.retired_invalidations_deleted == 1, result.retention_prune
+
+
+def test_the_retired_delete_is_bounded_per_pass_and_drains_across_passes(store):
+    """One pass must not delete an unbounded backlog: this runs inside `work_lock` every 60 s.
+
+    Measured on a copy of the live store: 435,835 retired rows deleted in one unbounded statement
+    took 0.891 s of write-lock hold, against a gate predicate that fails at a 3 s stall. A bounded
+    pass took 0.045 s. The bound is asserted as a STATE TRANSITION across passes, never as a
+    duration -- a timing threshold here would be exactly the kind of flaky gate this project bans.
+    """
+    now = 1_787_000_000.0
+    cutoff = now - storage.RETENTION_SECONDS
+    store.initialize_ring_storage()
+    connection = store._connection()
+    total = storage.RETIRED_INVALIDATION_PRUNE_LIMIT + 3
+    with connection:
+        connection.executemany(
+            "INSERT INTO ring_invalidations("
+            "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            [
+                (RESOLUTION, index * RESOLUTION, 1, "fact_mutation", 0.0, cutoff - 1_000.0)
+                for index in range(total)
+            ],
+        )
+    assert _count_invalidations(store) == total
+
+    first = store.prune(now=now)
+    assert first.retired_invalidations_deleted == storage.RETIRED_INVALIDATION_PRUNE_LIMIT
+    remaining = _count_invalidations(store)
+    assert remaining == total - storage.RETIRED_INVALIDATION_PRUNE_LIMIT, remaining
+
+    second = store.prune(now=now)
+    assert second.retired_invalidations_deleted == remaining
+    assert _count_invalidations(store) == 0
+
+    third = store.prune(now=now)
+    assert third.retired_invalidations_deleted == 0, "a drained ledger must delete nothing"
+
+
+def _count_invalidations(store_obj: storage.Store) -> int:
+    return int(store_obj._connection().execute(
+        "SELECT count(*) FROM ring_invalidations"
+    ).fetchone()[0])
 
 
 # --- coverage and unavailable ---------------------------------------------------------------
@@ -384,14 +532,17 @@ def test_a_restart_retains_an_invalidated_cell_even_when_its_slot_looks_persiste
         opened.append_batch(observations=[_observation("late", float(target) + 1.0)])
         assert (RESOLUTION, target) in _pending(opened), "the fixture recorded no invalidation"
 
-        # A fresh restart: no publications yet in THIS process.
-        service._ring_publications = 0
+        # A fresh restart: neither partial nor coherent publication state carries across processes.
+        restarted = service_module.StatsCurrentService(
+            tmp_path / "statsd-restarted.sock", database,
+            monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0], randomizer=lambda: 0.0,
+        )
         cell = next(
             item for item in (
                 materializer.DirtyCell(RESOLUTION, target),
             )
         )
-        retained = service._restart_ring_cells(opened, candidate, frozenset({cell}))
+        retained = restarted._restart_ring_cells(opened, candidate, frozenset({cell}))
 
     assert cell in retained, (
         "the restart filter dropped a cell the ledger had marked contradicted"
@@ -430,9 +581,12 @@ def test_a_restart_still_drops_a_historically_open_cell(tmp_path):
         connection.commit()
         assert not _pending(opened), "this control needs a store with no pending work"
 
-        service._ring_publications = 0
+        restarted = service_module.StatsCurrentService(
+            tmp_path / "statsd-restarted.sock", database,
+            monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0], randomizer=lambda: 0.0,
+        )
         cell = materializer.DirtyCell(RESOLUTION, historical)
-        retained = service._restart_ring_cells(opened, candidate, frozenset({cell}))
+        retained = restarted._restart_ring_cells(opened, candidate, frozenset({cell}))
 
     assert cell not in retained, (
         "the restart filter retained a historically open cell; downtime will read as quiet zero"
@@ -845,20 +999,33 @@ def test_an_already_pending_row_is_not_duplicated_by_a_second_mutation(store):
     assert len(pending_now) <= len(after_first)
 
 
-def test_an_already_retired_row_is_never_resurrected_or_deleted(store):
-    """A retired row is history; the sweep only removes PENDING rows."""
+def test_an_already_retired_row_is_never_resurrected_or_swept(store):
+    """A retired row is history to the ACTIONABILITY SWEEP, which only removes PENDING rows.
+
+    Retention is now a second, separate reason a retired row can go, so this pins `applied_at`
+    INSIDE the retention window to isolate the sweep. Before, the fixture published at wall clock
+    500.0 against a cutoff of 7,060.0, so the row was older than retention purely by accident of
+    the synthetic timestamps -- which made the assertion read as "nothing ever deletes a retired
+    row", a contract this file's own retention tests now deliberately contradict. Narrowing it back
+    to the sweep is what the name and docstring always claimed.
+    """
     instant = 7_000.0
+    now = instant + storage.RETENTION_SECONDS + RESOLUTION
     _publish_for(store, instant)
     store.append_batch(observations=[_observation("e", instant)])
     generation = max(_pending_generations(store))
     store.publish_ring_buckets(
         buckets=[_bucket(int(instant // RESOLUTION) * RESOLUTION)],
-        source_generation=generation, published_at=500.0,
+        source_generation=generation, published_at=now,
     )
     retired = {row for row in _ledger(store) if row[3] is not None}
     assert retired, "fixture retired nothing"
+    assert all(applied >= now - storage.RETENTION_SECONDS for *_x, applied in retired), (
+        "the fixture must retire inside the retention window, or retention -- not the sweep -- "
+        "is what this test measures"
+    )
 
-    store.prune(now=instant + storage.RETENTION_SECONDS + RESOLUTION)
+    store.prune(now=now)
 
     assert retired <= _ledger(store), "the sweep deleted an already-retired row"
 
@@ -1294,24 +1461,6 @@ def test_the_real_rebuild_caller_publishes_and_retires_across_close_and_reopen(t
 
     with storage.Store.open(database) as final:
         assert (resolution_seconds, bucket_start) not in _pending(final)
-
-
-def _slot_state(store_obj: storage.Store) -> dict[tuple[int, int], tuple[object, ...]]:
-    """Every ring slot by ADDRESS, including the empty ones.
-
-    Keyed by (resolution, slot_index) rather than by bucket, so a slot that was cleared is visible
-    as a changed value instead of silently vanishing from the comparison.
-    """
-    return {
-        (int(row[0]), int(row[1])): (
-            row[2], row[3], int(row[4]), int(row[5]), int(row[6]), float(row[7]), int(row[8]),
-        )
-        for row in store_obj._connection().execute(
-            "SELECT resolution_seconds, slot_index, bucket_start, bucket_json, complete, "
-            "source_generation, ring_generation, published_at, payload_version "
-            "FROM aggregate_ring_slots"
-        )
-    }
 
 
 def _owed_cell_after_restart(tmp_path, monotonic_now, wall_now, *, oldest: bool):
@@ -1848,3 +1997,101 @@ def test_the_honest_gap_owner_refuses_a_reader(tmp_path):
     with storage.Store.open_reader(database) as reader:
         with pytest.raises(storage.StatsCurrentError):
             reader.retire_unrebuildable_ring_cells([(RESOLUTION, RESOLUTION * 4_000, 0)])
+
+
+def _drifted_cursor_store(tmp_path, mutate):
+    """Build a valid v8 ring store, then drive `ring_replay_cursor` to a state only a tool reaches.
+
+    The product cannot get here: there is one INSERT site at schema creation and no DELETE site at
+    all. An external tool editing the file can, and until this validation existed the result was
+    accepted and then replayed from a wrong fold point.
+    """
+
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        connection = store._connection()
+        mutate(connection)
+        connection.commit()
+        with pytest.raises(storage.SchemaMismatchError) as raised:
+            storage._validate_ring_schema(connection)
+    return str(raised.value)
+
+
+def test_a_dropped_replay_cursor_row_is_refused_rather_than_refolded_from_zero(tmp_path):
+    """A missing cursor row means that resolution resumes from a fold point nobody wrote."""
+
+    message = _drifted_cursor_store(
+        tmp_path,
+        lambda connection: connection.execute(
+            "DELETE FROM ring_replay_cursor WHERE resolution_seconds = 1"
+        ),
+    )
+
+    assert "ring_replay_cursor" in message
+    assert "[1, 10, 60, 300]" in message
+    assert "[10, 60, 300]" in message
+
+
+def test_an_extra_replay_cursor_row_is_refused_rather_than_folding_a_ring_that_does_not_exist(tmp_path):
+    """The foreign key blocks this while it is on, so the reachable path is a tool that turned it off."""
+
+    def add_a_cursor_for_no_ring(connection):
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(7)")
+
+    message = _drifted_cursor_store(tmp_path, add_a_cursor_for_no_ring)
+
+    assert "ring_replay_cursor" in message
+    assert "[1, 7, 10, 60, 300]" in message
+
+
+def test_one_owner_enforces_every_pre_allocated_ring_table_row_set(tmp_path):
+    """Parity: the cursor's new check and the two that predate it are the same function.
+
+    Publication and `aggregate_rings` carry reject triggers, so the product path cannot corrupt
+    them and this drops the triggers to reach the state a tool would leave. The point is not that
+    the triggers are insufficient - it is that when the assertion is the only defence, as it is for
+    the update-heavy cursor, it has to be the same assertion.
+    """
+
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        connection = store._connection()
+        storage._validate_ring_schema(connection)
+
+        for name in tuple(
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        ):
+            connection.execute(f"DROP TRIGGER {name}")
+        connection.execute("PRAGMA foreign_keys=OFF")
+
+        for table, key_column, statement in (
+            ("aggregate_publication", "singleton", "DELETE FROM aggregate_publication"),
+            ("aggregate_rings", "resolution_seconds", "DELETE FROM aggregate_rings WHERE resolution_seconds = 10"),
+            ("ring_replay_cursor", "resolution_seconds", "DELETE FROM ring_replay_cursor WHERE resolution_seconds = 10"),
+        ):
+            connection.execute("SAVEPOINT parity")
+            connection.execute(statement)
+            with pytest.raises(storage.SchemaMismatchError) as raised:
+                storage._validate_ring_schema(connection)
+            assert f"{table} must hold exactly one row per {key_column}" in str(raised.value)
+            connection.execute("ROLLBACK TO parity")
+            connection.execute("RELEASE parity")
+
+
+def test_an_intact_ring_store_still_validates_after_the_cursor_assertion(tmp_path):
+    """Negative control: the new assertion must not refuse a store the product just created."""
+
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        connection = store._connection()
+        storage._validate_ring_schema(connection)
+        cursors = tuple(
+            int(row[0])
+            for row in connection.execute(
+                "SELECT resolution_seconds FROM ring_replay_cursor ORDER BY resolution_seconds"
+            )
+        )
+
+    assert cursors == (1, 10, 60, 300)

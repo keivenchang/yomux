@@ -256,8 +256,13 @@ class FakeEventSource {
     this.closeCount += 1;
   }
 
-  emit(name, data = '') {
-    for (const callback of this.listeners.get(name) || []) callback({data});
+  // A real EventSource exposes the frame's SSE `id:` line as `event.lastEventId`, and
+  // persists the last non-empty one across frames that carry none.
+  emit(name, data = '', lastEventId = '') {
+    if (lastEventId) this.lastEventId = String(lastEventId);
+    for (const callback of this.listeners.get(name) || []) {
+      callback({data, lastEventId: this.lastEventId || ''});
+    }
   }
 
   async respondFromLegacySnapshotMock() {
@@ -1565,6 +1570,148 @@ test('quiet-stream ready heartbeats are liveness, and only real silence is a sta
   client.stop();
 });
 
+// The stall predicate can only say that nothing arrived for three cadences; it cannot say
+// WHICH side went quiet. `streamEvidence()` already holds the observables that separate a
+// silent server from a stream this browser tore down and reopened, so the failure that
+// reaches the retained artifact must carry that snapshot, sampled at report time.
+test('the stall failure carries the stream evidence that classifies which side went quiet', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    return response(200, snapshot({range: 300, requested: 1, resolution: 1}));
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: FakeEventSource,
+    clientId: 'stall-evidence',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+  await client.start();
+  await clock.advance(0);
+  const before = client.streamEvidence();
+
+  await clock.advance(4000);
+  assert.equal(failures.length, 1, 'silence past the budget is reported once');
+  const evidence = failures[0].evidence;
+  assert.ok(evidence && typeof evidence === 'object', 'the stall failure carries a stream evidence snapshot');
+  assert.deepStrictEqual(
+    Object.keys(evidence).sort(),
+    Object.keys(before).sort(),
+    'the attached snapshot is the whole streamEvidence() record, not a hand-picked subset',
+  );
+  // Real silence: no frame was delivered and the stream was never torn down, so the quiet
+  // is upstream of this browser. A client-side rejection would move one of these two.
+  assert.equal(evidence.deliverySequence, before.deliverySequence, 'no frame was delivered during the stall window');
+  assert.equal(evidence.streamEpoch, before.streamEpoch, 'the stream was never closed and reopened');
+  assert.equal(evidence.streamOpen, true, 'the transport was still open when the watchdog fired');
+  assert.equal(evidence.running, true);
+  assert.equal(evidence.lastDeliveryKind, before.lastDeliveryKind);
+  assert.equal(evidence.lastDeliveryAtMs, before.lastDeliveryAtMs, 'the snapshot is sampled at report time and shows the last delivery is stale');
+  client.stop();
+});
+
+// `YO!stats stream generation stalled for more than 3s` is the classification predicate for
+// the whole stall investigation and several retained artifacts key off it byte-for-byte.
+// Attaching evidence must not touch it, and must not disturb the existing payload shape.
+test('attaching stall evidence leaves the stall message byte-identical', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    return response(200, snapshot({range: 300, requested: 1, resolution: 1}));
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: FakeEventSource,
+    clientId: 'stall-message',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+  await client.start();
+  await clock.advance(0);
+  await clock.advance(4000);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].message, 'YO!stats stream generation stalled for more than 3s');
+  assert.equal(failures[0].source, '/api/stats-stream');
+  assert.deepStrictEqual(Object.keys(failures[0]).sort(), ['evidence', 'message', 'source']);
+  client.stop();
+});
+
+// Boundary 4 of the stall investigation. The browser knows when a frame ARRIVED; without the
+// server's emit time it cannot tell "the server never sent it" from "the server sent it and it
+// arrived late". The emit timestamp rides the SSE `id:` line, outside the JSON body, so no frame
+// body key set changes and the strict `exactFields` validators never see it.
+test('the browser retains the server emit timestamp so emit can be compared against arrival', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    return response(200, snapshot({range: 300, requested: 1, resolution: 1}));
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: FakeEventSource,
+    clientId: 'emit-clock',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+  await client.start();
+  await clock.advance(0);
+  const stream = FakeEventSource.instances[0];
+
+  await clock.advance(1000);
+  stream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}), '4000');
+  const first = client.streamEvidence();
+  assert.equal(first.lastDeliveryEmitMs, 4000, 'the server emit timestamp is retained');
+  const firstArrival = first.lastDeliveryAtMs;
+
+  // The server emits one cadence later, but the frame takes 1.5 seconds longer to arrive. Emit
+  // spacing stays at one cadence while arrival spacing stretches: that difference is transport,
+  // and it is invisible without the emit timestamp.
+  await clock.advance(2500);
+  stream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}), '5000');
+  const second = client.streamEvidence();
+  assert.equal(second.lastDeliveryEmitMs - first.lastDeliveryEmitMs, 1000, 'the server emitted on cadence');
+  assert.equal(second.lastDeliveryAtMs - firstArrival, 2500, 'the browser saw it 1.5s late');
+  assert.deepStrictEqual(failures, [], 'retaining the emit clock reports nothing on its own');
+
+  // A frame with no `id:` keeps the last known emit time, exactly as EventSource does.
+  await clock.advance(1000);
+  stream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  assert.equal(client.streamEvidence().lastDeliveryEmitMs, 5000, 'an id-less frame does not erase the emit clock');
+  client.stop();
+});
+
+test('a server that sends no emit timestamps leaves the evidence numeric rather than absent', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => (url === '/api/stats-capabilities'
+      ? response(200, capabilities())
+      : response(200, snapshot({range: 300, requested: 1, resolution: 1}))),
+    EventSource: FakeEventSource,
+    clientId: 'emit-clock-absent',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock},
+  });
+  await client.start();
+  await clock.advance(0);
+  FakeEventSource.instances[0].emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  const evidence = client.streamEvidence();
+  assert.equal(evidence.lastDeliveryEmitMs, 0, 'an absent emit clock reads as 0, never NaN or undefined');
+  assert.equal(Number.isFinite(evidence.lastDeliveryEmitMs), true);
+  client.stop();
+});
+
 test('presentation work and exact snapshot repair never overlap each other', async () => {
   const repairClock = new FakeClock();
   let finishRepair;
@@ -1878,7 +2025,7 @@ test('browser transport uses one authenticated current stream and exact snapshot
   assert.deepStrictEqual({...client.streamEvidence()}, {
     running: true, visible: true, healthy: true, streamOpen: true, streamEpoch: 3,
     deliverySequence: 3, acceptedDeltaSequence: 0, lastDeliveryKind: 'ready', lastDeliveryAtMs: 0,
-    lastDeliveryEpoch: 3, rangeSeconds: 300, resolutionSeconds: 1, sourceGeneration: 1,
+    lastDeliveryEmitMs: 0, lastDeliveryEpoch: 3, rangeSeconds: 300, resolutionSeconds: 1, sourceGeneration: 1,
     cacheGeneration: 1, deltaRevision: 0,
   }, 'ack, snapshot, and ready arrive on the same stream that stays live');
   initialStream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));

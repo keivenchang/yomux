@@ -29,6 +29,7 @@ from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yolomux_lib.local_services.runtime import acquire_client_lease, claim_gated_idle_due, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import request_is_self_connection
 from yolomux_lib.local_services.runtime import run_local_rpc_service
+from yolomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
 from yolomux_lib.settings import stats_prune_local_time
 from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
 
@@ -45,9 +46,142 @@ PRUNE_CHECK_SECONDS = 60.0
 # Ten seconds keeps the 10-second views at most one bucket behind durable ingest.
 # A 60-second writer cadence would make that view trail by as many as six buckets.
 RING_FLUSH_SECONDS = 10.0
+# Persistence cadence for buffered facts. Acquisition stays at one second and the served
+# generation stays at one second (the builder reads the buffer, see _overlay_snapshot); only
+# the COMMIT moves to this interval. Ten seconds rather than five because a measured grid over
+# a realistic store put per-family-at-ten at 83.53% fewer append bytes against per-family-at-one,
+# beating merged-at-five (79.41%) without needing one transaction to span two families -- and at
+# equal commit count a family-spanning commit cost 25.05% more, because it dirties both families'
+# index and coverage pages. Commit COUNT is the lever: at ~24 kB per commit against a 4 kB page,
+# each commit dirties roughly six whole pages for a payload of tens of bytes.
+APPEND_FLUSH_MEASURED_SECONDS = 10.0
+# ...and the DEFAULT is OFF, which is not what the measurement selected.
+#
+# THE OPEN DESIGN PROBLEM, recorded here because this constant is where someone will come
+# looking. `source_generation` is the ring's freshness key, and `_publish_ring_views` compares
+# entry cursors against `_ring_published_cursors` built from it. The overlay
+# (`_overlay_snapshot`) serves buffered facts WITHOUT advancing that key, so with buffering on
+# the served cache carries `source_generation` 0 while showing real data -- measured, and it is
+# precisely the state the freshness floor exists to refuse. Two ring correctness gates fail on
+# it: `test_seeded_slow_ring_view_cannot_fall_back_to_the_startup_zero_cache` and
+# `test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer`. Both pass at 0.
+#
+# The obvious fix is NOT available. Advancing the generation for uncommitted facts would break
+# "no cursor, watermark or generation leads durability" -- an invariant this change exists to
+# preserve, pinned by
+# `test_the_buffer_never_advances_the_generation_before_it_commits`. That tension is the
+# problem, and it is a design decision rather than a bug fix.
+#
+# So: 0 = write through, exactly the pre-batching path, byte for byte. Set the admission
+# variable to APPEND_FLUSH_MEASURED_SECONDS to select the candidate arm once the collision is
+# resolved. Everything else about batching -- the probes, the quarantine, the overlay, the
+# ring-durability ordering -- is implemented and tested and waits behind this one number.
+APPEND_FLUSH_SECONDS = 0.0
+# Families that must never buffer. A browser append is acknowledged with a per-event receipt
+# and the browser DROPS the entry from its retry queue on success, so the acknowledgement
+# transfers custody: answering "accepted" for a fact that is only in memory would lose it on a
+# crash with nobody left to retry. These are event-driven and low-volume (4.22% of observations
+# and 6.87% of observation payload bytes measured over one live hour), so excluding them costs
+# almost none of the saving.
+WRITE_THROUGH_FAMILIES = frozenset({"browser"})
+# SOLE owner of this name. An A/B arm needs to select the persistence shape at statsd start,
+# and it must be selectable without editing code, so it is an admission variable -- which means
+# docker/run-tests.sh must forward it, or the subject process inside the container never sees
+# the arm and both arms silently run identical code. tests/test_check_runner.py asserts the
+# allowlist against this constant rather than restating the name.
+APPEND_FLUSH_ENV_NAME = "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"
+# The test container sets this on the container it builds (docker/run-tests.sh) and it is NOT in
+# FORWARDED_TEST_ENV, so it cannot be forwarded in from a host. Nothing on the production launch
+# path sets it: the live statsd's environment carries neither this name nor the arm's.
+APPEND_FLUSH_TEST_MARKER_ENV = "YOLOMUX_CHECK_IN_CONTAINER"
+# How many consecutive flushes may fail WITHOUT the offender being identifiable before the
+# buffer is discarded. The probe is what names offenders, so when the probe is itself failing --
+# a full or corrupt store, which is when losing data matters most -- nothing can be separated.
+# Retaining forever converts a disk problem into an OOM; discarding at once loses acknowledged
+# facts on the first transient error. Two attempts is the bound: one to ride out a transient
+# failure, and no more, with the discard COUNTED rather than reported as a clean flush.
+APPEND_FLUSH_UNRESOLVED_LIMIT = 2
+
+
+@dataclass(frozen=True, slots=True)
+class AppendFlushArm:
+    """What the process resolved, what was asked for, and why they differ."""
+
+    seconds: float
+    requested: float | None
+    refused_reason: str
+
+
+def resolve_append_flush_arm(environ: Mapping[str, str] | None = None) -> AppendFlushArm:
+    """SOLE owner of "which persistence owner does this process run".
+
+    A default is not a guard. `APPEND_FLUSH_ENV_NAME` is forwarded into the test container, so
+    on its own it is settable on any process -- and it selects an arm we KNOW fails two ring
+    correctness gates. A silently-honoured admission variable that enables a known-broken path
+    in production is the mirror image of the silently-ignored one the container allowlist exists
+    to prevent: same class, opposite direction.
+
+    So the arm is honoured only when the process ALSO carries the test-container marker, which
+    `docker/run-tests.sh` sets on the container it builds and which nothing on the production
+    launch path sets -- verified against the live statsd's own environment, which carries
+    neither name. `tools.docker_image.running_inside_container` is deliberately NOT reused: it
+    also returns true for `/.dockerenv`, so any containerised production deployment would pass
+    it.
+
+    Refusal IGNORES rather than raises. Raising would turn a stray environment variable into a
+    statsd outage -- one stale export and the host loses telemetry -- while the refused state is
+    write-through, which is the proven path and the one we want anyway. That is failing closed:
+    the request is denied and the daemon still works. It cannot be mistaken for the feature
+    working, because the refusal and the value that was asked for are both in `_status()`.
+
+    Inside the test container the value is parsed STRICTLY and a malformed arm raises, because
+    there a silently-defaulted arm measures nothing and reports a clean null.
+    """
+
+    values = os.environ if environ is None else environ
+    raw = values.get(APPEND_FLUSH_ENV_NAME)
+    if raw is None or not raw.strip():
+        return AppendFlushArm(APPEND_FLUSH_SECONDS, None, "")
+    if values.get(APPEND_FLUSH_TEST_MARKER_ENV) != "1":
+        return AppendFlushArm(
+            APPEND_FLUSH_SECONDS,
+            None,
+            f"{APPEND_FLUSH_ENV_NAME} is test-only and requires "
+            f"{APPEND_FLUSH_TEST_MARKER_ENV}=1; batched persistence is disabled pending the "
+            f"source_generation collision",
+        )
+    seconds = float(raw)
+    if not math.isfinite(seconds) or seconds < 0.0:
+        raise ValueError(f"{APPEND_FLUSH_ENV_NAME} must be a finite interval >= 0, got {raw!r}")
+    return AppendFlushArm(seconds, seconds, "")
+
+
+def resolve_append_flush_seconds(environ: Mapping[str, str] | None = None) -> float:
+    """The resolved interval alone. One owner above; this is the thin accessor."""
+
+    return resolve_append_flush_arm(environ).seconds
+
 BROWSER_FAILURE_LOG_MAX_BYTES = 1 * 1024 * 1024
 # One owner, in host_collectors, beside the sampler that sets it. See its comment there.
 HOST_CPU_CADENCE_SECONDS = host_collectors.HOST_CPU_CADENCE_SECONDS
+# How long without an RPC before nobody is taken to be watching stats.
+#
+# A live watcher is an SSE delta stream, and `server.py`'s loop calls `stats_current_http`
+# once per frame at roughly the one-second cadence, so five seconds is five frames of
+# headroom. It is deliberately far above `HOST_CPU_CADENCE_SECONDS` and above
+# `host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS` (3.0), so a watcher whose frame is
+# merely late is never mistaken for a watcher who left.
+HOST_CPU_UNWATCHED_AFTER_SECONDS = 5.0
+# The backed-off cadence. Ten seconds is a policy choice, not a measurement: it is a tenfold
+# reduction in sampler work, and it matches `RING_FLUSH_SECONDS` so the worker's wake set gains
+# no new distinct period.
+#
+# It is deliberately LONGER than `HOST_CPU_SAMPLE_STALE_AFTER_SECONDS`, so while unwatched the
+# web process publishes its CPU sample as ABSENT rather than frozen at a stale value. That is
+# the existing staleness owner's own rule -- past the stale window a number "is no longer a
+# measurement of the present and must be published as absent" -- and absence costs nothing when
+# nobody is reading. A watcher returning resumes the one-second cadence before its next frame.
+HOST_CPU_UNWATCHED_CADENCE_SECONDS = 10.0
 HOST_GPU_CADENCE_SECONDS = 10.0
 # VACUUM rewrites the SQLite file, so it is intentionally maintenance rather
 # than part of startup, ingest, or request handling. A small per-daemon jitter
@@ -61,6 +195,29 @@ VACUUM_RETRY_SECONDS = 5.0 * 60.0
 # busy box would then never reclaim the pruned free-list, so once compaction has
 # been owed longer than this cap it runs anyway and accepts the brief stall.
 VACUUM_MAX_DEFER_SECONDS = 60.0 * 60.0
+# How much of the file a rewrite must be able to hand back before one is worth doing, measured as
+# the rise in reclaimable space SINCE the last successful rewrite -- never the raw figure.
+#
+# The subtraction is the whole metric. Every schema has a natural B-tree fill, so the raw
+# reclaimable fraction of a FRESHLY VACUUMED store is already 3.600%, 3.864%, 3.929% and 3.576% on
+# the four audited databases, whose truly recoverable space was 0.0000%. A raw-figure threshold
+# anywhere under that floor rewrites the file forever and recovers nothing. Against its own
+# baseline the same four read 0.000%.
+#
+# 15.0% is a POLICY choice on measured arithmetic, not a physical constant: a rewrite costs about
+# 3.008x the post-rewrite size in writes, so reclaiming less than this is not worth the IO on the
+# cadence it would run at. Of the audited databases only the bulk-delete case, at 74.09% truly
+# recoverable, clears it.
+#
+# Accuracy, measured against actual shrink: the metric UNDER-predicts, always, and by roughly its
+# own baseline term -- it omits the slack the surviving rows will still carry after the rewrite.
+# Measured here across eight fixtures spanning 2,388 to 54,881 pages: -0.98, -0.98, -1.09, -1.37,
+# -1.51, -1.85, -3.59 and -11.72 pp, the last on a payload built from overflow pages. It has never
+# been observed to over-predict, which is the only direction that wastes a rewrite. The queue's
+# audit of three real databases reports a much tighter -0.03 to -0.20 pp; that band was not
+# reproducible on synthetic fixtures, so treat the sign as the guarantee and the magnitude as
+# shape-dependent.
+VACUUM_MIN_BENEFIT_RATIO = 0.15
 PrivateClientKey = str | None
 CacheKey = tuple[int, protocol.RequestedResolution, PrivateClientKey]
 DeltaKey = tuple[int, int, PrivateClientKey]
@@ -133,6 +290,9 @@ CONTROL_FIELDS = {
     "collector_context": FENCE_FIELDS | {"pid", "port", "owner_generation", "control_socket"},
     "usage_atom_backfill": FENCE_FIELDS | {"state", "sources", "missing", "scan"},
     "delta": FENCE_FIELDS | protocol.DELTA_REQUEST_FIELDS,
+    # Health only. `STATS_COMMAND_ROUTER` below derives `_handle_resource_state` from this
+    # name, so adding the entry IS the routing change -- there is no second table.
+    "resource_state": FENCE_FIELDS,
 }
 STATS_COMMAND_ACTIONS = frozenset((*CONTROL_FIELDS, "append", "snapshot"))
 STATS_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in STATS_COMMAND_ACTIONS})
@@ -1251,10 +1411,30 @@ class StatsCurrentService:
         self._pending_dirty: set[materializer.DirtyCell] = set()
         self._next_materialization_at: float | None = None
         self._pending_ring_dirty: set[materializer.DirtyCell] = set()
+        # Accepted-but-not-yet-committed facts, keyed by their storage identity so a record
+        # that is buffered AND later committed is served exactly once. Guarded by work_lock,
+        # which both append sites already hold.
+        self._pending_observations: dict[tuple[str, str, str], storage.Observation] = {}
+        self._pending_coverage: dict[tuple[str, str, str], storage.CoverageEpoch] = {}
+        self._next_append_flush_at: float | None = None
+        # Read once, at construction: an interval that changed under a live buffer would leave
+        # facts staged against a deadline that no longer exists.
+        self._append_flush_arm = resolve_append_flush_arm()
+        self._append_flush_seconds = self._append_flush_arm.seconds
+        self._append_flushes = 0
+        self._append_facts_buffered = 0
+        self._append_flush_failure = ""
+        self._append_flush_quarantined = 0
+        # While degraded the buffer stops accepting new facts, so a caller keeps custody of its
+        # own retry and sees the store's failure synchronously instead of having it acknowledged
+        # into a buffer that cannot be committed.
+        self._append_flush_degraded = False
+        self._append_flush_unresolved = 0
         self._ring_source_generation = 0
         self._next_ring_flush_at: float | None = None
         self._ring_waiting_for_source = 0
         self._ring_publications = 0
+        self._ring_coherent_publications = 0
         self._ring_buckets_published = 0
         self._statsd_unchanged_cell_materialization = 0
         self._last_ring_published_at = 0.0
@@ -1330,6 +1510,11 @@ class StatsCurrentService:
         self._request_trace_sequence = 0
         self._request_traces: deque[dict[str, object]] = deque(maxlen=MAX_REQUEST_TRACES)
         self._full_builds = self._incremental_builds = self._stale_builds = self._failed_builds = 0
+        # `_failed_builds` as of the last SUCCESSFUL publication. `/readyz` condition 3 is
+        # "has a build failed since we last published", which needs the value at that
+        # instant; the running total alone cannot answer it, and a daemon that failed once
+        # long ago and has published cleanly since is ready.
+        self._failed_builds_at_publication = 0
         # Every full build carries an explicit reason; an unlabelled periodic full
         # build is a bug (the five-minute reconcile must not schedule one).
         self._pending_full_reason = "startup"
@@ -1462,8 +1647,11 @@ class StatsCurrentService:
         now = self.monotonic()
         if now < self._next_vacuum_at:
             return False
-        # First idle tick at which we are owed: start the max-defer clock here so
-        # the cap measures from when compaction was first due, not the last run.
+        # First tick at which we are owed. The max-defer clock measures how long the CADENCE has
+        # been deferred by business, which is independent of what the benefit says on any one
+        # tick -- if a below-threshold answer reset it and an above-threshold answer restarted it
+        # from now, an oscillating benefit would keep `capped` false forever and a permanently
+        # busy box would never reclaim, which is the one thing the cap exists to prevent.
         if self._vacuum_due_since is None:
             self._vacuum_due_since = now
         quiet = now - self.last_rpc_at >= self.idle_seconds
@@ -1477,6 +1665,43 @@ class StatsCurrentService:
                 self._vacuum_due_since + VACUUM_MAX_DEFER_SECONDS,
             )
             return False
+        # AFTER the quiet gate and still outside work_lock. Cadence says a rewrite MAY run and
+        # the box now permits one; this says whether one would return anything. `dbstat` walks
+        # every page -- measured 0.46 s cold and 0.24-0.46 s warm on a 568 MB production copy --
+        # so asking it on every five-minute retry of a busy box burned seconds an hour on the
+        # thread that also owns the one-second CPU sampler, to answer a question nothing could
+        # act on. It stays outside work_lock: a concurrent scanner was measured to slow a writer
+        # 1.254x median without ever stalling it, while taking it inside the lock would put that
+        # quarter-second in front of every arriving RPC.
+        try:
+            benefit = (
+                vacuum_writer.reclaimable_ratio()
+                - vacuum_writer.reclaimable_ratio_at_last_vacuum()
+            )
+        except (sqlite3.Error, storage.StatsCurrentError) as error:
+            # `dbstat` is a compile-time option, and the baseline read reaches `last_vacuumed_at`,
+            # which raises SchemaMismatchError -- a StatsCurrentError, not a sqlite3.Error. Either
+            # way the question is unanswerable, so the guard FAILS OPEN and the cadence alone
+            # decides, exactly as before this existed. Failing closed would silently disable
+            # compaction forever and let the disk fill; letting it ESCAPE would unwind the worker
+            # loop, whose finally sets stop_event, and kill the daemon outright.
+            self._record_failure("vacuum_benefit", error)
+        else:
+            # Any answered read clears the failure, not only an above-threshold one. On the real
+            # store the benefit sits far under the threshold, so the below-threshold branch is the
+            # normal healthy state: clearing only on the other branch latched one transient error
+            # into the status projection indefinitely.
+            self._clear_failure("vacuum_benefit")
+            if benefit < VACUUM_MIN_BENEFIT_RATIO:
+                # A FULL interval, never VACUUM_RETRY_SECONDS. A benefit skip is not a busy
+                # deferral: nothing is owed and nothing is being retried, so reusing the retry
+                # delay would wake the daemon every five minutes to re-answer a question whose
+                # answer only moves as fast as the data does. The clock is cleared here rather
+                # than above because by this point it has already done its job -- it decided
+                # whether the quiet gate could be bypassed -- and a rewrite genuinely is not owed.
+                self._vacuum_due_since = None
+                self._next_vacuum_at = now + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter()
+                return False
         with self.work_lock:
             pending = (
                 self._pending_full
@@ -1516,6 +1741,10 @@ class StatsCurrentService:
         if self.worker is not None:
             self.worker.join(timeout=1.0)
         if self.writer is not None:
+            # A buffered fact is only in memory. Closing without committing it loses it
+            # outright, so the terminal boundary flushes regardless of the deadline.
+            with self.work_lock:
+                self._flush_appends_locked(self.writer)
             self.writer.close()
             self.writer = None
 
@@ -1556,6 +1785,330 @@ class StatsCurrentService:
             self._pending_coverage_refresh = False
             self._next_materialization_at = None
             return work
+
+    def _overlay_snapshot(
+        self,
+        snapshot: storage.StoreSnapshot,
+        read_window: tuple[float, float] | None,
+        pending_observations: tuple[storage.Observation, ...],
+        pending_coverage: tuple[storage.CoverageEpoch, ...],
+    ) -> storage.StoreSnapshot:
+        """Serve buffered facts through the SAME builder that serves committed rows.
+
+        This is why batching does not cost one-second freshness, and why it needs no second
+        builder: only the CONTENTS of the snapshot change. The materializer, the cache, the
+        delta ring and the snapshot RPC are untouched, and the records are the same typed
+        records the append path already carries.
+
+        A committed row always WINS on identity collision. Once a fact is durable the buffered
+        copy is the stale duplicate, which is what makes a double-count impossible across the
+        flush -- an observation counted twice inflates `Bucket.source_count`.
+        """
+
+        if not pending_observations and not pending_coverage:
+            return snapshot
+        low, high = (float("-inf"), float("inf")) if read_window is None else read_window
+        committed = {
+            (item.family, item.source_id, item.event_id) for item in snapshot.observations
+        }
+        extra_observations = tuple(
+            item for item in pending_observations
+            if (item.family, item.source_id, item.event_id) not in committed
+            and low <= item.observed_at <= high
+        )
+        # Coverage is keyed, not appended: a buffered epoch REPLACES the committed row for the
+        # same key, because it is the same epoch with `ended_at` advanced.
+        pending_by_key = {
+            (item.family, item.source_id, item.epoch_id): item for item in pending_coverage
+        }
+        coverage_rows = tuple(
+            pending_by_key.pop((item.family, item.source_id, item.epoch_id), item)
+            for item in snapshot.coverage_epochs
+        ) + tuple(pending_by_key.values())
+        if not extra_observations and coverage_rows == snapshot.coverage_epochs:
+            return snapshot
+        return replace(
+            snapshot,
+            # Same ORDER BY the SQL emits, so the materializer cannot tell an overlaid row
+            # from a committed one.
+            observations=tuple(sorted(
+                (*snapshot.observations, *extra_observations),
+                key=lambda item: (item.observed_at, item.family, item.source_id),
+            )),
+            coverage_epochs=tuple(sorted(
+                coverage_rows,
+                key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
+            )),
+            coverage_normalized=False,
+        )
+
+    def _buffer_eligible(
+        self,
+        observations: tuple[storage.Observation, ...],
+        atoms: tuple[storage.UsageAtom, ...],
+        tombstones: tuple[storage.UsageAtomTombstone, ...],
+        coverage: tuple[storage.CoverageEpoch, ...],
+        unavailable: tuple[storage.UnavailableSpan, ...],
+        observation_receipt_event_ids: tuple[str, ...] | None,
+    ) -> bool:
+        """Only whole batches buffer, so no batch is ever split across two durability regimes.
+
+        Usage atoms, tombstones and unavailable spans stay synchronous: atoms carry the
+        identity-conflict bisection protocol the web runtime drives off synchronous rejection,
+        and an unavailable span is the thing a coverage epoch is validated AGAINST, so
+        deferring one while committing the other would validate against a stale world.
+        """
+
+        if self._append_flush_seconds <= 0.0 or self._append_flush_degraded:
+            return False
+        if atoms or tombstones or unavailable or observation_receipt_event_ids is not None:
+            return False
+        if not observations and not coverage:
+            return False
+        return all(
+            item.family not in WRITE_THROUGH_FAMILIES
+            for item in (*observations, *coverage)
+        )
+
+    def _buffered_fact_count(self) -> int:
+        return len(self._pending_observations) + len(self._pending_coverage)
+
+    def _stage_appends_locked(
+        self,
+        observations: tuple[storage.Observation, ...],
+        coverage: tuple[storage.CoverageEpoch, ...],
+        append_now: float,
+    ) -> dict[str, object] | None:
+        """Buffer a batch and answer it, or return None to fall back to a commit.
+
+        The disposition every caller needs is decided by a READ: `_apply_observations` selects
+        the stored row and only then inserts. Anything this probe cannot answer -- an identity
+        conflict -- falls back to the real transaction, so the strict-store contract and the
+        web runtime's bisection protocol keep working exactly as they do today.
+        """
+
+        assert self.writer is not None
+        committed = self.writer.observation_dispositions(observations)
+        accepted: list[storage.Observation] = []
+        duplicates = 0
+        for observation, verdict in zip(observations, committed, strict=True):
+            if verdict == storage.Store.OBSERVATION_CONFLICT:
+                return None
+            key = (observation.family, observation.source_id, observation.event_id)
+            pending = self._pending_observations.get(key)
+            if pending is not None:
+                if pending != observation:
+                    return None
+                duplicates += 1
+                continue
+            if verdict == storage.Store.OBSERVATION_DUPLICATE:
+                duplicates += 1
+                continue
+            accepted.append(observation)
+        # A live collector re-offers its OPEN coverage epoch every cadence tick with `ended_at`
+        # advanced by one cadence, so buffering observations alone would remove NO commits. The
+        # newest offer for an epoch subsumes every earlier one, and the invalidation interval
+        # the store derives on flush is the union of the ticks it replaces.
+        coverage_changed = 0
+        stored = self.writer.coverage_dispositions(coverage)
+        for epoch, verdict in zip(coverage, stored, strict=True):
+            if verdict == storage.Store.COVERAGE_CONFLICT:
+                return None
+            key = (epoch.family, epoch.source_id, epoch.epoch_id)
+            # An offer is "accepted" only if it differs from BOTH what is buffered and what is
+            # stored. A live collector re-offers its open epoch every tick, so comparing
+            # against the buffer alone would report every unchanged re-offer as accepted.
+            if self._pending_coverage.get(key) != epoch and verdict == storage.Store.COVERAGE_CHANGED:
+                coverage_changed += 1
+                self._pending_coverage[key] = epoch
+        for observation in accepted:
+            self._pending_observations[
+                (observation.family, observation.source_id, observation.event_id)
+            ] = observation
+        if accepted or coverage_changed:
+            self._append_facts_buffered += len(accepted) + coverage_changed
+            # In-memory publication MAY lead durability; durable publication may not. So the
+            # dirty set that drives the served generation is updated here, while the ring
+            # staging and the source generation stay behind the commit.
+            self._pending_dirty.update(self._dirty_cells(tuple(accepted), ()))
+            self._update_cached_coverage_locked(
+                coverage, (), accepted_change=bool(coverage_changed), retention_prune=None,
+            )
+            if self._next_append_flush_at is None:
+                self._next_append_flush_at = self.monotonic() + self._append_flush_seconds
+        # NOT `_last_source_commit_at`: nothing committed here. Assigning a commit clock at
+        # stage time made the status blob report a fresh commit while every flush was failing,
+        # contradicting `append_persistence.last_failure` in the same payload.
+        return {
+            "ok": True,
+            # No generation exists for an uncommitted fact and none may be invented.
+            "source_generation": None,
+            "accepted": len(accepted) + coverage_changed,
+            "duplicates": duplicates,
+            "counts": {
+                "observations_accepted": len(accepted),
+                "observations_duplicate": duplicates,
+                "coverage_changed": coverage_changed,
+                "buffered": True,
+            },
+        }
+
+    def _flush_appends_if_due(self, writer: storage.Store | None = None) -> bool:
+        """Commit the buffer on the shared interval, through the sole writer lock.
+
+        Runs on the worker thread beside the prune and the compaction, so it can never be
+        mid-transaction when `Store.vacuum` runs -- SQLite forbids that -- and can never
+        interleave with the prune, which holds the same lock on the same thread.
+        """
+
+        with self.work_lock:
+            flush_writer = self.writer if writer is None else writer
+            if (
+                flush_writer is None
+                or self._next_append_flush_at is None
+                or self.monotonic() < self._next_append_flush_at
+            ):
+                return False
+            return self._flush_appends_locked(flush_writer)
+
+    def _quarantine_conflicts_locked(
+        self,
+        flush_writer: storage.Store,
+        observations: tuple[storage.Observation, ...],
+        coverage: tuple[storage.CoverageEpoch, ...],
+    ) -> tuple[tuple[storage.Observation, ...], tuple[storage.CoverageEpoch, ...], int] | None:
+        """Split a rejected batch into the records the store refuses and the rest, or None.
+
+        None means the probe could not answer at all, which is a different outcome from "no
+        offenders" and must not be collapsed into it.
+
+        Asks the same read-only probes the acknowledgement used, so "what the commit would
+        reject" has one answer everywhere. A record can turn conflicting AFTER it was buffered
+        -- the browser family still writes through while other families are buffered -- so this
+        is reachable even with the probe and the applier sharing a predicate.
+        """
+
+        try:
+            observation_verdicts = flush_writer.observation_dispositions(observations)
+            coverage_verdicts = flush_writer.coverage_dispositions(coverage)
+        except (sqlite3.Error, storage.StatsCurrentError):
+            # The probe itself cannot answer, so nothing can be separated with confidence. None
+            # is NOT the same answer as "nothing to drop": conflating them made the caller clear
+            # the buffer and report zero quarantined over a real loss.
+            return None
+        keep_observations = tuple(
+            item for item, verdict in zip(observations, observation_verdicts, strict=True)
+            if verdict != storage.Store.OBSERVATION_CONFLICT
+        )
+        keep_coverage = tuple(
+            item for item, verdict in zip(coverage, coverage_verdicts, strict=True)
+            if verdict != storage.Store.COVERAGE_CONFLICT
+        )
+        dropped = (len(observations) - len(keep_observations)) + (len(coverage) - len(keep_coverage))
+        return keep_observations, keep_coverage, dropped
+
+    def _flush_appends_locked(self, flush_writer: storage.Store) -> bool:
+        if not self._pending_observations and not self._pending_coverage:
+            self._next_append_flush_at = None
+            return False
+        observations = tuple(self._pending_observations.values())
+        coverage = tuple(self._pending_coverage.values())
+        quarantined = 0
+        try:
+            result = flush_writer.append_batch(
+                observations=observations, coverage_epochs=coverage,
+            )
+        except (sqlite3.Error, storage.StatsCurrentError) as error:
+            # One rejected epoch must not discard a whole flush interval of OTHER families'
+            # facts. Every buffered record was acknowledged `ok: True` and the caller dropped
+            # its retry on that acknowledgement -- the same custody argument that keeps `browser`
+            # synchronous -- so clearing the buffer wholesale loses acked facts with nobody left
+            # to resend them. Quarantine only what the probe now names as conflicting and retry
+            # the remainder once; a second failure quarantines the batch, because a flush that
+            # cannot make progress must not retry forever.
+            separated = self._quarantine_conflicts_locked(flush_writer, observations, coverage)
+            if separated is None or separated[2] == 0:
+                # NO OFFENDER IDENTIFIED, and it does not matter which way we got here: the
+                # probe could not answer, or it answered and found nothing conflicting. Both are
+                # the same epistemic state -- there is no record to remove -- so gating the
+                # retry on an offender having been NAMED inverted it against the failure most
+                # likely to be retryable. A transient `database is locked` leaves the probes
+                # perfectly able to answer, because they are SELECTs, and correctly reporting
+                # nothing conflicting; the path that most deserves a retry was the one
+                # guaranteed not to get one.
+                #
+                # So: ride out one transient failure with the buffer INTACT, and degrade to
+                # write-through so nothing new is acknowledged into a buffer that cannot be
+                # committed. Past the bound, discard -- and count every discarded fact, because
+                # a counter that reads zero over a data-loss event is what turns a bad situation
+                # into an invisible one.
+                self._append_flush_degraded = True
+                self._append_flush_unresolved += 1
+                self._append_flush_failure = type(error).__name__[:64]
+                self._record_failure("append_flush", error)
+                if self._append_flush_unresolved < APPEND_FLUSH_UNRESOLVED_LIMIT:
+                    self._next_append_flush_at = self.monotonic() + self._append_flush_seconds
+                    return False
+                self._append_flush_quarantined += len(observations) + len(coverage)
+                self._pending_observations.clear()
+                self._pending_coverage.clear()
+                self._next_append_flush_at = None
+                self._append_flush_unresolved = 0
+                return False
+            keep_observations, keep_coverage, dropped = separated
+            retried = None
+            if dropped and (keep_observations or keep_coverage):
+                try:
+                    retried = flush_writer.append_batch(
+                        observations=keep_observations, coverage_epochs=keep_coverage,
+                    )
+                except (sqlite3.Error, storage.StatsCurrentError) as retry_error:
+                    error = retry_error
+            self._pending_observations.clear()
+            self._pending_coverage.clear()
+            self._next_append_flush_at = None
+            self._append_flush_failure = type(error).__name__[:64]
+            self._append_flush_degraded = True
+            self._append_flush_quarantined += dropped
+            quarantined = dropped
+            self._record_failure("append_flush", error)
+            # Stage time already merged the offered epoch into the warm coverage model and the
+            # overlay let it mask the committed row by key. Nothing rolled that back, so the
+            # served model would keep a value the store never accepted, indefinitely. Drop the
+            # cached model so the next build re-reads coverage from the store.
+            if coverage:
+                self._cached_coverage_epochs = ()
+                self._cached_unavailable_spans = ()
+                self._coverage_cache_ready = False
+                self._coverage_gap_cache = _CoverageGapCache()
+                self._coverage_version += 1
+                self._pending_coverage_refresh = True
+            if retried is None:
+                return False
+            result = retried
+        self._pending_observations.clear()
+        self._pending_coverage.clear()
+        self._next_append_flush_at = None
+        self._append_flushes += 1
+        # A store that accepted a batch is working again; degraded is a state, not a latch.
+        self._append_flush_degraded = False
+        self._append_flush_unresolved = 0
+        if not quarantined:
+            # A pass that quarantined records LOST acknowledged facts, even though the retry
+            # committed the rest. Clearing the failure there would report a clean flush over a
+            # data-loss event; `quarantined_facts` carries how many.
+            self._append_flush_failure = ""
+            self._clear_failure("append_flush")
+        dirty = self._append_dirty_cells(result)
+        self._latest_source_generation = max(
+            self._latest_source_generation, result.source_generation,
+        )
+        self._last_source_commit_at = self.clock()
+        self._pending_dirty.update(dirty)
+        # Only now: a ring slot is a DURABLE publication and must not lead the commit.
+        self._stage_ring_cells_locked(dirty, result.source_generation)
+        self.work_event.set()
+        return True
 
     def _stage_ring_cells_locked(
         self,
@@ -1672,6 +2225,8 @@ class StatsCurrentService:
                 deadlines.extend((self._next_host_cpu_at, self._next_host_gpu_at))
             if self._pending_ring_dirty and self._next_ring_flush_at is not None:
                 deadlines.append(self._next_ring_flush_at)
+            if self._next_append_flush_at is not None:
+                deadlines.append(self._next_append_flush_at)
             if not deadlines:
                 return None
             return max(0.0, min(deadlines) - self.monotonic())
@@ -1731,7 +2286,7 @@ class StatsCurrentService:
     ) -> frozenset[materializer.DirtyCell]:
         """Keep a restart's first full build from synthesizing downtime as quiet zero."""
 
-        if self._ring_publications:
+        if self._ring_coherent_publications:
             return cells
         starts_by_resolution: dict[int, set[int]] = {}
         for cell in cells:
@@ -1796,8 +2351,10 @@ class StatsCurrentService:
                 or no_data[layer.resolution].get(bucket.start)
                 or bucket.cost_detail != materializer.BucketCostDetail()
             )
-            if not historical_open and (
-                has_persisted_fact or overlaps_uptime or has_materialized_fact
+            # Restart filtering drops an old open bucket only when the new materializer still has
+            # no fact for it. A completed usage/metric fold is proof, not synthesized quiet data.
+            if has_materialized_fact or (
+                not historical_open and (has_persisted_fact or overlaps_uptime)
             ):
                 retained.add(cell)
         return frozenset(retained)
@@ -1939,7 +2496,10 @@ class StatsCurrentService:
             previous_deadline = self._next_ring_flush_at
             self._next_ring_flush_at = self.monotonic()
         try:
-            published = self._flush_ring_if_due(publisher)
+            # Exact-slot repair answers the durable ledger, but it is not a coherent publication
+            # of every view at the touched resolutions. Keep the warm materializer as owner until
+            # the deferred ordinary ring flush publishes the complete staged generation.
+            published = self._flush_ring_if_due(publisher, promote_views=False)
         finally:
             with self.work_lock:
                 # Whatever the repair did not consume goes back to the ordinary cadence, with its
@@ -1952,6 +2512,8 @@ class StatsCurrentService:
     def _flush_ring_if_due(
         self,
         publisher: storage.Store | None = None,
+        *,
+        promote_views: bool = True,
     ) -> storage.RingPublication | None:
         """Publish one coherent all-resolution generation after the staging deadline."""
 
@@ -1964,6 +2526,12 @@ class StatsCurrentService:
                 or self.monotonic() < self._next_ring_flush_at
             ):
                 return None
+            # A ring slot is DURABLE. The served generation is allowed to lead durability --
+            # that is what the append overlay is for -- but a published slot may not, or a crash
+            # loses the facts and keeps a bucket the replay cursor will fold from. The ring
+            # deadline and the append deadline are independent, so this one can come due first;
+            # commit the buffer before publishing anything derived from it.
+            self._flush_appends_locked(ring_writer)
             with self.cache_lock:
                 candidate = None if self._cache is None else self._cache.generation
             if (
@@ -1992,6 +2560,13 @@ class StatsCurrentService:
                     buckets=writes,
                     source_generation=candidate.source_generation,
                     published_at=self.clock(),
+                    # Exact repair reserves the next ring generation in the addressed slots but
+                    # leaves the public singleton on the prior coherent cursor, so the deferred
+                    # ordinary flush completes THAT generation instead of burning a second one.
+                    # Cold-read coherence itself is owned elsewhere: `read_ring_window` derives its
+                    # cursor per resolution from the newest populated slot, and `_read_ring_snapshot`
+                    # declines a `pair_unavailable` window whose newest row is behind that cursor.
+                    advance_publication=promote_views,
                 )
             except BUILD_ERRORS as error:
                 self._ring_failure = type(error).__name__[:64]
@@ -2002,16 +2577,19 @@ class StatsCurrentService:
             self._next_ring_flush_at = None
             self._ring_waiting_for_source = 0
             self._ring_publications += 1
+            if promote_views:
+                self._ring_coherent_publications += 1
             self._ring_buckets_published += publication.buckets_updated
             self._last_ring_published_at = publication.published_at
             self._last_ring_publish_seconds = max(0.0, self.monotonic() - started)
             self._last_ring_source_generation = publication.source_generation
             self._ring_failure = ""
-            self._publish_ring_views(
-                ring_writer,
-                candidate,
-                frozenset(write.resolution_seconds for write in writes),
-            )
+            if promote_views:
+                self._publish_ring_views(
+                    ring_writer,
+                    candidate,
+                    frozenset(write.resolution_seconds for write in writes),
+                )
             self._clear_failure("ring_writer")
             return publication
 
@@ -2049,6 +2627,9 @@ class StatsCurrentService:
                 self.work_event.clear()
                 if self.stop_event.is_set():
                     break
+                # Before the prune and the compaction: both hold work_lock on this thread,
+                # and a VACUUM cannot run with a flush transaction open.
+                self._flush_appends_if_due(publisher)
                 self._prune_if_due(publisher)
                 self._vacuum_if_due_while_idle(publisher)
                 self._collect_host_facts_if_due(publisher)
@@ -2176,6 +2757,41 @@ class StatsCurrentService:
         self._host_coverage_epochs[key] = result
         return result
 
+    def _stats_are_watched(self) -> bool:
+        """SOLE owner of "is anyone watching stats". Nothing else may re-spell this.
+
+        A PROXY, and it OVER-REPORTS: `last_rpc_at` is stamped by `_on_client` for every RPC
+        this daemon serves, not only by a stats watcher, so a CLI call or an unrelated local
+        request reads as a watcher. That error direction is the safe one -- it keeps the
+        one-second cadence when it need not, rather than backing off while someone is reading,
+        which is the failure that would show a user a stale chart. It is never allowed to err
+        the other way.
+
+        The precise signal would be stream-scoped bookkeeping in `stats_current/http.py`,
+        which owns `snapshot_stream` and `delta_stream` and therefore knows how many streams
+        are actually open. That is a different file and a different owner; whoever tightens
+        this should replace the body here and leave every caller alone.
+
+        The chain that makes the proxy sound was traced rather than assumed: `server.py`'s SSE
+        loop calls `stats_current_http.delta_stream` once per frame, which reaches
+        `client.delta` -> `local_service_request` -> this daemon's `run_local_rpc_service`,
+        whose `on_client` is `_on_client`. A live watcher therefore stamps on every frame.
+
+        No silent default: `last_rpc_at` is set at construction, so the signal is always
+        available and a daemon that has served nothing yet reads as WATCHED. Reading an
+        unavailable signal as "unwatched" would make every cold start publish an absent CPU
+        sample until its first RPC arrived.
+        """
+
+        return self.monotonic() - self.last_rpc_at < HOST_CPU_UNWATCHED_AFTER_SECONDS
+
+    def _host_cpu_cadence_seconds(self) -> float:
+        """The sampling interval the current watcher state calls for, through the one owner."""
+
+        if self._stats_are_watched():
+            return HOST_CPU_CADENCE_SECONDS
+        return HOST_CPU_UNWATCHED_CADENCE_SECONDS
+
     def _collect_host_facts_if_due(self, publisher: storage.Store) -> None:
         context = self.collector_context
         if context is None:
@@ -2183,9 +2799,21 @@ class StatsCurrentService:
         now_monotonic = self.monotonic()
         now = self.clock()
         source_id = f"port:{context['port']}" if context["port"] else f"pid:{context['pid']}"
+        # A watcher that returns must not wait out a deadline set while nobody was reading.
+        # Backing off schedules the next sample up to HOST_CPU_UNWATCHED_CADENCE_SECONDS away,
+        # and nothing else moves it back, so without this the first seconds after a watcher
+        # returns would serve nothing -- which is the one-second freshness requirement broken by
+        # the very change meant to save work while it is not needed. Stateless on purpose: the
+        # invariant is "a watcher never waits longer than the watched cadence", which is a
+        # property of the deadline, not a transition flag that could disagree with it.
+        if (
+            self._stats_are_watched()
+            and self._next_host_cpu_at > now_monotonic + HOST_CPU_CADENCE_SECONDS
+        ):
+            self._next_host_cpu_at = now_monotonic
         try:
             if now_monotonic >= self._next_host_cpu_at:
-                self._next_host_cpu_at = now_monotonic + HOST_CPU_CADENCE_SECONDS
+                self._next_host_cpu_at = now_monotonic + self._host_cpu_cadence_seconds()
                 sample = self._host_cpu_sampler.sample(context["pid"])
                 # The sampler differences two readings, so its FIRST call after every statsd start
                 # has nothing to difference and reports `None` rather than `0.0`. This cycle then
@@ -2356,6 +2984,12 @@ class StatsCurrentService:
                     coverage_cache_was_ready = self._coverage_cache_ready
                     cached_coverage_epochs = self._cached_coverage_epochs
                     cached_unavailable_spans = self._cached_unavailable_spans
+                    # Pinned with the WAL generation, under the lock the builder already
+                    # holds. Re-taking work_lock inside the read window would put the row
+                    # scan back behind the durable writer, which is exactly what pinning
+                    # the snapshot exists to avoid.
+                    pending_observations = tuple(self._pending_observations.values())
+                    pending_coverage = tuple(self._pending_coverage.values())
                     # `coverage_refresh` means an accepted coverage delta still
                     # needs to materialize no-data spans. It does not mean the
                     # complete immutable history must be read again.
@@ -2369,7 +3003,9 @@ class StatsCurrentService:
                             read_window=read_window,
                         )
                     )
-                snapshot = read_snapshot()
+                snapshot = self._overlay_snapshot(
+                    read_snapshot(), read_window, pending_observations, pending_coverage,
+                )
                 if include_coverage:
                     coverage_epochs, unavailable_spans = materializer.normalize_coverage_model(
                         snapshot.coverage_epochs,
@@ -2691,6 +3327,7 @@ class StatsCurrentService:
                     resolution_generations.update({
                         resolution: candidate for resolution in published_resolutions
                     })
+                    self._failed_builds_at_publication = self._failed_builds
                     self._cache = PublishedCache(
                         candidate,
                         MappingProxyType(retained_entries),
@@ -3575,6 +4212,13 @@ class StatsCurrentService:
             raise storage.StatsCurrentError("stats store is not open")
         with self.work_lock:
             append_now = self.clock()
+            if self._buffer_eligible(observations, atoms, tombstones, coverage, unavailable,
+                                     observation_receipt_event_ids):
+                buffered = self._stage_appends_locked(observations, coverage, append_now)
+                if buffered is not None:
+                    self._append_requests += 1
+                    self.work_event.set()
+                    return buffered
             try:
                 result = self.writer.append_batch(
                     observations=observations,
@@ -3725,10 +4369,14 @@ class StatsCurrentService:
                 authenticated_username=str(request["authenticated_username"]),
             )
         except observations.BrowserObservationUpgradeRequired:
+            # The severity owner needs the rejecting producer, not the route: the daemon-wide
+            # protocol fence in `handle_with_binary` reaches the same POST before this validator
+            # runs, and that one stays an operator-actionable fault.
             return protocol.upgrade_required_response(
                 storage.MIN_WRITER_PROTOCOL,
                 storage.SCHEMA_VERSION,
                 str(storage.MIN_WRITER_BUILD),
+                caller_outcome_owner=BROWSER_UPLOAD_OUTCOME_OWNER,
             )
         receipt_event_ids = tuple(str(item["event_id"]).strip() for item in payload["observations"])
         if len(set(receipt_event_ids)) != len(receipt_event_ids):
@@ -4119,6 +4767,49 @@ class StatsCurrentService:
     def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return {"ok": True, "version": storage.MIN_WRITER_PROTOCOL, "schema_generation": storage.SCHEMA_VERSION, "build": storage.MIN_WRITER_BUILD, "code_revision": revision.CURRENT_CODE_REVISION, "pid": os.getpid(), "started_at": self.started_at}, b""
 
+    def _handle_resource_state(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        """The §1b control state `/readyz` needs, taking NO lock. Never route this through `_status()`.
+
+        `_status()` opens with `work_lock`, which the materializer worker holds for the whole
+        800-940 ms build burst. A readiness probe that waits behind the daemon it is checking
+        reports nothing about it, and the operator learns only that the check timed out. So this
+        is plain attribute reads and `len()` on the two pending sets -- the correctness property
+        is "acquires no lock", which is reviewable by reading the body.
+
+        Every key here is one `http.readyz` reads. Omitting one is not a smaller answer: absent
+        control state reads as NOT READY, so a missing key is a silent permanent failure.
+
+        `owed_startup_slots` reuses the existing signal rather than adding state: `_ring_publications`
+        counts what THIS process has published, so it is zero exactly while a restart still owes the
+        buckets a previous process left pending -- the same reasoning `_repair_startup_owed_slots`
+        already documents. Once this process has published, startup owes nothing.
+        """
+
+        cache = self._cache
+        return {
+            "ok": True,
+            # So `/livez` can sample `/proc` without ever asking this daemon again: the pid
+            # is a constant for the process lifetime, unlike every other field here.
+            "pid": os.getpid(),
+            "cache_generation": 0 if cache is None else cache.generation.cache_generation,
+            "source_generation": self._latest_source_generation,
+            "pending_cells": len(self._pending_ring_dirty),
+            "dirty_cells": len(self._pending_dirty),
+            "building": self._building,
+            "materializer_state": (
+                "failed" if self._last_failure_component == "materializer"
+                else "building" if self._building
+                else "dirty" if (self._pending_dirty or self._pending_coverage_refresh)
+                else "ready" if cache is not None
+                else "warming"
+            ),
+            "migration_state": self._migration_state,
+            "ring_failure": self._ring_failure,
+            "failed_builds": self._failed_builds,
+            "build_failed_since_publication": self._failed_builds > self._failed_builds_at_publication,
+            "owed_startup_slots": 0 if self._ring_publications else len(self._pending_ring_dirty),
+        }, b""
+
     def _handle_status(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return self._status(), b""
 
@@ -4161,7 +4852,16 @@ class StatsCurrentService:
         # owner's claim clock) -- a bare status/ping/snapshot request must
         # never count as demand. Only claim_gated_idle_due (via _idle) may
         # move last_client_at.
-        self.last_rpc_at = self.monotonic()
+        now = self.monotonic()
+        # Read BEFORE the stamp overwrites it. The worker sleeps until `min(deadlines)` in
+        # `_ring_wait_timeout`, and that set includes `_next_host_cpu_at`, so after a backoff it
+        # can be asleep for HOST_CPU_UNWATCHED_CADENCE_SECONDS. Pulling the deadline forward in
+        # `_collect_host_facts_if_due` is not enough on its own -- the worker has to be awake to
+        # read it. This is the only place that observes a watcher returning.
+        returning_watcher = now - self.last_rpc_at >= HOST_CPU_UNWATCHED_AFTER_SECONDS
+        self.last_rpc_at = now
+        if returning_watcher:
+            self.work_event.set()
 
     def _resolved_prune_time(self) -> prune_schedule.PruneTime:
         """Re-read the preference so a change takes effect without a restart."""
@@ -4744,6 +5444,13 @@ class StatsStatusProjector:
             pending_coverage = self._pending_coverage_refresh
             dirty, latest_source = len(self._pending_dirty), self._latest_source_generation
             ring_dirty = len(self._pending_ring_dirty)
+            append_flushes = self._append_flushes
+            append_buffered = self._buffered_fact_count()
+            append_facts_buffered = self._append_facts_buffered
+            append_flush_failure = self._append_flush_failure
+            append_quarantined = self._append_flush_quarantined
+            append_degraded = self._append_flush_degraded
+            next_append_flush_at = self._next_append_flush_at
             next_ring_flush_at = self._next_ring_flush_at
             ring_waiting_for_source = self._ring_waiting_for_source
             last_source_commit_at = self._last_source_commit_at
@@ -4900,6 +5607,27 @@ class StatsStatusProjector:
             },
             "owner_counters": {
                 "statsd_unchanged_cell_materialization": unchanged_cell_materialization,
+            },
+            # Which persistence owner this process selected, stated by the process itself. An
+            # A/B arm has to be BOTH forwarded by the launcher and observed by the subject; the
+            # flush counter alone cannot tell the arms apart on a quiet stream, because both
+            # report zero. The resolved interval is the discriminator, so it is reported here.
+            "append_persistence": {
+                "env_name": APPEND_FLUSH_ENV_NAME,
+                "flush_seconds": self._append_flush_seconds,
+                "buffering": self._append_flush_seconds > 0.0,
+                "default_flush_seconds": APPEND_FLUSH_SECONDS,
+                "measured_flush_seconds": APPEND_FLUSH_MEASURED_SECONDS,
+                "requested_flush_seconds": self._append_flush_arm.requested,
+                "refused_reason": self._append_flush_arm.refused_reason,
+                "write_through_families": sorted(WRITE_THROUGH_FAMILIES),
+                "buffered_facts": append_buffered,
+                "facts_buffered_total": append_facts_buffered,
+                "flushes": append_flushes,
+                "quarantined_facts": append_quarantined,
+                "degraded": append_degraded,
+                "next_flush_at": next_append_flush_at,
+                "last_failure": append_flush_failure,
             },
             "ring_writer": {
                 "cadence_seconds": RING_FLUSH_SECONDS,

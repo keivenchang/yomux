@@ -296,7 +296,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
         )
         stream_started = time.perf_counter()
         with urlopen(stream_request, timeout=10) as stream:
-            stream_line = stream.readline()
+            stream_line = read_stream_frame_header(stream)
             assert stream.status == 200 and b"event:" in stream_line
         stream_ms = (time.perf_counter() - stream_started) * 1000
         endpoint_measurements["stats-stream"] = (stream_ms, len(stream_line))
@@ -333,7 +333,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
                 _assert_24h_endpoint_latency(endpoint, elapsed_ms)
         delayed_stream_started = time.perf_counter()
         with urlopen(stream_request, timeout=10) as stream:
-            assert b"event:" in stream.readline()
+            assert b"event:" in read_stream_frame_header(stream)
         with pytest.raises(AssertionError, match="24h API latency guard"):
             _assert_24h_endpoint_latency("stats-stream", (time.perf_counter() - delayed_stream_started) * 1000)
 
@@ -485,6 +485,34 @@ def _assert_24h_endpoint_latency(endpoint: str, elapsed_ms: float) -> None:
         f"24h API latency guard: {endpoint} took {elapsed_ms:.1f} ms; limit is {MAX_24H_ENDPOINT_MS:.1f} ms"
     )
 
+
+
+def read_stream_frame_header(stream) -> bytes:
+    """Consume one SSE frame's header lines and return them, tolerating a leading `id:`.
+
+    The stats stream carries a monotonic emit id on EVERY frame -- `server.py:868`
+    `sse_id_line`, supplied at `server.py:2496`, `:2500`, `:2504`, `:2519` -- and the writer
+    emits it BEFORE the event name (`server.py:929`, `:946`). A reader that takes one line and
+    looks for the event name therefore reads the id line and fails on a perfectly healthy
+    stream. Observed directly on this endpoint: status 200, then
+
+        b'id: 2129409927\n'
+        b'event: ack\n'
+        b'data: {"cache_generation": 1700086400000, "chunk_count": 1, ...}\n'
+
+    Returning the CONSUMED bytes rather than only the event line keeps the caller's
+    `len(...)` first-frame byte measurement meaningful: it is the frame header actually
+    received, which is what the latency sample is describing.
+
+    Streams that pass no id are unaffected, because `sse_id_line` returns `b""` for an empty
+    id -- see `test_only_the_stats_stream_emits_an_sse_id_line`, which is the negative search
+    proving no other single-line reader in the suite can be reached by this change.
+    """
+
+    consumed = stream.readline()
+    if consumed.startswith(b"id:"):
+        consumed += stream.readline()
+    return consumed
 
 def _http_json(base_url: str, path: str, *, payload: object | None = None) -> tuple[int, object, int, float]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")

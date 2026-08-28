@@ -1819,7 +1819,9 @@ def main() -> int:
         print("error: output must be under /tmp", file=sys.stderr)
         return 2
     base_url = f"https://localhost:{args.port}"
-    web_pid = unique_listener_pid(args.port, timeout_seconds=2.0)
+    # Default mode: name the web process serving this port. Strict whole-host visibility
+    # cannot succeed on a shared host and is not what this measurement needs.
+    web_pid = unique_listener_pid(args.port, strict=False, timeout_seconds=2.0)
     service_pids = runtime_service_pids()
     statsd_pid = service_pids.get("statsd", 0)
     indexd_pid = service_pids.get("indexd", 0)

@@ -205,6 +205,64 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
     assert metrics["errors"] == [], metrics
 
 
+def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tmp_path):
+    """A queued answer for `w5k.md` must not present the prior `w5k` ranking as its result."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    stale_path = "/home/test/vortex/queues/DOIT.p1.e5.backend-lifetime-supervision.md"
+    current_path = "/home/test/vortex/notes/w5k/w5k.md"
+    metrics = browser.execute_async_script(
+        """
+        const stalePath = arguments[0];
+        const currentPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        let releaseCurrent = null;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/fs/search') return originalFetch(input, options);
+          const query = url.searchParams.get('query') || '';
+          if (query === 'w5k.md') return new Promise(resolve => { releaseCurrent = resolve; });
+          return new Response(JSON.stringify({
+            root: '/home/test/vortex',
+            files: [{name: 'DOIT.p1.e5.backend-lifetime-supervision.md', path: stalePath, relative_path: 'queues/DOIT.p1.e5.backend-lifetime-supervision.md', size: 1, mtime_ns: 1}],
+          }), {status: 200, headers: {'Content-Type': 'application/json'}});
+        };
+        const type = value => {
+          const input = document.querySelector('.command-palette-input');
+          input.value = value;
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+        };
+        (async () => {
+          openFileQuickOpen();
+          type('w5k');
+          await waitFor(() => commandPaletteState.items.some(item => item.path === stalePath), {description: 'initial stale Quick Open row'});
+          type('w5k.md');
+          await waitFor(() => fileQuickOpenState.loading && commandPaletteState.query === 'w5k.md', {description: 'queued longer Quick Open query'});
+          await waitFor(() => !commandPaletteState.items.some(item => item.path === stalePath), {description: 'stale row cleared before queued answer'});
+          const duringQueue = {
+            staleVisible: Array.from(document.querySelectorAll('.command-palette-row')).some(row => (row.textContent || '').includes('backend-lifetime-supervision')),
+            status: document.querySelector('.command-palette-status')?.textContent || '',
+          };
+          releaseCurrent(new Response(JSON.stringify({
+            root: '/home/test/vortex',
+            files: [{name: 'w5k.md', path: currentPath, relative_path: 'notes/w5k/w5k.md', size: 1, mtime_ns: 2}],
+          }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          await waitFor(() => commandPaletteState.items.some(item => item.path === currentPath), {description: 'queued Quick Open answer'});
+          done({duringQueue, finalPaths: commandPaletteState.items.map(item => item.path), errors: jsDebugFailureEvents('error')});
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        stale_path,
+        current_path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["duringQueue"]["staleVisible"] is False, metrics
+    assert "Searching files" in metrics["duringQueue"]["status"], metrics
+    assert metrics["finalPaths"] == [current_path], metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path):
     """A contiguous directory match must not highlight an earlier scattered subsequence."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
@@ -538,8 +596,9 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           descriptionOpensDetail,
           detailClosesOnTerminalEngagement,
           directionalLabels: Array.from(keyboardMenu?.querySelectorAll('.tab-split-action') || []).map(button => button.getAttribute('aria-label') || ''),
-          directionalGeometry: Array.from(keyboardMenu?.querySelectorAll('.tab-split-actions') || []).map(group => Object.fromEntries(
-            Array.from(group.querySelectorAll('.tab-split-action')).map(button => {
+          directionalGeometry: Array.from(keyboardMenu?.querySelectorAll('.tab-split-actions') || []).map(group => ({
+            title: (() => { const rect = group.querySelector('.tab-directional-actions-title')?.getBoundingClientRect(); return {left: rect?.left || 0, right: rect?.right || 0, top: rect?.top || 0, bottom: rect?.bottom || 0}; })(),
+            actions: Object.fromEntries(Array.from(group.querySelectorAll('.tab-split-action')).map(button => {
               const rect = button.getBoundingClientRect();
               const icon = button.querySelector('.tab-directional-action-icon');
               const iconRect = icon?.getBoundingClientRect();
@@ -554,8 +613,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
                 paneBorderRadius: paneStyle?.borderTopLeftRadius || '',
                 left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
               }];
-            }),
-          )),
+            })),
+          })),
           keyboardDescription: keyboardMenu?.querySelector('.tab-action-description')?.textContent.trim() || '',
         };
         """
@@ -573,14 +632,15 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert all(f"Swap {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert len(result["directionalGeometry"]) == 2, result
     for geometry in result["directionalGeometry"]:
+        assert geometry["title"]["bottom"] <= min(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")), geometry
         for zone in ("left", "right", "top", "bottom"):
-            assert f"tab-directional-action-icon--{zone}" in geometry[zone]["iconClass"], geometry
-            assert geometry[zone]["iconWidth"] > geometry[zone]["iconHeight"] > 0, geometry
-            assert geometry[zone]["iconBorderWidth"] == "2px", geometry
-            assert geometry[zone]["iconBorderRadius"] == "4px", geometry
-            assert geometry[zone]["paneBorderRadius"] == "2px", geometry
-        assert max(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry[zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
-        assert geometry["left"]["left"] < geometry["right"]["left"] < geometry["top"]["left"] < geometry["bottom"]["left"], geometry
+            assert f"tab-directional-action-icon--{zone}" in geometry["actions"][zone]["iconClass"], geometry
+            assert geometry["actions"][zone]["iconWidth"] > geometry["actions"][zone]["iconHeight"] > 0, geometry
+            assert geometry["actions"][zone]["iconBorderWidth"] == "2px", geometry
+            assert geometry["actions"][zone]["iconBorderRadius"] == "4px", geometry
+            assert geometry["actions"][zone]["paneBorderRadius"] == "2px", geometry
+        assert max(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) - min(geometry["actions"][zone]["top"] for zone in ("left", "right", "top", "bottom")) <= 1, geometry
+        assert geometry["actions"]["left"]["left"] < geometry["actions"]["right"]["left"] < geometry["actions"]["top"]["left"] < geometry["actions"]["bottom"]["left"], geometry
 
 
 def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, tmp_path):

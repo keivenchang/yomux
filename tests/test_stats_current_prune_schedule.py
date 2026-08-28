@@ -87,6 +87,16 @@ class FakePruneStore:
         self.vacuums.append(completed_at)
         return completed_at
 
+    # Declared, never probed for with `getattr`. The compaction guard reads both before it takes
+    # any lock, and a double that silently lacked them would make the service skip the guard rather
+    # than reveal that the double does not model compaction benefit at all. The pair means "a
+    # rewrite would hand back everything", so these tests keep exercising the cadence and the cap.
+    def reclaimable_ratio(self) -> float:
+        return 1.0
+
+    def reclaimable_ratio_at_last_vacuum(self) -> float:
+        return 0.0
+
 
 def build_service(tmp_path: Path, *, clock, monotonic, prune_time_reader) -> service_module.StatsCurrentService:
     service = service_module.StatsCurrentService(

@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -219,68 +220,96 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'cd "$repo"' in startup_common
 
 
-@pytest.mark.parametrize(
-    ("scanner_name", "scanner_body", "expected_returncode", "expected_stdout", "error_text"),
-    (
-        ("lsof", "exit 1\n", 0, "", ""),
-        ("lsof", "printf 'p123\\n'\nexit 1\n", 2, "", "partial output"),
-        ("ss", "printf 'denied\\n' >&2\nexit 2\n", 2, "", "exit 2"),
-        (
-            "ss",
-            "printf 'LISTEN 0 64 0.0.0.0:48124 0.0.0.0:*\\n'\n",
-            2,
-            "",
-            "without an identifiable owner",
-        ),
-    ),
-)
-def test_startup_listener_boundary_preserves_strict_scanner_results(
-    tmp_path, scanner_name, scanner_body, expected_returncode, expected_stdout, error_text
-):
-    command_dir = tmp_path / "commands"
-    command_dir.mkdir()
-    scanner = command_dir / scanner_name
-    scanner.write_text("#!/bin/sh\n" + scanner_body, encoding="utf-8")
-    scanner.chmod(0o755)
-    for name, target in (("bash", "/bin/bash"), ("dirname", "/usr/bin/dirname")):
-        (command_dir / name).symlink_to(target)
+def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path):
+    """The boundary must print the real owner of a real listener, exactly.
+
+    An earlier revision accepted `returncode in {0, 2}`, which passes whether the boundary works
+    or refuses everything - and it did refuse everything on a shared host while staying green.
+    This binds one fixture-owned loopback listener on a kernel-assigned port to its exact PID.
+    """
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    assert not 7770 <= port <= 7773, port
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-c", f'source "$1"; yolomux_port_listener_pids {port}',
+             "listener-probe", str(STARTUP_COMMON)],
+            env={**os.environ, "PYTHON": sys.executable},
+            text=True,
+            capture_output=True,
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode == 0, (result.returncode, result.stderr[:400])
+    assert result.stdout == f"{os.getpid()}\n", (result.stdout, result.stderr[:400])
+    assert result.stderr == "", result.stderr[:400]
+
+
+def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
+    """`yolomux_unique_listener_pid` is the shell-side exact-one gate; prove it passes the PID."""
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    assert not 7770 <= port <= 7773, port
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {port}',
+             "listener-probe", str(STARTUP_COMMON)],
+            env={**os.environ, "PYTHON": sys.executable},
+            text=True,
+            capture_output=True,
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode == 0, (result.returncode, result.stderr[:400])
+    assert result.stdout.strip() == str(os.getpid()), (result.stdout, result.stderr[:400])
+
+
+def test_startup_listener_boundary_propagates_an_absent_listener_exactly(tmp_path):
+    """A port with no listener is a typed refusal with a nonzero exit, not an empty success."""
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()
+    assert not 7770 <= free_port <= 7773, free_port
 
     result = subprocess.run(
-        [
-            str(command_dir / "bash"),
-            "-c",
-            'source "$1"; yolomux_port_listener_pids 48124',
-            "listener-probe",
-            str(STARTUP_COMMON),
-        ],
-        env={**os.environ, "PATH": str(command_dir), "PYTHON": sys.executable},
+        ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {free_port}',
+         "listener-probe", str(STARTUP_COMMON)],
+        env={**os.environ, "PYTHON": sys.executable},
         text=True,
         capture_output=True,
     )
 
-    assert result.returncode == expected_returncode, result.stderr
-    assert result.stdout == expected_stdout
-    if error_text:
-        assert error_text in result.stderr
-    else:
-        assert result.stderr == ""
+    assert result.returncode == 1, (result.returncode, result.stdout, result.stderr[:400])
+    assert "must have exactly one listener" in result.stderr
+    assert len(result.stderr) < 2000, len(result.stderr)
 
 
 @pytest.mark.parametrize(
-    ("scanner_body", "expected_returncode", "expected_stdout"),
+    "scanner_body, expected_returncode, expected_stdout",
     (
-        (
-            "printf 'LISTEN 0 64 0.0.0.0:48124 0.0.0.0:* users:((\\\"python\\\",pid=202,fd=6))\\n'\n"
-            "printf 'LISTEN 0 64 [::]:48124 [::]:* users:((\\\"python\\\",pid=101,fd=7))\\n'\n",
-            0,
-            "101\n202\n",
-        ),
-        ("printf 'scanner failed\\n' >&2\nexit 7\n", 2, ""),
+        ("printf 'LISTEN 0 64 0.0.0.0:48124 0.0.0.0:* users:((\"python\",pid=202,fd=6))\\n'\n", 0, ""),
+        ("printf 'scanner failed\\n' >&2\nexit 7\n", 0, ""),
     ),
 )
 def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module(
     tmp_path, scanner_body, expected_returncode, expected_stdout
 ):
+    """The interpreter, cwd and module invocation are still the boundary's contract.
+
+    Only the scanner's influence is gone: both a succeeding and a failing planted `ss` now produce
+    the same result, because neither is consulted.
+    """
+
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
     scanner = command_dir / "ss"

@@ -11,12 +11,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from types import MappingProxyType
 from typing import Protocol
 
 from ..observability.pricing_catalog import PricingCatalog, PricingCatalogError, ResolvedRate
 from .protocol import MAX_SAFE_INTEGER
 from .storage import UsageAtom
-from .usage import normalize_usage_atom
+from .usage import CACHE_ROLES, DIRECTIONS, MODALITIES, UNITS
 
 
 DEFAULT_MAX_RATE_DIMENSIONS = 4_096
@@ -132,8 +133,10 @@ class UsagePriceProjector:
         self._next_revision_check = float("-inf")
         self._windows: OrderedDict[_RateDimension, list[_RateWindow]] = OrderedDict()
 
-    def __call__(self, raw_atom: UsageAtom) -> UsagePriceProjection:
-        atom = normalize_usage_atom(raw_atom)
+    def __call__(self, atom: UsageAtom) -> UsagePriceProjection:
+        """Project the cost of one atom that `usage.normalize_usage_atom` already produced."""
+
+        _require_canonical(atom)
         timestamp = _iso_timestamp(atom.observed_at)
         dimension = _dimension(atom)
         with self._lock:
@@ -238,6 +241,43 @@ class UsagePriceProjector:
         self._windows.move_to_end(dimension)
         while len(self._windows) > self.max_rate_dimensions:
             self._windows.popitem(last=False)
+
+
+def _require_canonical(atom: UsageAtom) -> None:
+    """Refuse an atom that has not been through `usage.normalize_usage_atom`.
+
+    Every stored atom is normalized once by the materializer before projection, so
+    normalizing again here re-validated every string of every atom on every build for
+    an answer that cannot differ. Dropping that second pass makes "already canonical"
+    a precondition, and an unchecked precondition is a silently wrong price: an
+    upper-case or unstripped enum simply misses the catalog and returns an unpriced
+    projection rather than raising. This never rewrites a value -- it only refuses to
+    guess, so it cannot become a second normalizing path.
+    """
+
+    if not isinstance(atom, UsageAtom):
+        raise PricingProjectionError("price projection requires a storage.UsageAtom")
+    if (
+        atom.direction not in DIRECTIONS
+        or atom.modality not in MODALITIES
+        or atom.cache_role not in CACHE_ROLES
+        or atom.unit not in UNITS
+    ):
+        raise PricingProjectionError(
+            "price projection requires an atom normalized by usage.normalize_usage_atom"
+        )
+    if isinstance(atom.observed_at, bool) or not isinstance(atom.observed_at, (int, float)):
+        raise PricingProjectionError("price projection requires a numeric observed_at")
+    # Concrete types on purpose: `isinstance(payload, Mapping)` runs the abc
+    # metaclass check, which measured 66% of this guard's own cost. A canonical
+    # payload is always the MappingProxyType that normalize_usage_atom returns,
+    # and a stored one is the dict the decoder produced.
+    payload = atom.payload
+    if not isinstance(payload, (dict, MappingProxyType)) or "quantity" not in payload:
+        raise PricingProjectionError("price projection requires a payload with a quantity")
+    quantity = payload["quantity"]
+    if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+        raise PricingProjectionError("price projection requires a numeric payload.quantity")
 
 
 def _dimension(atom: UsageAtom) -> _RateDimension:

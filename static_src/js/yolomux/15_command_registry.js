@@ -83,6 +83,7 @@ const COMMAND_ROUTES = Object.freeze({
 // not belong in the user-command inventory asserted by K0. It remains declared here so the same
 // pre-network guard covers it instead of granting a blanket exception to internal POST requests.
 const INTERNAL_COMMAND_ROUTES = Object.freeze({
+  'terminal-file-resolve': commandRoute({id: 'terminal-file-resolve', method: 'POST', path: '/api/fs/resolve-file-candidates', contractClass: 'background'}),
   'background-owner-claim': commandRoute({id: 'background-owner-claim', method: 'POST', path: '/api/background/claim', contractClass: 'background'}),
   'operation-terminal-ack': commandRoute({id: 'operation-terminal-ack', method: 'POST', path: '/api/operations/ack', contractClass: 'background'}),
 });

@@ -7,7 +7,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
+
+from yolomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
 
 from . import identity
 from . import resolution as resolution_policy
@@ -131,6 +133,9 @@ class UpgradeRequiredWire(TypedDict):
     required_schema_generation: int
     required_build: str
     reason: str
+    # Only present when a named validator produced the rejection.  The key and its values are
+    # owned by ``yolomux_lib.observability.failure_severity``; see ``upgrade_required_response``.
+    caller_outcome_owner: NotRequired[str]
 
 
 class ProtocolValidationError(ValueError):
@@ -872,12 +877,25 @@ def pending_response(request: SnapshotRequest, retry_after_seconds: int, reason:
     return {"status": "pending", "protocol_version": WIRE_PROTOCOL_VERSION, "range_seconds": request.range_seconds, "requested_resolution": request.resolution, "resolution_seconds": request.resolution_seconds, "retry_after_seconds": retry, "reason": reason}
 
 
-def upgrade_required_response(required_protocol_version: int, required_schema_generation: int, required_build: str, reason: str = "client or writer is too old") -> UpgradeRequiredWire:
+def upgrade_required_response(required_protocol_version: int, required_schema_generation: int, required_build: str, reason: str = "client or writer is too old", caller_outcome_owner: str = "") -> UpgradeRequiredWire:
+    """Build the one upgrade fence wire response every producer returns.
+
+    ``caller_outcome_owner`` names the validator that rejected this particular payload.  It is
+    absent by default because most fences are daemon-wide protocol fences an operator must act
+    on; a producer that knows its rejection is an ordinary caller outcome names itself here, and
+    ``yolomux_lib.observability.failure_severity`` downgrades only markers it recognizes.
+    """
+
     protocol_version = _integer(required_protocol_version, "required_protocol_version", minimum=1)
     schema_generation = _integer(required_schema_generation, "required_schema_generation", minimum=1)
     if not isinstance(required_build, str) or not required_build or not isinstance(reason, str) or not reason:
         raise ProtocolValidationError("required_build and reason must be non-empty")
-    return {"status": "upgrade_required", "protocol_version": WIRE_PROTOCOL_VERSION, "required_protocol_version": protocol_version, "required_schema_generation": schema_generation, "required_build": required_build, "reason": reason}
+    if not isinstance(caller_outcome_owner, str):
+        raise ProtocolValidationError("caller_outcome_owner must be text")
+    response: dict[str, object] = {"status": "upgrade_required", "protocol_version": WIRE_PROTOCOL_VERSION, "required_protocol_version": protocol_version, "required_schema_generation": schema_generation, "required_build": required_build, "reason": reason}
+    if caller_outcome_owner:
+        response[CALLER_OUTCOME_OWNER_FIELD] = caller_outcome_owner
+    return cast(UpgradeRequiredWire, response)
 
 
 def validate_snapshot_for_request(request: SnapshotRequest, response: SnapshotWire, minimum_generation: int | None = None) -> None:

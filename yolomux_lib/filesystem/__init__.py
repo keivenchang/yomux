@@ -488,9 +488,9 @@ def git_root_for_path(path: Path) -> str:
 
 
 @normalize_os_errors
-def read_file(raw_path: str) -> dict[str, Any]:
+def read_file(raw_path: str, *, include_git: bool = True) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.read_file(raw_path)
+    return io_ops.read_file(raw_path, include_git=include_git)
 
 
 def _reindex_after_mutation(mutated_paths: list[Any], reason: str) -> list[str]:
@@ -577,13 +577,21 @@ def path_info(
     *,
     operation: str = "path_info",
     repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+    include_git: bool = True,
 ) -> dict[str, Any]:
     _sync_package_overrides()
     return io_ops.path_info(
         raw_path,
         operation=operation,
         repo_info_cache=repo_info_cache,
+        include_git=include_git,
     )
+
+
+@normalize_os_errors
+def resolve_file_candidates(raw_paths: list[str]) -> dict[str, Any]:
+    _sync_package_overrides()
+    return io_ops.resolve_file_candidates(raw_paths)
 
 
 def is_text_path(raw_path: str) -> bool:

@@ -636,6 +636,9 @@ const fileQuickOpenState = {
   // server can stream committed match deltas instead of the client re-issuing the whole query.
   deltaQuery: '',
   deltaRoots: new Map(),
+  // Candidate retention also includes the requested root or path directory; two path queries can
+  // share a filter while naming different directories and must not present each other's rows.
+  candidateQueryIdentity: '',
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -731,6 +734,7 @@ const serverWatchRootsState = {
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
+  debounceStartedAt: null,
   pendingOptions: {},
 };
 let fileExplorerFilesystemWatchToken = '';
@@ -896,7 +900,13 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-const gitDiffHistoryPageSize = 50;
+// The history panel paints one bounded page, with a small local reserve so the first
+// "Load older" action does not wait on another Git walk. Keep all consumers on these
+// one-source limits: Git history includes numstat work and must never expand with the
+// repository's complete history just because a directory has many commits.
+const gitDiffHistoryVisiblePageSize = 30;
+const gitDiffHistoryPrefetchSize = 10;
+const gitDiffHistoryFetchSize = gitDiffHistoryVisiblePageSize + gitDiffHistoryPrefetchSize;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -2100,6 +2110,7 @@ const yolomuxTiming = Object.freeze({
   forcedSessionMetadataSettleTimeoutMs: 8000,
   forcedSessionMetadataSettlePollMs: 151,
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
+  serverWatchDebounceMaxDeferralMs: uiDelayMs.serverWatchDebounce * 4,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
   // Bounded UI wait for the post-confirmation refreshed frame before the explicit
@@ -2125,6 +2136,7 @@ const {
   forcedSessionMetadataSettleTimeoutMs,
   forcedSessionMetadataSettlePollMs,
   serverWatchDebounceMs,
+  serverWatchDebounceMaxDeferralMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,
@@ -2847,6 +2859,13 @@ function applyApiRequestIdHeader(url, requestOptions) {
 
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
+// A 202 means the server ACCEPTED the work and keeps at it for its own
+// `FS_BATCH_OPERATION_DEADLINE_SECONDS` (app.py). Quitting sooner abandons work that is still
+// running and still succeeding -- on a CPU-oversubscribed host that painted "File could not be
+// opened" over a read the very next retry served. Accepted work waits the server's budget.
+const apiFetchAcceptedOperationDeadlineMs = 120000;
+// Gate-only: lets a browser test prove the expiry path without spending 120s of wall-clock. 0 = off.
+let apiFetchAcceptedOperationDeadlineTestMs = 0;
 // Route-qualified owners still decide whether roots, metadata, Finder, terminal, or stats demand is
 // equivalent. This is the one browser-wide capacity owner beneath them, so independent startup and
 // refresh work remains parallel without letting one page issue an unbounded fetch burst.
@@ -2962,6 +2981,13 @@ function apiFetchDeadlineMs(url, options = {}) {
   return apiFetchDefaultDeadlineMs;
 }
 
+// The wait budget for work the server already ACCEPTED. A route that asked for a longer budget
+// (upload, self-update) keeps it; nothing waits less than the server's own budget.
+function apiAcceptedOperationDeadlineMs(routeDeadlineMs = 0) {
+  if (apiFetchAcceptedOperationDeadlineTestMs) return apiFetchAcceptedOperationDeadlineTestMs;
+  return Math.max(Number(routeDeadlineMs) || 0, apiFetchAcceptedOperationDeadlineMs);
+}
+
 function apiFetchDeadlineError(deadlineMs, subject = 'request') {
   const seconds = Math.round(deadlineMs / 1000);
   const message = `deadline_expired: ${String(subject || 'request')} exceeded its ${seconds}s deadline`;
@@ -3026,6 +3052,8 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
+  const startupImmediate = requestOptions.startupImmediate === true;
+  delete requestOptions.startupImmediate;
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
   delete requestOptions.deadlineMs;
@@ -3069,7 +3097,8 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   };
   let response;
   try {
-    const requestPromise = runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal).catch(error => {
+    const request = startupImmediate ? fetch(url, requestOptions) : runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal);
+    const requestPromise = Promise.resolve(request).catch(error => {
       if (timeoutError) throw timeoutError;
       throw error;
     });
@@ -3427,7 +3456,7 @@ function waitForApiOperationResult(pending, expected = {}) {
   }
   const deadlineMs = Number.isFinite(Number(expected.deadlineMs)) && Number(expected.deadlineMs) > 0
     ? Number(expected.deadlineMs)
-    : apiFetchDefaultDeadlineMs;
+    : apiAcceptedOperationDeadlineMs();
   const signal = expected.signal || null;
   return new Promise((resolve, reject) => {
     const waiters = apiOperationState.waiters.get(record.id) || new Set();
@@ -3605,7 +3634,7 @@ async function apiFetchJson(url, options = {}, internalOptions = {}) {
     const result = await waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation: String(error?.operation?.context?.operation || ''),
-      deadlineMs: apiFetchDeadlineMs(url, options),
+      deadlineMs: apiAcceptedOperationDeadlineMs(apiFetchDeadlineMs(url, options)),
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
@@ -7614,13 +7643,14 @@ async function terminalReferenceProviderLinks(session, term, y) {
   const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
   const fileRefs = refs.filter(ref => ref.type === 'file');
   if (!fileRefs.length) return links;
-  const fileTargets = await Promise.all(fileRefs.map(ref => terminalFileReferenceTarget(session, ref, {fresh: false, user: true})));
-  fileRefs.forEach((ref, index) => {
-    if (fileTargets[index]) {
-      const link = terminalReferenceXtermLink(ref);
-      if (link) links.push(link);
-    }
-  });
+  // This provider runs once for each visible terminal line. Its output is only a visual underline:
+  // right-click determines the syntactic path and the selected editor tab owns the real read/error.
+  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
+  for (const ref of fileRefs) {
+    const link = terminalReferenceXtermLink(ref);
+    if (link) links.push(link);
+  }
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
@@ -7661,6 +7691,33 @@ function terminalFileReferenceCacheKey(session, reference) {
     reference?.path || '',
     reference?.text || '',
   ].join('\x1f');
+}
+
+const terminalFileReferenceResolutionPromises = new Map();
+
+function terminalFileReferenceResolutionKey(paths) {
+  return paths.join('\x1f');
+}
+
+function resolveTerminalFileReferenceCandidates(paths) {
+  const key = terminalFileReferenceResolutionKey(paths);
+  const existing = terminalFileReferenceResolutionPromises.get(key);
+  if (existing) return existing;
+  const resolution = (async () => {
+    try {
+      return await apiFetchJson('/api/fs/resolve-file-candidates', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paths}), startupImmediate: true,
+      });
+    } catch (error) {
+      if (!isApiPendingResponse(error)) throw error;
+      return await waitForApiOperationResult(error, {kind: 'filesystem_operation', operation: 'resolve_file_candidates'});
+    }
+  })();
+  terminalFileReferenceResolutionPromises.set(key, resolution);
+  void resolution.finally(() => {
+    if (terminalFileReferenceResolutionPromises.get(key) === resolution) terminalFileReferenceResolutionPromises.delete(key);
+  }).catch(() => {});
+  return resolution;
 }
 
 function terminalVisibleFileReferences(term) {
@@ -8989,6 +9046,18 @@ function terminalFileReferenceRejectionLabel(reason) {
   return `${t('editor.fileOpenFailedTitle')}: ${reason}`;
 }
 
+function terminalFileReferenceCachedTarget(session, reference, now = Date.now) {
+  const cacheKey = terminalFileReferenceCacheKey(session, reference);
+  const cached = terminalFileReferenceTargetCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= now()) {
+    terminalFileReferenceTargetCache.delete(cacheKey);
+    return null;
+  }
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+  return cached.value?.info?.kind === 'file' ? cached.value : null;
+}
+
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
   const canReuse = options.fresh === false;
@@ -9002,26 +9071,17 @@ async function terminalFileReferenceTarget(session, reference, options = {}) {
     }
     terminalFileReferenceTargetCache.delete(cacheKey);
   }
-  const fetchOptions = {
-    user: options.user !== false,
-    fresh: !canReuse,
-  };
   const targetPromise = (async () => {
     let rejection = null;
-    for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
-      try {
-        const info = await fetchFilePathInfo(path, fetchOptions);
-        if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
-      } catch (error) {
-        // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
-        const reason = userMessageText(error, t('common.requestFailed'));
-        rejection = {
-          kind: 'rejected',
-          label: terminalFileReferenceRejectionLabel(reason),
-          path,
-          reason,
-        };
-      }
+    const paths = terminalFileReferenceCandidatePaths(session, reference);
+    if (!paths.length) return null;
+    try {
+      const result = await resolveTerminalFileReferenceCandidates(paths);
+      if (result?.info?.kind === 'file') return {path: result.path, info: result.info, line: reference.line || null, text: reference.text || result.path};
+    } catch (error) {
+      const path = paths[0] || '';
+      const reason = userMessageText(error, t('common.requestFailed'));
+      rejection = {kind: 'rejected', label: terminalFileReferenceRejectionLabel(reason), path, reason};
     }
     if (rejection && options.reportRejection) {
       recordJsDebugEvent('client_failure', {
@@ -9079,7 +9139,7 @@ function requestFileEditorLineTarget(item, line) {
 
 async function openTerminalFileReference(target) {
   if (!target?.path) return;
-  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {viewMode: 'edit', userInitiated: true});
+  const item = await openFileInEditor(target.path, target.info || {name: basenameOf(target.path)}, {userInitiated: true});
   if (item && target.line) requestFileEditorLineTarget(item, target.line);
 }
 
@@ -9365,7 +9425,21 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
-  const fileTarget = terminalReference?.type === 'file' ? await terminalFileReferenceTarget(session, terminalReference, {reportRejection: true}) : null;
+  // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
+  // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
+  const optimisticFilePath = terminalReference?.type === 'file'
+    ? terminalFileReferenceAbsolutePath(session, terminalReference)
+    : '';
+  const fileTarget = optimisticFilePath
+    ? {
+      path: optimisticFilePath,
+      info: terminalFileReferenceCachedTarget(session, terminalReference)?.info || {name: basenameOf(optimisticFilePath)},
+      line: terminalReference.line || null,
+      text: terminalReference.text || optimisticFilePath,
+    }
+    : null;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
@@ -9377,7 +9451,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
   const hasUrlReference = terminalReference?.type === 'url';
   if (hasUrlReference) {
-    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, null, {selectionText: selected, session, term, container})) {
       appendContextMenuSeparator(menu);
     }
   } else {
@@ -9389,7 +9463,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
       appendContextMenuButton(menu, terminalCopyActionLabel(action), button => copyTerminalSelection(session, term, {action, button, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
     }
     appendContextMenuSeparator(menu);
-    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, null, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
   }
   appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu);
   if (hasUrlReference) {
@@ -9399,6 +9473,13 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   // dead Paste action when that probe found no text/image, and reuse the one paste transport.
   if (!readOnlyMode && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
     appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
+  }
+  if (fileTarget) {
+    const actions = document.createElement('div');
+    if (appendTerminalReferenceContextMenuItems(actions, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+      appendContextMenuSeparator(actions);
+      menu.prepend(...Array.from(actions.children));
+    }
   }
   terminalContextMenu.open(menu, x, y);
 }
@@ -9685,6 +9766,7 @@ const COMMAND_ROUTES = Object.freeze({
 // not belong in the user-command inventory asserted by K0. It remains declared here so the same
 // pre-network guard covers it instead of granting a blanket exception to internal POST requests.
 const INTERNAL_COMMAND_ROUTES = Object.freeze({
+  'terminal-file-resolve': commandRoute({id: 'terminal-file-resolve', method: 'POST', path: '/api/fs/resolve-file-candidates', contractClass: 'background'}),
   'background-owner-claim': commandRoute({id: 'background-owner-claim', method: 'POST', path: '/api/background/claim', contractClass: 'background'}),
   'operation-terminal-ack': commandRoute({id: 'operation-terminal-ack', method: 'POST', path: '/api/operations/ack', contractClass: 'background'}),
 });
@@ -15050,6 +15132,12 @@ function commandPaletteSearchQuery(query = commandPaletteState.query, mode = com
   return fileQuickOpenSearchText(query);
 }
 
+function fileQuickOpenCandidateQueryIdentity(query, root) {
+  const pathQuery = fileQuickOpenPathQuery(query);
+  if (pathQuery.active) return `path:${pathQuery.directory || '/'}\n${pathQuery.filter}`;
+  return `search:${String(root || '')}\n${commandPaletteSearchQuery(query)}`;
+}
+
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
   const q = commandPaletteState.query.trim();
@@ -15278,6 +15366,7 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  fileQuickOpenState.candidateQueryIdentity = '';
   // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
   // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
   resetFileQuickOpenDeltaCursors('');
@@ -15335,16 +15424,23 @@ function fileQuickOpenWorstFreshness(records) {
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
+  const searchQuery = commandPaletteSearchQuery(query);
+  const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
+  const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
   abortFileQuickOpenSearch();
+  fileQuickOpenState.candidateQueryIdentity = candidateQueryIdentity;
   const requestId = ++fileQuickOpenState.requestId;
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  // Rows retained across a refresh of the same query are still that query's answer, so they stay
+  // visible while the reread lands. Rows retained across a changed query are not its ranked answer.
+  if (candidateQueryIdentity !== previousCandidateQueryIdentity) fileQuickOpenState.candidates = [];
   // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
   // mutate this palette, and the roots/query it belonged to may have changed entirely.
-  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
+  resetFileQuickOpenDeltaCursors(searchQuery);
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -20312,6 +20408,9 @@ async function fetchRawFileBlob(path, options = {}) {
   try {
     const response = await apiFetch(rawFileUrl(path, options.params || {}), {
       cache: 'no-store',
+      // Visible preview bytes are a user-facing point read. They must not sit behind long-poll
+      // startup work in the browser-wide refresh coordinator.
+      startupImmediate: true,
       deadlineMs: options.deadlineMs || apiFetchLongOperationDeadlineMs,
       ...(options.signal ? {signal: options.signal} : {}),
     }, {returnUnauthorizedResponse: true, abortRetirementReason: 'raw_file_media_replaced'});
@@ -26519,9 +26618,8 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
-function finderPathActionDisabledReason(primaryInfo) {
+function finderPathActionDisabledReason() {
   if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
-  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
   return '';
 }
 
@@ -26533,8 +26631,10 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    if (!primaryInfo?.repo_root) return [];
-    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    // Directory listings already derive this marker from the pinned directory descriptor.  It is
+    // enough to offer the Git history tab now; the tab owns the slower Git history load.
+    if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
+    const disabledReason = readOnlyMode ? t('contextmenu.readOnlyUnavailable') : '';
     const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
@@ -26545,7 +26645,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     }];
   }
   if (entry.kind !== 'file') return [];
-  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabledReason = finderPathActionDisabledReason();
   const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
   const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
   const diffCapabilityReason = !primaryInfo?.repo_root
@@ -26572,28 +26672,14 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   ];
 }
 
-async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
-  closeFileContextMenu();
-  closeTerminalContextMenu();
-  closeSessionContextMenu();
-  closeFileImagePreview();
-  closeOtherSessionPopovers(null);
-  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
-  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
-  // pointermove over the row can reopen it right behind the context menu. Route through its own
-  // controller when bound so timers and state are reset the same way any other dismissal is.
-  row?.__yolomuxRepoHoverController?.closeNow?.();
-  hideFileTreeRepoPopover();
-  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
-  const selectedPaths = fileTreeActionPaths(fullPath);
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
-    console.warn('fs info failed', path, error);
-    return null;
-  })));
-  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu file-context-menu';
-  menu.setAttribute('role', 'menu');
+function sameFileTreeContextMenuSelection(fullPath, selectedPaths) {
+  const currentPaths = fileTreeActionPaths(fullPath);
+  return currentPaths.length === selectedPaths.length && currentPaths.every((path, index) => path === selectedPaths[index]);
+}
+
+function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options = {}) {
+  if (!menu) return;
+  menu.replaceChildren();
   const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
   const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
@@ -26627,7 +26713,39 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   }
   appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
+}
+
+async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+    console.warn('fs info failed', path, error);
+    return null;
+  })));
+  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
+  if (!menu.isConnected || !sameFileTreeContextMenuSelection(fullPath, selectedPaths)) return;
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options);
+}
+
+function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
+  closeFileContextMenu();
+  closeTerminalContextMenu();
+  closeSessionContextMenu();
+  closeFileImagePreview();
+  closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
+  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
+  const selectedPaths = fileTreeActionPaths(fullPath);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  const pendingRelativeCopyEntries = selectedPaths.map(() => ({available: false, text: '', reason: 'pending'}));
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, [], pendingRelativeCopyEntries, options);
   fileContextMenu.open(menu, x, y);
+  void refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options);
 }
 
 function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
@@ -27842,8 +27960,12 @@ function fileErrorText(error, fallbackKey, fallbackParams = {}) {
 const FILE_TOO_LARGE_MESSAGE_KEY = 'fs.error.tooLarge';
 
 function payloadReportsFileTooLarge(error) {
+  // Only the server SAYING the file is oversized counts. A genuine content oversize always carries
+  // this key (`FilesystemError.file_too_large`), so an unlabelled 413 is some other limit and must
+  // not be relabelled as an oversized file: doing that produced "File is too large to preview" with
+  // an empty size, because there was no file size to report for a limit that was not about size.
   const key = String(userMessageSnapshot(error)?.user_message?.key || '');
-  return key === '' || key === FILE_TOO_LARGE_MESSAGE_KEY;
+  return key === FILE_TOO_LARGE_MESSAGE_KEY;
 }
 
 function tooLargeFileState(size = null, message = null) {
@@ -28306,6 +28428,12 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A new tab has no file state until this point. Select its requested/default mode only after
+  // installing that state, so Preview capability is evaluated against the real file type. An
+  // ordinary reopen deliberately has no initialViewMode and keeps its existing per-tab choice.
+  if (options.initialViewMode && !fileEditorViewModesForPath(path).has(editorViewModeKey(path, item))) {
+    setFileEditorViewMode(path, options.initialViewMode, item);
+  }
   // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
   // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
   if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
@@ -28317,6 +28445,10 @@ function openFilesSetAndShow(path, state, options = {}) {
 
 function openFileStateHasLoadedEditorPayload(state) {
   return Boolean(state?.kind && state.loading !== true && state.kind !== 'file' && state.kind !== 'error');
+}
+
+function openFileLoadingStateStillCurrent(path, state) {
+  return fileState.get(path) === state && openFilePathHasOwner(path);
 }
 
 function refreshOpenFileDiffDecorations(path) {
@@ -28360,7 +28492,6 @@ async function focusExistingPhysicalFileEditor(requestedPath, existingPath, opti
   const item = primaryEditorItemForPath(existingPath, options.item || null);
   foldDuplicateEditorItemsForPath(existingPath, item);
   if (options.viewMode) setFileEditorViewMode(existingPath, options.viewMode, item);
-  else setFileEditorViewMode(existingPath, 'edit', item);
   recordEditorNav(item);
   const openOptions = {
     ...options,
@@ -28511,22 +28642,24 @@ async function refreshOpenFileDiff(path, options = {}) {
   return state._diffLoadingPromise;
 }
 
-async function refreshOpenFileGitMetadata(path) {
+async function refreshOpenFileGitMetadata(path, expectedState = null) {
   const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  if (!state || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   try {
-    const payload = await fetchFileReadPayload(path);
+    const payload = await fetchFileReadPayload(path, {includeGit: true});
     const current = fileState.get(path);
-    if (!current || current.kind !== 'text') return false;
+    if (!current || current.kind !== 'text' || (expectedState && current !== expectedState)) return false;
     applyFileGitMetadata(current, payload);
+    renderOpenFilePath(path);
     return true;
   } catch (_error) {
     const current = fileState.get(path);
-    if (current && current.kind === 'text') {
+    if (current && current.kind === 'text' && (!expectedState || current === expectedState)) {
       current.gitRoot = '';
       current.gitTracked = false;
       current.gitHistory = [];
       current.gitHasHistory = false;
+      renderOpenFilePath(path);
     }
     return false;
   }
@@ -28546,8 +28679,17 @@ async function fetchFilesystemOperationPayload(url, operation, options = {}) {
 }
 
 async function fetchFileReadPayload(path, options = {}) {
+  const url = `/api/fs/read?path=${encodeURIComponent(path)}${options.includeGit === true ? '&include_git=1' : ''}`;
+  // The first content read is a browser-owned direct lifecycle: it paints into the already-open
+  // tab and resolves to bytes or a typed file state without a jobd receipt. Git enrichment stays
+  // on the retained-operation path because it may inspect repository history.
+  if (options.includeGit !== true) {
+    return apiFetchJson(url, {startupImmediate: true, ...(options.signal ? {signal: options.signal} : {})}, {
+      quietStatuses: options.quietStatuses || [404, 413, 415],
+    });
+  }
   return fetchFilesystemOperationPayload(
-    `/api/fs/read?path=${encodeURIComponent(path)}`,
+    url,
     'read',
     options,
   );
@@ -28561,6 +28703,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   if (identityDedupe) {
     const pendingOpen = fileOpenPromiseFor(fullPath);
     if (pendingOpen) {
+      if (fileState.has(fullPath)) return focusExistingPhysicalFileEditor(fullPath, fullPath, options);
       await pendingOpen.catch(() => null);
       const existingAfterPending = openPathForPhysicalFile(fullPath, entry) || (fileState.has(fullPath) ? fullPath : '');
       if (existingAfterPending) return focusExistingPhysicalFileEditor(fullPath, existingAfterPending, options);
@@ -28582,18 +28725,19 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
-  if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
     applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
     if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
-    await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
     renderOpenFilePath(fullPath);
     return item;
   }
+  // A default is only for a new tab. Reopening an error/Loading tab may retry its read, but its
+  // existing per-item view mode remains the user's choice unless this action requested a mode.
+  openOptions.initialViewMode = options.viewMode || defaultFileEditorViewModeForPath(fullPath, kind);
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = fileEntryMtime(entry);
@@ -28609,8 +28753,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     await openFilesSetAndShow(fullPath, applyFileIdentityMetadata(rawPreviewFileState(fullPath, entry), entry), openOptions);
     return item;
   }
+  // Make the editor selection visible before the filesystem work begins.  The read completion
+  // replaces this exact path state with text or a typed error, so a slow backend never makes the
+  // user's Open action appear ignored.
+  const loadingState = applyFileIdentityMetadata({
+    mtime: fileEntryMtime(entry),
+    kind: 'text',
+    original: '',
+    content: '',
+    dirty: false,
+    loading: true,
+  }, entry);
   const openPromise = (async () => {
     const payload = await fetchFileReadPayload(fullPath);
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
       if (existingIdentityPath && existingIdentityPath !== fullPath) {
@@ -28626,12 +28782,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       dirty: false,
     }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
+    // Base content is the interactive path. Git status/history is useful decoration, but never
+    // delays the newly-created tab; discard its result if this state has since been replaced.
+    void refreshOpenFileGitMetadata(fullPath, state);
     return item;
   })();
+  // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
+  // read, so publish the same promise before rendering to prevent a duplicate request.
+  loadingState.loadingPromise = openPromise;
+  openFilesSetAndShow(fullPath, loadingState, openOptions);
   if (identityDedupe) setFileOpenPromise(fullPath, openPromise);
   try {
     return await openPromise;
   } catch (err) {
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     const status = Number(err?.status) || 0;
     if (status) {
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;
@@ -29308,6 +29472,7 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
@@ -29316,22 +29481,28 @@ function syncServerWatchRoots(options = {}) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
-  const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
   if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
     serverWatchRootsState.scheduledKey = requestKey;
     return;
   }
+  const now = performance.now();
+  if (serverWatchRootsState.debounceStartedAt === null) serverWatchRootsState.debounceStartedAt = now;
+  const deadline = serverWatchRootsState.debounceStartedAt + serverWatchDebounceMaxDeferralMs;
+  const delay = pendingOptions.immediate === true ? 0 : Math.max(0, Math.min(serverWatchDebounceMs, deadline - now));
+  if (serverWatchRootsState.timer && serverWatchRootsState.scheduledKey === requestKey && serverWatchRootsState.timerDelay === delay) return;
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
   serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
     serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};
@@ -48787,14 +48958,23 @@ function bindPreferencesPanel(panel) {
   const CURRENT_STATS_ZOOM_THRESHOLD_PX = 8;
   let nextRendererId = 1;
 
-  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}) {
+  // `streamEvidence` is the transport's own first-transition observables. The failure MESSAGE
+  // can only say that nothing arrived; it cannot say which side went quiet, so every artifact a
+  // stall left behind was unclassifiable. Sampling the snapshot here — inside the one owner every
+  // failure already routes through, at the exact moment of the report — attaches that evidence
+  // without adding a second reporting path. It is bounded (a fixed set of scalars) and read-only,
+  // so it changes no product behaviour, no message, and nothing about when a failure fires.
+  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}, streamEvidence = null) {
     let latched = false;
     return Object.freeze({
       report(message) {
         if (latched) return false;
         latched = true;
         const boundedMessage = String(message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
-        onFailure(Object.freeze({message: boundedMessage, source: '/api/stats-stream'}));
+        const evidence = typeof streamEvidence === 'function' ? streamEvidence() : null;
+        onFailure(Object.freeze(evidence
+          ? {message: boundedMessage, source: '/api/stats-stream', evidence}
+          : {message: boundedMessage, source: '/api/stats-stream'}));
         return true;
       },
       // An unload-initiated close is an outcome, not a failure, so it never consumes the
@@ -49514,7 +49694,7 @@ function bindPreferencesPanel(panel) {
     const userOnDelta = controllerOptions.onDelta || userOnGeneration;
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
-    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement);
+    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement, () => streamEvidence());
     const readinessTimeoutMs = positiveInteger(options.readinessTimeoutMs ?? 10_000, 'readinessTimeoutMs');
     const readinessRetryMs = positiveInteger(options.readinessRetryMs ?? 1_000, 'readinessRetryMs');
     const clientId = String(options.clientId ?? controllerOptions.clientId ?? '').trim();
@@ -49536,6 +49716,7 @@ function bindPreferencesPanel(panel) {
     let acceptedDeltaSequence = 0;
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
+    let lastDeliveryEmitMs = 0;
     let lastDeliveryEpoch = 0;
     const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
       && options.pageLifecycle !== undefined;
@@ -49560,7 +49741,13 @@ function bindPreferencesPanel(panel) {
     }
     ensureLifecycleScope();
 
-    function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
+    // `emitId` is the server's monotonic emit clock, carried on the frame's SSE `id:` line and
+    // handed over as `event.lastEventId`. Retaining it next to the arrival time is what separates
+    // "the server never sent it" from "the server sent it and it arrived late": emit spacing stays
+    // on cadence while arrival spacing stretches. It is deliberately read from outside the JSON
+    // body, so no frame body key set changes and `exactFields` never sees it. A server that sends
+    // no id leaves the value at 0 rather than NaN, so the evidence is always numeric.
+    function recordStreamDelivery(kind, epoch, {acceptedDelta = false, emitId = ''} = {}) {
       transportLifecycle.noteDelivery(streamTransportToken);
       streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
@@ -49568,6 +49755,8 @@ function bindPreferencesPanel(panel) {
       lastDeliveryKind = kind;
       lastDeliveryAtMs = Math.max(0, Number(clock.now()) || 0);
       lastDeliveryEpoch = epoch;
+      const emitted = Number(emitId);
+      lastDeliveryEmitMs = Number.isFinite(emitted) && emitted >= 0 ? emitted : 0;
     }
 
     function streamEvidence() {
@@ -49584,6 +49773,7 @@ function bindPreferencesPanel(panel) {
         acceptedDeltaSequence,
         lastDeliveryKind,
         lastDeliveryAtMs,
+        lastDeliveryEmitMs,
         lastDeliveryEpoch,
         rangeSeconds: Number(selection?.range_seconds) || 0,
         resolutionSeconds: Number(generation?.resolution_seconds) || 0,
@@ -49792,7 +49982,7 @@ function bindPreferencesPanel(panel) {
                 || value.range_seconds !== request.range_seconds
                 || String(value.requested_resolution) !== String(request.resolution)) throw new Error('snapshot ack does not match the active request');
             acknowledgement = Object.freeze(value);
-            recordStreamDelivery('ack', epoch);
+            recordStreamDelivery('ack', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -49810,7 +50000,7 @@ function bindPreferencesPanel(panel) {
               if (acknowledgement.chunk_count !== 1 || assembly || fullSnapshot) throw new Error('snapshot stream mixed full and chunked data');
               fullSnapshot = value;
             }
-            recordStreamDelivery('snapshot', epoch);
+            recordStreamDelivery('snapshot', epoch, {emitId: event.lastEventId});
           } catch (error) {
             void fail(error);
           }
@@ -49823,7 +50013,7 @@ function bindPreferencesPanel(panel) {
           }
           try {
             if (controller.acceptDelta(JSON.parse(event.data))) {
-              recordStreamDelivery('delta', epoch, {acceptedDelta: true});
+              recordStreamDelivery('delta', epoch, {acceptedDelta: true, emitId: event.lastEventId});
             }
           } catch (_error) {
             routeStreamFailure(candidate, epoch);
@@ -49851,7 +50041,7 @@ function bindPreferencesPanel(panel) {
               if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
                 throw new Error('snapshot cannot be not-modified before an initial generation');
               }
-              recordStreamDelivery('ready', epoch);
+              recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
               finish(value);
               return;
             }
@@ -49862,7 +50052,7 @@ function bindPreferencesPanel(panel) {
                 || ready.revision !== presentation?.delta_revision) {
               throw new Error('ready cursor does not match current generation');
             }
-            recordStreamDelivery('ready', epoch);
+            recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
             controller.noteStreamHeartbeat();
           } catch (error) {
             if (!settled) void fail(error);
@@ -59176,12 +59366,21 @@ function recordJsDebugCurrentStatsFailure(failure) {
   jsDebugCurrentStatsClientState.failureLatched = true;
   const message = String(failure?.message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
   const source = String(failure?.source || '/api/stats-stream').slice(0, 160);
+  // The stall message alone cannot say which side went quiet, so the transport's own
+  // first-transition observables ride along into the retained record. `streamEvidence()`
+  // returns a fixed set of scalars, so this stays bounded; it is dropped rather than
+  // coerced when it is not the object shape this owner expects.
+  const evidence = failure?.evidence;
+  const streamEvidence = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+    ? {...evidence}
+    : null;
   recordJsDebugStatsDiagnostic('warning', message, {
     category: 'stats_stream',
     requestId: String(failure?.requestId || failure?.request_id || '').slice(0, 128),
     route: source,
     eventType: 'stats-generation',
     deliveryOutcome: /(?:stalled|missing)/i.test(message) ? 'stalled' : 'failed',
+    ...(streamEvidence ? {streamEvidence} : {}),
   });
   return true;
 }
@@ -63434,6 +63633,7 @@ function newGitDiffTabState(item, defaults = {}) {
     head: '',
     snapshotCursor: '',
     commits: [],
+    visibleCommitCount: 0,
     nextCursor: '',
     truncated: false,
     truncationReason: '',
@@ -63487,7 +63687,7 @@ function cleanupGitDiffTab(item) {
 
 function gitDiffHistoryUrl(path, cursor = '') {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryPageSize}${suffix}`;
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryFetchSize}${suffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head) {
@@ -63587,6 +63787,8 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
+    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
+    else state.visibleCommitCount = Math.min(state.commits.length, gitDiffHistoryVisiblePageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
@@ -63615,7 +63817,30 @@ async function refreshGitDiffHistory(item, options = {}) {
 }
 
 function loadOlderGitDiffHistory(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return false;
+  // Expose the bounded reserve synchronously. Only after it is exhausted do we submit
+  // the next 30-visible-plus-10-reserve Git history walk.
+  if (state.visibleCommitCount < state.commits.length) {
+    state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
+    renderGitDiffPanel(item);
+    return true;
+  }
   return refreshGitDiffHistory(item, {append: true});
+}
+
+function gitDiffHistoryNearEnd(body) {
+  if (!body) return false;
+  return body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+}
+
+function bindGitDiffHistoryInfiniteScroll(item, body) {
+  bindScopedOnce(body, 'git-diff-history-infinite-scroll', scope => {
+    scope.ownEvent('scroll', body, 'scroll', () => {
+      if (!gitDiffHistoryNearEnd(body)) return;
+      void loadOlderGitDiffHistory(item);
+    }, {passive: true});
+  });
 }
 
 function gitDiffDetailGuard(state, sha) {
@@ -63690,6 +63915,11 @@ function gitDiffTextNode(className, text = '') {
 }
 
 function gitDiffCommitChangesNode(commit) {
+  if (commit?.summary_pending === true) {
+    const node = gitDiffTextNode('git-diff-commit-changes git-diff-commit-changes-pending', '…');
+    node.setAttribute('aria-label', t('common.loading'));
+    return node;
+  }
   const files = Math.max(0, Number(commit?.files) || 0);
   const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
   const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
@@ -63962,10 +64192,11 @@ function bindGitDiffFileTree(tree) {
   });
 }
 
-function gitDiffStatusNode(className, text, role = '') {
+function gitDiffStatusNode(className, text, role = '', options = {}) {
   const node = document.createElement('div');
   node.className = className;
-  node.textContent = String(text || '');
+  if (options.movingEllipsis === true) node.innerHTML = textWithMovingEllipsisHtml(text, 'git-diff-loading-ellipsis');
+  else node.textContent = String(text || '');
   if (role) node.setAttribute('role', role);
   return node;
 }
@@ -64023,7 +64254,7 @@ function renderGitDiffCommitList(item, list, state) {
   const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
   const existing = new Map(Array.from(list.children || []).map(group => [group.dataset?.gitDiffCommitGroup || '', group]));
   const groups = [];
-  for (const commit of state.commits) {
+  for (const commit of state.commits.slice(0, state.visibleCommitCount)) {
     const sha = String(commit?.sha || '');
     if (!sha) continue;
     const group = existing.get(sha) || document.createElement('section');
@@ -64062,6 +64293,7 @@ function createGitDiffPanel(item) {
   const body = document.createElement('div');
   body.className = 'git-diff-panel-body';
   body.setAttribute('aria-label', gitDiffTabLabel(item));
+  bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
   ensureGitDiffTabState(item);
   return panel;
@@ -64086,7 +64318,7 @@ function renderGitDiffPanel(item, options = {}) {
   const meta = panel.querySelector?.('.git-diff-meta');
   if (meta) {
     const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
-    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.commits.length || gitDiffHistoryPageSize})}`;
+    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryVisiblePageSize})}`;
   }
   const body = panel.querySelector?.('.git-diff-panel-body');
   if (!body) return state;
@@ -64096,18 +64328,12 @@ function renderGitDiffPanel(item, options = {}) {
   list.className = 'git-diff-commits';
   renderGitDiffCommitList(item, list, state);
   const nodes = [];
-  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status'));
+  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
   if (state.commits.length) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
-  if (state.nextCursor) {
-    nodes.push(makeButton({
-      className: 'git-diff-load-older',
-      label: state.loadingOlder ? t('common.loading') : t('gitDiff.loadOlder'),
-      disabled: state.loadingOlder,
-      onClick: () => void loadOlderGitDiffHistory(item),
-    }));
-  } else if (state.truncated) {
+  if (state.loadingOlder) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
+  else if (state.truncated && state.visibleCommitCount >= state.commits.length && !state.nextCursor) {
     nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
   }
   body.replaceChildren(...nodes);
@@ -64138,10 +64364,10 @@ function layoutUrlGitDiffStateSnapshot() {
       item,
       head: state.head,
       snapshotCursor: state.snapshotCursor,
-      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryPageSize),
+      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryVisiblePageSize),
       focusedSha: state.focusedSha || '',
-      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryPageSize),
-      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryPageSize),
+      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryVisiblePageSize),
+      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryVisiblePageSize),
     });
     if (result.length >= 32) break;
   }
@@ -64164,20 +64390,21 @@ function applyLayoutUrlGitDiffState(entries) {
     state.head = head;
     state.snapshotCursor = snapshotCursor;
     state.commits = [];
+    state.visibleCommitCount = 0;
     state.nextCursor = '';
     state.loaded = false;
     state.loadAttempted = false;
     state.error = null;
-    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryPageSize));
+    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryVisiblePageSize));
     state.focusedSha = gitDiffLayoutOid(entry.focusedSha);
     state.details.clear();
     state.detailErrors.clear();
-    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const paths = Array.isArray(pair?.[1]) ? pair[1].map(path => normalizeDirectoryPath(String(path || ''))).filter(Boolean).slice(0, 500) : [];
       return sha ? [[sha, new Set(paths)]] : [];
     }));
-    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const path = normalizeDirectoryPath(String(pair?.[1] || ''));
       return sha && path ? [[sha, path]] : [];
@@ -80488,7 +80715,6 @@ function loadAutoStatuses(options = {}) {
       if (!isApiPendingResponse(error)) throw error;
       payload = await waitForApiOperationResult(error, {
         kind: String(error?.operation?.kind || ''),
-        deadlineMs: apiFetchDeadlineMs('/api/auto-approve', {}),
         url: '/api/auto-approve',
         method: 'GET',
       });
@@ -80571,6 +80797,60 @@ function sealedAutoApprovePayloadNeedsMetadata(payload) {
 function deferSealedAutoApprovePayload(payload) {
   const heldRevision = agentWindowSnapshotRevision(deferredSealedAutoApprovePayload);
   if (agentWindowSnapshotRevision(payload) >= heldRevision) deferredSealedAutoApprovePayload = payload;
+}
+
+function heldSealIsFullyOvertaken(held, revision) {
+  // Authority is PER SESSION, never a global maximum. A held seal carries one revision
+  // for every session it names, so a single unrelated or already-advanced session must
+  // not authorise discarding status that another named session never received. Only
+  // complete per-session coverage means the seal carries nothing new.
+  if (!(revision > 0)) return false;
+  const heldSessions = Object.keys(held?.sessions || {});
+  if (!heldSessions.length) return false;
+  return heldSessions.every(session => agentWindowSnapshotRevision(autoApproveStates.get(session)) >= revision);
+}
+
+function reconcileDeferredSealedAutoApprove() {
+  // The ONE owner that resolves a held sealed payload, called from every terminal
+  // session-metadata outcome. A deferred payload used to be released only on the
+  // success tail, so a malformed/superseded/older-generation outcome left it held
+  // with nothing recorded and nothing scheduled to revisit it - the published
+  // consumer revision could then never advance again. Every terminal boundary now
+  // applies it, discards it, or records that it is still legitimately waiting.
+  //
+  // Authority is preserved, not bypassed: a payload is applied only when metadata
+  // genuinely covers its sessions, and is never applied merely to empty the holder.
+  if (!deferredSealedAutoApprovePayload) return {state: 'none', revision: 0};
+  const held = deferredSealedAutoApprovePayload;
+  const revision = agentWindowSnapshotRevision(held);
+  if (heldSealIsFullyOvertaken(held, revision)) {
+    // EVERY session this seal names has already applied that revision or newer, so it
+    // carries no truth any consumer still needs. A partial overtake falls through and
+    // is retained below rather than discarding an unserved session's status.
+    deferredSealedAutoApprovePayload = null;
+    return {state: 'discarded_superseded_revision', revision};
+  }
+  if (sealedAutoApprovePayloadNeedsMetadata(held)) {
+    // Still genuinely waiting on metadata. This retention has NO unconditional local
+    // bound: it is revisited only when a SUBSEQUENT metadata event occurs. Every
+    // terminal outcome of `applySessionMetadataPayload` now re-enters this reconciler,
+    // and that function is re-entered by the server-driven `transcripts_changed` path
+    // and by `refreshSessionMetadata` callers - but if no further metadata event ever
+    // arrives, the payload stays held. Recording the state is what makes that wait
+    // observable; it is not a guarantee that the wait ends.
+    return {state: 'retained_awaiting_metadata', revision};
+  }
+  deferredSealedAutoApprovePayload = null;
+  applyAutoApprovePayload(held, {render: false, deferForMetadata: false});
+  return {state: 'applied', revision};
+}
+
+function finalizeSessionMetadataOutcome(applied, reason, payload, details = {}) {
+  // Single finalization boundary: reuse the existing `lastApply` outcome owner and
+  // attach the deferred-payload disposition to it, so no terminal return needs its
+  // own copy of the reconciliation and no second result map exists.
+  const deferredSealed = reconcileDeferredSealedAutoApprove();
+  return noteSessionMetadataApply(applied, reason, payload, {...details, deferredSealed});
 }
 
 function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
@@ -81057,7 +81337,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // Validate BEFORE adopting anything. A malformed or superseded response must be rejected while it
   // still cannot touch shared identity: a late reply from the server that was just replaced would
   // otherwise flip the epoch back after the replacement's bytes had already landed.
-  if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
+  if (!payload || typeof payload !== 'object') return finalizeSessionMetadataOutcome(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) {
     // A superseded response still carries a true fact about the SERVER's build queue: which build
@@ -81068,7 +81348,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     // epoch adoption above, because the recorder refuses an identity from any other epoch and never
     // lowers the number.
     noteSessionMetadataPendingIdentity(payload);
-    return noteSessionMetadataApply(false, 'superseded_request', payload);
+    return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
@@ -81089,16 +81369,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
     if (nextGeneration > 0 && currentGeneration > nextGeneration) {
-      return noteSessionMetadataApply(false, 'older_work_graph_generation', payload, {session});
+      return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
-  noteSessionMetadataApply(true, 'applied', payload);
-  if (deferredSealedAutoApprovePayload && !sealedAutoApprovePayloadNeedsMetadata(deferredSealedAutoApprovePayload)) {
-    const deferredPayload = deferredSealedAutoApprovePayload;
-    deferredSealedAutoApprovePayload = null;
-    applyAutoApprovePayload(deferredPayload, {render: false, deferForMetadata: false});
-  }
+  finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -81118,7 +81393,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   // The payload is already committed above; only the render tail is abandoned here, so the applied
   // generation stands and the reason says which half stopped.
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'committed_render_superseded', payload, {committed: true});
+  if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The

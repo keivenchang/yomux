@@ -1,0 +1,86 @@
+{
+  "acquisition_seconds": 3600,
+  "anchor_observed_at": 1787712534.1632814,
+  "arm_wall_seconds": 2.295247,
+  "commits": 360,
+  "counts_after": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2039,
+    "freelist_count": 0,
+    "observations": 1201842,
+    "page_count": 127158,
+    "page_size": 4096,
+    "ring_invalidations": 529492,
+    "source_generation": 1162305,
+    "unavailable_spans": 1471,
+    "usage_atoms": 74011
+  },
+  "counts_before": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2039,
+    "freelist_count": 0,
+    "observations": 1194642,
+    "page_count": 126820,
+    "page_size": 4096,
+    "ring_invalidations": 529492,
+    "source_generation": 1161945,
+    "unavailable_spans": 1471,
+    "usage_atoms": 74011
+  },
+  "facts_per_commit": 20.0,
+  "families": [
+    "cpu/cpu-source",
+    "service_load/load-source"
+  ],
+  "family_count": 2,
+  "finished": {
+    "epoch": 1787713752.0917273,
+    "monotonic": 2097637.206843081,
+    "pt": "2026-08-25 20:09:12 PDT"
+  },
+  "interval_seconds": 10,
+  "label": "copy-merged-i10",
+  "main_bytes_after": 520765440,
+  "main_bytes_before": 519442432,
+  "measure_finished": {
+    "epoch": 1787713752.0404928,
+    "monotonic": 2097637.155608672,
+    "pt": "2026-08-25 20:09:12 PDT"
+  },
+  "measure_started": {
+    "epoch": 1787713750.3950648,
+    "monotonic": 2097635.510180276,
+    "pt": "2026-08-25 20:09:10 PDT"
+  },
+  "measure_wall_seconds": 1.645428,
+  "merged": true,
+  "observations_offered": 7200,
+  "observations_stored": 7200,
+  "read_bytes": 0,
+  "ring_buckets_seeded": 0,
+  "row_delta": {
+    "aggregate_ring_slots": 0,
+    "coverage_epochs": 0,
+    "observations": 7200,
+    "ring_invalidations": 0,
+    "unavailable_spans": 0,
+    "usage_atoms": 0
+  },
+  "shape": "real",
+  "source": "/tmp/yolomux-e3-profile-04/fixture/stats-v8.sqlite3",
+  "started": {
+    "epoch": 1787713749.7964807,
+    "monotonic": 2097634.911596576,
+    "pt": "2026-08-25 20:09:09 PDT"
+  },
+  "syscr": 528941,
+  "syscw": 13187,
+  "syscw_per_commit": 36.63,
+  "topology": "copy",
+  "wal_bytes_after": 4173592,
+  "wal_bytes_before": 156592,
+  "wchar": 28209736,
+  "write_bytes": 33587200,
+  "write_bytes_per_commit": 93297.8,
+  "write_bytes_per_observation": 4664.9
+}

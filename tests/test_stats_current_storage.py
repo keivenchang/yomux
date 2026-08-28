@@ -4,8 +4,10 @@
 
 import inspect
 import json
+import random
 import sqlite3
 import time
+import weakref
 from dataclasses import replace
 
 import pytest
@@ -28,6 +30,7 @@ from yolomux_lib.stats_current import StorageValidationError
 from yolomux_lib.stats_current import UnavailableSpan
 from yolomux_lib.stats_current import UsageAtom
 from yolomux_lib.stats_current import UsageAtomTombstone
+from yolomux_lib.stats_current.storage import VACUUM_BASELINE_FILENAME
 from yolomux_lib.stats_current import WRITER_FENCE_FILENAME
 from yolomux_lib.stats_current import materializer as materializer_module
 from yolomux_lib.stats_current import resolution as stats_resolution
@@ -188,6 +191,206 @@ def test_vacuum_reclaims_pruned_raw_table_pages(tmp_path):
         assert connection.execute("PRAGMA freelist_count").fetchone()[0] == 0
     finally:
         connection.close()
+
+
+# --- compaction benefit: the metric that decides whether a rewrite is worth doing ------------
+#
+# The whole point of these is the SUBTRACTION. Raw reclaimable space is never zero, because every
+# schema has a natural B-tree fill, so a threshold on the raw figure rewrites the file forever and
+# recovers nothing. Measured against its own post-vacuum baseline the same store reads 0.000.
+
+BENEFIT_PAD = 64
+
+
+def _benefit_observations(start, stop, pad=BENEFIT_PAD):
+    return [
+        Observation(
+            f"e-{index:012d}", "cpu", f"s{index % 5}", float(index), "epoch-1", 1,
+            {"value": index, "pad": "x" * pad},
+        )
+        for index in range(start, stop)
+    ]
+
+
+def _fill(store, total, pad=BENEFIT_PAD, chunk=25_000):
+    for start in range(0, total, chunk):
+        store.append_batch(observations=_benefit_observations(start, min(start + chunk, total), pad))
+
+
+def _benefit(store):
+    return store.reclaimable_ratio() - store.reclaimable_ratio_at_last_vacuum()
+
+
+def test_the_benefit_metric_reads_zero_after_a_vacuum_while_the_raw_figure_stays_above_the_floor(tmp_path):
+    """Must-skip, and the raw assertion documents exactly why the subtraction exists.
+
+    If someone deletes the baseline term and returns the raw ratio, this fails loudly rather than
+    quietly rewriting a compacted 200MB file every hour and recovering nothing. Audited on four
+    real databases whose truly recoverable space was 0.0000%: raw read 3.600%, 3.864%, 3.929% and
+    3.576%.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        _fill(store, 20_000)
+        store.vacuum(1_000.0)
+
+        assert _benefit(store) == 0.0
+        # The floor the subtraction removes. Measured 0.038959 on this fixture, inside the audited
+        # 3.5-3.9% band. A raw-figure guard at any threshold below this compacts forever.
+        assert store.reclaimable_ratio() > 0.03
+
+
+def test_the_benefit_metric_rises_with_random_key_appends_while_the_free_list_stays_empty(tmp_path):
+    """The property this whole item exists for.
+
+    Nothing was deleted, so `freelist_count` is 0 and any free-list-only metric reads exactly zero.
+    The space is real: random primary keys split B-tree pages and leave slack inside pages that are
+    still live, which only `dbstat.unused` can see.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        _fill(store, 20_000)
+        store.vacuum(1_000.0)
+        assert _benefit(store) == 0.0
+
+        random_source = random.Random(7)
+        store.append_batch(observations=[
+            Observation(
+                f"r-{random_source.getrandbits(48):014d}", "cpu",
+                f"s{random_source.getrandbits(8) % 5}", float(index), "epoch-1", 1,
+                {"value": index, "pad": "x" * BENEFIT_PAD},
+            )
+            for index in range(20_000)
+        ])
+        store._connection().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        assert store._connection().execute("PRAGMA freelist_count").fetchone()[0] == 0
+        # Measured 0.065915 on this fixture. A free-list-only metric would read 0.000 here.
+        assert _benefit(store) > 0.02
+
+
+def test_the_benefit_metric_predicts_the_measured_shrink_without_ever_over_predicting(tmp_path):
+    """ASYMMETRIC on purpose. Over-prediction wastes a rewrite; under-prediction only delays one.
+
+    The over bound is 0.001 and is the load-bearing half: across every fixture measured for this
+    change the metric has never once over-predicted. The under bound carries the baseline term
+    because that is the measured structure of the error, not a fudge -- the metric omits the slack
+    the surviving rows will still carry after the rewrite, which is what the baseline measures.
+    Measured errors, all under-predicting: -0.98 pp at this shape, -1.51 and -1.85 pp at a quarter
+    the row count, -11.72 pp on a payload built from overflow pages.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    total = 60_000
+    with Store.open(path) as store:
+        _fill(store, total)
+        store.vacuum(1_000.0)
+        baseline = store.reclaimable_ratio_at_last_vacuum()
+
+        store.prune(now=RETENTION_SECONDS + total * 0.7409)
+        connection = store._connection()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        predicted = _benefit(store)
+        pages_before = int(connection.execute("PRAGMA page_count").fetchone()[0])
+
+        store.vacuum(2_000.0)
+        pages_after = int(store._connection().execute("PRAGMA page_count").fetchone()[0])
+        actual = (pages_before - pages_after) / pages_before
+
+        assert predicted <= actual + 0.001, (
+            f"the metric OVER-predicted: {predicted:.6f} against a measured {actual:.6f}"
+        )
+        assert predicted >= actual - baseline - 0.005, (
+            f"the metric under-predicted by more than its baseline term: predicted {predicted:.6f}, "
+            f"measured {actual:.6f}, baseline {baseline:.6f}"
+        )
+        # And the point of the fixture: this case is the one that clears the policy threshold.
+        assert predicted >= 0.15
+
+
+def test_a_database_matching_the_audited_page_geometry_is_still_decided_on_measured_slack(tmp_path):
+    """Page geometry and an empty free list carry NO verdict, in either direction.
+
+    Built at runtime rather than committed, because the artifact is 215MB. The geometry is the
+    audited one, and on it the RAW figure reads 0.158461 -- above the 15.0% threshold, so a
+    raw-figure guard would rewrite this database. It is freshly compacted and a rewrite would
+    return nothing, and the metric says so.
+
+    The `is False` below encodes the 15.0% POLICY choice, not a physical fact. A rewrite costs
+    about 3.008x the post-rewrite size in writes; the threshold is where that stops being worth it
+    on this cadence. Change the policy and this assertion changes with it.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        _fill(store, 48_449, pad=3_800, chunk=8_000)
+        store.vacuum(1_000.0)
+        connection = store._connection()
+
+        assert int(connection.execute("PRAGMA page_size").fetchone()[0]) == 4_096
+        assert abs(int(connection.execute("PRAGMA page_count").fetchone()[0]) - 54_917) <= 64
+        assert int(connection.execute("PRAGMA freelist_count").fetchone()[0]) == 0
+        assert abs(path.stat().st_size - 224_940_032) <= 262_144
+
+        assert store.reclaimable_ratio() > 0.15, "the fixture no longer exercises the raw-vs-C5 gap"
+        assert (_benefit(store) >= 0.15) is False
+
+
+def test_an_unknown_baseline_reads_as_zero_rather_than_as_a_stale_number(tmp_path):
+    """A sidecar naming a different vacuum than the database does must not be believed.
+
+    A crash between the marker transaction and the sidecar leaves exactly that state. Reading the
+    previous rewrite's baseline as though it described the current one would suppress a needed
+    compaction; reading it as unknown costs at most one extra rewrite, which rewrites both halves
+    and self-corrects.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    sidecar = path.parent / VACUUM_BASELINE_FILENAME
+    with Store.open(path) as store:
+        _fill(store, 5_000)
+        assert store.reclaimable_ratio_at_last_vacuum() == 0.0, "a never-vacuumed store has none"
+
+        store.vacuum(1_000.0)
+        recorded = store.reclaimable_ratio_at_last_vacuum()
+        assert recorded > 0.0 and json.loads(sidecar.read_text())["last_vacuumed_at"] == 1_000.0
+
+        sidecar.write_text(json.dumps(
+            {"last_vacuumed_at": 999.0, "reclaimable_ratio": recorded}
+        ), encoding="utf-8")
+        assert store.reclaimable_ratio_at_last_vacuum() == 0.0
+
+        sidecar.write_text("{not json", encoding="utf-8")
+        assert store.reclaimable_ratio_at_last_vacuum() == 0.0
+        sidecar.unlink()
+        assert store.reclaimable_ratio_at_last_vacuum() == 0.0
+
+
+def test_a_baseline_ratio_above_one_is_rejected_like_a_negative_one(tmp_path):
+    """The validator's own docstring names this hazard and did not guard it.
+
+    A ratio is a fraction of the file, so above 1.0 is impossible. `_record_vacuum_baseline`
+    cannot produce one -- it is bounded by construction -- so this is corruption of the 0o600
+    sidecar. Believed, it makes the benefit permanently NEGATIVE, which is precisely the
+    "fabricated high baseline would suppress a needed compaction indefinitely and leave the
+    disk to fill" case the docstring calls out. Finiteness and `< 0` were checked; `> 1` was not.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    sidecar = path.parent / VACUUM_BASELINE_FILENAME
+    with Store.open(path) as store:
+        _fill(store, 5_000)
+        store.vacuum(1_000.0)
+        assert store.reclaimable_ratio_at_last_vacuum() > 0.0
+
+        for impossible in (1.5, 2.0, 1e9):
+            sidecar.write_text(json.dumps(
+                {"last_vacuumed_at": 1_000.0, "reclaimable_ratio": impossible}
+            ), encoding="utf-8")
+            assert store.reclaimable_ratio_at_last_vacuum() == 0.0, impossible
+
+        # Exactly 1.0 is degenerate but not impossible, and rejecting it would be a behaviour
+        # change beyond the finding: an entirely empty file IS wholly reclaimable.
+        sidecar.write_text(json.dumps(
+            {"last_vacuumed_at": 1_000.0, "reclaimable_ratio": 1.0}
+        ), encoding="utf-8")
+        assert store.reclaimable_ratio_at_last_vacuum() == 1.0
 
 
 def test_current_database_uses_a_versioned_path_and_publishes_the_fence_first(tmp_path):
@@ -1555,3 +1758,330 @@ def test_legacy_writer_stops_at_current_schema_without_mutation(tmp_path):
             writer_build=MIN_WRITER_BUILD - 1,
         )
     assert _files(path) == before
+
+
+def test_ring_replay_cursor_cardinality_is_validated_like_the_other_fixed_row_tables(tmp_path):
+    """A lost cursor row must be refused, not silently replayed from the wrong fold point.
+
+    `_validate_ring_schema` pins an exact row set for `aggregate_publication`, `aggregate_rings`
+    and `aggregate_ring_slots`, but `ring_replay_cursor` was excluded and never queried. This is
+    NOT an unbounded-growth defect -- one INSERT site at schema creation, no product DELETE site,
+    so growth is structurally impossible. It is a DRIFT-DETECTION gap: a v8 file whose cursor
+    rows an external tool removed would pass validation, and the fold point it then replays from
+    is whatever the surviving rows say.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        store.initialize_ring_storage()
+    expected = sorted(stats_resolution.RING_CAPACITIES)
+
+    with sqlite3.connect(path) as raw:
+        rows = [int(row[0]) for row in raw.execute(
+            "SELECT resolution_seconds FROM ring_replay_cursor ORDER BY resolution_seconds")]
+    assert rows == expected, "a fresh store starts with exactly one cursor row per ring"
+
+    # An external tool drops one cursor row. Every other ring assertion still passes.
+    with sqlite3.connect(path) as raw:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute("DELETE FROM ring_replay_cursor WHERE resolution_seconds = ?", (expected[0],))
+    with pytest.raises(SchemaMismatchError):
+        Store.open(path).close()
+
+
+def test_a_duplicate_ring_replay_cursor_row_is_structurally_impossible(tmp_path):
+    """The other half of the finding, recorded rather than guarded: the PK already prevents it.
+
+    `resolution_seconds` is the table's PRIMARY KEY, so a second row for the same ring cannot be
+    inserted at all. The cardinality assertion above therefore covers the reachable direction --
+    missing rows -- and this pins WHY the duplicate direction needs no separate guard, so a later
+    reader does not add one and conclude the check was incomplete.
+    """
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        store.initialize_ring_storage()
+    resolution = sorted(stats_resolution.RING_CAPACITIES)[0]
+    with sqlite3.connect(path) as raw:
+        with pytest.raises(sqlite3.IntegrityError):
+            raw.execute(
+                "INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(?)", (resolution,)
+            )
+# --- the bounded exact rebuild -------------------------------------------------
+#
+# `pinned_snapshot` decodes every observation into a tuple built from a `fetchall()` of every raw
+# row, so both representations of the whole store are live at once. `pinned_snapshot_batches` is
+# the bounded sibling. These tests pin the invariant it exists for, the four bounds it runs under,
+# and that it reads the same facts in the same order as the method it replaces.
+
+
+class _TrackedRow:
+    """A raw row that can be weakly referenced, so a test can prove when it stops being reachable.
+
+    Not a `tuple` subclass: variable-length built-ins cannot carry `__weakref__`, so the wrapper
+    holds the values and forwards indexing, which is all the reader does with a row.
+    """
+
+    __slots__ = ("_values", "__weakref__")
+
+    def __init__(self, values):
+        self._values = values
+
+    def __getitem__(self, index):
+        return self._values[index]
+
+
+def _seed_observations(store, count):
+    store.append_batch(
+        coverage_epochs=[CoverageEpoch("cpu", "probe", "epoch-1", 0.0, None, 1.0, 1)],
+        observations=[_observation("cpu", "probe", float(index)) for index in range(count)],
+    )
+
+
+def _track_raw_rows(store, tracked):
+    """Hand every raw SQLite row out as a weakly referenceable object and remember each one.
+
+    `sqlite3.Connection.execute` is read-only, so the seam is `row_factory`: it is the one place a
+    test can see the raw tuples the reader decodes from, without changing the reader.
+    """
+
+    connection = store._connection()
+    tracked.clear()
+
+    def remembering_row(_cursor, values):
+        row = _TrackedRow(values)
+        tracked.append(weakref.ref(row))
+        return row
+
+    connection = store._connection()
+    connection.row_factory = remembering_row
+    return connection
+
+
+def test_a_batch_never_holds_raw_rows_and_decoded_facts_together(tmp_path):
+    """The invariant, proved by reachability rather than by asserting a peak that passes today.
+
+    A peak-memory assertion passes or fails on the chunk size of the day. This asserts the thing
+    that actually bounds the rebuild: by the time a decoded batch reaches the caller, the raw
+    SQLite tuples it was built from are unreachable, so the store's rows and the store's decoded
+    facts are never both resident.
+    """
+
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 400)
+        tracked: list = []
+        _track_raw_rows(store, tracked)
+        try:
+            with store.pinned_snapshot_batches(max_rows=100) as read:
+                for batch in read():
+                    assert batch, "a yielded batch is never empty"
+                    alive = [reference for reference in tracked if reference() is not None]
+                    assert not alive, (
+                        f"{len(alive)} raw rows were still reachable when a decoded batch was "
+                        "yielded; rows and facts must never both be resident"
+                    )
+        finally:
+            store._connection().row_factory = None
+        assert len(tracked) >= 250, "the instrumentation must have seen every raw row"
+
+
+def test_the_row_bound_ends_a_batch_rather_than_the_rebuild(tmp_path):
+    """Row and byte bounds are batch-scoped: a full batch is a normal event, not a failure."""
+
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 250)
+        with store.pinned_snapshot_batches(max_rows=100) as read:
+            sizes = [len(batch) for batch in read()]
+
+    assert sizes == [100, 100, 50]
+    assert sum(sizes) == 250
+
+
+def test_the_decoded_byte_bound_also_ends_a_batch(tmp_path):
+    """Whichever of the two batch bounds trips first ends the batch."""
+
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 120)
+        with store.pinned_snapshot_batches(max_rows=50, max_decoded_bytes=1) as read:
+            sizes = [len(batch) for batch in read()]
+
+    # A one-byte budget admits no SECOND fetch, so each batch ends at its first fetch boundary
+    # rather than at the 50-row bound being reached twice. Both bounds are checked at fetch
+    # boundaries, which is what keeps an over-budget batch from being decoded before anyone looks.
+    assert sizes == [50, 50, 20]
+    assert sum(sizes) == 120
+
+
+def test_an_over_budget_rebuild_is_abandoned_with_a_reason_rather_than_truncated(tmp_path):
+    """Memory is a REBUILD bound. Serving half a store as if it were whole is the worse failure.
+
+    The reader is injected for the same reason the lifetime bound injects a clock. Growth is only
+    visible when the allocator asks the kernel for pages, so in a warm process a rebuild can decode
+    thousands of rows and move `RssAnon` not at all -- asserting on real growth would make this node
+    pass or fail on allocator state. The readings below are a baseline and one measurement past it.
+
+    Seeded past `_REBUILD_FETCH_ROWS` so the pre-fetch check is the one that fires here. A rebuild
+    finishing in a single fetch is measured too, by the check that runs after the fetch --
+    `test_a_batch_that_ends_on_the_byte_bound_still_measures_what_that_fetch_grew` is that path.
+    """
+
+    readings = iter((1_000_000, 1_000_000, 1_000_042))
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, storage_module._REBUILD_FETCH_ROWS * 2)
+        with store.pinned_snapshot_batches(max_memory_bytes=1, memory=lambda: next(readings)) as read:
+            with pytest.raises(storage_module.RebuildBoundExceeded) as raised:
+                list(read())
+
+    assert raised.value.reason == "rebuild_memory_bytes"
+    assert raised.value.limit == 1
+    # The GROWTH, not the absolute reading: 1,000,042 against a 1,000,000 baseline.
+    assert raised.value.measured == 42
+
+
+def test_the_memory_bound_measures_the_rebuild_and_not_the_whole_process(tmp_path):
+    """A bound on ABSOLUTE process memory is unusable, and the gate is what proved it.
+
+    Measured on the live daemon: `RssAnon` 623,244 kB plus `VmSwap` 942,440 kB is 1,529 MiB against
+    a 192 MiB budget, so an absolute check refuses every rebuild forever, from the first one after
+    start. The same bound fired in an xdist worker sitting at 300 MiB while the fixture held 200
+    observations, which is what surfaced it.
+
+    So the quantity is the rebuild's own growth. A process that is already large may still rebuild;
+    a rebuild that allocates past its budget still cannot.
+
+    Injected rather than allocated. Reaching 1.6 GiB by really allocating would make this node pass
+    or fail on interpreter and allocator state, which is the defect being fixed reproduced in the
+    test. Every reading below is far past the 192 MiB budget in absolute terms while the growth
+    between them stays under it, so an absolute check fails here and a growth check passes.
+    """
+
+    huge = storage_module.REBUILD_MAX_MEMORY_BYTES * 8
+    readings = iter([huge + step for step in (0, 0, 4096, 8192, 8192, 8192, 8192, 8192)])
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 200)
+        with store.pinned_snapshot_batches(memory=lambda: next(readings)) as read:
+            rows = sum(len(batch) for batch in read())
+
+    assert rows == 200
+
+
+def test_a_rebuild_that_runs_too_long_is_abandoned_with_a_reason(tmp_path):
+    """Lifetime is the other rebuild bound, and it still applies where memory cannot be read.
+
+    The memory readings are huge and FLAT on purpose. Under the retired absolute bound this node was
+    pre-empted in the gate: it expected `rebuild_seconds` and got `rebuild_memory_bytes`, because a
+    300 MiB worker tripped the memory check before the clock ever advanced. A growth bound cannot
+    pre-empt it however large the process is, and that is what these readings pin.
+    """
+
+    ticks = iter((0.0, 0.0, 500.0, 500.0, 500.0))
+    flat = storage_module.REBUILD_MAX_MEMORY_BYTES * 8
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 200)
+        with store.pinned_snapshot_batches(
+            max_seconds=120.0, now=lambda: next(ticks), memory=lambda: flat,
+        ) as read:
+            with pytest.raises(storage_module.RebuildBoundExceeded) as raised:
+                list(read())
+
+    assert raised.value.reason == "rebuild_seconds"
+    assert raised.value.limit == 120.0
+
+
+def test_a_batch_that_ends_on_the_byte_bound_still_measures_what_that_fetch_grew(tmp_path):
+    """No code path may hand the caller a batch whose fetch was never measured once.
+
+    The memory bound is checked at the top of the inner loop. When a fetch pushes `decoded_bytes`
+    past `max_decoded_bytes` the `while` condition is false, control goes straight to the yield,
+    and that fetch's growth is never checked at all -- not "the first check sees zero", but a whole
+    fetch and its decode loop unobserved. The row bound cannot reach this: 22,000 rows needs at
+    least eleven fetches, so the byte exit is the path that matters.
+
+    Nothing caps `payload_json`, so one fetch of 2,000 rows is unbounded above. That is why this is
+    a hole rather than a documented limit.
+
+    The readings sit flat across the baseline and the pre-fetch check so nothing fires early, then
+    step past the budget. Before the post-fetch check existed, this yielded a batch and raised
+    nothing.
+    """
+
+    readings = iter((1_000_000, 1_000_000, 1_000_512))
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 200)
+        with store.pinned_snapshot_batches(
+            max_decoded_bytes=1, max_memory_bytes=256, memory=lambda: next(readings),
+        ) as read:
+            handed_over = []
+            with pytest.raises(storage_module.RebuildBoundExceeded) as raised:
+                for batch in read():
+                    handed_over.append(batch)
+                    break
+
+    assert handed_over == [], "a batch reached the caller before its fetch was ever measured"
+    assert raised.value.reason == "rebuild_memory_bytes"
+    assert raised.value.measured == 512
+    assert raised.value.limit == 256
+
+
+def test_the_decoded_byte_bound_counts_utf8_bytes_and_not_characters(tmp_path):
+    """`REBUILD_BATCH_MAX_DECODED_BYTES` is named and derived in bytes, so it must be counted in them.
+
+    `len()` on a `str` counts code points. SQLite hands TEXT back as `str`, so counting characters
+    against a byte budget admits a batch up to four times the size the budget was derived for.
+
+    This store's own writer cannot produce the case: `_encode_json_object` calls `json.dumps` with
+    the default `ensure_ascii=True`, so every payload it writes escapes to ASCII and the two counts
+    agree. The rows below are widened by direct SQL for exactly that reason. The reader does not
+    choose who wrote the database it opens, and a counter that is only correct for one writer is
+    the kind of assumption that survives until it does not.
+
+    The budget is set to exactly one fetch of byte-counted payloads. Counting bytes ends the batch
+    at the first fetch boundary; counting characters carries it through a second.
+    """
+
+    wide = '{"v":"' + "\u00e9" * 100 + '"}'
+    assert len(wide.encode("utf-8")) > len(wide), "the fixture must actually be non-ASCII"
+
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, storage_module._REBUILD_FETCH_ROWS * 2)
+        store._connection().execute("UPDATE observations SET payload_json = ?", (wide,))
+        budget = storage_module._REBUILD_FETCH_ROWS * len(wide.encode("utf-8"))
+        with store.pinned_snapshot_batches(max_decoded_bytes=budget) as read:
+            sizes = [len(batch) for batch in read()]
+
+    assert sizes[0] == storage_module._REBUILD_FETCH_ROWS, (
+        "the batch ran past its byte budget because the payloads were counted as characters"
+    )
+    assert sum(sizes) == storage_module._REBUILD_FETCH_ROWS * 2
+
+
+def test_the_batched_read_returns_the_same_facts_in_the_same_order_as_one_snapshot(tmp_path):
+    """Equivalence with the method it replaces, across a keyset boundary rather than within one."""
+
+    with storage_module.Store.open(tmp_path / DATABASE_FILENAME) as store:
+        _seed_observations(store, 500)
+        with store.pinned_snapshot() as read_whole:
+            whole = read_whole().observations
+        with store.pinned_snapshot_batches(max_rows=37) as read_batches:
+            streamed = tuple(item for batch in read_batches() for item in batch)
+
+    assert len(streamed) == len(whole) == 500
+    assert streamed == whole
+    assert len({item.event_id for item in streamed}) == 500, "keyset paging duplicated no row"
+
+
+def test_the_memory_bound_reads_anonymous_plus_swap_and_never_resident_size():
+    """`RssAnon + VmSwap`, because RSS and USS both FALL when the kernel pages a process out.
+
+    Measured on the live daemon, `VmRSS` sat 61.4% below `VmHWM` while `RssAnon + VmSwap` was
+    within 1.1% of it. A bound checked against RSS would admit a rebuild holding 1,583 MiB while
+    reporting 618 MiB and healthy.
+    """
+
+    source = inspect.getsource(storage_module._rebuild_memory_bytes)
+    # The docstring names RSS to say why it is wrong, so this reads the executable body only.
+    body = source.split('"""')[2]
+
+    assert "RssAnon:" in body
+    assert "VmSwap:" in body
+    assert "VmRSS" not in body
+    assert "Rss:" not in body
+    assert storage_module._rebuild_memory_bytes() > 0, "this Linux host reports both fields"

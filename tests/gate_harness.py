@@ -2395,6 +2395,9 @@ if (input.fsBatchItem !== null) {
       body,
     };
     fetches.push(request);
+    if (String(url).startsWith('/api/fs/resolve-file-candidates')) {
+      return helpers.jsonResponse(input.fsBatchItem, Number(input.fsBatchItem.status || 200));
+    }
     if (!String(url).startsWith('/api/fs/batch')) {
       return helpers.jsonResponse({error: `unexpected VM fetch: ${String(url)}`}, 500);
     }
@@ -2470,10 +2473,10 @@ class GateBundleVm:
     ) -> GateBundleVmResult:
         """Execute one async JS body and return its result plus fetch/debug evidence.
 
-        ``fs_batch_item`` replaces ``fetch`` with a real HTTP-200
-        ``/api/fs/batch`` envelope.  Its fields are copied onto every requested
-        item, so a caller can model rejected terminal-file candidates with a
-        typed item such as ``{"ok": False, "status": 503, "error": "..."}``.
+        ``fs_batch_item`` replaces ``fetch`` with either a real HTTP-200
+        ``/api/fs/batch`` envelope or the direct terminal-candidate response.
+        A caller can therefore model a typed resolver failure such as
+        ``{"status": 503, "error": "..."}``.
         """
 
         if not isinstance(script, str) or not script.strip():

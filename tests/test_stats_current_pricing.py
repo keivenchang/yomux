@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Current-only catalog pricing projection contracts."""
 
+import hashlib
+import json
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from yolomux_lib.pricing_catalog import PricingCatalog, ResolvedRate
-from yolomux_lib.stats_current import materializer, pricing, storage
+from yolomux_lib.stats_current import materializer, pricing, storage, usage
 from yolomux_lib.stats_current import service as service_module
 from tests.cross_layer_matrix import observed_fixture_atoms
 
@@ -324,3 +328,83 @@ def test_current_service_default_projects_seed_priced_usage(tmp_path, monkeypatc
     assert isinstance(service.price_resolver, pricing.UsagePriceProjector)
     assert service._cache is not None
     assert _cost(service._cache.generation) == 30_000_000
+
+
+# --- the materializer -> pricing seam --------------------------------------------------------
+# `materializer._build` normalizes every stored usage atom once before projecting it, so the
+# projector receives an atom that is already canonical. It used to renormalize that atom a
+# second time, which repeated the whole validation for every atom on every build.
+
+
+def _count_canonical_text_validations(monkeypatch):
+    """Record every string the usage owner validates, however it is reached."""
+
+    names: list[str] = []
+    original = usage._text
+
+    def counting(value, name, **options):
+        names.append(name)
+        return original(value, name, **options)
+
+    monkeypatch.setattr(usage, "_text", counting)
+    return names
+
+
+def test_a_build_normalizes_each_usage_atom_exactly_once(tmp_path, monkeypatch):
+    """Two passes over the same atom is duplicate work, not a second opinion."""
+
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atoms = tuple(_atom(event_id=f"usage-{index}") for index in range(4))
+
+    validations = _count_canonical_text_validations(monkeypatch)
+    usage.normalize_usage_atom(atoms[0])
+    per_atom = len(validations)
+    assert per_atom > 0, "the counter never observed a normalization"
+
+    validations.clear()
+    _build(_snapshot(*atoms), resolver, 1)
+
+    assert len(validations) == per_atom * len(atoms)
+
+
+def test_price_projection_refuses_an_atom_nobody_normalized(tmp_path):
+    """An un-normalized enum must raise, not miss the catalog and read as merely unpriced."""
+
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    canonical = usage.normalize_usage_atom(_atom())
+    assert resolver(canonical).micro_usd == 30_000_000
+
+    for field, value in (
+        ("direction", "OUTPUT"), ("modality", " text"),
+        ("cache_role", "NONE"), ("unit", "Tokens"),
+    ):
+        raw = storage.UsageAtom(**{
+            "event_id": "usage-1", "direction": "output", "modality": "text",
+            "cache_role": "none", "unit": "tokens", "observed_at": _observed_at(),
+            "payload": dict(canonical.payload), **{field: value},
+        })
+        with pytest.raises(pricing.PricingProjectionError):
+            resolver(raw)
+
+
+def test_served_cost_report_is_byte_identical_for_a_pinned_usage_snapshot(tmp_path):
+    """Dropping the duplicate normalization must not move one price, dimension or rounding."""
+
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atoms = (
+        _atom(event_id="usage-1"),
+        _atom(event_id="usage-2", quantity=1500),
+        _atom(event_id="usage-3", pricing_profile="subscription"),
+    )
+
+    report = materializer.build_cost_report(_build(_snapshot(*atoms), resolver, 1).layer(1))
+    served = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+
+    assert report["catalog_revision"] == 4
+    assert report["dimensions"]["output"] == {
+        "api_list_micro_usd": 60_045_000, "micro_usd": 30_045_000, "tokens": 2_001_500,
+    }
+    assert len(served) == 3054
+    assert hashlib.sha256(served).hexdigest() == (
+        "933c6879b183f209c35669a375b71e1e95489dfc72a88b0d1960591c4c333cf2"
+    )

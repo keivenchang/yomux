@@ -223,3 +223,33 @@ def test_owner_is_small_and_has_no_old_or_derived_pipeline_dependency():
         "token_stream", "legacy_history",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize("updates", [
+    {},
+    {"event_id": " event-1 ", "direction": "INPUT", "unit": "TOKENS"},
+    {"modality": " Image ", "cache_role": "WRITE_5M", "direction": "input"},
+    {"observed_at": 10},
+    {"observed_at": 10.5},
+    {"payload": {
+        "quantity": 25, "provider": " openai ", "model": "gpt-5",
+        "agent_id": "agent-a", "telemetry_complete": True,
+        "pricing_profile": "subscription", "service_tier": "flex", "effort": "high",
+        "execution_source": "codex", "thread_id": "thread-1",
+        "model_evidence": "scan_state.resumed_model",
+    }},
+    {"payload": {
+        "quantity": 0, "provider": "anthropic", "model": "claude\u00e9",
+        "agent_id": "agent-\u00e9", "telemetry_complete": False,
+    }},
+])
+def test_normalizing_an_already_normalized_atom_is_a_no_op(updates):
+    """The second pass is duplicate work, so it must not be able to change an answer."""
+
+    once = usage.normalize_usage_atom(_atom(**updates))
+    twice = usage.normalize_usage_atom(once)
+
+    assert twice == once
+    assert dict(twice.payload) == dict(once.payload)
+    assert list(twice.payload) == list(once.payload), "payload key order drifted"
+    assert usage.normalize_usage_atom(twice) == once, "a third pass drifted"

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -46,6 +47,22 @@ def fully_warm_status() -> dict[str, float | int]:
 
 def dead_client_lease_record(pid: int) -> dict[str, object]:
     return current_host_identity().process_record_fields(pid=pid, start_identity="proc:1")
+
+
+def append_and_commit(service, store, **fields):
+    """Append through the RPC path and force its commit.
+
+    Persistence batches on `APPEND_FLUSH_SECONDS`: an RPC append for a buffered family stages
+    the fact, answers `source_generation: None`, and the worker commits it on the shared
+    deadline. The tests below are about the BUILDER's view of DURABLE generations, so they run
+    the flush the worker would otherwise run instead of asserting a generation the append no
+    longer produces.
+    """
+
+    response, binary = service.handle_with_binary(append_request(**fields))
+    with service.work_lock:
+        service._flush_appends_locked(store)
+    return response, binary
 
 
 def cpu_record(event_id: str = "cpu-1", observed_at: float = 10.0) -> dict[str, object]:
@@ -146,6 +163,22 @@ class FakeStore:
         """
         return ()
 
+    def coverage_dispositions(self, coverage):
+        """Explicit part of the store interface, like `observation_dispositions` below.
+
+        This double accepts every append, so every offer is a real change.
+        """
+        return tuple(storage.Store.COVERAGE_CHANGED for _ in coverage)
+
+    def observation_dispositions(self, observations):
+        """Explicit part of the store interface, like `pending_invalidation_cells` above.
+
+        The batching append path asks what a commit WOULD decide before it decides whether to
+        commit. This double accepts every append, so every disposition is "accepted" -- a real
+        answer, not a stub.
+        """
+        return tuple(storage.Store.OBSERVATION_ACCEPTED for _ in observations)
+
     def __init__(self):
         self.source_generation = 0
         self.reads = 0
@@ -159,6 +192,18 @@ class FakeStore:
         self.read_windows = []
         self.coverage_reads = []
         self.vacuums = []
+        # Declared rather than absent, like `pending_invalidation_cells` above. The compaction
+        # guard reads both before it takes any lock. The default pair means "a rewrite would hand
+        # back everything", so every pre-existing vacuum test keeps exercising the cadence and the
+        # quiet gate rather than silently becoming a benefit-skip test.
+        self.reclaimable = 1.0
+        self.reclaimable_baseline = 0.0
+
+    def reclaimable_ratio(self):
+        return self.reclaimable
+
+    def reclaimable_ratio_at_last_vacuum(self):
+        return self.reclaimable_baseline
 
     def append_batch(self, **values):
         self.appends += 1
@@ -779,13 +824,13 @@ def test_blocked_cold_build_publishes_then_catches_up_without_starvation(tmp_pat
     result = []
 
     def append():
-        result.append(service.handle_with_binary(append_request(observations=[cpu_record()])))
+        result.append(append_and_commit(service, store, observations=[cpu_record()]))
         append_done.set()
 
     thread = threading.Thread(target=append)
     thread.start()
     assert append_done.wait(1), "durable append waited on the materializer"
-    assert result[0][0]["source_generation"] == 1
+    assert service._latest_source_generation == 1
     release.set()
     thread.join(timeout=1)
     assert incremental_entered.wait(2)
@@ -846,10 +891,10 @@ def test_producer_faster_than_builder_publishes_progress_then_converges(tmp_path
     service._build_once(store, True, frozenset())
     service._pending_full = False
 
-    first, _binary = service.handle_with_binary(append_request(observations=[
+    first, _binary = append_and_commit(service, store, observations=[
         cpu_record("cpu-1", 99_990.25),
-    ]))
-    assert first["source_generation"] == 1
+    ])
+    assert service._latest_source_generation == 1
     first_work = service._take_work()
     assert first_work is not None
     now[0] = 100_001.0
@@ -858,10 +903,10 @@ def test_producer_faster_than_builder_publishes_progress_then_converges(tmp_path
     assert builder_entered.wait(1)
 
     for generation, observed_at in ((2, 99_991.25), (3, 99_992.25)):
-        response, _binary = service.handle_with_binary(append_request(observations=[
+        response, _binary = append_and_commit(service, store, observations=[
             cpu_record(f"cpu-{generation}", observed_at),
-        ]))
-        assert response["source_generation"] == generation
+        ])
+        assert service._latest_source_generation == generation
 
     release_builder.set()
     build.join(timeout=2)
@@ -1968,6 +2013,87 @@ def test_vacuum_runs_when_due_and_quiet(tmp_path):
 
     service._on_client()  # last_client_at = 100.0
     monotonic_now[0] = 200.0  # 100s since the last RPC; past the 60s quiet window
+
+    assert service._vacuum_if_due_while_idle() is True
+    assert store.vacuums == [5_000.0]
+    assert service._vacuum_due_since is None
+
+
+def test_a_benefit_skip_advances_a_full_interval_rather_than_the_retry_delay(tmp_path):
+    """A benefit skip is not a busy deferral, and conflating the two costs a retry loop.
+
+    `VACUUM_RETRY_SECONDS` means "something was in the way, look again shortly". Nothing is in the
+    way here: the rewrite would return almost nothing, and that answer only moves as fast as the
+    data does. Reusing the retry delay would wake the daemon every five minutes forever to
+    re-answer the same question.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    store.reclaimable, store.reclaimable_baseline = 0.20, 0.10  # benefit 0.10, under 0.15
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    monotonic_now[0] = 200.0  # quiet, so only the benefit guard can be the reason for a skip
+
+    assert service._vacuum_if_due_while_idle() is False
+    assert store.vacuums == []
+    assert service._next_vacuum_at == 200.0 + service_module.VACUUM_INTERVAL_SECONDS
+    assert service._next_vacuum_at != 200.0 + service_module.VACUUM_RETRY_SECONDS
+    # A POLICY CHOICE, pinned deliberately: nothing is owed, so the clock is cleared. The
+    # alternative -- leave it running -- would make the cap fire the instant a rewrite became
+    # worthwhile, stalling a busy box immediately. Clearing is safe HERE, and only here, because
+    # by this point the clock has already decided whether the quiet gate could be bypassed: it
+    # starts on the due tick, before the benefit is ever read, so a below-threshold answer can no
+    # longer reset a clock that is mid-count on a busy box. See
+    # `test_the_max_defer_cap_still_fires_when_the_benefit_oscillates_on_a_busy_box`, which is
+    # the case an earlier ordering starved.
+    assert service._vacuum_due_since is None
+
+
+def test_the_benefit_guard_never_takes_work_lock_when_it_skips(tmp_path):
+    """The skip costs a shared read and must not queue behind the serial listener's lock.
+
+    Held from the test thread, so a guard that took `work_lock` before deciding would block until
+    this test released it. The join is a LIVENESS bound -- did it return at all -- not a
+    performance threshold.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    store.reclaimable, store.reclaimable_baseline = 0.02, 0.01
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+    monotonic_now[0] = 200.0
+    outcome = []
+
+    with service.work_lock:
+        caller = threading.Thread(
+            target=lambda: outcome.append(service._vacuum_if_due_while_idle()),
+            name="benefit-guard-under-held-lock",
+        )
+        caller.start()
+        caller.join(timeout=5.0)
+        blocked = caller.is_alive()
+
+    caller.join(timeout=5.0)
+    assert not blocked, "the benefit guard blocked on work_lock instead of skipping"
+    assert outcome == [False]
+    assert store.vacuums == []
+
+
+def test_the_bulk_delete_case_clears_the_benefit_threshold_and_the_rewrite_runs(tmp_path):
+    """The one audited database that is worth rewriting, and the only one that clears 15.0%.
+
+    Its truly recoverable space is 74.09%. The other audited databases sit at 0.0000% truly
+    recoverable behind a raw figure of 3.5-3.9%, so this is the negative control's opposite: the
+    guard must not become "never compact".
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    store.reclaimable, store.reclaimable_baseline = 0.7409 + 0.0360, 0.0360
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    monotonic_now[0] = 200.0
 
     assert service._vacuum_if_due_while_idle() is True
     assert store.vacuums == [5_000.0]
@@ -3461,6 +3587,18 @@ def test_large_warm_coverage_corpus_is_not_rescanned_at_one_hz(tmp_path):
             super().__init__()
             self.observation_ids = {"unchanged"}
 
+        def observation_dispositions(self, observations):
+            """Consistent with this double's own `append_batch`, which dedupes by event id.
+
+            The batching append path asks what a commit WOULD decide before deciding whether to
+            commit, so a double that dedupes on commit must dedupe on the probe too.
+            """
+            return tuple(
+                storage.Store.OBSERVATION_DUPLICATE if item.event_id in self.observation_ids
+                else storage.Store.OBSERVATION_ACCEPTED
+                for item in observations
+            )
+
         def append_batch(self, **values):
             observations = tuple(values.get("observations", ()))
             accepted = tuple(
@@ -3794,10 +3932,10 @@ def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_pat
     service.writer = store
     service._build_once(store, True, frozenset())
     service._pending_full = False
-    first, _binary = service.handle_with_binary(append_request(observations=[
+    first, _binary = append_and_commit(service, store, observations=[
         cpu_record("cpu-first", 99_990.25),
-    ]))
-    assert first["source_generation"] == 1
+    ])
+    assert service._latest_source_generation == 1
     first_work = service._take_work()
     assert first_work is not None
     store.block_reads = True
@@ -3809,10 +3947,10 @@ def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_pat
 
     def append_later():
         append_started.set()
-        response, _binary = service.handle_with_binary(append_request(observations=[
+        response, _binary = append_and_commit(service, store, observations=[
             cpu_record("cpu-later", 99_995.25),
-        ]))
-        assert response["source_generation"] == 2
+        ])
+        assert service._latest_source_generation == 2
         append_done.set()
 
     later = threading.Thread(target=append_later)
@@ -3895,7 +4033,7 @@ def test_pinned_build_keeps_coverage_generation_atomic_across_append(tmp_path, w
     assert first_work is not None
     if warm_cache:
         service._build_once(store, *first_work)
-        service.handle_with_binary(append_request(observations=[cpu_record("trigger", 99_995.25)]))
+        append_and_commit(service, store, observations=[cpu_record("trigger", 99_995.25)])
         first_work = service._take_work()
         assert first_work is not None
     built.clear()
@@ -3903,7 +4041,7 @@ def test_pinned_build_keeps_coverage_generation_atomic_across_append(tmp_path, w
     build = threading.Thread(target=lambda: service._build_once(store, *first_work))
     build.start()
     assert store.read_entered.wait(1)
-    response, _binary = service.handle_with_binary(append_request(coverage_epochs=[{
+    response, _binary = append_and_commit(service, store, coverage_epochs=[{
         "family": appended.family,
         "source_id": appended.source_id,
         "epoch_id": appended.epoch_id,
@@ -3911,7 +4049,7 @@ def test_pinned_build_keeps_coverage_generation_atomic_across_append(tmp_path, w
         "ended_at": appended.ended_at,
         "native_cadence_seconds": appended.native_cadence_seconds,
         "owner_generation": appended.owner_generation,
-    }]))
+    }])
     assert response["accepted"] == 1
     store.release_read.set()
     build.join(timeout=2)
@@ -4791,3 +4929,234 @@ def test_usage_atom_backfill_control_publishes_scan_counters(tmp_path):
     assert service._usage_atom_backfill == {
         "state": "pending", "sources": 7, "missing": 4, "scan": scan,
     }
+
+
+# ---------------------------------------------------------------------------
+# Findings from the findings-blind audit of the compaction benefit guard.
+# ---------------------------------------------------------------------------
+
+
+class _CountingBenefitStore(FakeStore):
+    """Counts benefit reads and can fail them, which no earlier fixture could do."""
+
+    def __init__(self, error=None, error_times=0):
+        super().__init__()
+        self.benefit_reads = 0
+        self.error = error
+        self.error_times = error_times
+
+    def reclaimable_ratio(self):
+        self.benefit_reads += 1
+        if self.error is not None and self.error_times > 0:
+            self.error_times -= 1
+            raise self.error
+        return self.reclaimable
+
+
+def test_a_transient_benefit_read_failure_clears_on_the_next_healthy_check(tmp_path):
+    """F2. The below-threshold branch is the NORMAL state, so it must clear the failure.
+
+    The real 519 MB store sits far under the threshold, so the below-threshold branch is taken
+    on every healthy check. If only the above-threshold branch clears, one transient
+    `sqlite3.OperationalError` latches a stale failure into the status projection forever, and
+    nothing on the healthy path ever removes it. No test covered the error path at all.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = _CountingBenefitStore(error=sqlite3.OperationalError("no such table: dbstat"),
+                                  error_times=1)
+    store.reclaimable, store.reclaimable_baseline = 0.20, 0.10  # benefit 0.10, under 0.15
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    monotonic_now[0] = 200.0
+    service._vacuum_if_due_while_idle()
+    assert service._last_failure_component == "vacuum_benefit"
+    assert service._last_failure == "OperationalError"
+
+    for tick in range(5):
+        monotonic_now[0] = 200.0 + (tick + 1) * (service_module.VACUUM_INTERVAL_SECONDS + 1.0)
+        service._vacuum_if_due_while_idle()
+    assert service._last_failure_component == ""
+    assert service._last_failure == ""
+
+
+def test_a_schema_mismatch_on_the_benefit_read_fails_open_instead_of_killing_the_daemon(tmp_path):
+    """F6. `reclaimable_ratio_at_last_vacuum` reaches `last_vacuumed_at`, which raises
+    `SchemaMismatchError` -- a `StatsCurrentError`, not a `sqlite3.Error`.
+
+    Escaping here escapes the worker loop, whose `finally` sets `stop_event`: a fatal daemon
+    exit, from the one branch that went to trouble to fail open.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+
+    class MismatchStore(FakeStore):
+        def reclaimable_ratio_at_last_vacuum(self):
+            raise storage.SchemaMismatchError("current stats vacuum metadata is missing")
+
+    store = MismatchStore()
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+    monotonic_now[0] = 200.0
+
+    assert service._vacuum_if_due_while_idle() is True     # fails OPEN: cadence alone decides
+    assert service.stop_event.is_set() is False
+    assert service._last_failure_component == "vacuum_benefit"
+
+
+def test_a_busy_box_does_not_rescan_the_whole_database_on_every_retry_tick(tmp_path):
+    """F4. `dbstat` walks every page. Scanning it once per five-minute retry costs seconds an
+    hour on the thread that also owns the one-second CPU sampler and the ten-second ring flush,
+    to answer a question no one can act on while the box is busy.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = _CountingBenefitStore()
+    store.reclaimable, store.reclaimable_baseline = 0.9, 0.0   # would compact if it could
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    for tick in range(12):
+        monotonic_now[0] = 200.0 + tick * service_module.VACUUM_RETRY_SECONDS
+        service.last_rpc_at = monotonic_now[0]                  # never quiet
+        assert service._vacuum_if_due_while_idle() is False
+    assert store.vacuums == []
+    assert store.benefit_reads == 0, store.benefit_reads
+
+
+def test_the_max_defer_cap_still_fires_when_the_benefit_oscillates_on_a_busy_box(tmp_path):
+    """F3. The cap exists so a permanently busy box still reclaims.
+
+    If a below-threshold check resets the clock and an above-threshold check restarts it from
+    now, an oscillating benefit means `capped` never becomes true and the box never compacts.
+    The clock must measure how long the CADENCE has been deferred by business, which is
+    independent of what the benefit happens to say on any one tick.
+    """
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = _CountingBenefitStore()
+    store.reclaimable_baseline = 0.0
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    step = service_module.VACUUM_RETRY_SECONDS
+    ticks = int((24 * 60 * 60) / step)
+    for tick in range(ticks):
+        monotonic_now[0] = 200.0 + tick * step
+        service.last_rpc_at = monotonic_now[0]                  # never quiet, for 24 hours
+        store.reclaimable = 0.9 if tick % 2 == 0 else 0.01      # oscillates across 0.15
+        service._vacuum_if_due_while_idle()
+    assert store.vacuums, "an oscillating benefit starved the max-defer cap for 24 busy hours"
+
+
+def test_readiness_fires_with_the_whole_ring_still_staged(tmp_path):
+    """CHARACTERIZATION of the readiness defect, and the constraint on fixing it.
+
+    `service.py` states the invariant in its own comment: *"Ready has to mean every
+    consumer-visible owner for this generation is established, and an owed slot is exactly such
+    an owner."* It does not hold -- readiness fires while the ring is unflushed, which is why a
+    snapshot at the readiness instant is refused with `pending`.
+
+    This pins the SIZE of what is staged, because that is what constrains the fix. The obvious
+    repair -- drain `_pending_ring_dirty` before announcing readiness -- would publish every one
+    of these cells, and `repair_pending_ring_slots` already records that exact regression as
+    traced and fixed: *"at restart `_stage_ring_candidate` has already staged the WHOLE ring --
+    measured 1248 cells -- so merely bringing the deadline forward made the repair publish all
+    1248 immediately ... which is what pushed the restart's right edge out as incomplete."*
+
+    So this test is deliberately NOT asserting the desired end state. It asserts today's, so
+    that a later fix has to change it on purpose and has the constraint in front of it.
+    """
+    path = tmp_path / storage.DATABASE_FILENAME
+    clock = 100_000.0
+    with storage.Store.open(path) as writer:
+        writer.append_batch(
+            observations=tuple(
+                storage.Observation(
+                    f"obs-cpu-{index:06d}", "cpu", "host", clock - 1.0 - index, "epoch:1", 1,
+                    {"process_percent": 40.0, "system_percent": 10.0},
+                )
+                for index in range(50)
+            ),
+            coverage_epochs=(
+                storage.CoverageEpoch("cpu", "host", "epoch:1", clock - 3_600.0, None, 1.0, 1),
+            ),
+        )
+        with storage.Store.open_reader(path) as reader:
+            service = service_module.StatsCurrentService(
+                tmp_path / "statsd.sock", path, clock=lambda: clock,
+            )
+            service._build_once(reader, True, frozenset(), publisher=writer)
+
+    assert service.cache_ready_event.is_set() is True
+    assert service._failed_builds == 0
+    # The whole ring, one cell per slot across every resolution.
+    assert len(service._pending_ring_dirty) == sum(stats_resolution.RING_CAPACITIES.values())
+    # Nothing has been published yet, so the restored-cursor floor is still what serving sees.
+    assert service._ring_publications == 0
+    # And this is what the daemon projects at that instant: `queue.pending` is a BOOLEAN, so the
+    # 1 a measuring lane observes means "something is staged", not "one cell".
+    status = service._status()
+    assert status["queue"]["pending"] == 1
+    assert status["queue"]["dirty_cells"] == 0
+    assert status["ring_writer"]["pending_cells"] == sum(stats_resolution.RING_CAPACITIES.values())
+
+
+def test_the_startup_ring_cursor_floor_alone_refuses_an_otherwise_servable_snapshot(tmp_path):
+    """TRACE of the readiness `pending` window: the unflushed ring is not what refuses it.
+
+    Both arms below are byte-identical in every way that the readiness item blamed -- same
+    store, same cold build, and `_pending_ring_dirty` holding the WHOLE ring in both. The only
+    difference is one entry in `_ring_published_cursors`, which on a real restart is written by
+    `_repair_startup_owed_slots` -> `_publish_ring_views`.
+
+    `_publish_ring_views` sets that cursor for every PUBLISHED RESOLUTION (`service.py:3510`,
+    unconditional), but populates `_ring_views` only for DEMANDED views, because
+    `_ring_view_keys` filters on `_view_demanded`. At startup nothing has been demanded yet, so
+    the floor is installed for a view that was never built, and `_published_snapshot_owner`
+    hands back `shared_entry` -- None -- instead of the perfectly current warm entry.
+
+    So draining the ring before readiness cannot fix this and would publish MORE resolutions,
+    installing MORE floors against views that still do not exist.
+    """
+    clock = 100_000.0
+
+    def build(inject_floor):
+        path = tmp_path / ("floor" if inject_floor else "nofloor") / storage.DATABASE_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with storage.Store.open(path) as writer:
+            writer.append_batch(
+                observations=tuple(
+                    storage.Observation(
+                        f"obs-{index:05d}", "cpu", "host", clock - 1.0 - index, "epoch:1", 1,
+                        {"process_percent": 40.0, "system_percent": 10.0},
+                    )
+                    for index in range(60)
+                ),
+                coverage_epochs=(
+                    storage.CoverageEpoch("cpu", "host", "epoch:1", clock - 3_600.0, None, 1.0, 1),
+                ),
+            )
+            with storage.Store.open_reader(path) as reader:
+                service = service_module.StatsCurrentService(
+                    tmp_path / "statsd.sock", path, clock=lambda: clock,
+                )
+                service._build_once(reader, True, frozenset(), publisher=writer)
+        # No owed invalidations, so the startup repair is a no-op and installs no floor.
+        assert service._ring_publications == 0 and service._ring_published_cursors == {}
+        # ... while the entire ring is staged and unflushed, in BOTH arms.
+        assert len(service._pending_ring_dirty) == sum(stats_resolution.RING_CAPACITIES.values())
+        if inject_floor:
+            generation = service._cache.generation
+            with service.cache_lock:
+                service._ring_published_cursors[1] = (
+                    generation.source_generation, generation.cache_generation,
+                )
+        metadata, binary = service._snapshot(snapshot_request())
+        return metadata, binary
+
+    served_metadata, served_binary = build(False)
+    assert served_metadata.get("status", "ok") == "ok"
+    assert len(served_binary) > 0, "the whole ring is unflushed and the snapshot is still served"
+
+    refused_metadata, refused_binary = build(True)
+    assert refused_metadata["status"] == "pending"
+    assert refused_metadata["retry_after_seconds"] == 1
+    assert refused_binary == b""

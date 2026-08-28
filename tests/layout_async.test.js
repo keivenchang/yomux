@@ -140,7 +140,7 @@ async function runLayoutAsyncSuite() {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const first = 'a'.repeat(40), second = 'b'.repeat(40);
-    api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], loaded: true, loadAttempted: true});
+    api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], visibleCommitCount: 2, loaded: true, loadAttempted: true});
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
     api.renderGitDiffPanelForTest(item, {panel});
@@ -174,6 +174,27 @@ async function runLayoutAsyncSuite() {
     assert.equal(refreshed.detailCollapsedDirectories.has(oldSha), false, 'Refresh retires stale per-SHA folder state');
   });
 
+  await testAsync('Git history paints 30 rows and exposes its 10-row reserve without another Git request', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 40}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: 'next-page', truncated: false}));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 30, 'the first paint is the visible 30-row page');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=40'], 'one request carries exactly the 30-row page plus its 10-row reserve');
+    assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 40, 'Load older paints the retained reserve immediately');
+    assert.equal(requests.length, 1, 'the retained reserve does not submit another Git history request');
+  });
+
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
@@ -196,7 +217,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=50$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=40$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -343,7 +364,7 @@ async function runLayoutAsyncSuite() {
     const enDate = enApi.gitDiffCommitRowForTest(enApi.gitDiffItemFor('/repo'), commit).querySelector('.git-diff-commit-date').textContent;
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
     const item = api.gitDiffItemFor('/repo');
-    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], loaded: true, loadAttempted: true});
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
     state.expanded.add(commit.sha);
     state.details.set(commit.sha, {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []});
     const panel = api.createGitDiffPanelForTest(item);
@@ -1601,9 +1622,9 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
     assert.equal(api.apiOperationStateForTest().pending, 1);
     assert.equal(api.apiOperationStateForTest().waiters, 1);
-    advance(14999);
+    advance(119999);
     await flushAsyncWork();
-    assert.equal(api.apiOperationStateForTest().pending, 1, '14,999 ms remains inside the caller deadline');
+    assert.equal(api.apiOperationStateForTest().pending, 1, '119,999 ms remains inside the caller deadline');
     advance(1);
     const error = await result;
 
@@ -1617,7 +1638,7 @@ async function runLayoutAsyncSuite() {
     const failures = api.jsDebugFailureEventsForTest('error');
     assert.equal(failures.length, 1);
     assert.equal(failures[0].endpoint, '/api/fs/read');
-    assert.equal(failures[0].error, 'deadline_expired: request exceeded its 15s deadline');
+    assert.equal(failures[0].error, 'deadline_expired: request exceeded its 120s deadline');
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0);
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: 'op-deadline-read', cursor: {epoch: 'deadline-epoch', seq: 1}},
@@ -1632,6 +1653,52 @@ async function runLayoutAsyncSuite() {
       result: {state: 'failed', error: 'conflicting duplicate'},
       status: 500,
     }), false, 'a conflicting duplicate cannot replace the retained terminal');
+  });
+
+  await testAsync('a filesystem operation waiter without an override uses the accepted-operation budget', async () => {
+    let now = 0;
+    let nextTimer = 1;
+    const timers = new Map();
+    const setTimeout = (callback, delay) => {
+      const id = nextTimer++;
+      timers.set(id, {callback, due: now + Number(delay)});
+      return id;
+    };
+    const advance = milliseconds => {
+      now += milliseconds;
+      for (const [id, timer] of [...timers.entries()].sort((left, right) => left[1].due - right[1].due)) {
+        if (timer.due > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    };
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      setTimeout,
+      clearTimeout: id => timers.delete(id),
+      performance: {now: () => now},
+    });
+    const receipt = {
+      state: 'queued',
+      operation: {
+        id: 'op-default-accepted-deadline',
+        kind: 'auto_approve_operation',
+        context: {},
+        cursor: {epoch: 'default-accepted-deadline', seq: 0},
+      },
+    };
+    api.registerApiOperationReceiptForTest(receipt);
+    const result = api.waitForApiOperationResultForTest(receipt, {
+      kind: 'auto_approve_operation',
+    }).then(() => null, error => error);
+
+    advance(119999);
+    await flushAsyncWork();
+    assert.equal(api.apiOperationStateForTest().waiters, 1, 'the default waiter remains live through 119,999 ms');
+    advance(1);
+    const error = await result;
+    assert.equal(error?.code, 'deadline_expired');
+    assert.equal(error?.payload?.timeout_ms, 120000, 'the no-override waiter owns the accepted-operation budget');
+    assert.equal(api.apiOperationStateForTest().waiters, 0);
   });
 
   await testAsync('one filesystem waiter can detach while another retains the accepted operation', async () => {
@@ -2217,6 +2284,10 @@ async function runLayoutAsyncSuite() {
 
     const opened = api.openFileInEditorForTest(path, {name: 'cold-editor.txt'}, {viewMode: 'edit'});
     await flushAsyncWork();
+    assert.equal(api.currentFileStateForTest(path).loading, true, 'the selected tab exists in Loading state before its cold read terminal arrives');
+    const repeatedOpen = api.openFileInEditorForTest(path, {name: 'cold-editor.txt'}, {viewMode: 'edit'});
+    assert.equal(api.currentFileStateForTest(path).loading, true, 'reopening the same pending file focuses its existing Loading tab without waiting');
+    assert.equal(receipts.filter(receipt => receipt.operation === 'read').length, 1, 'reopening a pending file does not submit a second read');
     settle(receipts.at(-1), {
       path,
       content: 'original\n',
@@ -2231,7 +2302,24 @@ async function runLayoutAsyncSuite() {
       git_has_history: true,
     });
     assert.ok(await opened);
+    assert.ok(await repeatedOpen);
     assert.equal(api.currentFileStateForTest(path).content, 'original\n');
+    await flushAsyncWork();
+    assert.equal(receipts.filter(receipt => receipt.operation === 'read').length, 2, 'the base read paints first, then a separate deferred Git read starts');
+    settle(receipts.at(-1), {
+      path,
+      content: 'original\n',
+      size: 9,
+      mtime: 1,
+      mtime_ns: 1,
+      realpath: path,
+      file_id: 'dev:1:ino:2',
+      git_root: '/repo',
+      git_tracked: true,
+      git_history: [{ref: 'HEAD'}],
+      git_has_history: true,
+    });
+    await flushAsyncWork();
 
     const diff = api.refreshOpenFileDiffForTest(path, {silent: true, renderOnComplete: false});
     await flushAsyncWork();
@@ -2255,7 +2343,7 @@ async function runLayoutAsyncSuite() {
     settle(receipts.at(-1), {path, size: 6, mtime: 2, mtime_ns: 2, realpath: path, file_id: 'dev:1:ino:2'});
     assert.equal(await save, true);
     assert.equal(api.currentFileStateForTest(path).dirty, false, 'the exact write terminal marks the buffer clean');
-    assert.equal(receipts.length, 3, 'open, diff, and save each issue one request');
+    assert.equal(receipts.length, 4, 'base open paints first, then deferred Git, diff, and save issue their own requests');
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0);
@@ -2676,6 +2764,123 @@ async function runLayoutAsyncSuite() {
     assert.equal(status.stale, true, 'a delta for the retired requestId is rejected as stale');
     assert.equal(api.fileQuickOpenStateForTest().candidates.some(file => file.path === '/repo/stale.md'), false,
       'the stale response never mutates the current candidate set');
+  });
+
+  await testAsync('a superseded query stops presenting its rows once the user types a longer one', async () => {
+    // The reported shape: typing `w5k.md` showed `DOIT.p1.e5.backend-lifetime-supervision.md` at row 1
+    // and no `w5k.md` at all. Measured against the real index, the backend answer for `w5k.md` puts
+    // `notes/w5k/w5k.md` at position 1 and that DOIT file at position 77 -- so the row on screen was
+    // never an answer to `w5k.md`. It was the answer to the shorter `w5k`, still being presented while
+    // the newer, more specific search sat accepted-but-unanswered behind the operation queue.
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const decoy = '/repo/queues/DOIT.p1.e5.backend-lifetime-supervision.md';
+    let answerLongQuery = null;
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      // The longer query is accepted but never answered during this test: the queued 202 case.
+      if (target.includes(encodeURIComponent('w5k.md'))) return new Promise(resolve => { answerLongQuery = resolve; });
+      return Promise.resolve(jsonResponse({
+        root: '/repo', root_realpath: '/repo', query: 'w5k', limit: 500,
+        files: [{path: decoy, name: 'DOIT.p1.e5.backend-lifetime-supervision.md',
+                 relative_path: 'queues/DOIT.p1.e5.backend-lifetime-supervision.md', realpath: decoy}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 'w5k');
+    api.setCommandPaletteQueryForTest('w5k');
+    await api.refreshFileQuickOpenCandidatesForTest('w5k');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [decoy],
+      'the shorter query legitimately matches the decoy');
+
+    api.setCommandPaletteStateForTest('files', 'w5k.md');
+    api.setCommandPaletteQueryForTest('w5k.md');
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('w5k.md');
+    await flushAsyncWork();
+
+    assert.ok(answerLongQuery, 'the longer query reached the backend and is still unanswered');
+    assert.equal(api.fileQuickOpenStateForTest().loading, true, 'the palette reports that it is still searching');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [],
+      'rows belonging to the superseded query are not presented as the newer query\'s ranked answer');
+
+    answerLongQuery(jsonResponse({
+      root: '/repo', root_realpath: '/repo', query: 'w5k.md', limit: 500,
+      files: [{path: '/repo/notes/w5k/w5k.md', name: 'w5k.md', relative_path: 'notes/w5k/w5k.md', realpath: '/repo/notes/w5k/w5k.md'}],
+    }));
+    await inFlight;
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/repo/notes/w5k/w5k.md'],
+      'the answer for the current query replaces the list once it lands');
+  });
+
+  await testAsync('a same-query refresh keeps its current rows visible until the new answer lands', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const retained = '/repo/notes/w5k/w5k.md';
+    let searchCount = 0;
+    let answerRefresh = null;
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      searchCount += 1;
+      if (searchCount > 1) return new Promise(resolve => { answerRefresh = resolve; });
+      return Promise.resolve(jsonResponse({
+        root: '/repo', root_realpath: '/repo', query: 'w5k', limit: 500,
+        files: [{path: retained, name: 'w5k.md', relative_path: 'notes/w5k/w5k.md', realpath: retained}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 'w5k');
+    api.setCommandPaletteQueryForTest('w5k');
+    await api.refreshFileQuickOpenCandidatesForTest('w5k');
+
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('  w5k  ');
+    await flushAsyncWork();
+    assert.ok(answerRefresh, 'the normalized same-query refresh reached the backend and remains pending');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [retained],
+      'the current answer remains visible during a refresh of the same normalized query');
+
+    answerRefresh(jsonResponse({root: '/repo', root_realpath: '/repo', query: 'w5k', limit: 500, files: []}));
+    await inFlight;
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates), [],
+      'the refreshed same-query answer replaces the retained rows once it lands');
+  });
+
+  await testAsync('a path query with the same filter clears rows when its directory changes', async () => {
+    const api = loadYolomux();
+    let listCount = 0;
+    let answerSecondDirectory = null;
+    api.setFetchForTest(url => {
+      if (!String(url).includes('/api/fs/list')) return Promise.resolve(jsonResponse({state: 'building'}));
+      listCount += 1;
+      if (listCount > 1) return new Promise(resolve => { answerSecondDirectory = resolve; });
+      return Promise.resolve(jsonResponse({
+        path: '/repo-a',
+        entries: [{kind: 'file', name: 'foo.md'}],
+      }));
+    });
+
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo-a', []);
+    api.setCommandPaletteStateForTest('files', '/repo-a/foo');
+    api.setCommandPaletteQueryForTest('/repo-a/foo');
+    await api.refreshFileQuickOpenCandidatesForTest('/repo-a/foo');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/repo-a/foo.md']);
+
+    api.setCommandPaletteStateForTest('files', '/repo-b/foo');
+    api.setCommandPaletteQueryForTest('/repo-b/foo');
+    const inFlight = api.refreshFileQuickOpenCandidatesForTest('/repo-b/foo');
+    await flushAsyncWork();
+    assert.ok(answerSecondDirectory, 'the same-filter query for the second directory remains pending');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates), [],
+      'rows from the prior directory cannot be selected while the new directory is loading');
+
+    answerSecondDirectory(jsonResponse({path: '/repo-b', entries: []}));
+    await inFlight;
   });
 
   await testAsync('a rebase_required verdict performs one full-snapshot repair, not a mixed merge', async () => {
@@ -3623,6 +3828,105 @@ async function runLayoutAsyncSuite() {
     api.commitTmuxSessionLifecycleMutationForTest(mutation, {newName: 'renamed'});
     assert.equal(api.tmuxSessionLifecycleRecordForTest('1').phase, 'retired');
     assert.equal(api.tmuxSessionLifecycleRecordForTest('renamed').phase, 'renaming-in');
+  });
+
+  await testAsync('every terminal metadata outcome accounts for a deferred sealed status payload', async () => {
+    // Regression: `applyAutoApprovePayload` can HOLD a sealed status payload until metadata knows
+    // its sessions, but the only release lived on the success tail of `applySessionMetadataPayload`,
+    // after its terminal early returns. A malformed, superseded, older-generation, or
+    // committed-render-superseded outcome left the payload held with nothing recorded and nothing
+    // scheduled to revisit it, so the published consumer revision could never advance again.
+    const api = loadYolomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const metadataFor = (generation, sessionOrder, extra = {}) => ({
+      metadata_identity: {epoch: 'epoch-a', generation},
+      session_order: sessionOrder,
+      sessions: Object.fromEntries(sessionOrder.map(session => [session, {panes: [], ...extra}])),
+    });
+    const sealed = revision => ({
+      session_order: ['1', '2'],
+      sessions: {
+        '1': {target: '1', enabled: false, last_action: 'off'},
+        '2': {target: '2', enabled: false, last_action: 'off'},
+      },
+      agent_window_snapshot_revision: revision,
+    });
+    const lastApply = () => api.transcriptMetadataStateForTest().lastApply;
+    const hold = label => assert.equal(
+      api.applyAutoApprovePayloadForTest(sealed(9)).deferred, true,
+      `${label}: a seal naming a session metadata does not know must be held`,
+    );
+
+    assert.equal(await api.applySessionMetadataPayloadForTest(metadataFor(1, ['1']), quiet), true);
+    assert.equal(api.transcriptMetadataStateForTest().loaded, true, 'metadata must be loaded before a seal can defer');
+    // A newer work graph so the older-generation refusal has something to be older than.
+    assert.equal(await api.applySessionMetadataPayloadForTest(
+      metadataFor(2, ['1'], {work_graph: {version: 1, generation: 9}}), quiet), true);
+
+    // FINDING 1: all FOUR terminal outcomes, each with a freshly held payload.
+    let committedRenderCalls = 0;
+    const terminalCases = [
+      ['malformed_payload', null, quiet],
+      ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
+      ['older_work_graph_generation', metadataFor(4, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      // The committed-render outcome is current at the entry gate and superseded at the render
+      // gate, which is the only way to reach the fourth terminal exit.
+      ['committed_render_superseded', metadataFor(5, ['1']), {
+        ...quiet,
+        requestIsCurrent: () => {
+          committedRenderCalls += 1;
+          return committedRenderCalls === 1;
+        },
+      }],
+    ];
+    for (const [expectedReason, metadataPayload, options] of terminalCases) {
+      hold(expectedReason);
+      await api.applySessionMetadataPayloadForTest(metadataPayload, options);
+      const last = lastApply();
+      assert.equal(last.reason, expectedReason, `${expectedReason}: the terminal outcome names itself`);
+      assert.ok(last.deferredSealed, `${expectedReason}: the terminal outcome accounts for the held payload`);
+      assert.equal(
+        last.deferredSealed.state, 'retained_awaiting_metadata',
+        `${expectedReason}: metadata still does not cover the held sessions, so retention is recorded rather than silent`,
+      );
+      assert.equal(last.deferredSealed.revision, 9, `${expectedReason}: the held revision is recorded`);
+    }
+
+    // FINDING 4: the retained -> applied transition, through the same owner.
+    assert.equal(await api.applySessionMetadataPayloadForTest(metadataFor(6, ['1', '2']), quiet), true);
+    assert.equal(lastApply().deferredSealed.state, 'applied', 'a covered payload is released, not held');
+    assert.equal(api.autoApproveStateForTest('2').agent_window_snapshot_revision, 9, 'the released payload advanced the consumer revision');
+    assert.equal(lastApply().deferredSealed.revision, 9);
+
+    // FINDING 3: a PARTIAL per-session overtake must RETAIN, not discard. Session '1' is pushed
+    // past the held revision while session '2' is left behind; a global maximum would wrongly
+    // discard status that session '2' never received.
+    const api2 = loadYolomux('', ['1']);
+    assert.equal(await api2.applySessionMetadataPayloadForTest(metadataFor(1, ['1']), quiet), true);
+    assert.equal(api2.applyAutoApprovePayloadForTest(sealed(9)).deferred, true, 'partial: the seal is held');
+    api2.setAutoApproveStateForTest('1', {target: '1', enabled: false, last_action: 'off', agent_window_snapshot_revision: 40});
+    api2.setAutoApproveStateForTest('2', {target: '2', enabled: false, last_action: 'off', agent_window_snapshot_revision: 3});
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    assert.equal(api2.transcriptMetadataStateForTest().lastApply.reason, 'malformed_payload');
+    assert.equal(
+      api2.transcriptMetadataStateForTest().lastApply.deferredSealed.state, 'retained_awaiting_metadata',
+      'a partial overtake must retain: one advanced session cannot discard status another never received',
+    );
+
+    // FINDING 2: a REAL complete overtake discards. Both held sessions are at or past the held
+    // revision, so the seal carries no truth any consumer still needs.
+    api2.setAutoApproveStateForTest('2', {target: '2', enabled: false, last_action: 'off', agent_window_snapshot_revision: 9});
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    const overtaken = api2.transcriptMetadataStateForTest().lastApply;
+    assert.equal(overtaken.reason, 'malformed_payload');
+    assert.equal(overtaken.deferredSealed.state, 'discarded_superseded_revision', 'a fully overtaken seal is discarded');
+    assert.equal(overtaken.deferredSealed.revision, 9);
+    // FINDING 4: retained -> discarded is terminal; nothing is held afterwards.
+    await api2.applySessionMetadataPayloadForTest(null, quiet);
+    assert.equal(
+      api2.transcriptMetadataStateForTest().lastApply.deferredSealed.state, 'none',
+      'the discard is terminal: no payload remains held',
+    );
   });
 
   await testAsync('metadata apply records the generation it rendered and a machine-readable reason for every drop', async () => {
@@ -5442,6 +5746,48 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(cleared, [], 'no redundant timer needs cancellation when no descriptor change was queued');
     });
 
+    await testAsync('pending watch-root descriptor coalesces without restarting its debounce', async () => {
+      let now = 0;
+      let nextTimer = 1;
+      const timers = new Map();
+      const cleared = [];
+      const calls = [];
+      const setTimeout = (callback, delay) => {
+        const id = nextTimer++;
+        timers.set(id, {callback, due: now + delay});
+        return id;
+      };
+      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        setTimeout,
+        clearTimeout(id) { cleared.push(id); timers.delete(id); },
+        performance: {now: () => now},
+      });
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFileExplorerRootForTest('/repo');
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), options});
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+
+      api.syncServerWatchRootsForTest();
+      const initialState = api.serverWatchRootsStateForTest();
+      const initialDescriptor = api.clientServerWatchStateForTest();
+      const timer = initialState.timer;
+      now = 100;
+      api.syncServerWatchRootsForTest();
+      const repeatedState = api.serverWatchRootsStateForTest();
+      const repeatedDescriptor = api.clientServerWatchStateForTest();
+      assert.equal(repeatedState.timer, timer, `the repeated queued descriptor keeps its original timer: ${JSON.stringify({initialState, initialDescriptor, repeatedState, repeatedDescriptor})}`);
+      assert.deepStrictEqual(cleared, [], 'the repeated queued descriptor does not cancel the debounce');
+
+      now = 300;
+      timers.get(timer).callback();
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.equal(calls.filter(call => call.url === '/api/watch/roots').length, 1, 'the original debounce registers exactly once');
+      assert.equal(api.fixtureLifecycleOperationStateForTest().watchRootsPending, false, 'registration completion retires fixture-visible debounce work');
+    });
+
     await testAsync('identical forced watch-root generation joins one in-flight registration', async () => {
       const timers = [];
       const firstRegistration = deferredFetch();
@@ -6747,7 +7093,105 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(api.filePanelItemsForPath(linkPath)), [], 'symlink alias does not create a second editable editor tab');
       assert.equal(api.editorViewModeFor(realPath, firstItem), 'diff', 'alias open applies the requested mode to the existing editor');
       assert.equal(api.currentFileStateForTest(realPath).content, 'dirty edit\n', 'alias open preserves the dirty buffer');
-      assert.equal(calls.filter(url => url.startsWith('/api/fs/read')).length, 1, 'entry identity avoids a second read before focusing the existing editor');
+      const readCalls = calls.filter(url => url.startsWith('/api/fs/read'));
+      assert.equal(readCalls.length, 2, 'entry identity avoids a second base read before focusing the existing editor');
+      assert.equal(readCalls.filter(url => url.includes('include_git=1')).length, 1, 'the one deferred Git read follows the already-painted base content');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/keep-preview.md';
+      const aliasPath = '/repo/app/keep-preview-alias.md';
+      const calls = [];
+      api.setFetchForTest(url => {
+        const request = String(url);
+        calls.push(request);
+        const requestedPath = decodeURIComponent((request.match(/path=([^&]+)/) || [])[1] || '');
+        return Promise.resolve(jsonResponse({
+          path: requestedPath,
+          content: '# preview\n',
+          size: 10,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:22',
+        }));
+      });
+
+      const item = await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}, {viewMode: 'preview'});
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'the initial explicit Preview action selects Preview');
+      assert.equal(await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}), item, 'an implicit reopen focuses the existing tab');
+      assert.equal(api.currentFileStateForTest(path).kind, 'text', 'an implicit reopen keeps the loaded file state');
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'an implicit reopen preserves the selected Preview mode');
+      assert.equal(await api.openFileInEditorForTest(aliasPath, {name: 'keep-preview-alias.md', realpath: path, file_id: 'dev:10:ino:22'}), item, 'an implicit physical-file alias focuses the same tab');
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'an implicit physical-file alias preserves the selected Preview mode');
+      await api.openTerminalFileReferenceForTest({path, info: {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}});
+      assert.equal(api.editorViewModeFor(path, item), 'preview', 'terminal Open also preserves the selected Preview mode');
+      assert.equal(await api.openFileInEditorForTest(path, {name: 'keep-preview.md', realpath: path, file_id: 'dev:10:ino:22'}, {viewMode: 'edit'}), item, 'an explicit reopen still focuses the existing tab');
+      assert.equal(api.editorViewModeFor(path, item), 'edit', 'an explicit view action still overrides the preserved mode');
+      assert.equal(calls.filter(url => url.startsWith('/api/fs/read?') && !url.includes('include_git=1')).length, 1, 'reopens and aliases do not start another base read');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/src/stale-git.md';
+      const deferredGit = deferredFetch();
+      api.setFetchForTest(url => {
+        const route = String(url);
+        if (route.includes('include_git=1')) return deferredGit.promise;
+        return Promise.resolve(jsonResponse({
+          path,
+          content: '# base\n',
+          size: 7,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:21',
+        }));
+      });
+
+      await api.openFileInEditorForTest(path, {name: 'stale-git.md'}, {viewMode: 'edit'});
+      assert.equal(api.currentFileStateForTest(path).content, '# base\n', 'base content paints before deferred Git metadata resolves');
+      api.setOpenFileStateForTest(path, {
+        ...api.currentFileStateForTest(path),
+        content: '# newer state\n',
+        original: '# newer state\n',
+        gitRoot: '/newer/repo',
+      });
+      deferredGit.resolve(jsonResponse({
+        path,
+        content: '# base\n',
+        size: 7,
+        mtime: 1,
+        mtime_ns: 1,
+        realpath: path,
+        file_id: 'dev:10:ino:21',
+        git_root: '/stale/repo',
+        git_tracked: true,
+        git_history: [{ref: 'HEAD'}],
+        git_has_history: true,
+      }));
+      await flushAsyncWork();
+      assert.equal(api.currentFileStateForTest(path).content, '# newer state\n', 'a stale deferred Git result never replaces newer editor content');
+      assert.equal(api.currentFileStateForTest(path).gitRoot, '/newer/repo', 'a stale deferred Git result never clobbers newer Git state');
+    }
+
+    for (const response of [
+      () => jsonResponse({path: '/repo/app/src/closed.md', content: '# closed\n', size: 9, mtime: 1, mtime_ns: 1}),
+      () => jsonResponse({error: 'path not found: /repo/app/src/closed.md', status: 404}, 404),
+    ]) {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/src/closed.md';
+      const delayedRead = deferredFetch();
+      api.setFetchForTest(() => delayedRead.promise);
+      const opening = api.openFileInEditorForTest(path, {name: 'closed.md'}, {viewMode: 'edit'});
+      await flushAsyncWork();
+      assert.equal(api.currentFileStateForTest(path).loading, true, 'the immediate tab is Loading before a delayed base read completes');
+      assert.equal(await api.closeFileTabForTest(path), true, 'the user can close an immediate Loading tab');
+      delayedRead.resolve(response());
+      assert.equal(await opening, null, 'a completed read returns no item after its Loading tab was closed');
+      assert.equal(api.currentFileStateForTest(path), null, 'neither a delayed success nor a delayed error resurrects a closed tab');
+      assert.deepEqual(canonical(api.filePanelItemsForPath(path)), [], 'a delayed base read never recreates closed tab ownership');
     }
 
     {
@@ -6796,7 +7240,9 @@ async function runLayoutAsyncSuite() {
       assert.notEqual(newItem, oldItem, 'opening the moved full path does not focus the stale missing editor tab');
       assert.equal(api.currentFileStateForTest(oldPath).externalMissing, true, 'old path remains marked missing');
       assert.equal(api.currentFileStateForTest(newPath).content, '# moved\n', 'new path loads fresh file content');
-      assert.deepStrictEqual(calls.filter(url => url.startsWith('/api/fs/read')).map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath], 'new full path forces a fresh read');
+      const newPathReadCalls = calls.filter(url => url.startsWith('/api/fs/read'));
+      assert.deepStrictEqual(newPathReadCalls.map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath, newPath], 'new full path forces a base read followed by deferred Git metadata');
+      assert.equal(newPathReadCalls.filter(url => url.includes('include_git=1')).length, 1, 'only the deferred new-path read asks for Git metadata');
     }
 
     {
@@ -6836,7 +7282,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(secondItem, firstItem, 'concurrent same-path new-editor opens converge on the first editor item');
       assert.deepStrictEqual(canonical(api.openFileEditorItems()), [firstItem], 'concurrent same-path opens leave one editable editor item');
       assert.equal(api.editorViewModeFor(path, firstItem), 'diff', 'the later requested mode applies to the focused existing editor');
-      assert.equal(calls.filter(url => url.startsWith('/api/fs/read')).length, 1, 'same-path open dedupe does not race a second read');
+      const samePathReadCalls = calls.filter(url => url.startsWith('/api/fs/read'));
+      assert.equal(samePathReadCalls.length, 2, 'same-path opens share one base read and schedule one deferred Git read');
+      assert.equal(samePathReadCalls.filter(url => url.includes('include_git=1')).length, 1, 'the shared open emits no duplicate deferred Git request');
     }
 
     {
@@ -8137,30 +8585,27 @@ async function runLayoutAsyncSuite() {
 
     {
       const api = loadYolomux('', ['1']);
-      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
+      api.setTranscriptInfoForTest('1', {selected_pane: {target: '%test', current_path: '/home/test/yolomux.dev3'}, panes: [{target: '%test', active: true, window_active: true, current_path: '/home/test/yolomux.dev3'}]});
       const lines = [terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123')];
       const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
       const fileRef = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'file');
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+        calls.push({url: String(url), method: options.method || 'GET', paths: body.paths || []});
         return Promise.resolve(jsonResponse({
-          responses: body.requests.map(request => ({
-            id: request.id,
-            ok: true,
-            payload: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: request.path},
-          })),
+          path: body.paths[0],
+          info: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: body.paths[0]},
         }));
       });
-      const targetPromise = api.terminalFileReferenceTarget('1', fileRef);
+      const targetPromise = api.terminalFileReferenceTarget('1', {...fileRef, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md'});
       await api.flushFileExplorerFsBatchForTest();
       const target = await targetPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', trigger_counts: {'explicit-user': 1}, type: 'info'}],
-        url: '/api/fs/batch',
-      }], 'terminal file refs confirm existence through the shared fs info batch path');
+        paths: ['/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md'],
+        url: '/api/fs/resolve-file-candidates',
+      }], 'terminal file refs use one bounded point resolver request');
       assert.deepStrictEqual(canonical(target), {
         info: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md'},
         line: 123,
@@ -8168,6 +8613,53 @@ async function runLayoutAsyncSuite() {
         text: 'tests/SHARE_TEST_INVENTORY.md:123',
       }, 'confirmed terminal file refs carry the absolute path and line for the Open file menu action');
     }
+
+    await testAsync('terminal file menus expose Open file without resolver admission and the selected tab owns its read', async () => {
+      const api = loadYolomux('', ['1']);
+      const readRequest = deferredFetch();
+      const requests = [];
+      api.setFetchForTest(url => {
+        requests.push(String(url));
+        assert.ok(String(url).startsWith('/api/fs/read?'), `only the selected tab may read, got ${url}`);
+        return readRequest.promise;
+      });
+      const menu = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+      const labels = node => Array.from(node.children).map(child => child.textContent).filter(Boolean);
+      const first = {type: 'file', path: '/tmp/first.md', text: '/tmp/first.md'};
+
+      void api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {reference: first});
+      const firstMenu = menu();
+      assert.ok(firstMenu, 'a file right-click paints its menu before the resolver settles');
+      assert.equal(api.testElementForId('appOverlayRoot').children.filter(child => child.classList?.contains('terminal-context-menu')).length, 1, 'the immediate menu is the sole terminal context-menu overlay');
+      assert.deepStrictEqual(labels(firstMenu), ['Open file', 'Copy path', 'Copy', 'Copy without indent', 'Copy tmux selection'], 'a syntactic file candidate exposes the enabled action on the first menu paint');
+      assert.equal(firstMenu.children[0].disabled, false, 'Open file is never gated on a resolver verdict');
+      assert.deepStrictEqual(requests, [], 'right-click does not submit an optional resolver request');
+      firstMenu.children[0].listeners.get('click')[0]({preventDefault() {}, stopPropagation() {}});
+      await flushAsyncWork();
+      assert.deepStrictEqual(requests.filter(url => url.startsWith('/api/fs/read?')), [`/api/fs/read?path=${encodeURIComponent(first.path)}`], 'the immediate tab owns one direct read');
+      assert.equal(api.currentFileStateForTest(first.path).loading, true, 'the new selected tab renders Loading while its backend read is held');
+      readRequest.resolve(jsonResponse({path: first.path, content: '# first\n', size: 8, mtime: 1, mtime_ns: 1, realpath: first.path, file_id: 'dev:1:ino:1'}));
+      await flushAsyncWork();
+      assert.equal(api.currentFileStateForTest(first.path).loading, undefined, 'the same tab leaves Loading after its read completes');
+      assert.equal(api.currentFileStateForTest(first.path).content, '# first\n', 'the same tab receives the read content');
+    });
+
+    await testAsync('terminal file menus reuse a warm positive target without a second backend admission', async () => {
+      const api = loadYolomux('', ['1']);
+      const target = {type: 'file', path: '/tmp/warm-target.md', text: '/tmp/warm-target.md'};
+      let fetches = 0;
+      api.setFetchForTest(() => {
+        fetches += 1;
+        return Promise.resolve(jsonResponse({path: target.path, info: {kind: 'file', name: 'warm-target.md', path: target.path}}));
+      });
+      assert.ok(await api.terminalFileReferenceTarget('1', target, {fresh: false}), 'the passive target lookup warms a positive cache entry');
+      const beforeMenuFetches = fetches;
+      void api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {reference: target});
+      const menu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+      assert.ok(menu, 'the explicit right-click paints a menu synchronously');
+      assert.deepStrictEqual(Array.from(menu.children).map(child => child.textContent).filter(Boolean), ['Open file', 'Copy path', 'Copy', 'Copy without indent', 'Copy tmux selection'], 'a warm positive target makes file actions available on the first menu paint');
+      assert.equal(fetches, beforeMenuFetches, 'the explicit gesture does not submit the already-known target a second time');
+    });
 
     {
       const api = loadYolomux('', ['1']);
@@ -8206,24 +8698,17 @@ async function runLayoutAsyncSuite() {
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
+        calls.push({url: String(url), method: options.method || 'GET', paths: body.paths || []});
         return Promise.resolve(jsonResponse({
-          responses: body.requests.map(request => ({
-            id: request.id,
-            ok: true,
-            payload: {kind: 'file', name: 'lark3_coder_v2.rs', path: request.path},
-          })),
+          path: body.paths[0],
+          info: {kind: 'file', name: 'lark3_coder_v2.rs', path: body.paths[0]},
         }));
       });
       const providerPromise = api.terminalReferenceProviderLinks('1', term, 1);
       await api.flushFileExplorerFsBatchForTest();
       const links = await providerPromise;
-      assert.deepStrictEqual(canonical(calls), [{
-        method: 'POST',
-        requests: [{id: 1, path: '/home/test/vortex4/lib/llm/src/protocols/openai/chat_completions/lark3_coder_v2.rs', trigger_counts: {'explicit-user': 1}, type: 'info'}],
-        url: '/api/fs/batch',
-      }], 'terminal lark-style file refs confirm existence against the active pane cwd');
-      assert.equal(links.length, 1, 'confirmed terminal file refs are exposed to xterm as visual decorations');
+      assert.deepStrictEqual(canonical(calls), [], 'terminal file underline paint does not submit background filesystem work');
+      assert.equal(links.length, 1, 'syntactic terminal file refs are exposed to xterm as visual decorations without an existence probe');
       assert.deepStrictEqual(canonical({
         text: links[0].text,
         range: links[0].range,
@@ -8243,10 +8728,8 @@ async function runLayoutAsyncSuite() {
       let requestCount = 0;
       api.setFetchForTest((_url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
-        requestCount += body.requests.length;
-        return Promise.resolve(jsonResponse({
-          responses: body.requests.map(request => ({id: request.id, ok: false, status: 404, error: 'not found'})),
-        }));
+        requestCount += 1;
+        return Promise.resolve(jsonResponse({path: '', info: null, misses: body.paths.map(path => ({path, status: 404}))}));
       });
       const firstTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
       const concurrentTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
@@ -8270,21 +8753,45 @@ async function runLayoutAsyncSuite() {
 
     {
       const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/repo'}});
+      let requestCount = 0;
+      let resolveRequest;
+      api.setFetchForTest((_url, options = {}) => {
+        requestCount += 1;
+        const body = JSON.parse(options.body);
+        assert.deepEqual(body, {paths: ['/repo/a.py', '/a.py', '/home/test/a.py']}, 'different terminal line targets share one candidate request');
+        return new Promise(resolve => { resolveRequest = resolve; });
+      });
+      const first = api.terminalFileReferenceTarget('1', {type: 'file', path: 'a.py', line: 10, text: 'a.py:10'}, {fresh: false});
+      const second = api.terminalFileReferenceTarget('1', {type: 'file', path: 'a.py', line: 20, text: 'a.py:20'}, {fresh: false});
+      await flushAsyncWork();
+      assert.equal(requestCount, 1, 'one visible path has one in-flight candidate request even when terminal references carry different line numbers');
+      resolveRequest(jsonResponse({path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}}));
+      assert.deepEqual(canonical(await first), {path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}, line: 10, text: 'a.py:10'});
+      assert.deepEqual(canonical(await second), {path: '/repo/a.py', info: {kind: 'file', name: 'a.py', path: '/repo/a.py'}, line: 20, text: 'a.py:20'});
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      let requests = 0;
+      api.setFetchForTest(() => {
+        requests += 1;
+        return Promise.resolve(jsonResponse({}));
+      });
+      assert.equal(await api.terminalFileReferenceTarget('1', {type: 'file', path: 'https://example.invalid/file.md'}, {fresh: false}), null, 'unsupported file-like references are rejected locally');
+      assert.equal(requests, 0, 'unsupported file-like references do not submit an empty resolver request');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-ttl'}});
       let now = 1_000_000;
       let requestCount = 0;
       api.setFetchForTest((_url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
-        requestCount += body.requests.length;
-        return Promise.resolve(jsonResponse({
-          responses: body.requests.map(request => ({
-            id: request.id,
-            ok: request.path.endsWith('positive.js'),
-            status: request.path.endsWith('positive.js') ? 200 : 404,
-            payload: request.path.endsWith('positive.js') ? {kind: 'file', name: 'positive.js', path: request.path} : undefined,
-            error: request.path.endsWith('positive.js') ? undefined : 'not found',
-          })),
-        }));
+        requestCount += 1;
+        const path = body.paths.find(candidate => candidate.endsWith('positive.js')) || '';
+        return Promise.resolve(jsonResponse({path, info: path ? {kind: 'file', name: 'positive.js', path} : null}));
       });
       const clock = () => now;
       const missing = {type: 'file', path: 'negative.js', text: 'negative.js'};
@@ -8316,14 +8823,9 @@ async function runLayoutAsyncSuite() {
       let requestCount = 0;
       api.setFetchForTest((_url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
-        requestCount += body.requests.length;
-        return Promise.resolve(jsonResponse({
-          responses: body.requests.map(request => ({
-            id: request.id,
-            ok: true,
-            payload: {kind: 'file', name: request.path.split('/').pop(), path: request.path},
-          })),
-        }));
+        requestCount += 1;
+        const path = body.paths[0];
+        return Promise.resolve(jsonResponse({path, info: {kind: 'file', name: path.split('/').pop(), path}}));
       });
       const ref = index => ({type: 'file', path: `cache-${index}.js`, text: `cache-${index}.js`});
       await Promise.all(Array.from({length: 512}, (_unused, index) => (

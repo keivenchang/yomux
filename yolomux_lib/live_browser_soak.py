@@ -237,7 +237,8 @@ def validate_arguments(url: str, duration: int, expected_head: str, expected_bun
 
 
 def listener_identity(port: int) -> ListenerIdentity:
-    pid = unique_listener_pid(port)
+    # Default mode: identify the live listener to report its cwd, start time and HEAD.
+    pid = unique_listener_pid(port, strict=False)
     cwd = process_cwd(pid)
     if not cwd:
         raise RuntimeError(f"cannot resolve listener cwd for PID {pid}")

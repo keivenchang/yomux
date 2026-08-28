@@ -1124,6 +1124,15 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             > before["slots"][rebuildable_address]["published_at"]
         ), "the rebuildable owed cell was never republished"
 
+        snapshot_metadata, snapshot_binary = restarted_client.snapshot({
+            "range_seconds": 3_600,
+            "resolution": 60,
+            "client_id": "ring-owed-pre-page",
+        })
+        assert snapshot_metadata.get("ok") is True and snapshot_binary, snapshot_metadata
+        pre_page_snapshot = json.loads(snapshot_binary)
+        assert pre_page_snapshot["cost_report"]["total_tokens"] == 12, pre_page_snapshot
+
         _load_real_stats_page(request, browser, prepared.runtime, gate_auth_credentials)
         _show_gpu_util_and_cost_summary(browser)
         _set_range_from_slider(browser, 3_600)

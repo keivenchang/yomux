@@ -479,6 +479,9 @@ def test_app_submits_operation_compaction_as_fresh_maintenance_receipt(tmp_path)
     assert response["ok"] is True
     assert calls == [(('queued_delivery_compact', {"state_path": str(path)}), {
         "priority": "maintenance",
+        # Maintenance never cold-starts jobd, so the submission carries launch=False.
+        # See `TmuxWebtermApp.submit_queued_delivery_compaction` and `JobClient.submit`.
+        "launch": False,
         "generation": 1,
         "coalesce_key": "operation-ledger-compact:test",
         "delivery": "receipt",

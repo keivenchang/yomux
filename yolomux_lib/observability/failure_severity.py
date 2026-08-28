@@ -25,6 +25,10 @@ filesystem operation can carry are produced by exactly one owner,
 * ``path_not_found`` (404, from ``FilesystemError.path_not_found``) -- the path is gone.  OUTCOME.
 * ``permission_denied`` (403, from ``FilesystemError.os_error`` on ``PermissionError``) -- the
   caller may not read it.  OUTCOME.
+* ``upgrade_required`` (426) -- an old browser stats payload is a caller outcome only when statsd's
+  payload validator names itself with ``caller_outcome_owner=statsd.browser_upload``.  A web-to-
+  daemon protocol fence uses the same HTTP code but requires operator action, so it remains a
+  fault even on ``POST /api/stats-observations``.  MARKED PAYLOAD REJECTION: OUTCOME; OTHER: FAULT.
 * ``conflict`` (409, ``target_exists``), ``request_too_large`` (413, ``file_too_large``),
   ``unsupported_media_type`` (415) -- also target state, but each code is ALSO produced by the
   generic status map in ``Handler.write_api_response`` for unrelated routes (session creation,
@@ -44,10 +48,18 @@ FAULT: this module downgrades only what it can positively identify.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from http import HTTPStatus
 from typing import Any
 
 
-EXPECTED_CALLER_OUTCOME_CODES = frozenset({"path_not_found", "permission_denied"})
+EXPECTED_CALLER_OUTCOME_CODES = frozenset({
+    "path_not_found",
+    "permission_denied",
+    "upgrade_required",
+})
+
+CALLER_OUTCOME_OWNER_FIELD = "caller_outcome_owner"
+BROWSER_UPLOAD_OUTCOME_OWNER = "statsd.browser_upload"
 
 EXPECTED_OUTCOME_LOG_LEVEL = "info"
 FAULT_LOG_LEVEL = "error"
@@ -76,6 +88,14 @@ def expected_caller_outcome(error: Any, *, status: int = 0) -> bool:
         if isinstance(recorded, bool) or not isinstance(recorded, int):
             return False
         resolved = recorded
+    if code == "upgrade_required":
+        # Fail closed: 426 is also the daemon-wide protocol fence an operator must act on, so
+        # only the named producer of a stale-payload rejection buys the downgrade.
+        details = error["details"]
+        return (
+            resolved == HTTPStatus.UPGRADE_REQUIRED
+            and details.get(CALLER_OUTCOME_OWNER_FIELD) == BROWSER_UPLOAD_OUTCOME_OWNER
+        )
     return 400 <= resolved < 500
 
 

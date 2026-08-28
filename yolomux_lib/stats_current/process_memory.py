@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -21,6 +22,12 @@ MAX_PROCESS_MEMORY_SERIES = 5
 MAX_PROCESS_MEMORY_PAYLOAD_SERIES = 8
 MAX_PROCESS_CPU_SERIES = 4
 MAX_PROCESS_BINARY_LENGTH = 64
+# Every stored process payload re-derives its binary keys on read to prove they are
+# already normalized, so one build asks the same short question hundreds of thousands
+# of times about a few hundred distinct names. The answer is a pure function of the
+# text, so it is cached. The bound is deliberate: see NORMALIZED_BINARY_CACHE_ENTRIES.
+NORMALIZED_BINARY_CACHE_ENTRIES = 1024
+_DELETED_SUFFIX_RE = re.compile(r"\s+\(deleted\)$", re.IGNORECASE)
 _PYTHON_BINARY_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?", re.IGNORECASE)
 _VERSION_BINARY_RE = re.compile(r"\d+(?:\.\d+){1,3}")
 _SAFE_BINARY_RE = re.compile(r"[^a-z0-9._+-]+")
@@ -42,7 +49,17 @@ class ProcessCensusRow:
 def normalize_process_binary(value: object) -> str:
     """Return one privacy-safe binary identity without paths or arguments."""
 
-    raw = re.sub(r"\s+\(deleted\)$", "", str(value or "").strip(), flags=re.IGNORECASE)
+    # Coerce to text BEFORE the cache. Keying the cache on the caller's object would
+    # let `1` and `True` share one entry -- they are equal and hash alike, yet they
+    # normalize to "1" and "true-3cbc87c7" -- and would raise on an unhashable list.
+    return _normalized_process_binary(str(value or "").strip())
+
+
+@lru_cache(maxsize=NORMALIZED_BINARY_CACHE_ENTRIES)
+def _normalized_process_binary(raw: str) -> str:
+    """Derive one binary identity from already-stripped text."""
+
+    raw = _DELETED_SUFFIX_RE.sub("", raw)
     name = Path(raw).name
     if _PYTHON_BINARY_RE.fullmatch(name):
         return "python"

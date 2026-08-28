@@ -889,8 +889,8 @@ def optional_pinned_file_git_metadata(
     return repo, tracked, history, relative_path, repo_info, ""
 
 
-GIT_HISTORY_DEFAULT_LIMIT = 50
-GIT_HISTORY_MAX_LIMIT = 50
+GIT_HISTORY_DEFAULT_LIMIT = 40
+GIT_HISTORY_MAX_LIMIT = 40
 GIT_HISTORY_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 GIT_HISTORY_MAX_PAYLOAD_BYTES = 384 * 1024
 GIT_HISTORY_MAX_TEXT_BYTES = 8 * 1024
@@ -3713,7 +3713,7 @@ def _literal_scope_args(relative_path: str) -> list[str]:
     return ["--", f":(literal){relative_path}"] if relative_path else []
 
 
-def _parse_history_numstat(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
+def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
     if raw and not output_truncated and not raw.endswith(b"\0"):
         raise _history_error(
             "malformed Git history terminator",
@@ -3722,18 +3722,19 @@ def _parse_history_numstat(raw: bytes, *, output_truncated: bool) -> tuple[list[
         )
     tokens = raw.split(b"\0")
     commits: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
     index = 0
     parse_truncated = output_truncated
     metadata_truncated = False
     while index < len(tokens):
         token = tokens[index]
+        # Git inserts a record separator before each later --format record even with -z.
+        # The explicit NUL keeps fields unambiguous; discard only that separator.
+        if token.startswith(b"\n"):
+            token = token[1:]
         if token == b"":
             index += 1
             continue
         if token == b"commit":
-            if current is not None:
-                commits.append(current)
             if index + 6 >= len(tokens):
                 if output_truncated:
                     parse_truncated = True
@@ -3748,79 +3749,21 @@ def _parse_history_numstat(raw: bytes, *, output_truncated: bool) -> tuple[list[
             author_text, author_was_truncated = _bounded_utf8(author, GIT_HISTORY_MAX_TEXT_BYTES)
             subject_text, subject_was_truncated = _bounded_utf8(subject, GIT_HISTORY_MAX_TEXT_BYTES)
             metadata_truncated = metadata_truncated or author_was_truncated or subject_was_truncated
-            current = {
+            commits.append({
                 "sha": _decode_git_text(sha),
                 "short": _decode_git_text(short),
                 "parents": _decode_git_text(parents).split() if parents else [],
                 "subject": subject_text,
                 "author": author_text,
                 "authored_at": authored_at_value,
-                "files": 0,
-                "added": 0,
-                "removed": 0,
-                "binary_files": 0,
-            }
+                "summary_pending": True,
+            })
             index += 7
             continue
-        if current is None:
-            if output_truncated:
-                break
-            raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
-        stat_token = token[1:] if token.startswith(b"\n") else token
-        fields = stat_token.split(b"\t", 2)
-        if len(fields) != 3:
-            if output_truncated:
-                parse_truncated = True
-                break
-            raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
-        if fields[2] == b"":
-            if index + 2 >= len(tokens):
-                if output_truncated:
-                    parse_truncated = True
-                    break
-                raise _history_error(
-                    "malformed Git history rename",
-                    key="fs.error.gitHistoryFailed",
-                    status=500,
-                )
-            old_token = tokens[index + 1]
-            new_token = tokens[index + 2]
-            if not old_token or not new_token:
-                raise _history_error(
-                    "malformed Git history rename",
-                    key="fs.error.gitHistoryFailed",
-                    status=500,
-                )
-            index += 3
-        else:
-            index += 1
-        current["files"] += 1
-        added_is_binary = fields[0] == b"-"
-        removed_is_binary = fields[1] == b"-"
-        if added_is_binary != removed_is_binary:
-            raise _history_error(
-                "malformed Git history counts",
-                key="fs.error.gitHistoryFailed",
-                status=500,
-            )
-        if added_is_binary:
-            current["binary_files"] += 1
-            continue
-        try:
-            added = int(fields[0])
-            removed = int(fields[1])
-            if added < 0 or removed < 0:
-                raise ValueError("negative Git history count")
-            current["added"] += added
-            current["removed"] += removed
-        except ValueError as error:
-            raise _history_error(
-                "malformed Git history counts",
-                key="fs.error.gitHistoryFailed",
-                status=500,
-            ) from error
-    if current is not None and not parse_truncated:
-        commits.append(current)
+        if output_truncated:
+            parse_truncated = True
+            break
+        raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
     return commits, parse_truncated, metadata_truncated
 
 
@@ -3939,16 +3882,16 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             "log",
             "--topo-order",
             "--root",
+            "--no-patch",
             "--diff-merges=first-parent",
             "--no-ext-diff",
             "--no-textconv",
-            "--find-renames",
-            "--find-copies-harder",
-            "--numstat",
+            # This is a metadata-only index. File names, rename/copy detection, and line counts
+            # belong to git_commit after an explicit commit disclosure.
             "-z",
             f"--max-count={page_limit + 1}",
             f"--skip={offset}",
-            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s",
+            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s%x00",
             frozen_head,
             *_literal_scope_args(scope.relative_path),
         ]
@@ -3960,7 +3903,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             max_output_bytes=GIT_HISTORY_MAX_OUTPUT_BYTES,
         )
         raw = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
-        commits, output_truncated, metadata_truncated = _parse_history_numstat(
+        commits, output_truncated, metadata_truncated = _parse_history_metadata(
             raw,
             output_truncated=result.stdout_truncated,
         )

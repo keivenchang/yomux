@@ -691,10 +691,10 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
         assert payload["error"]["code"] == "path_not_found"
         assert payload["error"]["message"]["key"] == "common.pathNotFound"
         assert payload["error"]["message"]["params"] == {"path": str(target)}
-        assert payload["error"]["details"]["status"] == HTTPStatus.NOT_FOUND
         assert payload["error"]["details"]["path"] == str(target)
-        operation_id = payload["error"]["details"]["operation_id"]
-        assert operation_id.startswith("op-")
+        # The descriptor-authorized base read is intentionally direct. A missing file has the
+        # same typed API outcome without manufacturing a jobd operation/receipt.
+        assert "operation_id" not in payload["error"]["details"]
         assert "transport" not in payload["error"]["message"]["key"].lower()
 
         start = validate_server_log_ring_payload(runtime.server._fixture_server_log_boundary)
@@ -710,28 +710,19 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
             if str(entry.get("level") or "").lower() in {"warning", "error"}
         ]
         assert blocking == [], blocking
-        # Both writers still record the outcome, at info: `record_operation_failure` when the jobd
-        # operation fails, and `write_api_response` when that terminal failure is replayed to the
-        # caller. ONE missing file therefore produces TWO rows. The assertion this replaced demanded
-        # exactly those two rows at ERROR, which pinned the double count as correct operator
-        # evidence; the count is pinned here instead, so a third writer, a dropped row, or a
-        # de-duplication of these two is still visible without being release-blocking.
+        # The direct descriptor read has no jobd receipt to replay. Its one API response records
+        # the expected caller-owned outcome at info without manufacturing a second operation row.
         outcomes = [
             entry for entry in transition["newLogs"]
             if (entry["source"], entry["category"]) in {("jobd-operation", "operation"), ("api-response", "api")}
         ]
         assert [
             (str(entry["level"]).lower(), entry["source"], entry["category"]) for entry in outcomes
-        ] == [
-            (EXPECTED_OUTCOME_LOG_LEVEL, "jobd-operation", "operation"),
-            (EXPECTED_OUTCOME_LOG_LEVEL, "api-response", "api"),
-        ], outcomes
+        ] == [(EXPECTED_OUTCOME_LOG_LEVEL, "api-response", "api")], outcomes
         messages = [json.loads(entry["message"]) for entry in outcomes]
-        assert [message["code"] for message in messages] == ["path_not_found", "path_not_found"]
-        assert [message["request"]["id"] for message in messages] == [
-            payload["request"]["id"], payload["request"]["id"],
-        ]
-        assert messages[0]["operation"]["id"] == operation_id
+        assert [message["code"] for message in messages] == ["path_not_found"]
+        assert [message["request"]["id"] for message in messages] == [payload["request"]["id"]]
+        assert messages[0]["operation"] is None
         runtime.server._fixture_server_log_boundary = current
 
 

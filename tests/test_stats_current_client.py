@@ -520,7 +520,7 @@ def test_public_surface_has_only_shared_lifecycle_writes_snapshot_and_delta():
     public = {name for name, value in client_module.StatsCurrentClient.__dict__.items() if not name.startswith("_") and callable(value)}
     assert public == {
         "ensure_started", "acquire_lease", "renew_lease", "release_lease", "register_collector_context",
-        "status", "runtime_status", "retry", "browser_diagnostics", "set_usage_atom_backfill_status", "append", "snapshot", "delta",
+        "status", "runtime_status", "resource_state", "retry", "browser_diagnostics", "set_usage_atom_backfill_status", "append", "snapshot", "delta",
     }
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     for retired in ("fallback_legacy", "materialized_snapshot", "query_buckets", "claim_agent_token", "merge_records"):
