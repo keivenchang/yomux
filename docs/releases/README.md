@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.18 | `v0.7.18` | `v0.7.18^{commit}` | [v0.7.18-evidence.md](v0.7.18-evidence.md) | immediate file tabs and direct descriptor-authorized base reads, with Git decoration deferred from content paint |
 | 0.7.17 | `v0.7.17` | `v0.7.17^{commit}` | [v0.7.17-evidence.md](v0.7.17-evidence.md) | bounded YO!stats rebuild and persistence work, authenticated service health endpoints, and gate ownership/cost stability repairs |
 | 0.7.16 | `v0.7.16` | `v0.7.16^{commit}` | [v0.7.16-evidence.md](v0.7.16-evidence.md) | restores Blame and Differ on NFS-backed repositories, opens files when Git cannot describe them, and reclaims writer slots left by cancelled runs |
 | 0.7.15 | `v0.7.15` | `v0.7.15^{commit}` | [v0.7.15-evidence.md](v0.7.15-evidence.md) | tmux control-client lifecycle ownership, roster metadata convergence, and preserved topbar refusal state and tooltip ownership |

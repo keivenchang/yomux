@@ -1926,6 +1926,10 @@ function openFileStateHasLoadedEditorPayload(state) {
   return Boolean(state?.kind && state.loading !== true && state.kind !== 'file' && state.kind !== 'error');
 }
 
+function openFileLoadingStateStillCurrent(path, state) {
+  return fileState.get(path) === state && openFilePathHasOwner(path);
+}
+
 function refreshOpenFileDiffDecorations(path) {
   for (const panel of fileEditorPanelsForPath(path)) {
     if (panel._cmView) panel._cmView.dispatch({});
@@ -2118,22 +2122,24 @@ async function refreshOpenFileDiff(path, options = {}) {
   return state._diffLoadingPromise;
 }
 
-async function refreshOpenFileGitMetadata(path) {
+async function refreshOpenFileGitMetadata(path, expectedState = null) {
   const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  if (!state || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   try {
-    const payload = await fetchFileReadPayload(path);
+    const payload = await fetchFileReadPayload(path, {includeGit: true});
     const current = fileState.get(path);
-    if (!current || current.kind !== 'text') return false;
+    if (!current || current.kind !== 'text' || (expectedState && current !== expectedState)) return false;
     applyFileGitMetadata(current, payload);
+    renderOpenFilePath(path);
     return true;
   } catch (_error) {
     const current = fileState.get(path);
-    if (current && current.kind === 'text') {
+    if (current && current.kind === 'text' && (!expectedState || current === expectedState)) {
       current.gitRoot = '';
       current.gitTracked = false;
       current.gitHistory = [];
       current.gitHasHistory = false;
+      renderOpenFilePath(path);
     }
     return false;
   }
@@ -2153,8 +2159,17 @@ async function fetchFilesystemOperationPayload(url, operation, options = {}) {
 }
 
 async function fetchFileReadPayload(path, options = {}) {
+  const url = `/api/fs/read?path=${encodeURIComponent(path)}${options.includeGit === true ? '&include_git=1' : ''}`;
+  // The first content read is a browser-owned direct lifecycle: it paints into the already-open
+  // tab and resolves to bytes or a typed file state without a jobd receipt. Git enrichment stays
+  // on the retained-operation path because it may inspect repository history.
+  if (options.includeGit !== true) {
+    return apiFetchJson(url, {startupImmediate: true, ...(options.signal ? {signal: options.signal} : {})}, {
+      quietStatuses: options.quietStatuses || [404, 413, 415],
+    });
+  }
   return fetchFilesystemOperationPayload(
-    `/api/fs/read?path=${encodeURIComponent(path)}`,
+    url,
     'read',
     options,
   );
@@ -2168,6 +2183,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   if (identityDedupe) {
     const pendingOpen = fileOpenPromiseFor(fullPath);
     if (pendingOpen) {
+      if (fileState.has(fullPath)) return focusExistingPhysicalFileEditor(fullPath, fullPath, options);
       await pendingOpen.catch(() => null);
       const existingAfterPending = openPathForPhysicalFile(fullPath, entry) || (fileState.has(fullPath) ? fullPath : '');
       if (existingAfterPending) return focusExistingPhysicalFileEditor(fullPath, existingAfterPending, options);
@@ -2196,7 +2212,6 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
     if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
-    await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
     renderOpenFilePath(fullPath);
     return item;
@@ -2216,8 +2231,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     await openFilesSetAndShow(fullPath, applyFileIdentityMetadata(rawPreviewFileState(fullPath, entry), entry), openOptions);
     return item;
   }
+  // Make the editor selection visible before the filesystem work begins.  The read completion
+  // replaces this exact path state with text or a typed error, so a slow backend never makes the
+  // user's Open action appear ignored.
+  const loadingState = applyFileIdentityMetadata({
+    mtime: fileEntryMtime(entry),
+    kind: 'text',
+    original: '',
+    content: '',
+    dirty: false,
+    loading: true,
+  }, entry);
   const openPromise = (async () => {
     const payload = await fetchFileReadPayload(fullPath);
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
       if (existingIdentityPath && existingIdentityPath !== fullPath) {
@@ -2233,12 +2260,20 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       dirty: false,
     }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
+    // Base content is the interactive path. Git status/history is useful decoration, but never
+    // delays the newly-created tab; discard its result if this state has since been replaced.
+    void refreshOpenFileGitMetadata(fullPath, state);
     return item;
   })();
+  // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
+  // read, so publish the same promise before rendering to prevent a duplicate request.
+  loadingState.loadingPromise = openPromise;
+  openFilesSetAndShow(fullPath, loadingState, openOptions);
   if (identityDedupe) setFileOpenPromise(fullPath, openPromise);
   try {
     return await openPromise;
   } catch (err) {
+    if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     const status = Number(err?.status) || 0;
     if (status) {
       let state = status === 415 ? await sniffedRawPreviewFileState(fullPath, entry) : null;

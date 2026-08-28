@@ -56,6 +56,7 @@ from .common import codex_event_kind
 from .common import codex_exec_argv
 from .common import codex_runtime_env
 from .common import error_payload
+from .common import product_filename
 from .common import ready_response_envelope_bytes
 from .common import terminate_process_group
 from .common import validated_product_metadata
@@ -420,12 +421,31 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path)
+        if query_bool(qs, "include_git"):
+            self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path, {"include_git": True})
+            return
+        # A first editor open needs only one authorized descriptor walk, stat, bounded read, and
+        # binary check. Keep that small operation in this request thread instead of sending it
+        # through jobd's point queue and receipt polling. Git is explicitly deferred to the
+        # include_git path because repository snapshots can be arbitrarily slow.
+        try:
+            payload = filesystem.read_file(raw_path, include_git=False)
+        except filesystem.FilesystemError as error:
+            payload = error.payload()
+            # Preserve the long-standing file-open contract. The generic HTTP envelope maps a
+            # bare 404 to ``not_found``; callers use this finer code to keep an expected missing
+            # file distinct from a transport failure.
+            if error.status == HTTPStatus.NOT_FOUND:
+                payload["error_code"] = "path_not_found"
+                payload["path"] = raw_path
+            self.write_json(payload, status=HTTPStatus(error.status))
+            return
+        self.write_json(payload, status=HTTPStatus.OK)
 
     def handle_fs_info(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path)
+        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path, {"include_git": query_bool(qs, "include_git")})
 
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -493,15 +513,24 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         self.write_json(response.payload, status=response.status)
 
     def handle_fs_raw(self, parsed: Any) -> None:
+        """Serve one bounded authorized file directly; raw media must not wait behind jobd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
-        self.submit_filesystem_relay(
-            "GET /api/fs/raw",
-            "raw",
-            raw_path,
-            {"download": download, "max_bytes": self.file_transfer_max_bytes()},
-        )
+        try:
+            body, content_type = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
+            return
+        disposition = "attachment" if download else "inline"
+        self.write_product_bytes(body, {
+            "format": "opaque_bytes",
+            "content_type": content_type,
+            "length": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "disposition": disposition,
+            "filename": product_filename(Path(raw_path).name, fallback="download") if disposition == "attachment" else "",
+        })
 
     def handle_fs_zip(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -823,6 +852,17 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             "fs_batch_client_scope": summary["client_scope"],
         }
         self.write_json(response, status=status)
+
+    def handle_fs_resolve_file_candidates(self, parsed: Any) -> None:
+        del parsed
+        payload = self.read_json_body(8 * 4096)
+        if payload is None:
+            return
+        raw_paths = payload.get("paths")
+        if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 8 or any(not isinstance(path, str) for path in raw_paths):
+            self.write_json(error_payload("paths must contain 1 to 8 strings", message_key="request.error.jsonObject", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.submit_filesystem_operation("POST /api/fs/resolve-file-candidates", "resolve_file_candidates", raw_paths[0], {"paths": raw_paths})
 
     def file_transfer_max_bytes(self) -> int:
         getter = getattr(self.server.app, "file_transfer_max_bytes", None)
@@ -2131,6 +2171,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_info(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_info(self, parsed)
+
+    def handle_fs_resolve_file_candidates(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_resolve_file_candidates(self, parsed)
 
     def handle_fs_diff(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_diff(self, parsed)

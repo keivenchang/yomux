@@ -174,7 +174,7 @@ def _sniff_raw_mime(data: bytes) -> str:
     return ""
 
 
-def read_file(raw_path: str) -> dict[str, Any]:
+def read_file(raw_path: str, *, include_git: bool = True) -> dict[str, Any]:
     with paths.safe_path(raw_path, operation="read_file") as handle:
         path = handle.requested
         file_stat = handle.stat_result
@@ -194,8 +194,8 @@ def read_file(raw_path: str) -> dict[str, Any]:
         # The file has already been read at this point. Git history is decoration on top of that
         # answer, so a repository that is slow, huge, or being rewritten reports itself in
         # `git_enrichment` instead of taking the file away from the reader.
-        git_root, git_tracked, git_history, _relative_path, _repo_info, git_reason = (
-            git_ops.optional_pinned_file_git_metadata(handle, operation="read_file")
+        git_root, git_tracked, git_history, _relative_path, _repo_info, git_reason = _optional_file_git_metadata(
+            handle, operation="read_file", include_git=include_git,
         )
         return {
             "path": str(path),
@@ -594,46 +594,46 @@ def create_directory(raw_path: str) -> dict[str, Any]:
         return {"path": str(path), "created": True, "kind": "dir"}
 
 
+def _optional_file_git_metadata(
+    handle: paths.SafePathHandle,
+    *,
+    operation: str,
+    include_git: bool,
+    repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+) -> tuple[str, bool, list[Any], str, dict[str, Any] | None, str]:
+    if not include_git:
+        return "", False, [], "", None, "deferred"
+    return git_ops.optional_pinned_file_git_metadata(
+        handle, include_repo_info=True, repo_info_cache=repo_info_cache, operation=operation,
+    )
+
+
 def _existing_path_info(
     raw_path: str,
     *,
     operation: str,
     repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+    include_git: bool = True,
 ) -> dict[str, Any]:
     with paths.safe_path(raw_path, operation=operation) as handle:
         path = handle.requested
         file_stat = handle.stat_result
-        kind = "dir" if stat.S_ISDIR(file_stat.st_mode) else "file"
-        size: int | None = None
-        mtime: int | None = None
-        mtime_ns: int | None = None
+        result = handle.base_capability()
+        kind = str(result["kind"])
         preview_mime = ""
         diff_capable = False
         if kind == "file":
-            size = int(file_stat.st_size)
-            mtime = int(file_stat.st_mtime)
-            mtime_ns = int(file_stat.st_mtime_ns)
             with os.fdopen(os.dup(handle.descriptor), "rb") as fh:
                 sample = fh.read(512)
             preview_mime = _sniff_raw_mime(sample) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
-            diff_capable = size <= paths.MAX_READ_BYTES and not preview_mime and not paths._looks_binary(sample)
+            diff_capable = int(result["size"] or 0) <= paths.MAX_READ_BYTES and not preview_mime and not paths._looks_binary(sample)
         # Validating a path is the step that decides whether Open is offered at all, so it carries
         # the same rule as the read: Git metadata that cannot be produced is reported, not fatal.
-        repo_root, tracked, history, relative_path, repo_info, git_reason = (
-            git_ops.optional_pinned_file_git_metadata(
-                handle,
-                include_repo_info=True,
-                repo_info_cache=repo_info_cache,
-                operation=operation,
-            )
+        repo_root, tracked, history, relative_path, repo_info, git_reason = _optional_file_git_metadata(
+            handle, operation=operation, include_git=include_git, repo_info_cache=repo_info_cache,
         )
         return {
-            "path": str(path),
-            "name": path.name,
-            "kind": kind,
-            "size": size,
-            "mtime": mtime,
-            "mtime_ns": mtime_ns,
+            **result,
             "preview_mime": preview_mime,
             "diff_capable": diff_capable,
             "repo_root": repo_root,
@@ -642,7 +642,6 @@ def _existing_path_info(
             "relative_path": relative_path,
             "repo": repo_info,
             "git_enrichment": {"available": not git_reason, "reason": git_reason},
-            **paths._physical_file_identity(path, resolved=handle.resolved, stat_result=file_stat),
         }
 
 
@@ -651,9 +650,10 @@ def path_info(
     *,
     operation: str = "path_info",
     repo_info_cache: dict[str, dict[str, Any] | None] | None = None,
+    include_git: bool = True,
 ) -> dict[str, Any]:
     try:
-        return _existing_path_info(raw_path, operation=operation, repo_info_cache=repo_info_cache)
+        return _existing_path_info(raw_path, operation=operation, repo_info_cache=repo_info_cache, include_git=include_git)
     except paths.FilesystemError as error:
         if error.status != 404:
             raise
@@ -678,7 +678,34 @@ def path_info(
             "git_has_history": False,
             "relative_path": "",
             "repo": None,
+            "git_enrichment": {"available": False, "reason": "deferred"},
         }
+
+
+def resolve_file_candidates(raw_paths: list[str]) -> dict[str, Any]:
+    """Probe at most eight ordered paths through the descriptor-authorized base owner."""
+
+    if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 8:
+        raise ValueError("paths must contain 1 to 8 items")
+    paths_in_order: list[str] = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or raw_path in paths_in_order:
+            raise ValueError("paths must be unique strings")
+        paths.validate_request_path_lexical(raw_path)
+        paths_in_order.append(raw_path)
+    misses: list[dict[str, Any]] = []
+    for raw_path in paths_in_order:
+        try:
+            info = path_info(raw_path, operation="resolve_file_candidates", include_git=False)
+        except paths.FilesystemError as error:
+            if error.status == 404:
+                misses.append({"path": raw_path, "status": 404})
+                continue
+            raise
+        if info["kind"] == "file":
+            return {"path": info["path"], "info": info, "misses": misses}
+        misses.append({"path": raw_path, "status": 404})
+    return {"path": "", "info": None, "misses": misses}
 
 
 def is_text_path(raw_path: str) -> bool:

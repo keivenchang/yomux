@@ -1468,6 +1468,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(requests[1].url, '/api/fs/raw?path=%2Frepo%2Fimage.png', 'a non-JSON error response retains the requested path for its typed fallback');
     assert.deepStrictEqual(canonical(api.locationAssignmentsForTest()), [], 'status-aware raw media does not redirect before rendering its typed 401');
 
+    const heldStartupRequests = [];
+    const queuedRawRequests = [];
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/fs/raw?')) {
+        queuedRawRequests.push(String(url));
+        return Promise.resolve(response({}, 200, new Blob(['image'], {type: 'image/png'})));
+      }
+      return new Promise(resolve => heldStartupRequests.push(resolve));
+    });
+    const startupRequests = Array.from({length: 8}, (_value, index) => api.apiFetchJsonForTest(`/api/startup/${index}`));
+    await flushAsyncWork();
+    assert.equal(heldStartupRequests.length, 8, 'the ordinary startup-refresh governor is saturated');
+    const queuedRaw = await api.fetchRawFileBlobForTest('/repo/visible.png');
+    assert.equal(queuedRaw.ok, true, 'visible raw bytes are not queued behind unrelated startup work');
+    assert.deepStrictEqual(queuedRawRequests, ['/api/fs/raw?path=%2Frepo%2Fvisible.png'], 'visible raw media starts its direct HTTP fetch while the governor is full');
+    for (const resolve of heldStartupRequests) resolve(response({ok: true}, 200));
+    await Promise.all(startupRequests);
+
     const created = [];
     const revoked = [];
     const originalCreateObjectURL = URL.createObjectURL;
@@ -1550,7 +1568,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2', 'blob:test-3'], 'zero-dimension load revokes its unusable object URL');
 
       let settleFetch;
-      api.setFetchForTest(() => new Promise(resolve => { settleFetch = resolve; }));
+      api.setFetchForTest((_url, options = {}) => new Promise((resolve, reject) => {
+        settleFetch = resolve;
+        options.signal?.addEventListener?.('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')), {once: true});
+      }));
       const staleMedia = new TestElement('stale-media', 'img');
       const pending = api.installRawFileMediaSourceForTest(staleMedia, '/repo/old.png');
       await flushAsyncWork();
@@ -6265,13 +6286,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
     assert.ok(linkProviderSource.includes('function installTerminalFileReferenceUnderlines'), 'existing terminal file refs have a persistent underline overlay owner');
     assert.ok(/function terminalFileReferenceViewportSignature\(term\)/.test(linkProviderSource), 'terminal file underline scheduling keys cheap viewport state');
-    assert.ok(/const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;/.test(linkProviderSource), 'passive terminal file resolution uses the 1.7-second scan buffer');
-    assert.ok(/function terminalFileReferenceUnderlineIsActive\(session, container\) \{[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(session\)[\s\S]*terminalIsVisible\(session, container\)/.test(linkProviderSource), 'passive terminal file resolution requires the active pane tab, shown xterm, and visible browser document');
+    assert.ok(/const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;/.test(linkProviderSource), 'terminal file underline refresh uses the 1.7-second scan buffer');
+    assert.ok(/function terminalFileReferenceUnderlineIsActive\(session, container\) \{[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(session\)[\s\S]*terminalIsVisible\(session, container\)/.test(linkProviderSource), 'terminal file underlines require the active pane tab, shown xterm, and visible browser document');
     assert.ok(/const terminalFileReferenceTargetCache = new Map\(\);[\s\S]*const fileExplorerMemoryCacheLimit = 512;/.test(bootstrapSource), 'terminal file targets reuse the shared bounded frontend cache limit');
     assert.ok(/terminalFileReferenceTargetCache\.has\(cacheKey\)[\s\S]*setLimitedMapEntry\(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit\)/.test(linkProviderSource), 'terminal file target cache hits refresh LRU recency through the shared helper');
     assert.ok(/const scheduleCachedRender = \(\) => \{[\s\S]*if \(renderFrame\) return;[\s\S]*requestAnimationFrame/.test(linkProviderSource), 'terminal file underline cached repaint is coalesced through one frame');
-    assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);[\s\S]*if \(\(viewportChanged \|\| contentChanged\) && !timer\)/.test(linkProviderSource), 'terminal output clears stale cached underlines immediately and cannot postpone the bounded resolver with continuous renders');
-    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,500}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 1.7-second resolver');
+    assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);[\s\S]*if \(\(viewportChanged \|\| contentChanged\) && !timer\)/.test(linkProviderSource), 'terminal output clears stale cached underlines immediately and cannot postpone the bounded visual refresh with continuous renders');
+    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,500}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 1.7-second refresh');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
     assert.ok(/applyTerminalContainerTheme\(container, displayTheme\)/.test(terminalBootSource), 'new terminal containers get the same display theme marker as live theme updates');

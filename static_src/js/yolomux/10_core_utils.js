@@ -545,6 +545,8 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
+  const startupImmediate = requestOptions.startupImmediate === true;
+  delete requestOptions.startupImmediate;
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
   delete requestOptions.deadlineMs;
@@ -588,7 +590,8 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   };
   let response;
   try {
-    const requestPromise = runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal).catch(error => {
+    const request = startupImmediate ? fetch(url, requestOptions) : runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal);
+    const requestPromise = Promise.resolve(request).catch(error => {
       if (timeoutError) throw timeoutError;
       throw error;
     });
@@ -5133,13 +5136,14 @@ async function terminalReferenceProviderLinks(session, term, y) {
   const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
   const fileRefs = refs.filter(ref => ref.type === 'file');
   if (!fileRefs.length) return links;
-  const fileTargets = await Promise.all(fileRefs.map(ref => terminalFileReferenceTarget(session, ref, {fresh: false, user: true})));
-  fileRefs.forEach((ref, index) => {
-    if (fileTargets[index]) {
-      const link = terminalReferenceXtermLink(ref);
-      if (link) links.push(link);
-    }
-  });
+  // This provider runs once for each visible terminal line. Its output is only a visual underline:
+  // right-click determines the syntactic path and the selected editor tab owns the real read/error.
+  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
+  for (const ref of fileRefs) {
+    const link = terminalReferenceXtermLink(ref);
+    if (link) links.push(link);
+  }
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
@@ -5180,6 +5184,33 @@ function terminalFileReferenceCacheKey(session, reference) {
     reference?.path || '',
     reference?.text || '',
   ].join('\x1f');
+}
+
+const terminalFileReferenceResolutionPromises = new Map();
+
+function terminalFileReferenceResolutionKey(paths) {
+  return paths.join('\x1f');
+}
+
+function resolveTerminalFileReferenceCandidates(paths) {
+  const key = terminalFileReferenceResolutionKey(paths);
+  const existing = terminalFileReferenceResolutionPromises.get(key);
+  if (existing) return existing;
+  const resolution = (async () => {
+    try {
+      return await apiFetchJson('/api/fs/resolve-file-candidates', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paths}), startupImmediate: true,
+      });
+    } catch (error) {
+      if (!isApiPendingResponse(error)) throw error;
+      return await waitForApiOperationResult(error, {kind: 'filesystem_operation', operation: 'resolve_file_candidates'});
+    }
+  })();
+  terminalFileReferenceResolutionPromises.set(key, resolution);
+  void resolution.finally(() => {
+    if (terminalFileReferenceResolutionPromises.get(key) === resolution) terminalFileReferenceResolutionPromises.delete(key);
+  }).catch(() => {});
+  return resolution;
 }
 
 function terminalVisibleFileReferences(term) {
@@ -6508,6 +6539,18 @@ function terminalFileReferenceRejectionLabel(reason) {
   return `${t('editor.fileOpenFailedTitle')}: ${reason}`;
 }
 
+function terminalFileReferenceCachedTarget(session, reference, now = Date.now) {
+  const cacheKey = terminalFileReferenceCacheKey(session, reference);
+  const cached = terminalFileReferenceTargetCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= now()) {
+    terminalFileReferenceTargetCache.delete(cacheKey);
+    return null;
+  }
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+  return cached.value?.info?.kind === 'file' ? cached.value : null;
+}
+
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
   const canReuse = options.fresh === false;
@@ -6521,26 +6564,17 @@ async function terminalFileReferenceTarget(session, reference, options = {}) {
     }
     terminalFileReferenceTargetCache.delete(cacheKey);
   }
-  const fetchOptions = {
-    user: options.user !== false,
-    fresh: !canReuse,
-  };
   const targetPromise = (async () => {
     let rejection = null;
-    for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
-      try {
-        const info = await fetchFilePathInfo(path, fetchOptions);
-        if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
-      } catch (error) {
-        // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
-        const reason = userMessageText(error, t('common.requestFailed'));
-        rejection = {
-          kind: 'rejected',
-          label: terminalFileReferenceRejectionLabel(reason),
-          path,
-          reason,
-        };
-      }
+    const paths = terminalFileReferenceCandidatePaths(session, reference);
+    if (!paths.length) return null;
+    try {
+      const result = await resolveTerminalFileReferenceCandidates(paths);
+      if (result?.info?.kind === 'file') return {path: result.path, info: result.info, line: reference.line || null, text: reference.text || result.path};
+    } catch (error) {
+      const path = paths[0] || '';
+      const reason = userMessageText(error, t('common.requestFailed'));
+      rejection = {kind: 'rejected', label: terminalFileReferenceRejectionLabel(reason), path, reason};
     }
     if (rejection && options.reportRejection) {
       recordJsDebugEvent('client_failure', {
@@ -6884,7 +6918,21 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
-  const fileTarget = terminalReference?.type === 'file' ? await terminalFileReferenceTarget(session, terminalReference, {reportRejection: true}) : null;
+  // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
+  // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
+  const optimisticFilePath = terminalReference?.type === 'file'
+    ? terminalFileReferenceAbsolutePath(session, terminalReference)
+    : '';
+  const fileTarget = optimisticFilePath
+    ? {
+      path: optimisticFilePath,
+      info: terminalFileReferenceCachedTarget(session, terminalReference)?.info || {name: basenameOf(optimisticFilePath)},
+      line: terminalReference.line || null,
+      text: terminalReference.text || optimisticFilePath,
+    }
+    : null;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
@@ -6896,7 +6944,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   copyDebug('contextmenu', {session, selectionSource: selection.source, chars: selected.length});
   const hasUrlReference = terminalReference?.type === 'url';
   if (hasUrlReference) {
-    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, null, {selectionText: selected, session, term, container})) {
       appendContextMenuSeparator(menu);
     }
   } else {
@@ -6908,7 +6956,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
       appendContextMenuButton(menu, terminalCopyActionLabel(action), button => copyTerminalSelection(session, term, {action, button, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
     }
     appendContextMenuSeparator(menu);
-    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
+    if (appendTerminalReferenceContextMenuItems(menu, terminalReference, null, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
   }
   appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu);
   if (hasUrlReference) {
@@ -6918,6 +6966,13 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   // dead Paste action when that probe found no text/image, and reuse the one paste transport.
   if (!readOnlyMode && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
     appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
+  }
+  if (fileTarget) {
+    const actions = document.createElement('div');
+    if (appendTerminalReferenceContextMenuItems(actions, terminalReference, fileTarget, {selectionText: selected, session, term, container})) {
+      appendContextMenuSeparator(actions);
+      menu.prepend(...Array.from(actions.children));
+    }
   }
   terminalContextMenu.open(menu, x, y);
 }

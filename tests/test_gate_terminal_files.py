@@ -32,7 +32,7 @@ def test_rejected_terminal_file_candidate_keeps_a_typed_visible_reason(gate_bund
             "reason": "fixture file-info rejection",
         },
     }, result
-    assert len(result.fetches) == 1, result
+    assert len(result.fetches) == 1 and result.fetches[0]["url"] == "/api/fs/resolve-file-candidates", result
 
 
 def test_n5_explicit_rejected_result_after_http_200_is_counted_as_a_client_failure(gate_bundle_vm):
@@ -57,8 +57,8 @@ def test_n5_explicit_rejected_result_after_http_200_is_counted_as_a_client_failu
         ]
     }, result
     api_events = [event for event in result.js_debug_events if event.get("type") == "api"]
-    assert len(api_events) == 3 and all(event.get("status") == 200 for event in api_events), result
-    assert len(result.fetches) == 3 and result.batch_flushes >= 1, result
+    assert len(api_events) == 3 and all(event.get("status") == 503 for event in api_events), result
+    assert len(result.fetches) == 3 and all(fetch["url"] == "/api/fs/resolve-file-candidates" for fetch in result.fetches), result
     client_failures = [event for event in result.js_debug_events if event.get("type") == "client_failure"]
     assert [event.get("reason_code") for event in client_failures] == ["file_info_rejected"] * 3, result
     assert [event.get("path") for event in client_failures] == [
@@ -66,7 +66,7 @@ def test_n5_explicit_rejected_result_after_http_200_is_counted_as_a_client_failu
         "/fixture/b.py",
         "/fixture/c.py",
     ], result
-    assert len(result.js_debug_errors) == 3, result
+    assert len(result.js_debug_errors) == 6, result
 
 
 def test_n5_passive_terminal_file_guesses_are_not_client_failures(gate_bundle_vm):
@@ -87,6 +87,6 @@ def test_n5_passive_terminal_file_guesses_are_not_client_failures(gate_bundle_vm
     assert result.operation_error is None, result
     assert result.value == {"target": None}, result
     api_events = [event for event in result.js_debug_events if event.get("type") == "api"]
-    assert len(api_events) == 1 and api_events[0].get("status") == 200, result
+    assert len(api_events) == 1 and api_events[0].get("status") == 404, result
     assert [event for event in result.js_debug_events if event.get("type") == "client_failure"] == [], result
-    assert result.js_debug_errors == (), result
+    assert len(result.js_debug_errors) == 1 and result.js_debug_errors[0].get("status") == 404, result

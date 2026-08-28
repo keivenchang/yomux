@@ -863,7 +863,7 @@ def test_background_owner_starts_only_the_current_stats_runtime():
 
     webapp.handle_background_owner_acquired({"last_transition": "acquired", "generation": {}})
 
-    assert calls == ["event", "job", "pricing", "current", "session-files", "tabber", "tabber-worker", "publish"]
+    assert calls == ["event", "job", "pricing", "current", "tabber", "tabber-worker", "publish"]
 
 
 def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp_path):

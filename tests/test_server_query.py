@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import hashlib
 import inspect
 import io
 import json
@@ -1125,6 +1126,56 @@ def test_html_uses_browser_highlight_js_bundle():
     assert web.static_asset_path("vendor/highlight.min.js").is_file()
 
 
+def test_raw_file_response_reads_the_authorized_file_without_jobd(monkeypatch):
+    body = b"<svg/>"
+    calls = []
+    handler = SimpleNamespace(
+        file_transfer_max_bytes=lambda: 1024,
+        write_product_bytes=lambda value, product: calls.append((value, product)),
+    )
+    monkeypatch.setattr(server_module.filesystem, "read_raw", lambda path, max_bytes: (calls.append((path, max_bytes)) or (body, "image/svg+xml")))
+
+    server_module.FilesystemHttpAdapter.handle_fs_raw(
+        handler,
+        SimpleNamespace(query=f"path={quote('/repo/figure.svg')}&download=1"),
+    )
+
+    assert calls[0] == ("/repo/figure.svg", 1024)
+    assert calls[1] == (body, {
+        "format": "opaque_bytes",
+        "content_type": "image/svg+xml",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "attachment",
+        "filename": "figure.svg",
+    })
+
+
+def test_raw_file_response_preserves_direct_authorization_error(monkeypatch):
+    writes = []
+    handler = SimpleNamespace(
+        file_transfer_max_bytes=lambda: 1024,
+        write_json=lambda payload, status: writes.append((payload, status)),
+        write_product_bytes=lambda *_args: pytest.fail("raw error must not create a product response"),
+    )
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "read_raw",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(server_module.filesystem.FilesystemError.path_not_found("/repo/missing.svg")),
+    )
+
+    server_module.FilesystemHttpAdapter.handle_fs_raw(handler, SimpleNamespace(query=f"path={quote('/repo/missing.svg')}"))
+
+    assert writes == [(
+        {
+            "error": "path not found: /repo/missing.svg",
+            "user_message": {"key": "common.pathNotFound", "params": {"path": "/repo/missing.svg"}, "fallback": "path not found: /repo/missing.svg"},
+            "status": 404,
+        },
+        HTTPStatus.NOT_FOUND,
+    )]
+
+
 def test_handle_upload_enforces_live_app_size_limit():
     app = SimpleNamespace(file_transfer_max_bytes=lambda: 5, upload_files=lambda *_args: (_ for _ in ()).throw(AssertionError("upload_files should not run")))
     handler = SimpleNamespace(
@@ -2031,6 +2082,24 @@ def test_handle_fs_list_preserves_legacy_jobd_request_without_repo_opt_out():
     assert calls == [("GET /api/fs/list", "list", "/repo")]
 
 
+def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monkeypatch):
+    calls = []
+    writes = []
+    handler = object.__new__(Handler)
+    handler.write_json = lambda payload, status: writes.append((status, payload))
+    handler.submit_filesystem_operation = lambda *args: calls.append(args)
+    monkeypatch.setattr(server_module.filesystem, "read_file", lambda path, *, include_git: {"path": path, "content": "fast"})
+
+    Handler.handle_fs_read(handler, urlparse("/api/fs/read?path=%2Frepo%2Ffast.txt"))
+
+    assert calls == []
+    assert writes == [(HTTPStatus.OK, {"path": "/repo/fast.txt", "content": "fast"})]
+
+    Handler.handle_fs_read(handler, urlparse("/api/fs/read?path=%2Frepo%2Fslow.txt&include_git=1"))
+
+    assert calls == [("GET /api/fs/read", "read", "/repo/slow.txt", {"include_git": True})]
+
+
 def test_handle_fs_git_history_and_commit_validate_and_submit_retained_reads():
     calls = []
     writes = []
@@ -2221,9 +2290,10 @@ def test_filesystem_batch_list_preserves_repo_metadata_by_default_and_allows_exp
 
 
 def test_filesystem_batch_product_returns_typed_permission_failure_without_raising(monkeypatch):
-    def denied_path_info(_raw_path, *, operation, repo_info_cache=None):
+    def denied_path_info(_raw_path, *, operation, repo_info_cache=None, include_git=True):
         assert repo_info_cache == {}
         assert operation == "fs_batch.info"
+        assert include_git is True
         raise PermissionError(13, "permission denied", "/restricted/item")
 
     monkeypatch.setattr(server_module.filesystem.io_ops, "path_info", denied_path_info)

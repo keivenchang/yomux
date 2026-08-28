@@ -658,6 +658,21 @@ class SafePathHandle:
         """
         return descriptor_path(self.descriptor)
 
+    def base_capability(self) -> dict[str, Any]:
+        """Return non-Git facts for this already-authorized descriptor generation."""
+
+        metadata = self.stat_result
+        kind = "dir" if stat.S_ISDIR(metadata.st_mode) else "file"
+        return {
+            "path": str(self.requested),
+            "name": self.requested.name,
+            "kind": kind,
+            "size": int(metadata.st_size) if kind == "file" else None,
+            "mtime": int(metadata.st_mtime) if kind == "file" else None,
+            "mtime_ns": int(metadata.st_mtime_ns) if kind == "file" else None,
+            **_physical_file_identity(self.requested, resolved=self.resolved, stat_result=metadata),
+        }
+
 
 class SafeParentHandle:
     """Pinned authorized parent used for descriptor-relative namespace mutations."""

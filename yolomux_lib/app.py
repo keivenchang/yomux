@@ -1898,7 +1898,7 @@ def filesystem_batch_submission(
 
 FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
     "list", "read", "info", "search", "index_status", "count", "diff", "git_history",
-    "git_commit", "blame",
+    "git_commit", "blame", "resolve_file_candidates",
 })
 
 # Ref-only changes can precede watchd's periodic reconciliation, so separate requests for these
@@ -1911,7 +1911,7 @@ FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 # `count`, `diff`, `blame`, recursive `delete`, Finder batches, watch-diff fanouts, forced
 # session-files transforms -- stays on the shared `interactive` lane, because its cost is unbounded
 # in the input and it is exactly the work that used to put an editor open behind it head-of-line.
-FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
+FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status", "resolve_file_candidates"})
 
 # The write-side half of that same principle, and the half that was missed when `point` was drawn:
 # one path in, one bounded side effect, a browser waiting on it right now.  These satisfy exactly
@@ -4231,6 +4231,10 @@ class WatchBridge:
                 # coalesce instead of turning every watcher notification into interactive Git.
                 force=False,
                 requester="background-refresh",
+                # A watcher notification is invalidation evidence, not permission to perform
+                # an unbounded Git snapshot in the watcher thread.  Return a receipt now; jobd
+                # owns the bounded, coalesced materialization after this revision is published.
+                accepted_operation=True,
             )
             event_payload = {"request": item, "status": int(status), "data": payload}
             stable_event_payload = copy.deepcopy(event_payload)
@@ -8758,7 +8762,11 @@ class TmuxWebtermApp:
         self.pricing_refresh_coordinator.start_periodic()
         self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
-        self.warm_start_session_files_payload_cache()
+        # Startup must bind before any repository snapshot work.  The old warm-cache probe
+        # constructed a session-files cache key synchronously; an uncovered repository turns
+        # that key into a full pinned Git object-store snapshot.  That made a large repository
+        # keep the whole HTTP listener unavailable during startup.  Session-files requests own
+        # their deferred jobd refresh after the listener is live instead.
         self.warm_start_tabber_activity_cache()
         self.start_tabber_activity_cache_warmer()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")

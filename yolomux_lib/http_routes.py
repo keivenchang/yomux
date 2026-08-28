@@ -1534,6 +1534,11 @@ def post_fs_batch(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_batch(parsed)
 
 
+def post_fs_resolve_file_candidates(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_resolve_file_candidates(parsed)
+
+
 def post_fs_write(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_fs_write(parsed)
@@ -1683,6 +1688,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/count", "readonly", get_fs_count, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, protocol=RESPONSE_BINARY, group="filesystem"),
     Route("POST", "/api/fs/batch", "admin", post_fs_batch, protocol=RESPONSE_JSON_BATCH, body_limit=64 * 1024, group="filesystem"),
+    Route("POST", "/api/fs/resolve-file-candidates", "readonly", post_fs_resolve_file_candidates, protocol=RESPONSE_JSON, body_limit=32 * 1024, group="filesystem"),
     Route("POST", "/api/fs/write", "admin", post_fs_write, protocol=RESPONSE_JSON, group="filesystem"),
     Route("POST", "/api/fs/delete", "admin", post_fs_delete, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),

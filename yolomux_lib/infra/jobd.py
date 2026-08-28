@@ -430,7 +430,9 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
     if operation == "list":
         result = filesystem.list_directory(path, include_repo_info=args.get("include_repo_info") is not False)
     elif operation == "read":
-        result = filesystem.read_file(path)
+        result = filesystem.read_file(path, include_git=args.get("include_git") is True)
+    elif operation == "resolve_file_candidates":
+        result = filesystem.resolve_file_candidates(args.get("paths"))
     elif operation == "html_preview":
         result = filesystem.read_file(path)
         body = html_preview_document(
@@ -447,7 +449,7 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
             "filename": "",
         })
     elif operation == "info":
-        result = filesystem.path_info(path, operation="filesystem_operation.info")
+        result = filesystem.path_info(path, operation="filesystem_operation.info", include_git=args.get("include_git") is True)
     elif operation == "search":
         # Step 4: an opaque cursor selects delta mode; ``search_files`` serves committed journal
         # deltas since it (no traversal) instead of a snapshot. An absent/empty cursor is a snapshot.

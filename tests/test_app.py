@@ -9797,7 +9797,7 @@ def test_publish_session_files_ready_events_keeps_watch_refresh_noninteractive(m
     finally:
         webapp.control_server.stop()
 
-    assert calls == [(("1", 24.0), {"from_ref": None, "to_ref": None, "repo_refs": None, "force": False, "requester": "background-refresh"})]
+    assert calls == [(("1", 24.0), {"from_ref": None, "to_ref": None, "repo_refs": None, "force": False, "requester": "background-refresh", "accepted_operation": True})]
 
 
 def test_dependency_invalidation_counts_are_bounded_by_trigger_not_by_event_volume(monkeypatch):
@@ -11460,7 +11460,7 @@ def _ready_filesystem_product(payload, *, schedule=None):
 
 
 def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_do_not():
-    assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status"}
+    assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status", "resolve_file_candidates"}
     assert {"git_history", "git_commit"} <= app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
