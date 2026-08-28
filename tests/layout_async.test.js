@@ -2259,6 +2259,7 @@ async function runLayoutAsyncSuite() {
     api.setFetchForTest((url, options = {}) => {
       const route = String(url);
       const operation = route.startsWith('/api/fs/read') ? 'read'
+        : route.startsWith('/api/fs/info') ? 'info'
         : route.startsWith('/api/fs/diff') ? 'diff'
           : route === '/api/fs/write' && options.method === 'POST' ? 'write' : '';
       assert.ok(operation, `unexpected editor fetch ${route}`);
@@ -2305,15 +2306,10 @@ async function runLayoutAsyncSuite() {
     assert.ok(await repeatedOpen);
     assert.equal(api.currentFileStateForTest(path).content, 'original\n');
     await flushAsyncWork();
-    assert.equal(receipts.filter(receipt => receipt.operation === 'read').length, 2, 'the base read paints first, then a separate deferred Git read starts');
+    assert.equal(receipts.filter(receipt => receipt.operation === 'read').length, 1, 'the base read paints before metadata decoration starts');
+    assert.equal(receipts.filter(receipt => receipt.operation === 'info').length, 1, 'the deferred Git operation reads metadata without rereading content');
     settle(receipts.at(-1), {
       path,
-      content: 'original\n',
-      size: 9,
-      mtime: 1,
-      mtime_ns: 1,
-      realpath: path,
-      file_id: 'dev:1:ino:2',
       git_root: '/repo',
       git_tracked: true,
       git_history: [{ref: 'HEAD'}],
@@ -5450,6 +5446,244 @@ async function runLayoutAsyncSuite() {
     }
   });
 
+  await testAsync('session-files background completion applies its ready payload without another accepted request', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({session: '1', loaded: true, repos: [], files: [], errors: []}));
+    });
+    const request = {session: '1', hours: 24, from_ref: '', to_ref: '', repo_refs: {}};
+    const staleData = {session: '1', loaded: true, repos: [{repo: '/stale'}], files: [], errors: [], from_ref: '', to_ref: ''};
+    const freshData = {session: '1', loaded: true, repos: [{repo: '/ready'}], files: [], errors: [], from_ref: '', to_ref: ''};
+
+    api.applySessionFilesPayloadFromPushForTest(staleData, request);
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/stale', 'the stale HTTP generation is initially visible in Finder');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().payload.repos[0].repo, '/stale', 'the stale HTTP generation is initially visible in Differ');
+    api.handleClientPushEventNowForTest('session_files_ready', {request, data: freshData});
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/ready', 'the ready push applies to Finder');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().payload.repos[0].repo, '/ready', 'the ready push applies to Differ');
+    const cacheView = 'a'.repeat(64);
+    const requestDescriptor = '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e';
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: '1', cache_key_hash: 'ready-generation', cache_view_id: cacheView, request_descriptor: requestDescriptor});
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, [`/api/session-files?from=HEAD&to=current&session=1&hours=24&cache_only=1&cache_view=${cacheView}`], 'the redacted completion may revalidate the canonical cache once, but cannot start another accepted session-files request');
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: '1', cache_key_hash: 'ready-generation', cache_view_id: cacheView, request_descriptor: requestDescriptor});
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: 'other-session', cache_key_hash: 'other-generation', cache_view_id: 'b'.repeat(64), request_descriptor: requestDescriptor});
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: '1', cache_key_hash: 'wrong-descriptor', cache_view_id: 'c'.repeat(64), request_descriptor: 'd'.repeat(64)});
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, [`/api/session-files?from=HEAD&to=current&session=1&hours=24&cache_only=1&cache_view=${cacheView}`], 'an exact replay and a wrong-session completion perform zero cache-view reads');
+  });
+
+  await testAsync('a cache-only pending response consumes its session-files completion once', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.applySessionFilesPayloadFromPushForTest({session: '1', loaded: true, repos: [{repo: '/preserved'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}, {session: '1', from_ref: 'HEAD', to_ref: 'current'});
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({session: '1', state: 'queued', status: 'pending', retry_after_seconds: 1}, 202));
+    });
+    const cacheView = 'c'.repeat(64);
+    const completion = {role: 'session-files', session: '1', cache_key_hash: 'pending-generation', cache_view_id: cacheView, request_descriptor: '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e'};
+    api.handleClientPushEventNowForTest('background_refresh_done', completion);
+    await new Promise(resolve => setImmediate(resolve));
+    api.handleClientPushEventNowForTest('background_refresh_done', completion);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(requests.length, 1, 'a bounded cache-only 202 consumes its completion so an EventSource replay cannot create a disk-read loop');
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/preserved', 'a cache miss preserves the current browser state');
+  });
+
+  await testAsync('a newer session-files completion queues behind its in-flight older cache view', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const requestDescriptor = 'e'.repeat(64); // Server-issued descriptor for a canonicalized repo-ref spelling.
+    api.applySessionFilesPayloadFromPushForTest({session: '1', loaded: true, repos: [{repo: '/base'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current', cache: {request_descriptor: requestDescriptor}}, {session: '1', from_ref: 'HEAD', to_ref: 'current'});
+    const pending = [];
+    api.setFetchForTest(url => new Promise(resolve => pending.push({url: String(url), resolve})));
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: '1', cache_key_hash: 'older', cache_view_id: 'a'.repeat(64), request_descriptor: requestDescriptor});
+    await flushAsyncWork();
+    assert.equal(pending.length, 1, 'the older completion opens its one cache-only view');
+    api.handleClientPushEventNowForTest('background_refresh_done', {role: 'session-files', session: '1', cache_key_hash: 'newer', cache_view_id: 'b'.repeat(64), request_descriptor: requestDescriptor});
+    await flushAsyncWork();
+    assert.equal(pending.length, 1, 'the newer completion is sequenced instead of aborting the older cache-only read');
+    pending[0].resolve(jsonResponse({session: '1', loaded: true, repos: [{repo: '/older'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}));
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, 'the queued newer cache view starts only after the older request settles');
+    pending[1].resolve(jsonResponse({session: '1', loaded: true, repos: [{repo: '/newer'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}));
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/newer', 'the newer generation owns the final rendered payload');
+  });
+
+  await testAsync('a completion waits for an ordinary session-files read before applying its cache view', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const pending = [];
+    api.setFetchForTest(url => new Promise(resolve => pending.push({url: String(url), resolve})));
+    const ordinary = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await flushAsyncWork();
+    assert.equal(pending.length, 1, 'the ordinary request starts first');
+    const descriptor = '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e';
+    api.handleClientPushEventNowForTest('background_refresh_done', {
+      role: 'session-files', session: '1', cache_key_hash: 'newer', cache_view_id: 'd'.repeat(64), request_descriptor: descriptor,
+    });
+    await flushAsyncWork();
+    assert.equal(pending.length, 1, 'the completion remains pending instead of being acknowledged behind the ordinary read');
+    pending[0].resolve(jsonResponse({session: '1', loaded: true, repos: [{repo: '/older'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}));
+    await ordinary;
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, `the completion opens exactly one cache view after the ordinary request settles: ${pending.map(entry => entry.url).join(', ')}`);
+    pending[1].resolve(jsonResponse({session: '1', loaded: true, repos: [{repo: '/newer'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}));
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/newer', 'the completion view replaces the older ordinary response');
+  });
+
+  await testAsync('a hidden session-files surface ignores a redacted completion without opening a cache view', async () => {
+    const api = loadYolomux('', ['1']);
+    let fetches = 0;
+    api.setFetchForTest(() => { fetches += 1; return Promise.resolve(jsonResponse({})); });
+    api.handleClientPushEventNowForTest('background_refresh_done', {
+      role: 'session-files', session: '1', cache_key_hash: 'hidden',
+      cache_view_id: 'f'.repeat(64), request_descriptor: 'e'.repeat(64),
+    });
+    await flushAsyncWork();
+    assert.equal(fetches, 0, 'a hidden completion does not open a cache-only request');
+  });
+
+  await testAsync('an EventSource reconnect replays one session-files completion without a second cache read', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      cancelAnimationFrame() {},
+    });
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const descriptor = '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e';
+    const calls = [];
+    api.setFetchForTest(url => {
+      calls.push(String(url));
+      return Promise.resolve(jsonResponse({session: '1', loaded: true, repos: [{repo: '/replayed'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}));
+    });
+    api.installClientEventStreamForTest();
+    const source = api.clientEventTransportStateForTest().source;
+    source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
+    source.onerror();
+    source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
+    const completion = {role: 'session-files', session: '1', cache_key_hash: 'reconnect-generation', cache_view_id: '9'.repeat(64), request_descriptor: descriptor};
+    const replay = {data: JSON.stringify({type: 'background_refresh_done', payload: completion}), type: 'background_refresh_done', lastEventId: '71'};
+    frames.length = 0;
+    source.listeners.get('background_refresh_done')[0](replay);
+    assert.equal(frames.length, 1, 'the replay reaches the transport-owned frame queue');
+    frames.shift()();
+    await flushAsyncWork();
+    source.listeners.get('background_refresh_done')[0](replay);
+    if (frames.length) frames.shift()();
+    await flushAsyncWork();
+    const cacheViewCalls = calls.filter(url => url.includes('/api/session-files?'));
+    assert.equal(cacheViewCalls.length, 1, `the replayed completion consumes one opaque cache view after native reconnect: ${JSON.stringify(calls)}`);
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/replayed');
+  });
+
+  await test('watcher session-files receipt waits for its terminal payload instead of painting an empty ready state', () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const context = {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current', repo_refs: {}};
+    const staleData = {session: '1', loaded: true, repos: [{repo: '/stale'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'};
+    const readyData = {session: '1', loaded: true, repos: [{repo: '/terminal'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'};
+    const receipt = {
+      state: 'queued',
+      request: {id: 'r-watcher-session-files'},
+      operation: {
+        id: 'op-watcher-session-files',
+        kind: 'session_files',
+        cursor: {epoch: 'watcher', seq: 0},
+        context,
+      },
+    };
+
+    api.applySessionFilesPayloadFromPushForTest(staleData, context);
+    api.handleClientPushEventNowForTest('session_files_ready', {request: context, status: 202, data: receipt});
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/stale', 'a watcher receipt cannot normalize into an empty Finder payload');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().payload.repos[0].repo, '/stale', 'a watcher receipt cannot normalize into an empty Differ payload');
+
+    api.handleClientPushEventNowForTest('operation_terminal', {
+      operation: {id: receipt.operation.id, cursor: {epoch: 'watcher', seq: 1}},
+      result: {state: 'ready', request: receipt.request, data: readyData, quality: {complete: true, stale: false}, warnings: []},
+    });
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/terminal', 'the watcher terminal applies to Finder after its receipt');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().payload.repos[0].repo, '/terminal', 'the watcher terminal applies to Differ after its receipt');
+  });
+
+  await test('replayed watcher terminal settles when its session-files receipt arrives later', () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const context = {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current', repo_refs: {}};
+    const receipt = {
+      state: 'queued',
+      request: {id: 'r-replayed-watcher-session-files'},
+      operation: {
+        id: 'op-replayed-watcher-session-files',
+        kind: 'session_files',
+        cursor: {epoch: 'watcher-replay', seq: 0},
+        context,
+      },
+    };
+    const readyData = {session: '1', loaded: true, repos: [{repo: '/replayed-terminal'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'};
+
+    api.handleClientPushEventNowForTest('operation_terminal', {
+      operation: {id: receipt.operation.id, cursor: {epoch: 'watcher-replay', seq: 1}},
+      result: {state: 'ready', request: receipt.request, data: readyData, quality: {complete: true, stale: false}, warnings: []},
+    });
+    api.handleClientPushEventNowForTest('session_files_ready', {request: context, status: 202, data: receipt});
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/replayed-terminal', 'a replayed terminal settles Finder when the watcher receipt registers');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().payload.repos[0].repo, '/replayed-terminal', 'a replayed terminal settles Differ when the watcher receipt registers');
+  });
+
   await testAsync('authoritative session-files push fences stale HTTP without aborting its finite transport', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
@@ -7094,8 +7328,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.editorViewModeFor(realPath, firstItem), 'diff', 'alias open applies the requested mode to the existing editor');
       assert.equal(api.currentFileStateForTest(realPath).content, 'dirty edit\n', 'alias open preserves the dirty buffer');
       const readCalls = calls.filter(url => url.startsWith('/api/fs/read'));
-      assert.equal(readCalls.length, 2, 'entry identity avoids a second base read before focusing the existing editor');
-      assert.equal(readCalls.filter(url => url.includes('include_git=1')).length, 1, 'the one deferred Git read follows the already-painted base content');
+      const metadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
+      assert.equal(readCalls.length, 1, 'entry identity avoids a second base read before focusing the existing editor');
+      assert.equal(metadataCalls.length, 1, 'the one deferred Git operation follows the already-painted base content without rereading bytes');
     }
 
     {
@@ -7241,8 +7476,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.currentFileStateForTest(oldPath).externalMissing, true, 'old path remains marked missing');
       assert.equal(api.currentFileStateForTest(newPath).content, '# moved\n', 'new path loads fresh file content');
       const newPathReadCalls = calls.filter(url => url.startsWith('/api/fs/read'));
-      assert.deepStrictEqual(newPathReadCalls.map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath, newPath], 'new full path forces a base read followed by deferred Git metadata');
-      assert.equal(newPathReadCalls.filter(url => url.includes('include_git=1')).length, 1, 'only the deferred new-path read asks for Git metadata');
+      const newPathMetadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
+      assert.deepStrictEqual(newPathReadCalls.map(url => decodeURIComponent((url.match(/path=([^&]+)/) || [])[1] || '')), [newPath], 'new full path forces one base content read');
+      assert.equal(newPathMetadataCalls.length, 1, 'the deferred new-path Git operation does not reread content');
     }
 
     {
@@ -7283,8 +7519,9 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(api.openFileEditorItems()), [firstItem], 'concurrent same-path opens leave one editable editor item');
       assert.equal(api.editorViewModeFor(path, firstItem), 'diff', 'the later requested mode applies to the focused existing editor');
       const samePathReadCalls = calls.filter(url => url.startsWith('/api/fs/read'));
-      assert.equal(samePathReadCalls.length, 2, 'same-path opens share one base read and schedule one deferred Git read');
-      assert.equal(samePathReadCalls.filter(url => url.includes('include_git=1')).length, 1, 'the shared open emits no duplicate deferred Git request');
+      const samePathMetadataCalls = calls.filter(url => url.startsWith('/api/fs/info') && url.includes('include_git=1'));
+      assert.equal(samePathReadCalls.length, 1, 'same-path opens share one base read');
+      assert.equal(samePathMetadataCalls.length, 1, 'the shared open emits one metadata-only Git request');
     }
 
     {

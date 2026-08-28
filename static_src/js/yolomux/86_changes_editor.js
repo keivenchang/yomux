@@ -173,6 +173,24 @@ function sessionFilesRequestKey(request = {}, sessionFallback = '') {
   return JSON.stringify(normalized);
 }
 
+function sessionFilesRequestDescriptor(request = {}, sessionFallback = '') {
+  const normalized = normalizedSessionFilesRequest(request, sessionFallback);
+  const repositoryRefs = Object.entries(normalized.repo_refs)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([repo, refs]) => [repo, String(refs.from || ''), String(refs.to || '')]);
+  return sha256HexOfString(JSON.stringify([
+    'session-files-request', normalized.session, normalized.hours,
+    normalized.from_ref, normalized.to_ref, repositoryRefs,
+  ]));
+}
+
+function sessionFilesDescriptorForDestination(destination, request) {
+  const descriptor = String(sessionFilesPayloadForDestination(destination)?.cache?.request_descriptor || '');
+  return /^[0-9a-f]{64}$/.test(descriptor)
+    ? descriptor
+    : sessionFilesRequestDescriptor(request, request.session);
+}
+
 function sessionFilesRequestMatchesDestination(request = {}, session = '', destination = 'differ') {
   if (!request || typeof request !== 'object') return false;
   if (destination === 'finder' && !fileExplorerTreePaneIsVisible()) return false;
@@ -805,7 +823,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     state.diffPinnedToRef = '';
   }
   renderFileExplorerChangesPanels({force: true, view: 'differ'});
-  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true, freshGit: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
   return true;
 }
@@ -879,6 +897,7 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
     errors: Array.isArray(payload.errors) ? payload.errors : [],
     warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+    cache: payload.cache && typeof payload.cache === 'object' ? {...payload.cache} : {},
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
     refreshing_elsewhere: payload.refreshing_elsewhere === true,
@@ -1008,6 +1027,10 @@ function sessionFilesStateForDestination(destination = 'differ') {
 }
 
 const sessionFilesProducerDeadlineMs = 5000;
+// A redacted background completion is a cache-view hint, not a command to refresh every
+// visible surface. This bounded destination map owns replay acknowledgement and serialization
+// of genuinely newer completions; it replaces a separate unbounded acknowledgement cache.
+const sessionFilesCompletionRevalidations = new Map();
 
 function scheduleSessionFilesProducerDeadline(destination, payload) {
   if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return;
@@ -1154,7 +1177,10 @@ function renderSessionFilesDestination(destination, options = {}) {
 async function fetchSessionFiles(options = {}) {
   const destination = options.destination === 'finder' ? 'finder' : 'differ';
   const forceRefresh = options.force === true;
+  const freshGit = options.freshGit === true;
   const backgroundRefresh = options.background === true;
+  const cacheOnly = options.cacheOnly === true;
+  const cacheView = String(options.cacheView || '');
   const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
@@ -1177,6 +1203,9 @@ async function fetchSessionFiles(options = {}) {
   retireSessionFilesRequest(destination, 'session-files request replaced');
   const requestIsCurrent = state.guard.begin();
   const requestController = typeof AbortController === 'function' ? new AbortController() : null;
+  let releaseCompletionWaiter = null;
+  const completionWaiter = !backgroundRefresh ? new Promise(resolve => { releaseCompletionWaiter = resolve; }) : null;
+  if (completionWaiter) state.completionWaiter = completionWaiter;
   state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
@@ -1190,6 +1219,9 @@ async function fetchSessionFiles(options = {}) {
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
+    if (freshGit) params.set('fresh_git', '1');
+    if (cacheOnly) params.set('cache_only', '1');
+    if (cacheOnly && /^[0-9a-f]{64}$/.test(cacheView)) params.set('cache_view', cacheView);
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
@@ -1213,6 +1245,7 @@ async function fetchSessionFiles(options = {}) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
+    if (cacheOnly && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return true;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
@@ -1224,7 +1257,9 @@ async function fetchSessionFiles(options = {}) {
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
+    return true;
   } catch (err) {
+    if (cacheOnly && isApiPendingResponse(err)) return false;
     if (isApiPendingResponse(err)) {
       const nextPayload = {
         ...emptySessionFilesPayload(session, false, destination),
@@ -1258,6 +1293,10 @@ async function fetchSessionFiles(options = {}) {
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    if (state.completionWaiter === completionWaiter) {
+      state.completionWaiter = null;
+      releaseCompletionWaiter?.();
+    }
     if (current && (shouldRender || wasLoading) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       renderPaneTabStrips();
@@ -1282,9 +1321,77 @@ async function refreshVisibleSessionFilesSurfaces(options = {}) {
       session: request.session,
       silent: options.silent !== false,
       force: options.force === true,
+      cacheOnly: options.cacheOnly === true,
+      cacheView: options.cacheView,
     }));
   }
   await Promise.all(requests);
+}
+
+function sessionFilesCompletionIdentity(completion = {}) {
+  const cacheView = String(completion.cache_view_id || '');
+  const generation = String(completion.cache_key_hash || cacheView);
+  return cacheView && generation ? `${generation}\x1f${cacheView}` : '';
+}
+
+function sessionFilesCompletionCandidates(completion = {}) {
+  const completedSession = String(completion.session || '');
+  const requestDescriptor = String(completion.request_descriptor || '');
+  if (!/^[0-9a-f]{64}$/.test(requestDescriptor)) return [];
+  const destinations = [];
+  if (fileExplorerTreePaneIsVisible()) destinations.push('finder');
+  if (fileExplorerSessionFilesPaneIsVisible()) destinations.push('differ');
+  const seen = new Set();
+  return destinations.map(destination => ({destination, request: sessionFilesRequestForDestination(destination)}))
+    .filter(candidate => {
+      const requestKey = sessionFilesRequestKey(candidate.request, candidate.request.session);
+      if (!candidate.request.session || (completedSession && candidate.request.session !== completedSession) || requestDescriptor !== sessionFilesDescriptorForDestination(candidate.destination, candidate.request) || seen.has(requestKey)) return false;
+      seen.add(requestKey);
+      return true;
+    });
+}
+
+async function refreshSessionFilesCompletionSurfaces(completion = {}) {
+  const cacheView = String(completion.cache_view_id || '');
+  if (!/^[0-9a-f]{64}$/.test(cacheView)) return false;
+  const completionIdentity = sessionFilesCompletionIdentity(completion);
+  const attempts = [];
+  for (const candidate of sessionFilesCompletionCandidates(completion)) {
+    const stateKey = `${candidate.destination}\x1f${candidate.request.session}`;
+    const existing = sessionFilesCompletionRevalidations.get(stateKey);
+    if (existing?.identity === completionIdentity) {
+      attempts.push(existing.promise || Promise.resolve(existing.acknowledged));
+      continue;
+    }
+    const run = async () => {
+      // A completion cannot be acknowledged while an ordinary request owns this destination:
+      // that response may be older than the opaque view. Wait for it to settle, then read the
+      // completion's single cache view without aborting either transport.
+      const ordinaryRequest = sessionFilesStateForDestination(candidate.destination).completionWaiter;
+      if (ordinaryRequest) await ordinaryRequest;
+      const applied = await fetchSessionFiles({
+        destination: candidate.destination,
+        session: candidate.request.session,
+        silent: true,
+        cacheOnly: true,
+        cacheView,
+      });
+      const current = sessionFilesCompletionRevalidations.get(stateKey);
+      if (current?.identity !== completionIdentity) return false;
+      // Both a ready response and the bounded cache-only pending response consume this
+      // completion. Retrying the same opaque view on replay adds disk reads but cannot produce
+      // newer data; a later producer completion has its own identity and remains eligible.
+      current.acknowledged = true;
+      return true;
+    };
+    // A newer completion is serialized after the destination's finite older cache read. Starting
+    // both would abort the old response and turn normal EventSource ordering into a timing race.
+    const promise = (existing?.promise ? existing.promise.then(run, run) : run());
+    sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, acknowledged: false, promise});
+    attempts.push(promise);
+  }
+  const outcomes = await Promise.all(attempts);
+  return outcomes.some(Boolean);
 }
 
 function applySessionFilesPayloadToDestination(destination, payload, request, session) {
@@ -2279,6 +2386,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const openOptions = {
     item,
     ownerSession,
+    includeGit: openDiffMode,
     viewMode: initialMode,
     forceNewTab: options.forceNewTab === true,
     userInitiated: options.userInitiated !== false,

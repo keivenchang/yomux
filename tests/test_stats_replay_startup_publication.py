@@ -240,6 +240,10 @@ def test_all_owed_startup_repair_keeps_the_warm_owner_until_ring_convergence(
         assert repaired.buckets_updated == len(owed_cells)
         assert restarted._pending_ring_dirty == set()
         assert restarted._next_ring_flush_at is None
+        # Exact startup repair reserves durable slots but must not install a warm-view
+        # freshness floor: no public range has been demanded or rebuilt yet.  The
+        # ordinary coherent publication below is the sole owner that may advance it.
+        assert restarted._ring_published_cursors == {}
         assert storage.pending_invalidation_cells(reopened._connection()) == ()
         public_after_repair = int(reopened._connection().execute(
             "SELECT ring_generation FROM aggregate_publication WHERE singleton = 1"

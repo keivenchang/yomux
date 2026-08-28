@@ -548,6 +548,7 @@ const fileExplorerSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
   abortController: null,
+  completionWaiter: null,
 };
 const fileExplorerFinderSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
@@ -555,6 +556,7 @@ const fileExplorerFinderSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
   abortController: null,
+  completionWaiter: null,
 };
 // One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.

@@ -4857,7 +4857,7 @@ def test_activity_summary_cold_session_files_schedules_refresh_without_waiting(m
         "refreshing_elsewhere": True,
     }
     assert len(refreshes) == 1
-    assert refreshes[0][1] == webapp.refresh_session_files_info_cache
+    assert refreshes[0][1] == webapp.refresh_session_files_cache
 
 
 def test_activity_summary_bytes_returns_typed_terminal_statusd_failure(monkeypatch, legacy_activity_summary_enabled):
@@ -6276,9 +6276,9 @@ def test_two_app_session_files_callers_share_jobd_product_until_watcher_generati
         status_before = first.job_client.request({"action": "status"})
 
         for webapp in (first, second):
-            with webapp.session_files_service.cache_lock:
-                webapp.session_files_service.repo_dirty_generations[str(repo)] = 1
+            webapp.mark_repo_state_dirty([repo])
         changed_payload, changed_status = first.session_files_payload_for_infos("5", {"5": idle}, 24.0, force=True, requester="filesystem-event")
+        assert first.session_files_service.wait_for_idle(2.0)
         status_after = first.job_client.request({"action": "status"})
     finally:
         first.control_server.stop()
@@ -6287,14 +6287,18 @@ def test_two_app_session_files_callers_share_jobd_product_until_watcher_generati
         worker.join(timeout=2.0)
 
     assert first_status == second_status == changed_status == HTTPStatus.OK
-    assert first_payload == second_payload
+    # The first caller built the product and the second reused it. Cache diagnostics are local
+    # delivery facts (hit and age), not part of the shared session-files product.
+    assert {key: value for key, value in first_payload.items() if key != "cache"} == {
+        key: value for key, value in second_payload.items() if key != "cache"
+    }
     assert changed_payload["files"] == first_payload["files"]
-    # Status/Finder churn may rebuild the lightweight attribution product, but the shared Git
-    # snapshot must be reused until the watcher-authoritative repository generation changes.
-    assert status_before["product_counters"]["session_files_view"]["completed"] == 2
+    # Both callers share one completed product.  The watcher-authoritative generation change is
+    # the only event in this scenario that may create the next product.
+    assert status_before["product_counters"]["session_files_view"]["completed"] == 1
     assert status_before["product_work_totals"]["session_files_view"]["git_snapshots"] == 1
-    assert status_before["product_work_totals"]["session_files_view"]["git_snapshot_cache_hits"] == 1
-    assert status_after["product_counters"]["session_files_view"]["completed"] == 3
+    assert status_before["product_work_totals"]["session_files_view"]["git_snapshot_cache_hits"] == 0
+    assert status_after["product_counters"]["session_files_view"]["completed"] == 2
     assert status_after["product_work_totals"]["session_files_view"]["git_snapshots"] == 2
 
 

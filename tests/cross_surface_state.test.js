@@ -183,6 +183,7 @@ async function runCrossSurfaceStateSuite() {
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'https://yolomux.test');
       requests.push(parsed);
+      if (parsed.pathname === '/api/fs/batch') return Promise.resolve(jsonResponse({responses: [{id: 1, ok: true, status: 200, payload: {path, kind: 'file', repo_root: '/repo', git_tracked: true, git_history: [{ref: 'HEAD'}, {ref: 'old'}], git_has_history: true}}]}));
       if (parsed.pathname === '/api/fs/read') return Promise.resolve(jsonResponse({path, content: 'old\n', size: 4, mtime: 1, git_root: '/repo', git_tracked: true, git_history: [{ref: 'HEAD'}, {ref: 'old'}], git_has_history: true}));
       if (parsed.pathname === '/api/fs/diff') return Promise.resolve(jsonResponse({repo: '/repo', relative_path: 'app.js', from_ref: parsed.searchParams.get('from'), to_ref: parsed.searchParams.get('to'), diff: 'fresh', original: 'old\n', working: 'dirty\n'}));
       throw new Error(`unexpected request ${parsed.pathname}`);

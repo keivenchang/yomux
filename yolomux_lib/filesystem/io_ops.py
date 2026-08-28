@@ -638,6 +638,7 @@ def _existing_path_info(
             "diff_capable": diff_capable,
             "repo_root": repo_root,
             "git_tracked": tracked,
+            "git_history": history,
             "git_has_history": bool(history),
             "relative_path": relative_path,
             "repo": repo_info,

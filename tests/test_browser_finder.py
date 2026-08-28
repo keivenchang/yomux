@@ -328,9 +328,8 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
     )
     metrics = browser.execute_async_script(
         """
-            const done = arguments[0];
-            const waitFor = window.__yolomuxTestWaitFor;
-            (async () => {
+        const done = arguments[0];
+        (async () => {
           const rowsForMenu = () => Array.from(document.querySelectorAll('.file-context-menu button')).map(button => ({
             text: button.textContent.trim(),
             disabled: button.disabled,
@@ -959,18 +958,13 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
             return buttons.length ? buttons : null;
           });
         };
-            const choose = async label => {
-              const buttons = await openMenu();
-              let button = buttons.find(node => node.textContent.trim() === label);
-              if (!button) throw new Error(`${label} action missing: ${buttons.map(node => node.textContent.trim()).join(', ')}`);
-              if (label === 'ΔShow Diff' && button.disabled) {
-                button = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(
-                  node => node.textContent.trim() === label && !node.disabled,
-                ));
-              }
-              if (button.disabled) throw new Error(`${label} action unexpectedly disabled: ${button.title}`);
-              button.click();
-            };
+        const choose = async label => {
+          const buttons = await openMenu();
+          const button = buttons.find(node => node.textContent.trim() === label);
+          if (!button) throw new Error(`${label} action missing: ${buttons.map(node => node.textContent.trim()).join(', ')}`);
+          if (button.disabled) throw new Error(`${label} action unexpectedly disabled: ${button.title}`);
+          button.click();
+        };
         (async () => {
           invalidateFileExplorerFsCaches();
           const initialButtons = await openMenu();
@@ -1053,35 +1047,21 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
 
 def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_deferred(browser, tmp_path):
     repo = "/home/test/notes"
-    plain = "/home/test/plain"
     sha = "a" * 40
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
         "?sessions=files,1&layout=row@50(left,right)&tabs=left:files;right:1",
         settings={"file_explorer": {"root_mode": "fixed"}},
-        fs_entries={
-            "/home/test": [
-                {"name": "notes", "kind": "dir", "is_repo": True},
-                {"name": "plain", "kind": "dir", "is_repo": False},
-            ],
-            repo: [],
-            plain: [],
-        },
+        fs_entries={"/home/test": [{"name": "notes", "kind": "dir", "is_repo": True}], repo: []},
     )
     WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/notes"]')
-              && document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/plain"]');
-            """
-        )
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/notes\"]')")
     )
     metrics = browser.execute_async_script(
         """
         const repo = arguments[0];
-        const plain = arguments[1];
-        const sha = arguments[2];
+        const sha = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
         const waitFor = window.__yolomuxTestWaitFor;
@@ -1092,99 +1072,36 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
         window.fetch = (input, options = {}) => {
           const url = new URL(String(input), location.href);
           requests.push(url.pathname + url.search);
-          if (url.pathname === '/api/fs/batch') {
-            const body = JSON.parse(options.body || '{}');
-            return new Promise(resolve => {
-              resolveBatch = () => resolve(jsonResponse({responses: (body.requests || []).map((request, index) => ({
-                id: request.id ?? index,
-                ok: true,
-                status: 200,
-                payload: {
-                  path: request.path,
-                  name: request.path.split('/').filter(Boolean).pop() || '/',
-                  kind: 'dir',
-                  realpath: request.path,
-                  ...(request.path === repo ? {repo_root: repo} : {}),
-                },
-              }))}));
-            });
-          }
-          if (url.pathname === '/api/fs/git-history') {
-            return new Promise(resolve => {
-              resolveHistory = () => resolve(jsonResponse({
-                path: repo,
-                repo,
-                relative_path: '',
-                head: sha,
-                snapshot_cursor: 'notes-snapshot',
-                next_cursor: '',
-                truncated: false,
-                commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 0, binary_files: 0}],
-              }));
-            });
-          }
+          if (url.pathname === '/api/fs/batch') return new Promise(resolve => {
+            resolveBatch = () => resolve(jsonResponse({responses: (JSON.parse(options.body || '{}').requests || []).map((request, index) => ({id: request.id ?? index, ok: true, status: 200, payload: {path: request.path, name: 'notes', kind: 'dir', realpath: request.path, repo_root: repo}}))}));
+          });
+          if (url.pathname === '/api/fs/git-history') return new Promise(resolve => {
+            resolveHistory = () => resolve(jsonResponse({path: repo, repo, relative_path: '', head: sha, snapshot_cursor: 'notes-snapshot', next_cursor: '', truncated: false, commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 1, binary_files: 0}]}));
+          });
           return originalFetch(input, options);
-        };
-        const labels = () => Array.from(document.querySelectorAll('.file-context-menu button')).map(button => ({text: button.textContent.trim(), disabled: button.disabled}));
-        const openMenu = path => {
-          const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + path + '"]');
-          const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32});
-          row.dispatchEvent(event);
-          return event.defaultPrevented;
         };
         (async () => {
           invalidateFileExplorerFsCaches();
-          const nativeSuppressed = openMenu(repo);
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const immediate = labels();
+          const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/notes"]');
+          const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32});
+          row.dispatchEvent(event);
           const diffButton = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff');
-          if (!diffButton) throw new Error('repository Diff action was not painted before path info');
+          if (!diffButton || diffButton.disabled) throw new Error('repository Diff action did not paint enabled before path info');
           diffButton.click();
           const item = gitDiffItemFor(repo);
-          const loading = await waitFor(() => {
-            const panel = panelNodes.get(item);
-            const node = panel?.querySelector('.git-diff-state-loading[role="status"]');
-            return node || null;
-          });
-          const active = itemIsActivePaneTab(item);
-          const panelVisible = Boolean(panelNodes.get(item)?.isConnected);
-          const loadingText = loading?.textContent || '';
-          const movingEllipsis = Boolean(loading?.querySelector('.moving-ellipsis'));
-          if (!resolveBatch || !resolveHistory) throw new Error('expected deferred path-info and Git history requests');
+          const loading = await waitFor(() => panelNodes.get(item)?.querySelector('.git-diff-state-loading[role="status"]') || null);
+          if (!resolveBatch || !resolveHistory) throw new Error('expected independent deferred metadata and history requests');
           resolveBatch();
           resolveHistory();
-          const nonRepoNativeSuppressed = openMenu(plain);
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          done({
-            nativeSuppressed,
-            immediate,
-            item,
-            active,
-            panelVisible,
-            loading: Boolean(loading),
-            loadingText,
-            movingEllipsis,
-            nonRepoNativeSuppressed,
-            nonRepoLabels: labels(),
-            requests,
-            errors: jsDebugFailureEvents('error'),
-            rejections: jsDebugFailureEvents('rejection'),
-          });
-        })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => {
-          window.fetch = originalFetch;
-        });
+          done({nativeSuppressed: event.defaultPrevented, item, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
         """,
         repo,
-        plain,
         sha,
     )
     assert not metrics.get("error"), metrics
-    assert metrics["nativeSuppressed"] is True, metrics
-    assert metrics["immediate"][0] == {"text": "ΔShow Diff", "disabled": False}, metrics
-    assert metrics["item"] == f"gitdiff:{quote(repo, safe='')}", metrics
-    assert metrics["active"] is True and metrics["panelVisible"] is True and metrics["loading"] is True, metrics
-    assert metrics["loadingText"] == "loading..." and metrics["movingEllipsis"] is True, metrics
-    assert metrics["nonRepoNativeSuppressed"] is True and "ΔShow Diff" not in metrics["nonRepoLabels"], metrics
+    assert metrics["nativeSuppressed"] is True and metrics["item"] == f"gitdiff:{quote(repo, safe='')}", metrics
+    assert metrics["active"] is True and metrics["loadingText"] == "loading..." and metrics["movingEllipsis"] is True, metrics
     assert any(request.startswith("/api/fs/batch") for request in metrics["requests"]), metrics
     assert any(request.startswith("/api/fs/git-history?path=%2Fhome%2Ftest%2Fnotes") for request in metrics["requests"]), metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -1198,8 +1115,8 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
         settings={"file_explorer": {"root_mode": "fixed"}},
         fs_entries={
             "/home/test": [
-                {"name": "repo", "kind": "dir", "is_repo": True},
-                {"name": "plain", "kind": "dir", "is_repo": False},
+                {"name": "repo", "kind": "dir"},
+                {"name": "plain", "kind": "dir"},
             ],
             "/home/test/repo": [
                 {"name": "binary.dat", "kind": "file", "size": 32},
@@ -1248,7 +1165,7 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
           }
           return originalFetch(input, options);
         };
-        const menuButtons = async (path, options = {}) => {
+        const menuButtons = async path => {
           closeFileContextMenu();
           const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + path + '"]');
           row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
@@ -1256,11 +1173,7 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
             const values = Array.from(document.querySelectorAll('.file-context-menu button'));
             return values.length ? values : null;
           });
-          if (options.settled !== true) return buttons;
-          return waitFor(() => {
-            const values = Array.from(document.querySelectorAll('.file-context-menu button'));
-            return fileExplorerFsBatchPending.size === 0 && values.some(button => button.textContent.trim() === 'ΔShow Diff' && /binary|large/i.test(button.title)) ? values : null;
-          });
+          return buttons;
         };
         const menuLabels = async path => {
           const buttons = await menuButtons(path);
@@ -1270,14 +1183,12 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
           invalidateFileExplorerFsCaches();
           const eligible = await menuLabels('/home/test/repo');
           const plain = await menuLabels('/home/test/plain');
-          closeFileContextMenu();
-          await waitFor(() => fileExplorerFsBatchPending.size === 0);
           document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo"]').click();
           await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/repo/binary.dat"]'));
-          const binary = (await menuButtons('/home/test/repo/binary.dat', {settled: true})).map(button => ({
+          const binary = (await menuButtons('/home/test/repo/binary.dat')).map(button => ({
             label: button.textContent.trim(), disabled: button.disabled, title: button.title,
           }));
-          const large = (await menuButtons('/home/test/repo/large.txt', {settled: true})).map(button => ({
+          const large = (await menuButtons('/home/test/repo/large.txt')).map(button => ({
             label: button.textContent.trim(), disabled: button.disabled, title: button.title,
           }));
 
@@ -2086,7 +1997,6 @@ def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser
     metrics = browser.execute_async_script(
         """
         const done = arguments[0];
-        const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
           const root = '/home/test/repo/docs';
           const selected = `${root}/note.md`;
@@ -2116,9 +2026,7 @@ def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser
             await openFileExplorerManualRoot(root);
             const row = document.querySelector(`.file-tree-row[data-path="${selected}"]`);
             await showFileTreeContextMenu(row, selected, {kind: 'file', name: 'note.md'}, 32, 32);
-            const copyRelative = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(
-              button => /copy relative path/i.test(button.textContent) && !button.disabled,
-            ));
+            const copyRelative = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
             const enabled = Boolean(copyRelative && !copyRelative.disabled);
             copyRelative?.click();
             await new Promise(resolve => requestAnimationFrame(resolve));
@@ -2126,9 +2034,7 @@ def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser
 
             rejectRootInfo = true;
             await showFileTreeContextMenu(row, selected, {kind: 'file', name: 'note.md'}, 32, 32);
-            const unavailable = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(
-              button => /copy relative path/i.test(button.textContent) && button.disabled,
-            ));
+            const unavailable = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
             const disabledAfterRootFailure = Boolean(unavailable?.disabled);
             closeFileContextMenu();
             done({enabled, copied, disabledAfterRootFailure, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});

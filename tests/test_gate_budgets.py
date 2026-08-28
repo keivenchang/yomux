@@ -10,10 +10,14 @@ import os
 import re
 import socket
 import stat
+import subprocess
+import sys
 import threading
+import tempfile
 import time
 from urllib.parse import urlencode
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +26,7 @@ from yolomux_lib.local_services import registry as local_services_registry
 from yolomux_lib.local_services import rpc as local_service_rpc_module
 from yolomux_lib.approval.approvald import ApprovalClient
 from yolomux_lib.infra import jobd as jobd_module
+from yolomux_lib.filesystem import git_ops
 from yolomux_lib.infra.jobd import JobClient
 from yolomux_lib.infra.jobd import PersistentJobBroker
 from yolomux_lib.local_services.client import LocalServiceClient
@@ -68,6 +73,17 @@ def test_gate_runtime_paths_are_fixture_owned(gate_runtime_paths):
     assert os.environ["HOME"] == str(gate_runtime_paths.home_dir)
     assert os.environ["YOLOMUX_CONFIG_DIR"] == str(gate_runtime_paths.config_dir)
     assert os.environ["YOLOMUX_STATE_DIR"] == str(gate_runtime_paths.state_dir)
+    assert os.environ["TMPDIR"] == str(gate_runtime_paths.tmp_dir)
+    assert Path(tempfile.gettempdir()).resolve() == gate_runtime_paths.tmp_dir.resolve()
+    assert gate_runtime_paths.chrome_profile_dir.is_dir()
+    assert git_ops._git_loose_object_cache_root().is_relative_to(gate_runtime_paths.tmp_dir)
+    child_tempdir = subprocess.run(
+        [sys.executable, "-c", "import tempfile; print(tempfile.gettempdir())"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    assert Path(child_tempdir).resolve() == gate_runtime_paths.tmp_dir.resolve()
     assert gate_runtime_paths.auth_config_path == gate_runtime_paths.config_dir / "auth.yaml"
     patched_paths = dict(gate_runtime_paths.patched_module_paths)
     assert patched_paths["yolomux_lib.infra.common.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path

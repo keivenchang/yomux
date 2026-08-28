@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 import tempfile
@@ -99,7 +100,7 @@ RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "DOIT.075.2." + "yo" + "share-removal.md",
 ))
 RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
-    ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".git", ".claude", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
 RETIRED_SHARE_SKIPPED_SUFFIXES: Final[tuple[str, ...]] = (".agent-edit.lock",)
 
@@ -346,33 +347,41 @@ def _source_text_assertions(root: Path) -> dict[str, Any]:
 
 def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
     violations: list[str] = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        relative = path.relative_to(root).as_posix()
-        parts = Path(relative).parts
-        if any(
-            part in RETIRED_SHARE_SKIPPED_PARTS or part.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
-            for part in parts
-        ):
-            continue
-        if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "DONE":
-            continue
-        if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS:
-            violations.append(f"retired_share_surface: forbidden filename {relative}")
-        if relative in RETIRED_SHARE_CONTENT_EXCEPTIONS:
-            continue
-        content = path.read_bytes()
-        lowered = content.lower()
-        matches: list[tuple[int, str]] = []
-        for token in RETIRED_SHARE_CONTENT_TOKENS:
-            offset = lowered.find(token.lower())
-            if offset >= 0:
-                matches.append((offset, token.decode("ascii")))
-        key_match = RETIRED_SHARE_I18N_KEY_RE.search(content)
-        if key_match:
-            matches.append((key_match.start(), "quoted retired i18n key"))
-        for offset, label in sorted(matches):
-            line = content.count(b"\n", 0, offset) + 1
-            violations.append(f"retired_share_surface: {relative}:{line}: forbidden {label}")
+    for parent, directories, filenames in os.walk(root):
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory not in RETIRED_SHARE_SKIPPED_PARTS
+            and not directory.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
+        )
+        for filename in sorted(filenames):
+            path = Path(parent) / filename
+            relative = path.relative_to(root).as_posix()
+            parts = Path(relative).parts
+            if any(
+                part in RETIRED_SHARE_SKIPPED_PARTS or part.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
+                for part in parts
+            ):
+                continue
+            if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "DONE":
+                continue
+            if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS:
+                violations.append(f"retired_share_surface: forbidden filename {relative}")
+            if relative in RETIRED_SHARE_CONTENT_EXCEPTIONS:
+                continue
+            content = path.read_bytes()
+            lowered = content.lower()
+            matches: list[tuple[int, str]] = []
+            for token in RETIRED_SHARE_CONTENT_TOKENS:
+                offset = lowered.find(token.lower())
+                if offset >= 0:
+                    matches.append((offset, token.decode("ascii")))
+            key_match = RETIRED_SHARE_I18N_KEY_RE.search(content)
+            if key_match:
+                matches.append((key_match.start(), "quoted retired i18n key"))
+            for offset, label in sorted(matches):
+                line = content.count(b"\n", 0, offset) + 1
+                violations.append(f"retired_share_surface: {relative}:{line}: forbidden {label}")
     return tuple(violations)
 
 

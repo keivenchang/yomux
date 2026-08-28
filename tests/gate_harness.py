@@ -236,6 +236,8 @@ class GateRuntimePaths:
     log_dir: Path
     workspace_dir: Path
     upload_dir: Path
+    tmp_dir: Path
+    chrome_profile_dir: Path
     patched_module_paths: tuple[tuple[str, Path], ...]
 
 
@@ -309,6 +311,9 @@ def resolved_gate_writable_paths(paths: GateRuntimePaths) -> dict[str, Path]:
     resolved[f"env:{GATE_ROOT_ENV_VAR}"] = Path(os.environ[GATE_ROOT_ENV_VAR])
     resolved.update({f"module:{label}": path for label, path in paths.patched_module_paths})
     resolved["module:yolomux_lib.workspace.uploads.UPLOAD_TMP_BASE"] = uploads_module.UPLOAD_TMP_BASE
+    resolved["env:TMPDIR"] = Path(os.environ["TMPDIR"])
+    resolved["fixture:tmp_dir"] = paths.tmp_dir
+    resolved["fixture:chrome_profile_dir"] = paths.chrome_profile_dir
     return resolved
 
 
@@ -344,9 +349,16 @@ def patch_imported_writable_constants(
 
 
 @pytest.fixture
-def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimePaths]:
+def gate_runtime_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterable[GateRuntimePaths]:
     """Own every writable runtime root and imported path constant for one test."""
 
+    # Pytest lazily derives its own tmp_path base from TMPDIR.  Establish that base before this
+    # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
+    # deletes pytest's cached base and every later tmp_path fixture fails during setup.
+    tmp_path_factory.getbasetemp()
     root = Path(tempfile.mkdtemp(prefix="yag-", dir="/tmp"))
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
@@ -363,6 +375,8 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
     log_dir = root / "logs"
     workspace_dir = root / "workspaces"
     upload_dir = root / "uploads"
+    tmp_dir = root / "tmp"
+    chrome_profile_dir = root / "chrome-profile"
     for directory in (
         home_dir,
         config_dir,
@@ -375,6 +389,8 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         log_dir,
         workspace_dir,
         upload_dir,
+        tmp_dir,
+        chrome_profile_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -401,6 +417,10 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
     for name, path in per_test_env.items():
         monkeypatch.setenv(name, str(path))
     monkeypatch.setenv(GATE_ROOT_ENV_VAR, str(root))
+    monkeypatch.setenv("TMPDIR", str(tmp_dir))
+    previous_tempdir = tempfile.tempdir
+    tempfile.tempdir = None
+    assert Path(tempfile.gettempdir()).resolve() == tmp_dir.resolve()
     # Keep the default Finder-root lookup and its native filesystem watcher
     # inside this test's owned HOME tree.
     monkeypatch.setenv(GATE_HOME_ENV_VAR, str(home_dir))
@@ -455,12 +475,15 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         log_dir=log_dir,
         workspace_dir=workspace_dir,
         upload_dir=upload_dir,
+        tmp_dir=tmp_dir,
+        chrome_profile_dir=chrome_profile_dir,
         patched_module_paths=patched_module_paths,
     )
     assert_writable_paths_beneath(root, resolved_gate_writable_paths(paths))
     try:
         yield paths
     finally:
+        tempfile.tempdir = previous_tempdir
         # Removing the root is the last act of this fixture, so every writer it
         # owns has to be retired first.  A local-service daemon spawned straight
         # from gate_runtime_paths (JobClient/ApprovalClient, no app) unlinks its

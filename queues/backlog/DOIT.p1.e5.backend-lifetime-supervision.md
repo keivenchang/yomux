@@ -17,6 +17,10 @@ Every backend and sidecar has one explicit lifetime owner, exits within a numeri
 
 Backend retirement and same-root owner election use the same host/boot/process/generation identity, service records, locks, signals, unlink, reclaim, and adoption paths. Implementing them in separate queues would make two agents edit the same lifecycle owner and could leave private-root and caller-shared-root behavior inconsistent.
 
+## Scope Transfer
+
+- On 2026-08-27, the user transferred jobd executor-slot replacement, generation fencing, quarantine, and reaping from this queue to `DOIT.p0.e5.instant-file-open-and-bounded-jobd.md`. E5 exclusively owns `yolomux_lib/infra/jobd.py` and shared jobd retirement tests for that work; implementation is deferred until the user resumes E5. This queue retains all non-jobd backend lifetime, process-identity, same-root coordination, and local-service lifecycle work, and must not add a parallel jobd executor owner.
+
 ## Context
 
 - Historical evidence found daemon/storaged processes reparented to PID 1 for 66 minutes because startup-only preflight was the sole reaper, self-connections prevented idle expiry, and the sidecar ledger was empty. Current topology must be re-inventoried before accepting old symbols or owners.

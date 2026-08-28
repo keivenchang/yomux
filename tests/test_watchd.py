@@ -931,7 +931,7 @@ def test_watchd_slow_generation_bump_does_not_block_an_unrelated_status_request(
     service.handle(_request("upsert", lease_id=lease, descriptor_id="watched", descriptor=descriptor))
     generation = service.watch_generation
     assert service.reconcile(reason="configuration", watch_generation=generation) is not None
-    assert service.repo_generations[str(nested_repo)] == 1
+    assert service.repo_generations.get(str(nested_repo), 0) == 0
     settings_path.write_text('{"changed": true}', encoding="utf-8")
     match_started = threading.Event()
     release_match = threading.Event()
@@ -966,7 +966,7 @@ def test_watchd_slow_generation_bump_does_not_block_an_unrelated_status_request(
 
     assert outcomes["status"]["ok"] is True
     assert outcomes["reconcile"] is not None
-    assert service.repo_generations[str(nested_repo)] == 2
+    assert service.repo_generations[str(nested_repo)] == 1
 
 
 def test_watchd_listener_accepts_a_request_while_the_service_condition_is_held(tmp_path):
@@ -1808,7 +1808,7 @@ def test_watchd_reconcile_detects_content_edit_with_unchanged_directory_mtime(tm
 
     assert revision is not None
     assert revision["changed_paths"] == [str(root)]
-    assert revision["root_generations"] == {str(root): 2}
+    assert revision["root_generations"] == {str(root): 1}
 
 
 def test_watchd_native_content_event_advances_touched_root_before_periodic_reconcile(tmp_path):
@@ -1835,8 +1835,8 @@ def test_watchd_native_content_event_advances_touched_root_before_periodic_recon
 
     assert revision is not None
     assert revision["changed_paths"] == [str(child)]
-    assert revision["root_generations"] == {str(root): 2}
-    assert revision["repo_generations"] == {str(root): 2}
+    assert revision["root_generations"] == {str(root): 1}
+    assert revision["repo_generations"] == {str(root): 1}
     assert service.next_reconcile_at > time.monotonic()
 
 
@@ -1854,7 +1854,7 @@ def test_watchd_coarse_reconcile_projects_ancestor_change_to_nested_repo_generat
         "watch_paths": (str(workspace),),
     })
     service.reconcile(reason="configuration", watch_generation=1)
-    initial_repo_generation = service.repo_generations[str(repo)]
+    initial_repo_generation = service.repo_generations.get(str(repo), 0)
 
     (workspace / "new.txt").write_text("new", encoding="utf-8")
     changed = service.reconcile(reason="fallback", watch_generation=1)
@@ -3159,6 +3159,31 @@ def test_apply_watchd_revision_broad_parent_coarse_reset_delivers_only_the_narro
     stored_repos = webapp.client_watch_service.watchd_repo_generations
     assert parent_s not in stored_repos, stored_repos
     assert stored_repos.get(child_s) == 8, stored_repos
+
+
+def test_apply_watchd_revision_after_web_restart_invalidates_retained_repo_view(tmp_path, monkeypatch):
+    """The daemon's first retained nonzero generation must invalidate an old web cache view."""
+
+    repo = tmp_path / "project"
+    repo.mkdir()
+    repo_s = str(repo.resolve())
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord(watchd_epoch="e1", filesystem_roots=(repo_s,), watchd_revision=0)
+    webapp.client_watch_service.event_watcher_record = record
+    webapp.session_files_service.repo_dirty_generations[repo_s] = 0
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webapp, "mark_indexed_repo_discovery_dirty", lambda _paths: None)
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda **_kwargs: [])
+    revision = {
+        "epoch": "e1", "revision": 19, "healthy": True, "roots": [repo_s],
+        "repo_generations": {repo_s: 7}, "changed_paths": [], "files_changed": [], "token": "e1:19",
+    }
+    policy = FilesystemAccessPolicy(version=FS_ACCESS_POLICY_VERSION, roots=(repo_s,))
+    with filesystem.enforce_access_policy(policy):
+        webapp.apply_watchd_revision(record, revision, reset=True)
+
+    assert webapp.client_watch_service.watchd_repo_generations == {repo_s: 7}
+    assert webapp.session_files_service.repo_dirty_generations[repo_s] == 1
 
 
 def test_apply_watchd_revision_child_repo_generation_increment_is_not_masked_by_a_co_tenant_parent(tmp_path, monkeypatch):

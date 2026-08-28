@@ -54,6 +54,14 @@ TERMINAL_STATE_CONTRACTS = (
         queued_producer_function="accept_jobd_product_operation",
     ),
     TerminalStateContract(
+        contract_id="session-files-http-operation-completion",
+        owner_path=Path("yolomux_lib/app.py"),
+        owner_token="def session_files_http_payload(",
+        proof_path=Path("tests/test_session_files.py"),
+        proof_test="test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready",
+        queued_producer_function="session_files_http_payload",
+    ),
+    TerminalStateContract(
         contract_id="finder-expansion-all-surfaces",
         owner_path=Path("static_src/js/yolomux/60_popovers_tabs.js"),
         owner_token="function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries)",

@@ -12,6 +12,7 @@ import pytest
 from yolomux_lib import app as app_module
 from yolomux_lib import background_owner as background_owner_module
 from yolomux_lib import control as control_module
+from yolomux_lib.infra import atomic_file as atomic_file_module
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib import metadata as metadata_module
@@ -731,6 +732,104 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
     refresh_records = [record for record in manifest["events"] if record["type"] == "background_refresh_done"]
     assert refresh_records
     assert refresh_records[-1]["payload"]["role"] == BACKGROUND_ROLE_SESSION_FILES
+
+
+def test_follower_reads_owner_published_session_files_view_without_git_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    owner = app_module.TmuxWebtermApp(["1"])
+    follower = app_module.TmuxWebtermApp(["1"])
+    key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 24.0, "", "", (), "policy", (), ())
+    path, view_id = owner.session_files_disk_cache_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"session": "1", "loaded": True, "repos": [{"repo": "/owner-only"}], "files": [], "errors": []}
+    try:
+        descriptor = owner.session_files_request_descriptor("1", 24.0, None, None, None)
+        owner.write_session_files_disk_cache_unlocked(path, view_id, payload, HTTPStatus.OK, "owner-generation", descriptor)
+        monkeypatch.setattr(follower, "shared_git_identity", lambda *_args: (_ for _ in ()).throw(AssertionError("cache-view read must not inspect Git")))
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) == (payload, HTTPStatus.OK)
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, "HEAD", "current", None) is None
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["payload"]["repos"] = [{"repo": "/tampered"}]
+        path.write_text(json.dumps(record), encoding="utf-8")
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) is None
+        owner.write_session_files_disk_cache_unlocked(path, view_id, payload, HTTPStatus.OK, "owner-generation", descriptor)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["stored_at"] = 0.0
+        path.write_text(json.dumps(record), encoding="utf-8")
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) is None
+        owner.write_session_files_disk_cache_unlocked(path, view_id, payload, HTTPStatus.OK, "owner-generation", descriptor)
+        path.unlink()
+        path.symlink_to(tmp_path / "outside-cache-view.json")
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) is None
+        path.unlink()
+        os.mkfifo(path)
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) is None
+    finally:
+        owner.control_server.stop()
+        follower.control_server.stop()
+
+
+def test_invalid_session_files_cache_view_returns_pending_before_discovery_or_jobd(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = app_module.TmuxWebtermApp(["1"])
+
+    def prohibited(*_args, **_kwargs):
+        raise AssertionError("invalid cache-only view performed forbidden work")
+
+    webapp.refresh_sessions = prohibited
+    webapp.shared_git_identity = prohibited
+    webapp.job_client.submit = prohibited
+    try:
+        payload, status = webapp.session_files_http_payload(
+            "1", 24.0, "HEAD", "current", None,
+            cache_only=True, cache_view="not-an-opaque-view",
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload == webapp.session_files_cache_pending_payload("1")
+
+
+def test_follower_cache_view_read_sees_only_coherent_atomic_replacement(monkeypatch, tmp_path):
+    """An in-flight owner replacement is either the prior signed record or the new one."""
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    owner = app_module.TmuxWebtermApp(["1"])
+    follower = app_module.TmuxWebtermApp(["1"])
+    key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 24.0, "", "", (), "policy", (), ())
+    path, view_id = owner.session_files_disk_cache_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = owner.session_files_request_descriptor("1", 24.0, None, None, None)
+    first = {"session": "1", "loaded": True, "repos": [], "files": [{"path": "before.py"}], "errors": []}
+    second = {"session": "1", "loaded": True, "repos": [], "files": [{"path": "after.py"}], "errors": []}
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    real_replace = atomic_file_module.os.replace
+
+    def hold_record_replace(source, target):
+        if Path(target) == path and not entered_replace.is_set():
+            entered_replace.set()
+            assert release_replace.wait(2.0), "reader did not inspect the pre-replacement record"
+        return real_replace(source, target)
+
+    try:
+        owner.write_session_files_disk_cache_unlocked(path, view_id, first, HTTPStatus.OK, "generation-before", descriptor)
+        monkeypatch.setattr(atomic_file_module.os, "replace", hold_record_replace)
+        writer = threading.Thread(
+            target=owner.write_session_files_disk_cache_unlocked,
+            args=(path, view_id, second, HTTPStatus.OK, "generation-after", descriptor),
+        )
+        writer.start()
+        assert entered_replace.wait(2.0), "owner did not reach the atomic record replacement"
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) == (first, HTTPStatus.OK)
+        release_replace.set()
+        writer.join(timeout=2.0)
+        assert not writer.is_alive(), "owner did not complete the atomic record replacement"
+        assert follower.read_session_files_cache_view(view_id, "1", 24.0, None, None, None) == (second, HTTPStatus.OK)
+    finally:
+        release_replace.set()
+        owner.control_server.stop()
+        follower.control_server.stop()
 
 
 def test_background_client_event_manifest_replays_latest_scoped_state_to_returning_follower(monkeypatch, tmp_path):
@@ -1839,15 +1938,16 @@ def test_local_owner_session_files_refresh_request_starts_requested_cache_key(no
 
     assert result["refreshing"] is True
     assert len(starts) == 1
-    cache_key, target, session, infos, hours, from_ref, to_ref, repo_refs = starts[0]
+    cache_key, target, session, infos, hours, from_ref, to_ref, repo_refs, requester, trigger = starts[0]
     assert cache_key == requested_key
-    assert target == webapp.refresh_session_files_payload_cache
+    assert target == webapp.refresh_session_files_cache
     assert session == "1"
     assert infos == {"1": info}
     assert hours == 24.0
     assert from_ref == "HEAD"
     assert to_ref == "current"
     assert repo_refs == {}
+    assert (requester, trigger) == ("background-refresh", "background-refresh")
 
 
 def test_local_owner_tabber_refresh_request_starts_worker(no_control_socket, monkeypatch):

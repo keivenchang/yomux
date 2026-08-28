@@ -2400,6 +2400,24 @@ def test_read_file_reports_file_level_git_history(tmp_path):
     assert all(item["ref"] and item["short"] for item in payload["git_history"])
 
 
+def test_path_info_reports_file_level_git_history_without_reading_content(tmp_path):
+    init_repo(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "add tracked")
+    tracked.write_text("two\n", encoding="utf-8")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "update tracked")
+
+    payload = filesystem.path_info(str(tracked))
+
+    assert payload["git_tracked"] is True
+    assert payload["git_has_history"] is True
+    assert [item["subject"] for item in payload["git_history"]] == ["update tracked", "add tracked"]
+    assert all(item["ref"] and item["short"] for item in payload["git_history"])
+
+
 def test_read_file_outside_repo_is_not_tracked(tmp_path):
     file_path = tmp_path / "loose.txt"
     file_path.write_text("loose\n", encoding="utf-8")

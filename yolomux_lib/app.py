@@ -17,6 +17,7 @@ import resource
 import secrets
 import shutil
 import shlex
+import stat
 import subprocess
 import sys
 import threading
@@ -2223,6 +2224,20 @@ def session_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
     )
 
 
+def session_files_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
+    """Return only the session facts that can change its Git/file result.
+
+    Agent status, model, PID, and transcript offsets are activity metadata. Including them in a
+    session-files key turns a visible pane refresh into a new Git product even when its paths and
+    requested refs did not change.
+    """
+    return (
+        info.session,
+        tuple(sorted(str(pane.current_path or "") for pane in info.panes if pane.current_path)),
+        tuple(sorted(str(agent.cwd or "") for agent in info.agents if agent.cwd)),
+    )
+
+
 def metadata_warm_session_signature(info: SessionInfo) -> tuple[Any, ...]:
     """Return the repository-relevant subset of a session's live identity.
 
@@ -3086,7 +3101,11 @@ class WatchBridge:
             changed_repos = [
                 repo
                 for repo, generation in daemon_repo_generations.items()
-                if int(generation or 0) != int(prior_daemon_generations.get(repo) or 0)
+                # A restarted web process has no prior daemon generation, but its retained
+                # cache views can predate the watch daemon's already-published generation.
+                # Treat that first nonzero observation as a change so those old views cannot
+                # survive until TTL; a zero baseline remains inert.
+                if int(generation or 0) != int(prior_daemon_generations.get(repo, 0) or 0)
             ]
             self.state.watchd_repo_generations = {
                 str(repo): int(generation or 0)
@@ -4241,29 +4260,51 @@ class WatchBridge:
                 # owns the bounded, coalesced materialization after this revision is published.
                 accepted_operation=True,
             )
-            event_payload = {"request": item, "status": int(status), "data": payload}
-            stable_event_payload = copy.deepcopy(event_payload)
-            if isinstance(stable_event_payload.get("data"), dict):
-                stable_event_payload["data"].pop("cache", None)
-            signature = app.client_event_payload_signature(stable_event_payload)
-            key = app.client_event_payload_signature(item)
-            with self.state.lock:
-                previous_signature = self.state.session_file_payload_signatures.get(key)
-                self.state.session_file_payload_signatures[key] = signature
-            if previous_signature == signature and not force:
-                continue
-            app.record_dependency_invalidation(trigger)
-            app.publish_client_event(
-                "session_files_ready",
-                event_payload,
+            if app.publish_session_files_ready_payload(
+                item,
+                payload,
+                status,
                 trigger=trigger,
-                cache="ready",
+                force=force,
                 compute_ms=(time.perf_counter() - started) * 1000,
-            )
-            events.append("session_files_ready")
+            ):
+                events.append("session_files_ready")
         if events:
             app.request_tabber_activity_refresh(f"session-files:{trigger}")
         return events
+
+    def publish_session_files_ready_payload(
+        self,
+        app,
+        request: dict[str, Any],
+        payload: SessionFilesPayload,
+        status: HTTPStatus,
+        *,
+        trigger: str,
+        force: bool = False,
+        compute_ms: float | None = None,
+    ) -> bool:
+        """Publish one already-materialized session-files generation to local SSE clients."""
+        event_payload = {"request": copy.deepcopy(request), "status": int(status), "data": copy.deepcopy(payload)}
+        stable_event_payload = copy.deepcopy(event_payload)
+        if isinstance(stable_event_payload.get("data"), dict):
+            stable_event_payload["data"].pop("cache", None)
+        signature = app.client_event_payload_signature(stable_event_payload)
+        key = app.client_event_payload_signature(request)
+        with self.state.lock:
+            previous_signature = self.state.session_file_payload_signatures.get(key)
+            self.state.session_file_payload_signatures[key] = signature
+        if previous_signature == signature and not force:
+            return False
+        app.record_dependency_invalidation(trigger)
+        app.publish_client_event(
+            "session_files_ready",
+            event_payload,
+            trigger=trigger,
+            cache="ready",
+            compute_ms=compute_ms,
+        )
+        return True
 
     def start_status_generation_watcher(self, app, record: ClientEventWatcherRecord) -> bool:
         """Start one demand-scoped statusd generation waiter for this web process."""
@@ -4555,6 +4596,10 @@ class WatchBridge:
             rollback()
             raise
         common.start_thread_with_rollback(worker, rollback)
+        # A follower has no local event retention across a web-process restart. Replay only
+        # after the first SSE subscriber exists; startup replay otherwise consumes the durable
+        # record before a client can receive it.
+        app.replay_shared_background_client_events()
         if watchd_demanded:
             try:
                 app.start_watchd_revision_watcher(record)
@@ -4700,7 +4745,7 @@ class SessionFilesCoordinator:
 
         settings = app.settings_payload().get("settings", {}).get("file_explorer", {})
         return exclusions.ExclusionPolicy.from_settings(settings, session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
-    def session_files_cache_key( self, app, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, *, deferred_unwatched_identity: str | None = None, ) -> tuple[Any, ...]:
+    def session_files_cache_key( self, app, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
         repo_refs = session_files.canonical_repository_refs(repo_refs)
         repo_signatures: list[tuple[str, Any]] = []
         repo_roots = {
@@ -4713,21 +4758,11 @@ class SessionFilesCoordinator:
             repo_from = str(override.get("from") or "").strip() or from_ref
             repo_to = str(override.get("to") or "").strip() or to_ref
             repo = Path(repo_text)
-            # CRITICAL for "zero git spawns in warm requests": a `git status` identity ran here on
-            # every key build after a repo change. When the fs watcher covers the repo, its dirty
-            # generation int is the authoritative change signal, so use it and spawn NO git. The real
-            # git identity/snapshot is recomputed inside the jobd worker on an actual recompute. When
-            # the watcher is unhealthy, fall back to the git-spawn identity; the time-based
-            # SESSION_FILES_CACHE_SECONDS staleness remains the no-watcher backstop.
-            if app.watcher_covers_repo(repo):
-                repo_signatures.append((repo_text, app.repo_dirty_generation(repo_text)))
-            elif deferred_unwatched_identity:
-                # Accepted HTTP requests cannot run Git identity work before returning 202. The
-                # request-scoped suffix keeps application cache ownership honest; jobd strips only
-                # that suffix below so concurrent requests still share one in-flight producer.
-                repo_signatures.append((repo_text, f"deferred-unwatched:{deferred_unwatched_identity}"))
-            else:
-                repo_signatures.append((repo_text, app.shared_git_identity(repo, repo_from, repo_to)[0]))
+            # Building a cache key must not spawn Git.  The watcher advances this generation when it
+            # is available; SESSION_FILES_CACHE_SECONDS is the bounded invalidation backstop when it
+            # is not.  One identity on both sides of watcher activation prevents an unchanged view
+            # from becoming a second jobd product merely because a browser opened.
+            repo_signatures.append((repo_text, app.repo_dirty_generation(repo_text)))
         return (
             kind,
             SESSION_FILES_CACHE_KEY_VERSION,
@@ -4741,7 +4776,7 @@ class SessionFilesCoordinator:
             # -- memory, disk and the jobd coalesce key derived from this tuple -- serving rows the
             # new policy excludes.
             app.session_files_exclusion_policy().signature,
-            tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
+            tuple((name, session_files_info_cache_signature(info)) for name, info in sorted(infos.items())),
             tuple(repo_signatures),
         )
     def session_files_refresh_request_payload( self, app, cache_key: tuple[Any, ...], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> dict[str, Any]:
@@ -4819,6 +4854,75 @@ class SessionFilesCoordinator:
         key_text = app.client_event_payload_signature(key[:-2])
         signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
         return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
+    def session_files_request_descriptor(self, app, session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None) -> str:
+        bounded_hours = session_files.bounded_session_files_hours(hours)
+        # JSON has no distinct 24 and 24.0 values. Match the browser's Number serialization so
+        # both processes derive the same opaque descriptor without exposing the request tuple.
+        descriptor_hours: int | float = int(bounded_hours) if bounded_hours.is_integer() else bounded_hours
+        request = ("session-files-request", session or "", descriptor_hours, str(from_ref or ""), str(to_ref or ""), repo_refs_cache_signature(session_files.canonical_repository_refs(repo_refs)))
+        return hashlib.sha256(app.client_event_payload_signature(request).encode("utf-8")).hexdigest()
+    def session_files_request_descriptor_for_cache_key(self, app, key: tuple[Any, ...]) -> str:
+        """Return the opaque descriptor shared by cache records and completion events.
+
+        Completion state is shared between processes, so it must carry an equality token rather
+        than the request tuple (which can include repository paths).
+        """
+        if len(key) < 7:
+            return hashlib.sha256(app.client_event_payload_signature(("session-files-cache-key", key)).encode("utf-8")).hexdigest()
+        _kind, _version, session, hours, from_ref, to_ref, repo_refs, *_volatile = key
+        return app.session_files_request_descriptor(session, hours, from_ref, to_ref, dict((repo, {"from": from_value, "to": to_value}) for repo, from_value, to_value in repo_refs))
+    def session_files_cache_pending_payload(self, app, session: str | None) -> dict[str, Any]:
+        """Return the bounded read-pending shape accepted by the shared HTTP envelope."""
+        return {
+            "session": session or "",
+            "status": "pending",
+            "retry_after_seconds": 1,
+            "reason": "the requested session-files cache view is not ready",
+        }
+    def read_session_files_cache_view(self, app, view_id: str, session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None) -> tuple[SessionFilesPayload, HTTPStatus] | None:
+        """Read an owner-published opaque view without reconstructing Git identity."""
+        if not re.fullmatch(r"[0-9a-f]{64}", str(view_id or "")):
+            return None
+        path = SESSION_FILES_CACHE_DIR / f"{view_id}.json"
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                record = json.load(handle)
+        except (OSError, json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if not isinstance(record, dict):
+            return None
+        cached = published_caches.SessionFilesValidator(SESSION_FILES_CACHE_VERSION).payload(record, view_id)
+        payload_signature = str(record.get("payload_signature") or "")
+        actual_signature = app.session_files_payload_signature({
+            "payload": cached.payload if cached is not None else {},
+            "request_descriptor": str(record.get("request_descriptor") or ""),
+        })
+        expected_descriptor = app.session_files_request_descriptor(session, hours, from_ref, to_ref, repo_refs)
+        if (
+            cached is None
+            or payload_signature != actual_signature
+            or str(cached.payload.get("session") or "") != str(session or "")
+            or record.get("request_descriptor") != expected_descriptor
+        ):
+            return None
+        try:
+            age_seconds = max(0.0, time.time() - float(record.get("stored_at", 0.0)))
+        except (TypeError, ValueError):
+            return None
+        if age_seconds > SESSION_FILES_CACHE_SECONDS:
+            return None
+        return copy.deepcopy(cached.payload), cached.status
     def session_files_source_generation(self, app, key: tuple[Any, ...]) -> str:
         """The replaceable half of the cache identity: info + repo signatures."""
         return hashlib.sha256(app.client_event_payload_signature(key[-2:]).encode("utf-8")).hexdigest()
@@ -4937,18 +5041,18 @@ class SessionFilesCoordinator:
             clock=time.time,
             writer=atomic_write_text,
         )
-    def write_session_files_disk_cache_unlocked( self, app, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", ) -> None:
+    def write_session_files_disk_cache_unlocked( self, app, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", request_descriptor: str = "", ) -> None:
         app.session_files_published_cache().write(
             path,
             signature,
-            published_caches.SessionFilesCachedPayload(payload, status),
+            published_caches.SessionFilesCachedPayload(payload, status, request_descriptor),
             published_caches.SessionFilesFreshnessKey(source_generation, status),
         )
     def write_session_files_disk_cache(self, app, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         path, signature = app.session_files_disk_cache_path(key)
         try:
             with file_lock(path, dir_mode=0o700):
-                app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key))
+                app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key), app.session_files_request_descriptor_for_cache_key(key))
         except OSError as exc:
             logger.warning("failed to write session-files cache %s: %s", path, exc)
     def record_session_files_phase(self, app, phase: str, compute_ms: float, details: dict[str, Any]) -> None:
@@ -5151,7 +5255,7 @@ class SessionFilesCoordinator:
                 serialization_started = time.perf_counter()
                 if self.state.stable_generation_is_current(work_record):
                     app.set_session_files_memory_cache(key, payload, status)
-                    app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key))
+                    app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key), app.session_files_request_descriptor_for_cache_key(key))
                 app.record_session_files_phase(
                     "cache-serialization",
                     (time.perf_counter() - serialization_started) * 1000,
@@ -5326,31 +5430,19 @@ class SessionFilesCoordinator:
         overwrite a newer product for the same view.
         """
         _path, signature = app.session_files_disk_cache_path(cache_key)
-        jobd_cache_key = self.session_files_jobd_cache_key(cache_key)
-        source_generation = app.session_files_source_generation(jobd_cache_key)
+        source_generation = app.session_files_source_generation(cache_key)
         coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
         generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
         return coalesce_key, generation
-    @staticmethod
-    def session_files_jobd_cache_key(cache_key: tuple[Any, ...]) -> tuple[Any, ...]:
-        """Normalize only request-scoped unwatched suffixes for in-flight jobd ownership."""
-        repo_signatures = tuple(
-            (repo, "deferred-unwatched")
-            if isinstance(signature, str) and signature.startswith("deferred-unwatched:")
-            else (repo, signature)
-            for repo, signature in cache_key[-1]
-        )
-        return (*cache_key[:-1], repo_signatures)
     def session_files_jobd_source_profile(self, app, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
         """Return bounded source-change facts for jobd diagnostics, never raw cache-key contents."""
         _path, stable_view = app.session_files_disk_cache_path(cache_key)
-        jobd_cache_key = self.session_files_jobd_cache_key(cache_key)
-        repo_generations = [item[1] for item in jobd_cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
+        repo_generations = [item[1] for item in cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
         return {
             "requester": requester,
             "stable_view": stable_view,
             "info_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-2]).encode("utf-8")).hexdigest(),
-            "repo_signature": hashlib.sha256(app.client_event_payload_signature(jobd_cache_key[-1]).encode("utf-8")).hexdigest(),
+            "repo_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-1]).encode("utf-8")).hexdigest(),
             "repo_dirty_generation_count": len(repo_generations),
             "repo_dirty_generation_max": max(repo_generations, default=0),
         }
@@ -5380,6 +5472,9 @@ class SessionFilesCoordinator:
             "include_cross_session_attribution": not bool(session),
             "source": app.session_files_jobd_source_profile(cache_key, requester),
             "repository_states": app.session_files_jobd_repository_states(cache_key),
+            # An explicit Git action intentionally bypasses the worker's generation cache.  The
+            # ordinary path stays cacheable; this is the one user-requested correctness boundary.
+            "fresh_git": bool(replace),
             # Serializable policy, not a lookup: the worker applies exactly this at both doors.
             "exclusion_policy": app.session_files_exclusion_policy().as_payload(),
         }
@@ -5390,7 +5485,10 @@ class SessionFilesCoordinator:
             generation=generation,
             coalesce_key=coalesce_key,
             deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
-            fresh_only=bool(replace) or self.session_files_jobd_cache_key(cache_key) != cache_key,
+            # Ordinary pane convergence may be one generation behind until normal revalidation;
+            # it may reuse the completed product. An explicit Git/ref action passes replace=True
+            # and must produce a fresh view instead.
+            fresh_only=bool(replace),
         )
         return response, coalesce_key, generation
     def compute_session_files_payload_via_jobd(
@@ -5480,7 +5578,6 @@ class SessionFilesCoordinator:
             replace,
             priority,
             requester,
-            deferred=self.session_files_jobd_cache_key(cache_key) != cache_key,
             cache_refresh_seconds=SESSION_FILES_CACHE_SECONDS,
             unavailable_type=SessionFilesJobdUnavailable,
             exception_cause=local_service_exception_cause,
@@ -5513,9 +5610,25 @@ class SessionFilesCoordinator:
             context=context,
             exception_cause=local_service_exception_cause,
         )
-    def refresh_session_files_payload_cache( self, app, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
+    def refresh_session_files_cache(
+        self,
+        app,
+        cache_key: tuple[Any, ...],
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        *,
+        requester: str,
+        trigger: str,
+    ) -> None:
+        """Refresh one canonical session-files view and publish its single completion."""
         started = time.perf_counter()
         refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": session or ""}, cache_key=cache_key)
+        refresh_details["cache_view_id"] = app.session_files_disk_cache_path(cache_key)[1]
+        refresh_details["request_descriptor"] = app.session_files_request_descriptor(session, hours, from_ref, to_ref, repo_refs)
         app.log_sampled_background_refresh_event(
             "background_refresh_started",
             BACKGROUND_ROLE_SESSION_FILES,
@@ -5525,12 +5638,25 @@ class SessionFilesCoordinator:
             message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
         )
         try:
-            app.compute_session_files_cache_entry(
+            payload, status, _cache_hit, _age_seconds = app.compute_session_files_cache_entry(
                 cache_key,
-                lambda: app.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-refresh"),
+                lambda: app.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester=requester),
                 reserved=True,
             )
             compute_ms = (time.perf_counter() - started) * 1000
+            app.publish_session_files_ready_payload(
+                {
+                    "session": session or "",
+                    "hours": session_files.bounded_session_files_hours(hours),
+                    "from_ref": str(from_ref or ""),
+                    "to_ref": str(to_ref or ""),
+                    "repo_refs": repo_refs or {},
+                },
+                payload,
+                status,
+                trigger=trigger,
+                compute_ms=compute_ms,
+            )
             done_details = dict(refresh_details)
             done_details["compute_ms"] = round(compute_ms, 3)
             app.log_sampled_background_refresh_event(
@@ -5545,47 +5671,13 @@ class SessionFilesCoordinator:
         except SessionFilesJobdUnavailable as exc:
             # jobd could not produce the product this cycle. The single-flight is already released by
             # compute_session_files_cache_entry; nothing stale is cached and the next request retries.
-            logger.info("session-files payload refresh deferred (jobd) for %s: %s", cache_key, exc)
+            logger.info("session-files refresh deferred (jobd) for %s: %s", cache_key, exc)
         except Exception as exc:
-            logger.warning("session-files payload refresh failed for %s: %s", cache_key, exc)
-            raise
-    def refresh_session_files_info_cache( self, app, cache_key: tuple[Any, ...], info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        started = time.perf_counter()
-        refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session}, cache_key=cache_key)
-        app.log_sampled_background_refresh_event(
-            "background_refresh_started",
-            BACKGROUND_ROLE_SESSION_FILES,
-            "Session-files background refresh started",
-            refresh_details,
-            message_key="events.message.backgroundRefresh.started",
-            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-        )
-        try:
-            app.compute_session_files_cache_entry(
-                cache_key,
-                lambda: app.compute_session_files_payload_via_jobd(info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-info-refresh"),
-                reserved=True,
-            )
-            compute_ms = (time.perf_counter() - started) * 1000
-            done_details = dict(refresh_details)
-            done_details["compute_ms"] = round(compute_ms, 3)
-            app.log_sampled_background_refresh_event(
-                "background_refresh_done",
-                BACKGROUND_ROLE_SESSION_FILES,
-                "Session-files background refresh finished",
-                done_details,
-                message_key="events.message.backgroundRefresh.finished",
-                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-            )
-            app.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
-        except SessionFilesJobdUnavailable as exc:
-            logger.info("session-files info refresh deferred (jobd) for %s: %s", cache_key, exc)
-        except Exception as exc:
-            logger.warning("session-files info refresh failed for %s: %s", cache_key, exc)
+            logger.warning("session-files refresh failed for %s: %s", cache_key, exc)
             raise
     def start_session_files_cache_refresh(self, app, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
         if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            if target == app.refresh_session_files_payload_cache and len(args) >= 6:
+            if target == app.refresh_session_files_cache and len(args) >= 6:
                 session, _infos, hours, from_ref, to_ref, repo_refs = args[:6]
                 request_payload = app.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs)
             else:
@@ -5630,13 +5722,15 @@ class SessionFilesCoordinator:
         cache_key = app.requested_session_files_cache_key(payload, fallback_key)
         return app.start_session_files_cache_refresh(
             cache_key,
-            app.refresh_session_files_payload_cache,
+            app.refresh_session_files_cache,
             session or None,
             infos,
             hours,
             from_ref,
             to_ref,
             repo_refs,
+            "background-refresh",
+            "background-refresh",
         )
     def cached_session_files_payload_for_info( self, app, info: SessionInfo, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, *, wait_for_fresh: bool = True, ) -> SessionFilesPayload:
         infos = {info.session: info}
@@ -5646,7 +5740,7 @@ class SessionFilesCoordinator:
             payload, _status, fresh, _age = cached
             if not fresh:
                 if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    app.start_session_files_cache_refresh(key, app.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
+                    app.start_session_files_cache_refresh(key, app.refresh_session_files_cache, info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, "background-info-refresh", "background-info-refresh")
                 else:
                     app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
                     refresh_result = app.request_background_refresh(
@@ -5667,12 +5761,15 @@ class SessionFilesCoordinator:
         if not wait_for_fresh:
             app.start_session_files_cache_refresh(
                 key,
-                app.refresh_session_files_info_cache,
-                info,
+                app.refresh_session_files_cache,
+                info.session,
+                {info.session: info},
                 hours,
                 from_ref,
                 to_ref,
                 repo_refs,
+                "background-info-refresh",
+                "background-info-refresh",
             )
             return {
                 "session": info.session,
@@ -5750,7 +5847,7 @@ class SessionFilesCoordinator:
         for session, info in infos.items():
             payloads[session] = app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
         return payloads
-    def session_files_payload_for_infos( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
+    def session_files_payload_for_infos( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         started = time.perf_counter()
         cache_key = app.session_files_cache_key(
             "payload",
@@ -5760,11 +5857,10 @@ class SessionFilesCoordinator:
             from_ref,
             to_ref,
             repo_refs,
-            deferred_unwatched_identity=uuid.uuid4().hex if accepted_operation else None,
         )
         max_age = SESSION_FILES_CACHE_SECONDS
-        cached = None if force else app.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
-        priority = "interactive" if force else "freshness"
+        cached = None if fresh_git else app.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
+        priority = "interactive" if fresh_git else "freshness"
 
         def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
             app.client_watch_service.note_owner_invocation("session_files_materialization")
@@ -5777,7 +5873,7 @@ class SessionFilesCoordinator:
                 repo_refs,
                 cache_key,
                 priority=priority,
-                requester=requester, replace=force,
+                requester=requester, replace=fresh_git,
             )
 
         cache_meta: dict[str, Any]
@@ -5791,7 +5887,7 @@ class SessionFilesCoordinator:
             }
             if not fresh:
                 if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    refreshing = app.start_session_files_cache_refresh(cache_key, app.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
+                    refreshing = app.start_session_files_cache_refresh(cache_key, app.refresh_session_files_cache, session, infos, hours, from_ref, to_ref, repo_refs, "background-refresh", "background-refresh")
                     cache_meta["refreshing"] = refreshing
                 else:
                     app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
@@ -5825,7 +5921,7 @@ class SessionFilesCoordinator:
                     repo_refs,
                     cache_key,
                     priority=priority,
-                    requester=requester, replace=force,
+                    requester=requester, replace=fresh_git,
                 )
                 cache_meta = {
                     "hit": False,
@@ -5834,7 +5930,7 @@ class SessionFilesCoordinator:
                 }
             else:
                 try:
-                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd, replace=force)
+                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd, replace=fresh_git)
                     cache_meta = {
                         "hit": cache_hit,
                         "stale": False,
@@ -5894,7 +5990,7 @@ class SessionFilesCoordinator:
             details={"session": session or "", "status": int(status)},
         )
         return payload, status
-    def session_files_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
+    def session_files_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         refresh_errors = app.refresh_sessions()
         if session and session not in app.sessions:
             diagnostic = f"unknown session: {session}"
@@ -5909,11 +6005,27 @@ class SessionFilesCoordinator:
             to_ref=to_ref,
             repo_refs=repo_refs,
             force=force,
+            fresh_git=fresh_git,
             requester=requester,
             extra_errors=[*refresh_errors, *errors],
             accepted_operation=accepted_operation,
         )
-    def session_files_http_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
+    def session_files_http_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, cache_only: bool = False, cache_view: str = "", ) -> tuple[dict[str, Any], HTTPStatus]:
+        def ready(request_id: str, payload: SessionFilesPayload, status: HTTPStatus) -> tuple[dict[str, Any], HTTPStatus]:
+            # A browser cannot safely resolve every repo-ref spelling (worktrees and symlinks are
+            # server-owned), so return the server-canonical opaque descriptor with the payload it
+            # already requested. The shared completion still carries only this digest and view id.
+            materialized = copy.deepcopy(payload)
+            cache = materialized.get("cache") if isinstance(materialized.get("cache"), dict) else {}
+            cache["request_descriptor"] = app.session_files_request_descriptor(session, hours, from_ref, to_ref, repo_refs)
+            materialized["cache"] = cache
+            return app.session_files_ready_result(request_id, materialized), status
+        if cache_only:
+            cached = app.read_session_files_cache_view(cache_view, session, hours, from_ref, to_ref, repo_refs) if cache_view else None
+            if cached is None:
+                return app.session_files_cache_pending_payload(session), HTTPStatus.ACCEPTED
+            payload, status = cached
+            return ready(app.new_api_request_id(), payload, status)
         payload, status = app.session_files_payload(
             session,
             hours,
@@ -5921,13 +6033,14 @@ class SessionFilesCoordinator:
             to_ref=to_ref,
             repo_refs=repo_refs,
             force=force,
+            fresh_git=fresh_git,
             accepted_operation=True,
         )
         if payload.get("state") in {"queued", "failed"}:
             return payload, status
         request_id = app.new_api_request_id()
         if status < HTTPStatus.BAD_REQUEST:
-            return app.session_files_ready_result(request_id, payload), status
+            return ready(request_id, payload, status)
         descriptor = payload.get("user_message") if isinstance(payload.get("user_message"), dict) else {}
         message = str(descriptor.get("fallback") or payload.get("error") or "session-files request failed")
         return common.error_payload(
@@ -8739,7 +8852,10 @@ class TmuxWebtermApp:
                 message_key="events.message.backgroundOwner.blocked",
             )
         if not acquired:
-            self.replay_shared_background_client_events()
+            with self.client_events.lock:
+                has_subscribers = bool(self.client_events.subscribers)
+            if has_subscribers:
+                self.replay_shared_background_client_events()
         return acquired
 
     def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
@@ -10727,6 +10843,26 @@ class TmuxWebtermApp:
     def publish_session_files_ready_events(self, trigger: str = "watch", *, force: bool = False) -> list[str]:
         return self._watch_bridge.publish_session_files_ready_events(self, trigger, force=force)
 
+    def publish_session_files_ready_payload(
+        self,
+        request: dict[str, Any],
+        payload: SessionFilesPayload,
+        status: HTTPStatus,
+        *,
+        trigger: str,
+        force: bool = False,
+        compute_ms: float | None = None,
+    ) -> bool:
+        return self._watch_bridge.publish_session_files_ready_payload(
+            self,
+            request,
+            payload,
+            status,
+            trigger=trigger,
+            force=force,
+            compute_ms=compute_ms,
+        )
+
     def start_status_generation_watcher(self, record: ClientEventWatcherRecord) -> bool:
         return self._watch_bridge.start_status_generation_watcher(self, record)
 
@@ -10779,8 +10915,8 @@ class TmuxWebtermApp:
     def session_files_exclusion_policy(self) -> exclusions.ExclusionPolicy:
         return self._session_files_coordinator.session_files_exclusion_policy(self)
 
-    def session_files_cache_key( self, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, *, deferred_unwatched_identity: str | None = None, ) -> tuple[Any, ...]:
-        return self._session_files_coordinator.session_files_cache_key(self, kind, infos, session, hours, from_ref, to_ref, repo_refs, deferred_unwatched_identity=deferred_unwatched_identity)
+    def session_files_cache_key( self, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
+        return self._session_files_coordinator.session_files_cache_key(self, kind, infos, session, hours, from_ref, to_ref, repo_refs)
 
     def session_files_refresh_request_payload( self, cache_key: tuple[Any, ...], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> dict[str, Any]:
         return self._session_files_coordinator.session_files_refresh_request_payload(self, cache_key, session, hours, from_ref, to_ref, repo_refs)
@@ -10814,6 +10950,18 @@ class TmuxWebtermApp:
     def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]: # Stable logical view identity only (kind, version, session, hours, refs, # per-repo ref overrides): the volatile info/repo signatures (key[-2:]) # are a replaceable source generation stored INSIDE the record, so agent # status or transcript appends REPLACE one durable file per view instead # of minting a new filename per generation.
         return self._session_files_coordinator.session_files_disk_cache_path(self, key)
 
+    def session_files_request_descriptor(self, session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None) -> str:
+        return self._session_files_coordinator.session_files_request_descriptor(self, session, hours, from_ref, to_ref, repo_refs)
+
+    def session_files_request_descriptor_for_cache_key(self, key: tuple[Any, ...]) -> str:
+        return self._session_files_coordinator.session_files_request_descriptor_for_cache_key(self, key)
+
+    def session_files_cache_pending_payload(self, session: str | None) -> dict[str, Any]:
+        return self._session_files_coordinator.session_files_cache_pending_payload(self, session)
+
+    def read_session_files_cache_view(self, view_id: str, session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None) -> tuple[SessionFilesPayload, HTTPStatus] | None:
+        return self._session_files_coordinator.read_session_files_cache_view(self, view_id, session, hours, from_ref, to_ref, repo_refs)
+
     def session_files_source_generation(self, key: tuple[Any, ...]) -> str:
         return self._session_files_coordinator.session_files_source_generation(self, key)
 
@@ -10841,8 +10989,8 @@ class TmuxWebtermApp:
     def session_files_published_cache(self):
         return self._session_files_coordinator.session_files_published_cache(self)
 
-    def write_session_files_disk_cache_unlocked( self, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", ) -> None:
-        return self._session_files_coordinator.write_session_files_disk_cache_unlocked(self, path, signature, payload, status, source_generation)
+    def write_session_files_disk_cache_unlocked( self, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", request_descriptor: str = "", ) -> None:
+        return self._session_files_coordinator.write_session_files_disk_cache_unlocked(self, path, signature, payload, status, source_generation, request_descriptor)
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         return self._session_files_coordinator.write_session_files_disk_cache(self, key, payload, status)
@@ -10937,11 +11085,8 @@ class TmuxWebtermApp:
             priority=priority, requester=requester, replace=replace,
         )
 
-    def refresh_session_files_payload_cache( self, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        return self._session_files_coordinator.refresh_session_files_payload_cache(self, cache_key, session, infos, hours, from_ref, to_ref, repo_refs)
-
-    def refresh_session_files_info_cache( self, cache_key: tuple[Any, ...], info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        return self._session_files_coordinator.refresh_session_files_info_cache(self, cache_key, info, hours, from_ref, to_ref, repo_refs)
+    def refresh_session_files_cache( self, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, requester: str, trigger: str, ) -> None:
+        return self._session_files_coordinator.refresh_session_files_cache(self, cache_key, session, infos, hours, from_ref, to_ref, repo_refs, requester=requester, trigger=trigger)
 
     def start_session_files_cache_refresh(self, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
         return self._session_files_coordinator.start_session_files_cache_refresh(self, cache_key, target, *args)
@@ -10961,8 +11106,8 @@ class TmuxWebtermApp:
     def cached_session_files_payloads_for_infos( self, infos: dict[str, SessionInfo], hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, ) -> dict[str, SessionFilesPayload]:
         return self._session_files_coordinator.cached_session_files_payloads_for_infos(self, infos, hours, from_ref, to_ref, repo_refs)
 
-    def session_files_payload_for_infos( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload_for_infos(self, session, infos, hours, from_ref, to_ref, repo_refs, force, requester, extra_errors, accepted_operation)
+    def session_files_payload_for_infos( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        return self._session_files_coordinator.session_files_payload_for_infos(self, session, infos, hours, from_ref, to_ref, repo_refs, force, fresh_git, requester, extra_errors, accepted_operation)
 
     def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
         now = time.monotonic()
@@ -12968,11 +13113,11 @@ class TmuxWebtermApp:
         issues = [message_fields("message", "searchHistory.error.discovery", error, {"error": error}) for error in [*refresh_errors, *errors]]
         return {"session": session or "", "runs": rows, "errors": issues}, HTTPStatus.OK
 
-    def session_files_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload(self, session, hours, from_ref, to_ref, repo_refs, force, requester, accepted_operation)
+    def session_files_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        return self._session_files_coordinator.session_files_payload(self, session, hours, from_ref, to_ref, repo_refs, force, fresh_git, requester, accepted_operation)
 
-    def session_files_http_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._session_files_coordinator.session_files_http_payload(self, session, hours, from_ref, to_ref, repo_refs, force)
+    def session_files_http_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, fresh_git: bool = False, cache_only: bool = False, cache_view: str = "", ) -> tuple[dict[str, Any], HTTPStatus]:
+        return self._session_files_coordinator.session_files_http_payload(self, session, hours, from_ref, to_ref, repo_refs, force, fresh_git, cache_only, cache_view)
 
     def session_files_batch_payload( self, sessions: list[str] | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
         return self._session_files_coordinator.session_files_batch_payload(self, sessions, hours, from_ref, to_ref, repo_refs, force)

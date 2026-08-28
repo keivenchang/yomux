@@ -16,7 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tools import static_build
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
-from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error, consume_only_expected_js_debug_api_error
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_errors
 from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -843,7 +843,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
             const done = arguments[arguments.length - 1];
             (async () => {
               const started = performance.now();
-              openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
+              openFileInEditor(path, {name: path.split('/').at(-1)}, {includeGit: true, userInitiated: true, viewMode: 'edit'});
               let terminal = null;
               let waitError = '';
               try {
@@ -888,7 +888,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
         ({
             "path": "/api/fs/read",
             "method": "GET",
-            "query": {"path": str(target)},
+            "query": {"path": str(target), "include_git": "1"},
             "error": "deadline_expired: request exceeded its 15s deadline",
         },),
     )
@@ -1078,7 +1078,7 @@ def test_slow_fs_read_and_diff_below_deadline_render_normal_content(gate_browser
         (async () => {
           try {
             const readStarted = performance.now();
-            const item = await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
+            const item = await openFileInEditor(path, {name: path.split('/').at(-1)}, {includeGit: true, userInitiated: true, viewMode: 'edit'});
             const readElapsedMs = performance.now() - readStarted;
             setFileEditorViewMode(path, 'diff', item);
             const diffStarted = performance.now();
@@ -1266,7 +1266,7 @@ def test_c1_c2_vanished_working_file_keeps_enabled_differ_and_renders_git_diff(
         path="/api/fs/read",
         status=HTTPStatus.NOT_FOUND,
         method="GET",
-        query={"path": str(target)},
+            query={"path": str(target), "include_git": "1"},
     )
     assert metrics["errors"] == [expected_api_error] and metrics["rejections"] == [], metrics
     retire_expected_fixture_typed_api_failure(
@@ -1494,7 +1494,7 @@ def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_r
     diffs = [request for request in metrics["requests"] if request["path"] == "/api/fs/diff"]
     assert session_files and all(request["status"] == HTTPStatus.OK for request in session_files), metrics
     assert forced_session_files, metrics
-    assert len(reads) == 1 and reads[0]["status"] == HTTPStatus.ACCEPTED, metrics
+    assert len(reads) == 1 and reads[0]["status"] == HTTPStatus.ACCEPTED and "include_git=1" in reads[0]["query"], metrics
     assert len(diffs) == 1 and diffs[0]["status"] == HTTPStatus.ACCEPTED, metrics
     assert max(request["finished"] for request in forced_session_files) <= reads[0]["started"] <= diffs[0]["started"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -1535,4 +1535,10 @@ def test_a8_differ_recovers_from_ten_atomic_inode_swaps_and_keeps_real_delete_ty
     assert not deleted_row.get("error"), deleted_row
     assert missing["missing"] is True and missing["tabMissing"] is True and missing["missingBadge"] is True, missing
     assert "second committed content" in missing["rendered"], missing
+    assert_only_expected_browser_http_error(
+        gate_browser_runtime.browser,
+        path="/api/fs/read",
+        status=HTTPStatus.NOT_FOUND,
+        query={"path": str(target)},
+    )
     assert deleted_row == {"status": "D", "added": "", "removed": "-1"}, deleted_row

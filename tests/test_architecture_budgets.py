@@ -146,6 +146,9 @@ def test_retired_share_surface_guard_never_reads_churning_document_lock_control_
     control = tmp_path / "docs" / "DEVELOPMENT.md.agent-edit.lock" / ".owner.json.transient"
     control.parent.mkdir(parents=True)
     control.write_text("/api/" + "sha" + "re", encoding="utf-8")
+    historical = tmp_path / ".claude" / "worktrees" / "historical.txt"
+    historical.parent.mkdir(parents=True)
+    historical.write_text("/api/" + "sha" + "re", encoding="utf-8")
     read_bytes = Path.read_bytes
 
     def reject_control_file_read(path):
