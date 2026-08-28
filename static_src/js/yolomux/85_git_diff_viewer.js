@@ -550,10 +550,11 @@ function bindGitDiffFileTree(tree) {
   });
 }
 
-function gitDiffStatusNode(className, text, role = '') {
+function gitDiffStatusNode(className, text, role = '', options = {}) {
   const node = document.createElement('div');
   node.className = className;
-  node.textContent = String(text || '');
+  if (options.movingEllipsis === true) node.innerHTML = textWithMovingEllipsisHtml(text, 'git-diff-loading-ellipsis');
+  else node.textContent = String(text || '');
   if (role) node.setAttribute('role', role);
   return node;
 }
@@ -684,7 +685,7 @@ function renderGitDiffPanel(item, options = {}) {
   list.className = 'git-diff-commits';
   renderGitDiffCommitList(item, list, state);
   const nodes = [];
-  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status'));
+  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
   if (state.commits.length) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));

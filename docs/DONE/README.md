@@ -4,7 +4,7 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-202 entries, 2026-06-02 to 2026-08-23.
+203 entries, 2026-06-02 to 2026-08-27.
 
 | month | entries |
 | --- | ---: |
@@ -16,6 +16,7 @@ This is a historical record, not the current architecture or API contract: a lat
 
 | date | completed work |
 | --- | --- |
+| 2026-08-27 | [Finder right-click is immediate](2026-08/DOIT.p0.fix-right-click-finder.md) |
 | 2026-08-23 | [Statsd ring-invalidation storm fix](2026-08/DONE.statsd-ring-invalidation-storm.md) |
 | 2026-08-23 | [v0.7.12 exact tmux target revalidation](2026-08/DONE.0-7-12-tmux-exact-session-target.md) |
 | 2026-08-20 | [macOS boot/tmux environment isolation](2026-08/DONE.merge-macos-boot-tmux-env.md) |

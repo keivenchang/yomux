@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.20 | `v0.7.20` | `v0.7.20^{commit}` | [v0.7.20-evidence.md](v0.7.20-evidence.md) | Finder right-click paints before metadata; Git-directory Diff opens its tab immediately with animated loading |
 | 0.7.19 | `v0.7.19` | `v0.7.19^{commit}` | [v0.7.19-evidence.md](v0.7.19-evidence.md) | instant file reopening retains its selected mode, and jobd replaces only a bounded failed or stuck worker slot |
 | 0.7.18 | `v0.7.18` | `v0.7.18^{commit}` | [v0.7.18-evidence.md](v0.7.18-evidence.md) | immediate file tabs and direct descriptor-authorized base reads, with Git decoration deferred from content paint |
 | 0.7.17 | `v0.7.17` | `v0.7.17^{commit}` | [v0.7.17-evidence.md](v0.7.17-evidence.md) | bounded YO!stats rebuild and persistence work, authenticated service health endpoints, and gate ownership/cost stability repairs |

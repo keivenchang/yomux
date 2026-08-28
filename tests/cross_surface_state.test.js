@@ -127,7 +127,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual([...fileActions.map(action => action.mode)], ['edit', 'preview', 'diff']);
     assert.equal(fileActions.every(action => action.canonical === true), true, 'all Finder modes converge on the canonical working-tree tab');
     const unverifiedActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: null});
-    assert.equal(unverifiedActions.every(action => action.disabled === true && action.disabledReason), true, 'an unverified file disables every mode with an accessible reason');
+    assert.deepStrictEqual([...unverifiedActions.map(action => [action.mode, action.disabled])], [['edit', false], ['preview', false], ['diff', true]], 'an unverified file still opens readable modes immediately while only Diff waits for Git metadata');
     const nonRepoActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: {repo_root: '', relative_path: 'app.js'}});
     assert.deepStrictEqual([...nonRepoActions.map(action => [action.mode, action.disabled])], [['edit', false], ['preview', false], ['diff', true]], 'a proven non-repository file retains readable modes and disables only Diff');
     const binaryActions = api.finderOpenInNewTabActionsForContext({...fileContext, primaryInfo: {repo_root: '/repo', relative_path: 'app.js', size: 64, preview_mime: 'application/octet-stream'}});
@@ -137,20 +137,21 @@ async function runCrossSurfaceStateSuite() {
 
     const repoActions = api.finderOpenInNewTabActionsForContext({
       fullPath: '/repo',
-      entry: {kind: 'dir', name: 'repo'},
+      entry: {kind: 'dir', name: 'repo', is_repo: true},
       selectedPaths: ['/repo'],
-      primaryInfo: {repo_root: '/repo', relative_path: ''},
+      primaryInfo: null,
       menuState,
     });
     assert.deepStrictEqual([...repoActions.map(action => action.label)], ['ΔShow Diff']);
     assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
+    assert.equal(repoActions[0].disabled, false, 'the listing-proven repository directory may open its Diff tab before deferred path metadata returns');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
       ...fileContext,
       fullPath: '/unverified',
       entry: {kind: 'dir', name: 'unverified'},
       selectedPaths: ['/unverified'],
       primaryInfo: null,
-    })], [], 'a directory without positive repository metadata omits Diff repo instead of showing a disabled fallback');
+    })], [], 'a directory without the listing repository marker omits Diff instead of showing a disabled fallback');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({...fileContext, selectedPaths: ['/repo/app.js', '/repo/other.js']})], [], 'multi-selection omits Finder open actions');
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
       ...fileContext,
@@ -877,7 +878,8 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,680}scope\.ownEvent\('tree-click', panel, 'click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
-    assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
+    assert.ok(/function renderFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
+    assert.ok(/function showFileTreeContextMenu\([\s\S]*?renderFileTreeContextMenu\(menu, row, fullPath, entry, selectedPaths, \[\], pendingRelativeCopyEntries, options\);[\s\S]*?fileContextMenu\.open\(menu, x, y\);[\s\S]*?void refreshFileTreeContextMenu\(menu, row, fullPath, entry, selectedPaths, options\);/.test(fileExplorerSource), 'Finder context menus paint before deferred path metadata refreshes their actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
     assert.ok(/async function deleteFileTreePath[\s\S]*refreshVisibleSessionFilesSurfaces\(\{silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes both Finder working-tree and Differ comparison records');
     assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');

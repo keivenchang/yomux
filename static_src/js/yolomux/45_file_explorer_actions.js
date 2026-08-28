@@ -122,9 +122,8 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
-function finderPathActionDisabledReason(primaryInfo) {
+function finderPathActionDisabledReason() {
   if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
-  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
   return '';
 }
 
@@ -136,8 +135,10 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    if (!primaryInfo?.repo_root) return [];
-    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    // Directory listings already derive this marker from the pinned directory descriptor.  It is
+    // enough to offer the Git history tab now; the tab owns the slower Git history load.
+    if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
+    const disabledReason = readOnlyMode ? t('contextmenu.readOnlyUnavailable') : '';
     const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
@@ -148,7 +149,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     }];
   }
   if (entry.kind !== 'file') return [];
-  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabledReason = finderPathActionDisabledReason();
   const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
   const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
   const diffCapabilityReason = !primaryInfo?.repo_root
@@ -175,28 +176,14 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   ];
 }
 
-async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
-  closeFileContextMenu();
-  closeTerminalContextMenu();
-  closeSessionContextMenu();
-  closeFileImagePreview();
-  closeOtherSessionPopovers(null);
-  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
-  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
-  // pointermove over the row can reopen it right behind the context menu. Route through its own
-  // controller when bound so timers and state are reset the same way any other dismissal is.
-  row?.__yolomuxRepoHoverController?.closeNow?.();
-  hideFileTreeRepoPopover();
-  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
-  const selectedPaths = fileTreeActionPaths(fullPath);
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
-    console.warn('fs info failed', path, error);
-    return null;
-  })));
-  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu file-context-menu';
-  menu.setAttribute('role', 'menu');
+function sameFileTreeContextMenuSelection(fullPath, selectedPaths) {
+  const currentPaths = fileTreeActionPaths(fullPath);
+  return currentPaths.length === selectedPaths.length && currentPaths.every((path, index) => path === selectedPaths[index]);
+}
+
+function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options = {}) {
+  if (!menu) return;
+  menu.replaceChildren();
   const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
   const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
@@ -230,7 +217,39 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   }
   appendContextMenuButton(menu, t('common.rename'), () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.deleteSelected' : 'contextmenu.delete'), () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
+}
+
+async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+    console.warn('fs info failed', path, error);
+    return null;
+  })));
+  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
+  if (!menu.isConnected || !sameFileTreeContextMenuSelection(fullPath, selectedPaths)) return;
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, infos, relativeCopyEntries, options);
+}
+
+function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
+  closeFileContextMenu();
+  closeTerminalContextMenu();
+  closeSessionContextMenu();
+  closeFileImagePreview();
+  closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
+  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
+  const selectedPaths = fileTreeActionPaths(fullPath);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  const pendingRelativeCopyEntries = selectedPaths.map(() => ({available: false, text: '', reason: 'pending'}));
+  renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, [], pendingRelativeCopyEntries, options);
   fileContextMenu.open(menu, x, y);
+  void refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options);
 }
 
 function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
