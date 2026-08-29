@@ -2957,6 +2957,15 @@ def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
     assert '"${owner_label[@]+"${owner_label[@]}"}"' in text, text
 
 
+def test_run_tests_sh_uses_root_for_rootless_worktree_mounts():
+    """Rootless Docker cannot map the directory-service UID into its subordinate range."""
+
+    text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    assert "name=rootless" in text, text
+    assert 'run_user=(--user 0)' in text, text
+    assert '"${run_user[@]+"${run_user[@]}"}"' in text, text
+
+
 def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypatch, capsys):
     """One worker contract, four surfaces. They previously disagreed on the shared-box default.
 

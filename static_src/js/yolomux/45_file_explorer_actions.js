@@ -229,7 +229,7 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
 }
 
 async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path, {user: true, immediate: true}).catch(error => {
     console.warn('fs info failed', path, error);
     return null;
   })));
@@ -2000,6 +2000,21 @@ function foldDuplicateEditorItemsForPath(path, keepItem = null) {
   return keeper;
 }
 
+function releaseFileEditorItem(path, item) {
+  const nextSlots = itemInLayout(item)
+    ? layoutWithoutItemFromSlots(item, layoutSlots, {preserveRemovedSlot: true})
+    : null;
+  removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
+  fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
+  tabLastActivatedAt.delete(item);
+  removePanelForItem(item);
+  if (!openFilePathHasOwner(path) && !fileStateFor(path)?.dirty) deleteFileState(path);
+  syncFileLayoutItems();
+  if (nextSlots) applyLayoutSlots(nextSlots, {focusSession: focusedPanelItem, prune: false});
+}
+
 async function focusExistingPhysicalFileEditor(requestedPath, existingPath, options = {}) {
   if (!requestedPath || !existingPath) return null;
   const item = primaryEditorItemForPath(existingPath, options.item || null);
@@ -2342,6 +2357,9 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   const canonical = options.canonical === true;
   const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
   const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (openedItem && fileItemPath(openedItem) !== fullPath) {
+    for (const duplicateItem of fileEditorTabItemsForPath(fullPath)) releaseFileEditorItem(fullPath, duplicateItem);
+  }
   if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
   const openedPath = fileItemPath(openedItem) || fullPath;
   const state = fileEditorStateForItem(openedPath, openedItem);

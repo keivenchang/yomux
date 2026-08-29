@@ -4100,8 +4100,23 @@ class WatchBridge:
             worker = threading.Thread(target=run, daemon=True)
             watcher_record.snapshot_worker = worker
             generation = app.begin_transcripts_payload_work(worker, replace=True)
+            if generation <= 0:
+                watcher_record.snapshot_worker = None
+                return False
         try:
-            worker.start()
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                # Keep admission and start atomic with teardown. Once teardown takes this lock it
+                # either joins an already-running snapshot or prevents this writer from starting.
+                if (
+                    payload_record.stopped
+                    or payload_record.generation != generation
+                    or payload_record.worker is not worker
+                ):
+                    if self.state.event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
+                        watcher_record.snapshot_worker = None
+                    return False
+                worker.start()
         except RuntimeError:
             with self.state.lock:
                 if self.state.event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
@@ -4127,6 +4142,8 @@ class WatchBridge:
         guarded = record is not None
         if generation is None:
             generation = app.begin_transcripts_payload_work(worker, replace=True)
+            if generation <= 0:
+                return
         try:
             started = time.perf_counter()
             payload = app.build_transcripts_payload()
@@ -4632,6 +4649,9 @@ class WatchBridge:
                 snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
             if snapshot_generation:
                 app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
+            if snapshot_worker is not threading.current_thread():
+                snapshot_worker.join(timeout=5.0)
+                assert not snapshot_worker.is_alive(), "client-event snapshot worker did not stop"
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
@@ -11155,27 +11175,35 @@ class TmuxWebtermApp:
 
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
-            if record.worker is not None and not replace:
-                started_at = record.worker_started_at
+            if record.stopped:
+                return 0
+            if record.worker is not None:
+                if replace:
+                    record.superseded_workers.add(record.worker)
+                else:
+                    started_at = record.worker_started_at
                 # A worker still within the deadline holds the single-flight guard.
                 # Past it, the worker is treated as stalled and superseded so a hung
                 # build cannot refuse every future refresh; the stale worker's later
                 # commit/finish is a no-op because the generation has advanced.
-                if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
-                    if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
-                        record.rebuild_requested = True
-                        record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
-                        # The queued follow-up commits the generation after the in-flight one.
-                        pending_generation = record.generation + 1
-                    else:
-                        # The in-flight build began at or after the request, so it already observes
-                        # what this caller is asking about.
-                        pending_generation = record.generation
-                    if pending_generation_out is not None:
-                        pending_generation_out.append(pending_generation)
-                    return 0
+                    if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
+                        if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
+                            record.rebuild_requested = True
+                            record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
+                            # The queued follow-up commits the generation after the in-flight one.
+                            pending_generation = record.generation + 1
+                        else:
+                            # The in-flight build began at or after the request, so it already observes
+                            # what this caller is asking about.
+                            pending_generation = record.generation
+                        if pending_generation_out is not None:
+                            pending_generation_out.append(pending_generation)
+                        return 0
+                    record.superseded_workers.add(record.worker)
             record.generation += 1
             record.worker = worker
+            if worker is not None:
+                record.active_workers.add(worker)
             record.worker_started_at = time.monotonic()
             record.publish_requested = False
             if pending_generation_out is not None:
@@ -11205,7 +11233,9 @@ class TmuxWebtermApp:
     ) -> bool:
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
+            record.active_workers.discard(worker)
             if record.generation != generation or record.worker is not worker:
+                record.superseded_workers.discard(worker)
                 return False
             if invalidate:
                 record.generation += 1
@@ -11214,6 +11244,28 @@ class TmuxWebtermApp:
         # every build path ends here, so this is the one owner rather than a copy per call site.
         self.start_queued_transcripts_payload_rebuild()
         return True
+
+    def stop_transcripts_payload_work(self) -> None:
+        """Fence transcript refresh admission and join every admitted worker."""
+
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            record.stopped = True
+            record.generation += 1
+            workers = tuple(record.active_workers)
+            record.release_worker()
+            record.superseded_workers.clear()
+            record.active_workers.clear()
+            record.rebuild_requested = False
+            record.rebuild_publish = False
+        for worker in workers:
+            if isinstance(worker, threading.Timer):
+                worker.cancel()
+        for worker in workers:
+            if worker is threading.current_thread():
+                continue
+            worker.join(timeout=30)
+            assert not worker.is_alive(), "transcript payload rebuild did not stop"
 
     def start_queued_transcripts_payload_rebuild(self) -> bool:
         """Run the rebuild a forced refresh could not start because an older build held the guard.
@@ -11258,6 +11310,9 @@ class TmuxWebtermApp:
         that decided it.
         """
 
+        if self.__dict__.get("_fixture_runtime_stopping") is True:
+            return False
+
         generation = 0
         worker: object | None = None
         def run() -> None:
@@ -11267,7 +11322,8 @@ class TmuxWebtermApp:
             worker = threading.Timer(0.05, run)
             worker.daemon = True
         else:
-            worker = threading.Thread(target=run, daemon=True)
+            worker = threading.Thread(target=run, name="transcripts-payload-refresh", daemon=True)
+        worker._yolomux_transcripts_payload_owner = self
         generation = self.begin_transcripts_payload_work(
             worker,
             queue_rebuild_after=not_before,
@@ -11281,13 +11337,17 @@ class TmuxWebtermApp:
                     if record.worker is not None:
                         record.publish_requested = True
             return False
-        if publish:
+        try:
             with self.activity_transcript_service.transcripts_payload_cache_lock:
                 record = self.activity_transcript_service.transcripts_payload_cache_record
-                if record.generation == generation and record.worker is worker:
+                # The fixture teardown holds this same lock while fencing the record and capturing
+                # its worker.  Either it observes an already-started worker and joins it, or this
+                # start observes the fence and never creates a late writer beneath the fixture root.
+                if record.stopped or record.generation != generation or record.worker is not worker:
+                    return False
+                if publish:
                     record.publish_requested = True
-        try:
-            worker.start()
+                worker.start()
         except RuntimeError:
             self.finish_transcripts_payload_work(generation, worker, invalidate=True)
             raise
@@ -11303,6 +11363,8 @@ class TmuxWebtermApp:
         current_worker = worker if worker is not None else threading.current_thread()
         if generation is None:
             generation = self.begin_transcripts_payload_work(current_worker, replace=True)
+            if generation <= 0:
+                return
         try:
             payload = self.build_transcripts_payload()
             if not self.commit_transcripts_payload_cache(payload, generation):

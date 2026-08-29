@@ -2865,7 +2865,7 @@ def test_fixture_stops_accepted_jobd_operations_before_demoting_local_services()
     assert calls.index("jobd-operations") < calls.index("background-demotion")
 
 
-def test_fixture_joins_metadata_product_worker_before_demoting_local_services():
+def test_fixture_joins_metadata_product_worker_after_retiring_local_services():
     stop_event = threading.Event()
     worker_finished = threading.Event()
 
@@ -2892,10 +2892,12 @@ def test_fixture_joins_metadata_product_worker_before_demoting_local_services():
             pass
 
         def stop_jobd_operation_service(self):
-            pass
+            assert not worker_finished.is_set()
 
         def demote_background_owner(self):
-            assert worker_finished.is_set()
+            # The worker runs in jobd. It must stay joinable while jobd and its
+            # local services retire, then be joined before fixture teardown returns.
+            assert not worker_finished.is_set()
 
         def stop_auto_approve_all(self):
             pass
@@ -2907,6 +2909,7 @@ def test_fixture_joins_metadata_product_worker_before_demoting_local_services():
         worker.join(timeout=1)
 
     assert not worker.is_alive()
+    assert worker_finished.is_set()
 
 
 def _fixture_spawn_ownership(pid, *members):
@@ -3345,6 +3348,145 @@ def test_fixture_teardown_uses_one_snapshot_when_same_generation_member_replaces
         ((43231, "proc:44231"),),
     ]
     assert registry.spawn_ownership.member_identities == ((43231, "proc:44231"),)
+
+
+def test_fixture_teardown_retires_worker_after_leader_exits_between_snapshot_and_probe(tmp_path, monkeypatch):
+    """A worker left by a vanished leader remains proven and receives fixture retirement."""
+
+    generation = "a" * 32
+    state = {"term_sent": False, "signals": [], "reaped": False}
+    registry = local_service_registry.LocalServiceRegistry(
+        tmp_path,
+        local_service_registry.LocalServiceSpec("fixture", "fixture.module", "fixture.sock", 1),
+    )
+
+    class FixtureProcess:
+        pid = 43260
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    process = FixtureProcess()
+    registry.process = process
+    registry.spawn_ownership = local_service_registry.SpawnProcessOwnership(
+        leader_pid=process.pid,
+        process_group=process.pid,
+        session_id=process.pid,
+        generation_marker=generation,
+        member_identities=((process.pid, "proc:leader"),),
+    )
+    leader = local_service_registry.ProcessTableEntry(1, process.pid, 0.0, "leader", 100, process.pid, "proc:leader")
+    worker = local_service_registry.ProcessTableEntry(process.pid, process.pid, 0.0, "worker", 101, process.pid, "proc:worker")
+    monkeypatch.setattr(
+        local_service_registry,
+        "bounded_process_table",
+        lambda: {} if state["term_sent"] else {process.pid: leader, 43261: worker},
+    )
+    monkeypatch.setattr(
+        local_service_registry,
+        "process_start_identity",
+        lambda pid: None if pid == process.pid else "proc:worker",
+    )
+    monkeypatch.setattr(
+        local_service_registry,
+        "process_spawn_generation",
+        lambda pid: None if pid == process.pid else generation,
+    )
+
+    class ExitBarrier:
+        def __init__(self, _identities):
+            pass
+
+        def wait(self, _timeout):
+            return True
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _error_type, _error, _traceback):
+            pass
+
+    def signal_group(_group, signal_number):
+        state["signals"].append(signal_number)
+        state["term_sent"] = True
+
+    monkeypatch.setattr(gate_harness_module, "FixtureMemberExitBarrier", ExitBarrier)
+    monkeypatch.setattr(gate_harness_module, "signal_fixture_process_group", signal_group)
+    monkeypatch.setattr(registry, "_reap_exited_child", lambda child: state.__setitem__("reaped", child is process))
+
+    gate_harness_module.stop_fixture_local_service_process(
+        gate_harness_module.FixtureLocalServiceProcess(registry, process, registry.spawn_ownership),
+        label="snapshot-to-probe worker",
+    )
+
+    assert state["signals"] == [gate_harness_module.signal.SIGTERM]
+    assert state["reaped"] is True
+
+
+def test_fixture_retirement_reclaims_late_spawned_worker_by_private_tmpdir(tmp_path, monkeypatch):
+    """A pool worker has no daemon socket, but its inherited fixture root is exact ownership."""
+
+    root = tmp_path / "fixture"
+    (root / "tmp").mkdir(parents=True)
+    generation = "b" * 32
+    worker_pid = 43270
+    state = {"alive": True, "signals": []}
+    worker = local_service_registry.ProcessTableEntry(1, worker_pid, 0.0, "worker", 101, worker_pid, "proc:worker")
+
+    monkeypatch.setattr(
+        gate_harness_module,
+        "bounded_process_table",
+        lambda: {worker_pid: worker} if state["alive"] else {},
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "process_start_identity",
+        lambda pid: "proc:worker" if state["alive"] and pid == worker_pid else None,
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "process_spawn_generation",
+        lambda pid: generation if state["alive"] and pid == worker_pid else None,
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "_fixture_process_tmpdir",
+        lambda pid: root / "tmp" if state["alive"] and pid == worker_pid else None,
+    )
+
+    class ExitBarrier:
+        def __init__(self, _identities):
+            pass
+
+        def wait(self, _timeout):
+            return True
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _error_type, _error, _traceback):
+            pass
+
+    def signal_process(pid, signal_number):
+        state["signals"].append((pid, signal_number))
+        state["alive"] = False
+
+    monkeypatch.setattr(gate_harness_module, "FixtureMemberExitBarrier", ExitBarrier)
+    monkeypatch.setattr(gate_harness_module.os, "kill", signal_process)
+
+    retired = gate_harness_module.retire_fixture_spawned_processes_beneath_tmpdir(root, label="late worker")
+
+    assert retired == (gate_harness_module.FixtureSpawnedProcessIdentity(worker_pid, "proc:worker", generation),)
+    assert state["signals"] == [(worker_pid, gate_harness_module.signal.SIGTERM)]
 
 
 def test_fixture_escalates_stubborn_owned_service_group_within_original_bound(monkeypatch):

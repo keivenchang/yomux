@@ -239,6 +239,7 @@ class GateRuntimePaths:
     tmp_dir: Path
     chrome_profile_dir: Path
     patched_module_paths: tuple[tuple[str, Path], ...]
+    fixture_apps: list[Any] = field(default_factory=list)
 
 
 GATE_WRITABLE_ENV_VARS = (
@@ -492,6 +493,7 @@ def gate_runtime_paths(
         # process is still mutating and fails with a masked ENOENT.  Route the
         # retirement through the same owner the app fixtures use.
         run_fixture_cleanup_phases("gate_runtime_paths", (
+            ("registered app retirement", lambda: [stop_fixture_app_runtime(app, label="gate_runtime_paths") for app in paths.fixture_apps]),
             ("runtime root retirement", lambda: remove_fixture_runtime_root(
                 ledger,
                 root,
@@ -646,6 +648,9 @@ def start_fixture_live_server(
 
     if options.clear_server_logs:
         SERVER_LOGS.clear()
+    fixture_apps = getattr(paths, "fixture_apps", None) if paths is not None else None
+    if fixture_apps is not None and app not in fixture_apps:
+        fixture_apps.append(app)
     server_log_boundary = SERVER_LOGS.payload()
     prepare_fixture_http_app(monkeypatch, app)
     if port_lease is not None:
@@ -1987,6 +1992,89 @@ def install_fixture_local_service_ledger(monkeypatch: pytest.MonkeyPatch) -> Fix
     return ledger
 
 
+@dataclass(frozen=True)
+class FixtureSpawnedProcessIdentity:
+    """One non-daemon local-service descendant proven by its private temporary root."""
+
+    pid: int
+    start_identity: str
+    generation_marker: str
+
+
+def _fixture_process_tmpdir(pid: int) -> Path | None:
+    """Read only the inherited ``TMPDIR`` value needed for exact fixture ownership."""
+
+    try:
+        values = (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    prefix = b"TMPDIR="
+    matches = [value[len(prefix):] for value in values if value.startswith(prefix)]
+    if len(matches) != 1:
+        return None
+    try:
+        return Path(matches[0].decode("utf-8", errors="strict"))
+    except UnicodeDecodeError:
+        return None
+
+
+def fixture_spawned_processes_beneath_tmpdir(root: Path) -> tuple[FixtureSpawnedProcessIdentity, ...]:
+    """Resolve late local-service children without trusting a broad command-name match."""
+
+    expected_tmpdir = (root / "tmp").resolve()
+    found: list[FixtureSpawnedProcessIdentity] = []
+    for pid, entry in bounded_process_table().items():
+        if pid == os.getpid():
+            continue
+        generation_marker = process_spawn_generation(pid)
+        start_identity = entry.start_identity or process_start_identity(pid)
+        tmpdir = _fixture_process_tmpdir(pid)
+        if not generation_marker or not start_identity or tmpdir is None:
+            continue
+        if tmpdir.resolve() != expected_tmpdir:
+            continue
+        found.append(FixtureSpawnedProcessIdentity(pid, start_identity, generation_marker))
+    return tuple(sorted(found, key=lambda process: process.pid))
+
+
+def _fixture_spawned_process_still_running(process: FixtureSpawnedProcessIdentity, root: Path) -> bool:
+    """Re-prove identity and fixture root immediately before an exact signal."""
+
+    return (
+        process_start_identity(process.pid) == process.start_identity
+        and process_spawn_generation(process.pid) == process.generation_marker
+        and _fixture_process_tmpdir(process.pid) is not None
+        and _fixture_process_tmpdir(process.pid).resolve() == (root / "tmp").resolve()
+    )
+
+
+def retire_fixture_spawned_processes_beneath_tmpdir(root: Path, *, label: str) -> tuple[FixtureSpawnedProcessIdentity, ...]:
+    """Retire only proven local-service descendants that escaped registry daemon discovery."""
+
+    processes = fixture_spawned_processes_beneath_tmpdir(root)
+    for process in processes:
+        if not _fixture_spawned_process_still_running(process, root):
+            continue
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    barrier = FixtureMemberExitBarrier(tuple((process.pid, process.start_identity) for process in processes))
+    with barrier:
+        barrier.wait(2.0)
+    survivors = tuple(
+        process for process in processes if _fixture_spawned_process_still_running(process, root)
+    )
+    for process in survivors:
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+    if any(_fixture_spawned_process_still_running(process, root) for process in survivors):
+        raise AssertionError(f"{label} local-service descendant survived fixture retirement")
+    return processes
+
+
 def retire_fixture_local_services(
     ledger: FixtureLocalServiceLedger,
     root: Path,
@@ -2008,6 +2096,7 @@ def retire_fixture_local_services(
         # keeps its uid-wide inotify instance for as long as it runs. Reclaim
         # those from the process table, then prove none is left.
         ("unowned daemons", lambda: retire_local_service_daemons_beneath(root, label=label)),
+        ("inherited workers", lambda: retire_fixture_spawned_processes_beneath_tmpdir(root, label=label)),
         ("surviving daemons", lambda: assert_no_surviving_local_service_daemons(root, label=label)),
         ("reaper settlement", lambda: settle_fixture_local_service_reapers(registries, label=label)),
     ))
@@ -2022,7 +2111,38 @@ def remove_fixture_runtime_root(
     """Remove one root only after every registry writer has settled successfully."""
 
     retire_fixture_local_services(ledger, root, label=label)
-    shutil.rmtree(root)
+    try:
+        shutil.rmtree(root)
+    except OSError as error:
+        expected_tmpdir = (root / "tmp").resolve()
+        processes = [
+            {
+                "pid": pid,
+                "command": entry.command,
+                "tmpdir": str(tmpdir),
+                "generation": process_spawn_generation(pid),
+            }
+            for pid, entry in bounded_process_table().items()
+            if pid != os.getpid()
+            and (tmpdir := _fixture_process_tmpdir(pid)) is not None
+            and tmpdir.resolve() == expected_tmpdir
+        ]
+        frames = sys._current_frames()
+        threads = [
+            {
+                "name": thread.name,
+                "stack": [f"{frame.filename}:{frame.lineno}:{frame.name}" for frame in traceback.extract_stack(frames[thread.ident])[-8:]]
+                if thread.ident in frames else [],
+            }
+            for thread in threading.enumerate()
+        ]
+        raise AssertionError(json.dumps({
+            "error_code": "fixture_root_writer_unsettled",
+            "label": label,
+            "root": str(root),
+            "processes": processes,
+            "threads": threads,
+        }, sort_keys=True)) from error
 
 
 def settle_fixture_local_service_reapers(registries: Iterable[Any], *, label: str) -> None:
@@ -2103,6 +2223,21 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
         if metadata_stop is not None:
             metadata_stop.set()
 
+    def stop_session_files_work() -> None:
+        # Session-files refresh can still be materializing Git object pins after the last browser
+        # receipt. Fence and join that producer before jobd retirement and fixture-root removal.
+        coordinator = vars(app).get("_session_files_coordinator")
+        if coordinator is not None:
+            coordinator.stop()
+
+    def stop_transcript_payload_work() -> None:
+        """Fence admission and join every transcript worker retained by the cache record."""
+
+        app._fixture_runtime_stopping = True
+        stop = getattr(app, "stop_transcripts_payload_work", None)
+        if stop is not None:
+            stop()
+
     def seal_local_service_starts() -> None:
         seal_fixture_local_service_starts(fixture_local_service_registries(app))
 
@@ -2119,16 +2254,20 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
             assert not tabber_thread.is_alive(), f"{label} Tabber activity warmer did not stop"
 
     attempt(capture_thread_owners)
-    attempt(app.stop_client_event_watcher)
     attempt(signal_metadata_warmer)
+    attempt(stop_session_files_work)
+    attempt(stop_transcript_payload_work)
+    attempt(app.stop_client_event_watcher)
     if vars(app).get("queued_delivery_ledger") is not None:
         attempt(lambda: app.wait_for_jobd_operations_terminal(
             FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS,
         ))
-    attempt(app.stop_jobd_operation_service)
-    attempt(join_metadata_warmer)
     attempt(seal_local_service_starts)
+    # Capture immutable group ownership before asking jobd to stop. Its leader can exit while
+    # process-pool workers still inherit the group; the saved proof is what lets retirement signal
+    # those workers instead of losing the only owner record with the leader.
     attempt(capture_local_services)
+    attempt(app.stop_jobd_operation_service)
     attempt(app.demote_background_owner)
     attempt(capture_local_services)
     attempt(stop_tabber_warmer)
@@ -2139,6 +2278,10 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
         fixture_local_service_registries(app),
         label=label,
     ))
+    # metadata_warm_view runs in jobd, not in this observer thread. Retire and reap the fixture's
+    # jobd process before joining the observer so no worker can write under the fixture root after
+    # teardown returns.
+    attempt(join_metadata_warmer)
     if len(errors) == 1:
         raise errors[0]
     if errors:

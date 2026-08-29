@@ -803,6 +803,12 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
         ),
         evidence=metrics,
     )
+    assert_terminal_transition(
+        contract_id="jobd-product-operation-completion",
+        pending_observed=metrics.get("pending", {}).get("refreshing") is True,
+        terminal_observed=terminal.get("refreshing") is False and terminal.get("loaded") is True,
+        evidence=metrics,
+    )
     assert not metrics.get("error"), metrics
     assert metrics["pending"]["key"] == operation_id, metrics
     assert metrics["pending"]["epoch"] == operation_epoch, metrics

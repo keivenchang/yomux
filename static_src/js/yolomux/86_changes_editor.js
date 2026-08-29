@@ -2368,6 +2368,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
     || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
+  let resolvedPath = path;
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -2407,8 +2408,14 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }, openOptions);
   } else {
     const openedItem = await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
-    if (openedItem) item = openedItem;
-    const openedState = fileState.get(path);
+    if (openedItem) {
+      if (openedItem !== item) {
+        releaseFileEditorItem(path, item);
+      }
+      item = openedItem;
+      resolvedPath = fileItemPath(item) || path;
+    }
+    const openedState = fileState.get(resolvedPath);
     if (openedState?.externalMissing === true && !['A', '?'].includes(normalizedStatus)) {
       // A tracked Differ row can vanish after the listing snapshot. Keep the missing warning, but
       // retain a text surface so /api/fs/diff can recover the committed side from Git.
@@ -2418,24 +2425,24 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }
   }
   if (!openDiffMode) {
-    renderOpenFilePath(path);
-    void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+    renderOpenFilePath(resolvedPath);
+    void refreshOpenFileDiff(resolvedPath, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
     return;
   }
-  const diffReady = await refreshOpenFileDiff(path, {
+  const diffReady = await refreshOpenFileDiff(resolvedPath, {
     silent: true,
     renderOnComplete: false,
     updateControlsOnComplete: false,
     ...payloadRepoRefs,
   });
-  const current = fileState.get(path);
-  if (diffReady && fileStateCanRenderDiffView(path, current) && current?.externalMissing !== true) {
-    setFileEditorViewMode(path, 'diff', item);
+  const current = fileState.get(resolvedPath);
+  if (diffReady && fileStateCanRenderDiffView(resolvedPath, current) && current?.externalMissing !== true) {
+    setFileEditorViewMode(resolvedPath, 'diff', item);
   } else {
-    setFileEditorViewMode(path, 'edit', item);
+    setFileEditorViewMode(resolvedPath, 'edit', item);
   }
-  renderOpenFilePath(path);
-  if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
+  renderOpenFilePath(resolvedPath);
+  if (!diffReady || !fileStateCanRenderDiffView(resolvedPath, current)) {
     const reason = current?.diffError || t(current?.kind !== 'text' ? 'editor.notTextFile' : 'editor.noGitDiffHistory');
     const panel = panelNodes.get(item);
     if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');

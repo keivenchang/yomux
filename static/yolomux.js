@@ -26728,7 +26728,7 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
 }
 
 async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path, {user: true, immediate: true}).catch(error => {
     console.warn('fs info failed', path, error);
     return null;
   })));
@@ -28499,6 +28499,21 @@ function foldDuplicateEditorItemsForPath(path, keepItem = null) {
   return keeper;
 }
 
+function releaseFileEditorItem(path, item) {
+  const nextSlots = itemInLayout(item)
+    ? layoutWithoutItemFromSlots(item, layoutSlots, {preserveRemovedSlot: true})
+    : null;
+  removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
+  fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
+  tabLastActivatedAt.delete(item);
+  removePanelForItem(item);
+  if (!openFilePathHasOwner(path) && !fileStateFor(path)?.dirty) deleteFileState(path);
+  syncFileLayoutItems();
+  if (nextSlots) applyLayoutSlots(nextSlots, {focusSession: focusedPanelItem, prune: false});
+}
+
 async function focusExistingPhysicalFileEditor(requestedPath, existingPath, options = {}) {
   if (!requestedPath || !existingPath) return null;
   const item = primaryEditorItemForPath(existingPath, options.item || null);
@@ -28841,6 +28856,9 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   const canonical = options.canonical === true;
   const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
   const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (openedItem && fileItemPath(openedItem) !== fullPath) {
+    for (const duplicateItem of fileEditorTabItemsForPath(fullPath)) releaseFileEditorItem(fullPath, duplicateItem);
+  }
   if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
   const openedPath = fileItemPath(openedItem) || fullPath;
   const state = fileEditorStateForItem(openedPath, openedItem);
@@ -66850,6 +66868,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
     || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
+  let resolvedPath = path;
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -66889,8 +66908,14 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }, openOptions);
   } else {
     const openedItem = await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
-    if (openedItem) item = openedItem;
-    const openedState = fileState.get(path);
+    if (openedItem) {
+      if (openedItem !== item) {
+        releaseFileEditorItem(path, item);
+      }
+      item = openedItem;
+      resolvedPath = fileItemPath(item) || path;
+    }
+    const openedState = fileState.get(resolvedPath);
     if (openedState?.externalMissing === true && !['A', '?'].includes(normalizedStatus)) {
       // A tracked Differ row can vanish after the listing snapshot. Keep the missing warning, but
       // retain a text surface so /api/fs/diff can recover the committed side from Git.
@@ -66900,24 +66925,24 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }
   }
   if (!openDiffMode) {
-    renderOpenFilePath(path);
-    void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+    renderOpenFilePath(resolvedPath);
+    void refreshOpenFileDiff(resolvedPath, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
     return;
   }
-  const diffReady = await refreshOpenFileDiff(path, {
+  const diffReady = await refreshOpenFileDiff(resolvedPath, {
     silent: true,
     renderOnComplete: false,
     updateControlsOnComplete: false,
     ...payloadRepoRefs,
   });
-  const current = fileState.get(path);
-  if (diffReady && fileStateCanRenderDiffView(path, current) && current?.externalMissing !== true) {
-    setFileEditorViewMode(path, 'diff', item);
+  const current = fileState.get(resolvedPath);
+  if (diffReady && fileStateCanRenderDiffView(resolvedPath, current) && current?.externalMissing !== true) {
+    setFileEditorViewMode(resolvedPath, 'diff', item);
   } else {
-    setFileEditorViewMode(path, 'edit', item);
+    setFileEditorViewMode(resolvedPath, 'edit', item);
   }
-  renderOpenFilePath(path);
-  if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
+  renderOpenFilePath(resolvedPath);
+  if (!diffReady || !fileStateCanRenderDiffView(resolvedPath, current)) {
     const reason = current?.diffError || t(current?.kind !== 'text' ? 'editor.notTextFile' : 'editor.noGitDiffHistory');
     const panel = panelNodes.get(item);
     if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');

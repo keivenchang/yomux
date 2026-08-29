@@ -176,7 +176,7 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
           await waitFor(() => commandPaletteState.items.some(item => item.path === path), {description: `Quick Open result for ${query}`});
           const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === commandPaletteState.items.findIndex(item => item.path === path));
           row.click();
-          await waitFor(() => fileState.has(path) && slotForItem(fileEditorItemFor(path)) === 'left', {description: `editor tab for ${query}`});
+          await waitFor(() => fileStateFor(path)?.content && slotForItem(fileEditorItemFor(path)) === 'left', {description: `editor bytes for ${query}`});
         };
         (async () => {
           await openPath('t5t.md', t5tPath);
@@ -4558,8 +4558,8 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
           window.__doit65Fetches.push(url.pathname + url.search);
-          if (url.pathname === '/api/fs/read') {
-            return new Response(JSON.stringify({
+              if (url.pathname === '/api/fs/read') {
+                return new Response(JSON.stringify({
               path: url.searchParams.get('path') || path,
               content: 'print("hello")\\n',
               size: 15,
@@ -4571,8 +4571,8 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
               git_tracked: true,
               git_history: [{ref: 'a'}, {ref: 'b'}],
               git_has_history: true,
-            }), {status: 200, headers: {'Content-Type': 'application/json'}});
-          }
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
           if (url.pathname === '/api/fs/diff') {
             return new Response(JSON.stringify({
               repo: '/repo/app',
@@ -4673,8 +4673,8 @@ def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
           window.__doit65Fetches.push(url.pathname + url.search);
-          if (url.pathname === '/api/fs/read') {
-            return new Response(JSON.stringify({
+            if (url.pathname === '/api/fs/read') {
+                return new Response(JSON.stringify({
               path: url.searchParams.get('path') || realPath,
               content: 'print("hello")\\n',
               size: 15,
@@ -4686,9 +4686,10 @@ def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
               git_tracked: true,
               git_history: [{ref: 'a'}, {ref: 'b'}],
               git_has_history: true,
-            }), {status: 200, headers: {'Content-Type': 'application/json'}});
-          }
-          if (url.pathname === '/api/fs/diff') {
+                }), {status: 200, headers: {'Content-Type': 'application/json'}});
+              }
+                  if (url.pathname === '/api/fs/info') return new Response(JSON.stringify({path: url.searchParams.get('path') || realPath, realpath: realPath, file_id: 'dev:10:ino:20', repo_root: '/repo/app', git_tracked: true, git_history: [{ref: 'a'}, {ref: 'b'}], git_has_history: true}), {status: 200, headers: {'Content-Type': 'application/json'}});
+              if (url.pathname === '/api/fs/diff') {
             return new Response(JSON.stringify({
               repo: '/repo/app',
               relative_path: 'src/main.py',
@@ -4704,7 +4705,7 @@ def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
           const state = fileStateFor(realPath);
           state.content = 'dirty edit\\n';
           state.dirty = true;
-          await openChangedFileInDiff(linkPath, '1', 'M', '/repo/app', {forceNewTab: true, userInitiated: true, openMode: 'diff'});
+          await openChangedFileInDiff(linkPath, '1', 'M', '/repo/app', {userInitiated: true, openMode: 'diff'});
           const afterDiffActionItems = openFileEditorItems();
           const second = await openFileInAdditionalEditorTab(linkPath, {name: 'link-main.py', realpath: realPath, file_id: 'dev:10:ino:20'}, {viewMode: 'diff'});
           done({
@@ -4714,9 +4715,9 @@ def test_dockview_symlink_alias_focuses_existing_file_editor(browser, tmp_path):
             openItems: openFileEditorItems(),
             realItems: filePanelItemsForPath(realPath),
             linkItems: filePanelItemsForPath(linkPath),
-            content: fileStateFor(realPath)?.content || '',
-            dirty: fileStateFor(realPath)?.dirty === true,
-            mode: editorViewModeFor(realPath, first),
+              content: fileStateFor(realPath)?.content || '',
+              dirty: fileStateFor(realPath)?.dirty === true,
+              mode: editorViewModeFor(realPath, first),
             tabCount: Array.from(document.querySelectorAll('.dockview-pane-tab')).filter(tab => String(tab.dataset.paneTab || '').includes('main.py')).length,
             readCalls: window.__doit65Fetches.filter(url => url.startsWith('/api/fs/read')).length,
           });

@@ -49,8 +49,8 @@ TERMINAL_STATE_CONTRACTS = (
         contract_id="jobd-product-operation-completion",
         owner_path=Path("yolomux_lib/app.py"),
         owner_token="def accept_jobd_product_operation(",
-        proof_path=Path("tests/test_gate_editor.py"),
-        proof_test="test_a6_reopen_replaces_cached_not_found_after_file_is_created",
+        proof_path=Path("tests/test_gate_differ.py"),
+        proof_test="test_mock_git_differ_queued_producer_completion_settles_every_visible_surface",
         queued_producer_function="accept_jobd_product_operation",
     ),
     TerminalStateContract(

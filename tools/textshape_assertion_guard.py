@@ -102,6 +102,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher": "The macOS launcher row carries the captured plan through the shared launcher and injects a primary only for the default/durable row; Darwin execution is deferred (W14) and cannot run on this Linux host, so the macOS launch wiring is a source-only contract.",
     "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise": "The one shared macOS launcher must route through the exec plan when a row plan is present and keep the historical direct exec otherwise, so the supported launcher and boot.sh never drift into two macOS launch copies; this single-owner branch is macOS-only and checkable only as source on this host.",
     "tests/test_check_runner.py:test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present": "docker/run-tests.sh must stamp each container it launches with this run's ownership token (YOLOMUX_CHECK_RUN_TOKEN via the CONTAINER_OWNER_LABEL --label, threaded into the real docker run). The label lives in a shell script that cannot be exercised without a real docker run here, so pinning that exact wiring is the only way to keep W10's run-owned-container retirement from silently regressing to image-wide discovery; container ownership is proven behaviourally elsewhere.",
+    "tests/test_check_runner.py:test_run_tests_sh_uses_root_for_rootless_worktree_mounts": "The rootless Docker daemon cannot map the directory-service UID into its subordinate-ID range. The runner must detect that daemon and select container root so its user namespace maps to the invoking host user; the real bind-mount preflight exercises this behavior.",
     "tests/test_browser_layout.py:test_static_browser_fixtures_have_one_write_and_navigation_owner": "The static browser fixture must keep one write/navigation owner; runtime scenarios exercise the behavior separately.",
     "tests/test_local_service_runtime_row_projection.py:test_every_registry_row_producer_delegates_to_the_shared_parent": "Every registry-backed runtime-row producer must delegate to the single shared projection owner.",
     "tests/test_local_service_runtime_row_projection.py:test_shared_projection_and_watchd_bridge_have_no_lifecycle_entrypoint": "The projection and bridge are deliberately lifecycle-free; source absence prevents a second daemon owner.",
@@ -112,7 +113,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "3f6e8f4f1c5950e9a633b14ebbe6256d65ad9fae0056605bfaec1c2f4dc3d791"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "4c747dcf6ae0339cffc98202eec27897498ed4e40c3402d40c80cbc365e39706"
 
 
 @dataclass(frozen=True, slots=True)

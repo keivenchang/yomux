@@ -278,6 +278,14 @@ class TranscriptsPayloadCacheRecord:
     # a single flag, not a queue: repeated forced refreshes during one build cost one extra build.
     rebuild_requested: bool = False
     rebuild_publish: bool = False
+    # A deadline replacement fences a stale result, but it cannot stop the thread that is already
+    # materializing a Git view. Keep that worker with this single-flight owner until it finishes or
+    # fixture shutdown joins it; otherwise it becomes an unowned writer under the fixture root.
+    superseded_workers: set[object] = field(default_factory=set)
+    active_workers: set[object] = field(default_factory=set)
+    # Fixture shutdown fences new refreshes before it joins the in-flight worker.  A request that
+    # races teardown must not publish a new filesystem-writing worker after that join completes.
+    stopped: bool = False
 
     def release_worker(self) -> None:
         """Release the single-flight build guard and every intent scoped to that worker.

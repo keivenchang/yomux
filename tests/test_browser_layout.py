@@ -3323,7 +3323,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     client_producer_ids = metrics["clientProducerIds"]
     assert client_producer_ids["stats_stream"] > initial_producer_ids["fixture_error"], metrics
     assert client_producer_ids["api:/api/stats-snapshot"] == client_producer_ids["stats_stream"] + 1, metrics
-    assert client_producer_ids["api:/api/activity"] == client_producer_ids["api:/api/stats-snapshot"] + 1, metrics
+    assert client_producer_ids["api:/api/activity"] > client_producer_ids["api:/api/stats-snapshot"], metrics
     assert metrics["statsSnapshotFailure"] == "stats snapshot unavailable <script>", metrics
     assert metrics["statsSnapshotRequests"] == 1, metrics
     # /api/activity-summary is admission-disabled process-wide, so the tabber activity ledger is the

@@ -3011,6 +3011,50 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     assert all(executor is None for executor in service.executors.values())
 
 
+def test_jobd_shutdown_waits_for_scheduler_dispatch_before_retiring_executor(tmp_path, monkeypatch):
+    """Shutdown cannot sweep a pool while the scheduler is still submitting into it."""
+
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    entered_submit = threading.Event()
+    release_submit = threading.Event()
+    executor_shutdown = threading.Event()
+    shutdown_finished = threading.Event()
+
+    class Executor:
+        _processes = {}
+
+        def submit(self, *_args):
+            entered_submit.set()
+            assert release_submit.wait(timeout=2.0), "shutdown never released scheduler dispatch"
+            return Future()
+
+        def shutdown(self, **_kwargs):
+            executor_shutdown.set()
+
+    executor = Executor()
+    monkeypatch.setattr(service, "_executor", lambda *_args: executor)
+    service.executor_slots["interactive"][0].executor = executor  # type: ignore[assignment]
+    service._queue_record("text_facts", {"text": "late dispatch"}, "interactive", 1, "late-dispatch")
+    service._start_scheduler()
+    service.scheduler_event.set()
+    assert entered_submit.wait(timeout=2.0), "scheduler never reached executor dispatch"
+
+    service.stop_event.set()
+
+    def stop() -> None:
+        service._on_shutdown()
+        shutdown_finished.set()
+
+    shutdown = threading.Thread(target=stop, name="jobd-shutdown-test")
+    shutdown.start()
+    assert not executor_shutdown.wait(timeout=0.7), "executor retired before scheduler dispatch stopped"
+    release_submit.set()
+    shutdown.join(timeout=2.0)
+
+    assert shutdown_finished.is_set()
+    assert executor_shutdown.is_set()
+
+
 def test_shutdown_executor_terminates_a_worker_stuck_mid_task_without_hanging(tmp_path):
     """Forces the real hang red: a worker mid-task at shutdown must not survive `_shutdown_executor`.
 
