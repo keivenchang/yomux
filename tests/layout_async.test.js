@@ -270,6 +270,34 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.gitDiffCommitMessageForTest(state.details.get(shaA)).textContent, '<script>first</script>\n\nbody', 'commit messages are rendered as text');
   });
 
+  await testAsync('historical file selection paints its exact loading tab before comparison completion', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/src/app.js';
+    const fromRef = 'b'.repeat(40);
+    const toRef = 'a'.repeat(40);
+    const comparison = deferredFetch();
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      assert.equal(parsed.pathname, '/api/fs/diff');
+      assert.equal(parsed.searchParams.get('path'), path);
+      assert.equal(parsed.searchParams.get('from'), fromRef);
+      assert.equal(parsed.searchParams.get('to'), toRef);
+      return comparison.promise;
+    });
+    const opened = api.openGitDiffHistoricalFileForTest(
+      {repo: '/repo', from_ref: fromRef, to_ref: toRef, parents: [fromRef]},
+      {path: 'src/app.js', abs_path: path},
+    );
+    const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
+    assert.equal(opened, item, 'file selection returns the exact historical tab without waiting for Git');
+    assert.equal(api.tabTypeForItem(item)?.key, 'file-editor', 'the exact historical Editor item is installed synchronously');
+    assert.equal(api.editorViewModeFor(path, item), 'diff', 'the historical tab selects Diff before comparison bytes arrive');
+    assert.equal(api.fileEditorStateForItemForTest(path, item)?.loading, true, 'the selected historical tab exposes a loading state');
+    comparison.resolve(jsonResponse({repo: '/repo', relative_path: 'src/app.js', from_ref: fromRef, to_ref: toRef, diff: '@@ -1 +1 @@\n-old\n+new\n', original: 'old\n', working: 'new\n'}));
+    await flushAsyncWork();
+    assert.equal(api.fileEditorStateForItemForTest(path, item)?.diffLoaded, true, 'the background comparison still completes for the selected tab');
+  });
+
   await testAsync('attached Diff repo panels load once, render disclosure DOM, and open the exact historical Editor tuple', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');

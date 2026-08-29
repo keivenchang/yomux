@@ -2987,17 +2987,20 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert first["next_cursor"]
     assert first["truncated"] is False
     assert all(
-        {"sha", "short", "parents", "subject", "author", "authored_at", "summary_pending"}
+        {"sha", "short", "parents", "subject", "author", "authored_at", "files", "added", "removed", "binary_files"}
         <= item.keys()
         for item in first["commits"]
     )
     assert repo.outside_sha not in {item["sha"] for item in scoped["commits"]}
     assert scoped["relative_path"] == "scope"
-    assert next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)["summary_pending"] is True
+    scoped_root = next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)
+    assert scoped_root["files"] > 0
+    assert scoped_root["added"] >= 0
+    assert scoped_root["removed"] >= 0
     assert root_call_count == scoped_call_count
     assert root_call_count <= 4
-    assert "--no-patch" in history_log_args
-    assert "--numstat" not in history_log_args
+    assert "--numstat" in history_log_args
+    assert "--shortstat" in history_log_args
     assert "--find-renames" not in history_log_args
     assert "--find-copies-harder" not in history_log_args
 
@@ -3357,7 +3360,7 @@ def test_git_history_drops_in_progress_commit_when_output_is_truncated(tmp_path,
         assert isinstance(result, git_ops.PinnedGitResult)
         raw = result.stdout
         assert isinstance(raw, bytes)
-        second = raw.find(b"\0commit\0")
+        second = raw.find(b"\ncommit\0")
         assert second > 0
         return git_ops.PinnedGitResult(
             args=result.args,
@@ -3870,36 +3873,44 @@ def test_git_history_rejects_symlinked_ref_outside_allowed_roots(tmp_path, monke
     assert changed.value.message_key == "fs.error.gitRepositoryChanged"
 
 
-def test_git_history_probes_only_finite_object_directory_names(tmp_path, monkeypatch):
+def test_git_history_does_not_materialize_objects_or_retain_descriptors(tmp_path, monkeypatch):
     repo = create_git_history_repository(tmp_path / "history")
-
-    def reject_listdir(_path):
-        raise AssertionError("Git object discovery must not materialize a directory listing")
-
-    monkeypatch.setattr(git_ops.os, "listdir", reject_listdir)
-    history = filesystem.git_history(str(repo.root), limit=1)
-
-    assert history["commits"][0]["sha"] == repo.merge_sha
-
-
-def test_git_history_hardlinks_pinned_loose_objects_without_copying_or_retaining_descriptors(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    real_snapshot = git_ops._snapshot_regular_child
-    copied_loose_objects: list[str] = []
-
-    def record_loose_object_copy(parent_handle, source_path, destination, **kwargs):
-        if re.fullmatch(r"[0-9a-f]{2}", source_path.parent.name) and source_path.parent.parent.name == "objects":
-            copied_loose_objects.append(str(source_path))
-        return real_snapshot(parent_handle, source_path, destination, **kwargs)
-
-    monkeypatch.setattr(git_ops, "_snapshot_regular_child", record_loose_object_copy)
+    monkeypatch.setattr(
+        git_ops,
+        "_pinned_git_object_store",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("history must not materialize Git objects")),
+    )
     before_descriptors = len(os.listdir("/proc/self/fd"))
     history = filesystem.git_history(str(repo.root), limit=1)
     after_descriptors = len(os.listdir("/proc/self/fd"))
 
     assert history["commits"][0]["sha"] == repo.merge_sha
-    assert copied_loose_objects == []
     assert after_descriptors == before_descriptors
+
+
+def test_git_history_initial_rows_include_one_process_file_and_line_totals(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    history = filesystem.git_history(str(repo.root), limit=4)
+
+    assert all({"files", "added", "removed", "binary_files"} <= commit.keys() for commit in history["commits"])
+    merge = history["commits"][0]
+    assert merge["files"] > 0
+    assert merge["added"] >= 0
+    assert merge["removed"] >= 0
+    assert merge["binary_files"] == 0
+    history_calls = [args for args in calls if "log" in args]
+    assert len(history_calls) == 1
+    assert "--shortstat" in history_calls[0]
+    assert "--numstat" in history_calls[0]
+    assert "--no-renames" in history_calls[0]
 
 
 def test_git_history_rejects_in_place_loose_object_rewrite_during_read(tmp_path, monkeypatch):
@@ -3928,237 +3939,18 @@ def test_git_history_rejects_in_place_loose_object_rewrite_during_read(tmp_path,
     assert changed.value.message_key == "fs.error.gitRepositoryChanged"
 
 
-def test_git_history_checks_snapshot_deadline_before_each_loose_prefix_probe(tmp_path, monkeypatch):
-    repo = tmp_path / "empty-history"
-    repo.mkdir()
-    init_repo(repo)
-    original_check = git_ops.GitViewBudget.check
-    original_stat = git_ops.os.stat
-    check_calls = 0
-    prefix_calls = 0
-
-    def counted_check(budget):
-        nonlocal check_calls
-        check_calls += 1
-        return original_check(budget)
-
-    def require_check_before_prefix(path, *args, **kwargs):
-        nonlocal prefix_calls
-        if isinstance(path, str) and re.fullmatch(r"[0-9a-f]{2}", path):
-            prefix_calls += 1
-            assert check_calls >= prefix_calls
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(git_ops.GitViewBudget, "check", counted_check)
-    monkeypatch.setattr(git_ops.os, "stat", require_check_before_prefix)
-
-    history = filesystem.git_history(str(repo))
-
-    assert history["commits"] == []
-    assert prefix_calls == 256
-
-
-def test_git_history_snapshot_deadline_starts_before_control_resolution(tmp_path, monkeypatch):
-    repo = tmp_path / "empty-history"
-    repo.mkdir()
-    init_repo(repo)
-    original_stat = git_ops.os.stat
-    marker_probed = False
-
-    def observe_control_probe(path, *args, **kwargs):
-        nonlocal marker_probed
-        result = original_stat(path, *args, **kwargs)
-        if (
-            path == ".git"
-            and kwargs.get("dir_fd") is not None
-            and any(frame.function == "_pinned_git_control" for frame in inspect.stack())
-        ):
-            marker_probed = True
-        return result
-
-    monkeypatch.setattr(git_ops.os, "stat", observe_control_probe)
-    monkeypatch.setattr(git_ops.time, "monotonic", lambda: 11.0 if marker_probed else 0.0)
-
-    with pytest.raises(FilesystemError) as too_large:
-        filesystem.git_history(str(repo))
-
-    assert marker_probed is True
-    assert too_large.value.status == 413
-    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
-
-
-def test_git_history_rechecks_build_deadline_after_final_marker_validation(tmp_path, monkeypatch):
+def test_git_history_uses_direct_bounded_owner(tmp_path, monkeypatch):
     repo = create_git_history_repository(tmp_path / "history")
-    current_time = 0.0
-    original_marker_check = git_ops._ensure_git_marker_unchanged
-    marker_checked = False
 
-    def expire_after_marker_check(*args, **kwargs):
-        nonlocal current_time, marker_checked
-        original_marker_check(*args, **kwargs)
-        if not marker_checked:
-            marker_checked = True
-            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-
-    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
-    monkeypatch.setattr(git_ops, "_ensure_git_marker_unchanged", expire_after_marker_check)
-
-    with pytest.raises(FilesystemError) as too_large:
-        filesystem.git_history(str(repo.root), limit=1)
-
-    assert marker_checked is True
-    assert too_large.value.status == 413
-    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
-
-
-def test_git_history_snapshot_deadline_starts_before_repo_discovery(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    current_time = 0.0
-    original_repo_root = git_ops._pinned_repo_root
-
-    def delayed_repo_root(*args, **kwargs):
-        nonlocal current_time
-        result = original_repo_root(*args, **kwargs)
-        current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-        return result
-
-    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
-    monkeypatch.setattr(git_ops, "_pinned_repo_root", delayed_repo_root)
-
-    with pytest.raises(FilesystemError) as too_large:
-        filesystem.git_history(str(repo.root), limit=1)
-
-    assert too_large.value.status == 413
-    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
-
-
-def test_git_history_checks_deadline_before_each_repo_ancestor_probe(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    nested = repo.root / "one" / "two" / "three"
-    nested.mkdir(parents=True)
-    original_deadline_check = git_ops._ensure_git_view_deadline
-    original_safe_path = git_ops.paths.safe_path
-    deadline_checks = 0
-    ancestor_probes = 0
-    previous_probe_checks = 0
-
-    def counted_deadline_check(deadline):
-        nonlocal deadline_checks
-        deadline_checks += 1
-        return original_deadline_check(deadline)
-
-    def require_check_before_ancestor(*args, **kwargs):
-        nonlocal ancestor_probes, previous_probe_checks
-        if any(frame.function == "_pinned_repo_root" for frame in inspect.stack()):
-            ancestor_probes += 1
-            assert deadline_checks > previous_probe_checks
-            previous_probe_checks = deadline_checks
-        return original_safe_path(*args, **kwargs)
-
-    monkeypatch.setattr(git_ops, "_ensure_git_view_deadline", counted_deadline_check)
-    monkeypatch.setattr(git_ops.paths, "safe_path", require_check_before_ancestor)
-
-    history = filesystem.git_history(str(nested), limit=1)
-
-    assert history["head"] == repo.merge_sha
-    assert ancestor_probes >= 4
-
-
-def test_git_history_uses_a_fresh_deadline_for_retirement_validation(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    current_time = 0.0
-    original_git = git_ops._git_with_pinned_repo
-
-    def controlled_monotonic():
-        return current_time
-
-    def advance_after_log(repo_handle, args, **kwargs):
-        nonlocal current_time
-        result = original_git(repo_handle, args, **kwargs)
-        if "log" in args:
-            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-        return result
-
-    monkeypatch.setattr(git_ops.time, "monotonic", controlled_monotonic)
-    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
+    monkeypatch.setattr(
+        git_ops,
+        "_pinned_git_object_store",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("history must not materialize Git objects")),
+    )
 
     history = filesystem.git_history(str(repo.root), limit=1)
 
     assert history["commits"][0]["sha"] == repo.merge_sha
-
-
-def test_git_history_bounds_scope_retirement_with_the_shared_deadline(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    current_time = 0.0
-    original_git = git_ops._git_with_pinned_repo
-    original_namespace_check = git_ops._ensure_pinned_namespace_unchanged
-    scope_check_expired = False
-
-    def advance_after_log(repo_handle, args, **kwargs):
-        nonlocal current_time
-        result = original_git(repo_handle, args, **kwargs)
-        if "log" in args:
-            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-        return result
-
-    def expire_during_scope_retirement(handle):
-        nonlocal current_time, scope_check_expired
-        original_namespace_check(handle)
-        if (
-            current_time > git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS
-            and not scope_check_expired
-            and any(frame.function == "_pinned_git_history_scope" for frame in inspect.stack())
-        ):
-            scope_check_expired = True
-            current_time += git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-
-    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
-    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
-    monkeypatch.setattr(git_ops, "_ensure_pinned_namespace_unchanged", expire_during_scope_retirement)
-
-    with pytest.raises(FilesystemError) as too_large:
-        filesystem.git_history(str(repo.root), limit=1)
-
-    assert scope_check_expired is True
-    assert too_large.value.status == 413
-    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
-
-
-def test_git_history_bounds_pack_retirement_with_the_shared_deadline(tmp_path, monkeypatch):
-    repo = create_git_history_repository(tmp_path / "history")
-    repo.git("gc", "--quiet")
-    current_time = 0.0
-    original_git = git_ops._git_with_pinned_repo
-    original_pack_check = git_ops._ensure_pinned_regular_file_unchanged
-    pack_checked = False
-
-    def controlled_monotonic():
-        return current_time
-
-    def advance_after_log(repo_handle, args, **kwargs):
-        nonlocal current_time
-        result = original_git(repo_handle, args, **kwargs)
-        if "log" in args:
-            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-        return result
-
-    def expire_during_pack_check(handle):
-        nonlocal current_time, pack_checked
-        original_pack_check(handle)
-        if not pack_checked:
-            pack_checked = True
-            current_time += git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
-
-    monkeypatch.setattr(git_ops.time, "monotonic", controlled_monotonic)
-    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
-    monkeypatch.setattr(git_ops, "_ensure_pinned_regular_file_unchanged", expire_during_pack_check)
-
-    with pytest.raises(FilesystemError) as too_large:
-        filesystem.git_history(str(repo.root), limit=1)
-
-    assert pack_checked is True
-    assert too_large.value.status == 413
-    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
 
 
 @pytest.mark.parametrize(
@@ -4257,7 +4049,8 @@ def test_git_history_cannot_consume_transient_alternate_object_store(tmp_path, m
         filesystem.git_history(str(repo.root))
 
     assert injected >= 1
-    assert failed.value.message_key == "fs.error.gitHistoryFailed"
+    assert failed.value.status == 409
+    assert failed.value.message_key == "fs.error.gitRepositoryChanged"
 
 
 def test_git_history_rejects_alternate_object_store_added_during_read(tmp_path, monkeypatch):
@@ -4450,6 +4243,62 @@ def test_git_history_parsers_reject_incomplete_nontruncated_output(parser, raw, 
 
     assert failed.value.status == 500
     assert failed.value.message_key == expected_key
+
+
+def test_git_history_numstat_parser_handles_git_framing_empty_commit_and_newline_path(tmp_path):
+    repo = tmp_path / "history"
+    repo.mkdir()
+    init_repo(repo)
+    normal = repo / "normal.txt"
+    normal.write_text("normal\n", encoding="utf-8")
+    git(repo, "add", "--", "normal.txt")
+    git(repo, "commit", "-q", "-m", "normal")
+    git(repo, "commit", "--allow-empty", "-q", "-m", "empty")
+    newline_path = repo / "line\nname.txt"
+    newline_path.write_text("newline\n", encoding="utf-8")
+    git(repo, "add", "--", "line\nname.txt")
+    git(repo, "commit", "-q", "-m", "newline path")
+
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.quotePath=false",
+            "-C",
+            str(repo),
+            "log",
+            "--topo-order",
+            "--root",
+            "--diff-merges=first-parent",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "--shortstat",
+            "-z",
+            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s",
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    commits, output_truncated, metadata_truncated = git_ops._parse_history_numstat(
+        result.stdout,
+        output_truncated=False,
+    )
+
+    assert output_truncated is False
+    assert metadata_truncated is False
+    assert [commit["subject"] for commit in commits] == ["newline path", "empty", "normal"]
+    assert commits[0]["files"] == 1
+    assert commits[0]["added"] == 1
+    assert commits[0]["removed"] == 0
+    assert commits[0]["binary_files"] == 0
+    assert commits[1]["files"] == 0
+    assert commits[1]["added"] == 0
+    assert commits[1]["removed"] == 0
+    assert commits[1]["binary_files"] == 0
 
 
 @pytest.mark.parametrize(

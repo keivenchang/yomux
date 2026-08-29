@@ -304,23 +304,23 @@ function gitDiffTextNode(className, text = '') {
 }
 
 function gitDiffCommitChangesNode(commit) {
-  if (commit?.summary_pending === true) {
-    const node = gitDiffTextNode('git-diff-commit-changes git-diff-commit-changes-pending', '…');
-    node.setAttribute('aria-label', t('common.loading'));
+  const files = Number.isSafeInteger(commit?.files) && commit.files >= 0 ? commit.files : null;
+  const added = Number.isSafeInteger(commit?.added) && commit.added >= 0 ? commit.added : null;
+  const removed = Number.isSafeInteger(commit?.removed) && commit.removed >= 0 ? commit.removed : null;
+  const binary = Number.isSafeInteger(commit?.binary_files) && commit.binary_files >= 0 ? commit.binary_files : null;
+  const node = gitDiffTextNode('git-diff-commit-changes');
+  if (files === null || added === null || removed === null || binary === null) {
+    node.setAttribute('aria-label', t('common.notAvailable'));
+    node.title = t('common.notAvailable');
     return node;
   }
-  const files = Math.max(0, Number(commit?.files) || 0);
-  const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
-  const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
-  const binary = Math.max(0, Number(commit?.binary_files) || 0);
-  const node = gitDiffTextNode('git-diff-commit-changes');
   node.append(
     document.createTextNode(`${files} ${t('common.files')} `),
     gitDiffTextNode('git-diff-commit-added', `+${added}`),
     document.createTextNode(' '),
     gitDiffTextNode('git-diff-commit-removed', `-${removed}`),
   );
-  if (binary) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
+  if (binary > 0) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
   node.setAttribute('aria-label', `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`);
   return node;
 }
@@ -493,17 +493,22 @@ function gitDiffHistoricalComparisonKind(detail) {
   return parents.length > 1 ? 'merge-first-parent' : 'parent';
 }
 
-async function openGitDiffHistoricalFile(detail, file, options = {}) {
+function openGitDiffHistoricalFile(detail, file, options = {}) {
   const item = gitDiffHistoricalFileItem(detail, file);
   const identity = historicalFileEditorIdentity(item);
   if (!identity) return null;
-  return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
+  const openOptions = {
     item,
     repo: detail.repo,
     returnToItem: options.returnToItem,
     historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
     userInitiated: options.userInitiated !== false,
-  });
+  };
+  // Install and select the exact historical tab before waiting for its bounded comparison read.
+  // The editor owns the loading/error state; return the tab identity now so a slow Git comparison
+  // cannot make a deliberate file click appear to do nothing.
+  void openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, openOptions);
+  return item;
 }
 
 function gitDiffDetailCollapsedDirectories(state, sha) {
