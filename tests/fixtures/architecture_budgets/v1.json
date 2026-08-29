@@ -2036,7 +2036,7 @@
     "tests/test_browser_daemons_theme.py": 151,
     "tests/test_browser_dockview.py": 9209,
     "tests/test_browser_editor.py": 4984,
-    "tests/test_browser_finder.py": 4626,
+    "tests/test_browser_finder.py": 4631,
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
     "tests/test_browser_layout.py": 17562,

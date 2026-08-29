@@ -1068,17 +1068,20 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
         const originalFetch = window.fetch.bind(window);
         const waitFor = window.__yolomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
-        let resolveBatch = null;
-        let resolveHistory = null;
+        const batchResolvers = [];
+        const historyResolvers = [];
         const requests = [];
         window.fetch = (input, options = {}) => {
           const url = new URL(String(input), location.href);
           requests.push(url.pathname + url.search);
           if (url.pathname === '/api/fs/batch') return new Promise(resolve => {
-            resolveBatch = () => resolve(jsonResponse({responses: (JSON.parse(options.body || '{}').requests || []).map((request, index) => ({id: request.id ?? index, ok: true, status: 200, payload: {path: request.path, name: 'notes', kind: 'dir', realpath: request.path, repo_root: repo}}))}));
+            const requests = JSON.parse(options.body || '{}').requests || [];
+            const payload = {responses: requests.map((request, index) => ({id: request.id ?? index, ok: true, status: 200, payload: {path: request.path, name: 'notes', kind: 'dir', realpath: request.path, repo_root: repo}}))};
+            batchResolvers.push(() => resolve(jsonResponse(payload)));
           });
           if (url.pathname === '/api/fs/git-history') return new Promise(resolve => {
-            resolveHistory = () => resolve(jsonResponse({path: repo, repo, relative_path: '', head: sha, snapshot_cursor: 'notes-snapshot', next_cursor: '', truncated: false, commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 1, binary_files: 0}]}));
+            const payload = {path: repo, repo, relative_path: '', head: sha, snapshot_cursor: 'notes-snapshot', next_cursor: '', truncated: false, commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 1, binary_files: 0}]};
+            historyResolvers.push(() => resolve(jsonResponse(payload)));
           });
           return originalFetch(input, options);
         };
@@ -1089,13 +1092,14 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
           row.dispatchEvent(event);
           const diffButton = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff');
           if (!diffButton || diffButton.disabled) throw new Error('repository Diff action did not paint enabled before path info');
+          const infoRequestsBeforeClick = requests.filter(request => request.startsWith('/api/fs/batch')).length;
           diffButton.click();
           const item = gitDiffItemFor(repo);
           const loading = await waitFor(() => panelNodes.get(item)?.querySelector('.git-diff-state-loading[role="status"]') || null);
-          if (!resolveBatch || !resolveHistory) throw new Error('expected independent deferred metadata and history requests');
-          resolveBatch();
-          resolveHistory();
-          done({nativeSuppressed: event.defaultPrevented, item, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          if (batchResolvers.length !== 1 || historyResolvers.length !== 1) throw new Error('expected one context-menu metadata refresh and one tab history request');
+          batchResolvers.shift()();
+          historyResolvers.shift()();
+          done({nativeSuppressed: event.defaultPrevented, item, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), infoRequestsBeforeClick, infoRequestsAfterClick: requests.filter(request => request.startsWith('/api/fs/batch')).length, historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')).length, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
         """,
         repo,
@@ -1104,8 +1108,9 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
     assert not metrics.get("error"), metrics
     assert metrics["nativeSuppressed"] is True and metrics["item"] == f"gitdiff:{quote(repo, safe='')}", metrics
     assert metrics["active"] is True and metrics["loadingText"] == "loading..." and metrics["movingEllipsis"] is True, metrics
-    assert any(request.startswith("/api/fs/batch") for request in metrics["requests"]), metrics
-    assert any(request.startswith("/api/fs/git-history?path=%2Fhome%2Ftest%2Fnotes") for request in metrics["requests"]), metrics
+    assert metrics["infoRequestsBeforeClick"] == metrics["infoRequestsAfterClick"] == 1, metrics
+    assert metrics["historyRequests"] == 1, metrics
+    assert metrics["requests"][-1].startswith("/api/fs/git-history?path=%2Fhome%2Ftest%2Fnotes"), metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

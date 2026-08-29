@@ -26645,12 +26645,9 @@ function finderOpenInNewTabActionsForContext(context = {}) {
       item: gitDiffItemFor(fullPath),
       disabled,
       disabledReason,
-      action: () => {
-        // The user explicitly chose a Git path. Start its bounded metadata request now, but do
-        // not make the loading diff tab wait for it or for history.
-        void fetchFilePathInfo(fullPath, {fresh: true, user: true, immediate: true});
-        return openGitDiffTab(fullPath, {userInitiated: true});
-      },
+      // The context menu already refreshes this path's metadata. Opening the tab starts its
+      // own history request, so do not send a second fresh info request for the same click.
+      action: () => openGitDiffTab(fullPath, {userInitiated: true}),
     }];
   }
   if (entry.kind !== 'file') return [];
@@ -26672,10 +26669,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     canonical: true,
     disabled,
     disabledReason: disabled ? disabledReason : '',
-    action: () => {
-      if (mode === 'diff') void fetchFilePathInfo(fullPath, {fresh: true, user: true, immediate: true});
-      return openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'});
-    },
+      action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
   });
   return [
     actionForMode('edit', 'contextmenu.editNewTab'),
