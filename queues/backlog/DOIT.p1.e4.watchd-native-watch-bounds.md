@@ -2,7 +2,7 @@
 
 ## Consolidation lineage
 
-Split out of `DOIT.p1.e5.memory-hog.md` on 2026-08-25 for this v0.7.16 candidate because the old queue mixed watchd registration work with statsd resource work. The statsd halves moved to `DOIT.p0.e3.statsd-resource-bounds.md`; that queue is the sole statsd resource-bound owner and this one is the sole watchd native-registration owner. Neither may hold the other's work.
+Split out of `DOIT.p1.e5.memory-hog.md` on 2026-08-25 for this v0.7.16 candidate because the old queue mixed watchd registration work with statsd resource work. The v0.7.22 release decision closed the former P0 resource queue without claiming its unfinished measurements passed. This queue remains the sole watchd native-registration owner.
 
 `STATUS-REPORT.md` goal item 4 now spans both queues rather than the retired mixed queue.
 

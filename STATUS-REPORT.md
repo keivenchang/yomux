@@ -3,9 +3,9 @@
 Updated: 2026-08-28 10:12 PM PT
 Worktree: `/nfs/keivenc/dev/yolomux.e3-candidate.YqegFY`
 
-**Goal:** Produce a verified YOLOmux v0.7.17 candidate with every STATUS-scoped queue complete, the canonical gate green on the exact candidate identity, an independent audit, and authorized live acceptance.
+**Goal:** v0.7.17 historical candidate ledger. The v0.7.22 release decision closed the former P0 queue set; its exact scope and unrun measurements are recorded in `docs/DONE/2026-08/DONE.v0.7.22-p0-release-decision.md`.
 
-**Goal totals:** 0/6 done (0%); 6 TODO.
+**Goal totals:** historical ledger retained; not an active release denominator.
 
 ## Goal checklist
 
@@ -30,7 +30,7 @@ Worktree: `/nfs/keivenc/dev/yolomux.e3-candidate.YqegFY`
 
 - No focused queue. The STATUS-scoped inventory above is still current.
 
-## Pending goal items
+## Historical goal items
 
 - 1. Freeze the exact v0.7.17 worktree identity and reconcile the audited queue inventory.
 - 2. Close the recurring gate defects with named owners, deterministic regressions, and repeated post-fix evidence.

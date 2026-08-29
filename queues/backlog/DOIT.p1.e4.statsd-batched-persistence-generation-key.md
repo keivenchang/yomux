@@ -4,7 +4,7 @@
 
 P1, e4. Created 2026-08-25 as the named follow-up owner for design work **explicitly deferred out of the v0.7.17 release by Keiven**, so that the deferral has an owner rather than living only in a decision note. It is P1 rather than P0 because the release ships without it and nothing regresses; it is e4 rather than e2 because the blocking problem is a genuine invariant conflict, not a bug with a known fix.
 
-**This queue does not belong to the v0.7.17 STATUS-scoped inventory.** It is post-release work. `DOIT.p0.e3.statsd-resource-bounds.md` keeps its own batch-persistence item **open and not done**, because moving work to a follow-up does not satisfy a release item.
+**This queue does not belong to the v0.7.17 STATUS-scoped inventory.** It is post-release work. The former P0 resource queue was closed by the v0.7.22 release decision, which did not claim that its batch-persistence measurement passed. This queue remains the owner for any future generation-key work.
 
 ## What is already built, and must not be rebuilt
 
