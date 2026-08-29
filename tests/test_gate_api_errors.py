@@ -6,8 +6,7 @@ The journey deliberately excludes the YO!stats panel. Opening ``__yocost__`` aga
 freshly started fixture server produces real product Warnings ("YO!stats stream generation
 stalled for more than 3s", route ``/api/stats-stream``) and clamps every selected range back
 to 300s, so the panel cannot yet be driven through the strict browser diagnostic gate. That
-stall is the coverage item still open in ``DOIT.p0.browser-errors-release-blocking.md`` Plan
-bullet 5; the stats pending-response contract this gate accompanies is already asserted at the
+stall remains an unresolved post-release YO!stats coverage item; the stats pending-response contract this gate accompanies is already asserted at the
 HTTP layer by ``tests/test_stats_current_http.py``.
 """
 
