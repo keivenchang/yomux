@@ -26,7 +26,7 @@ from yolomux_lib import http_routes
 from yolomux_lib import server
 
 
-class _StoppedCompletionService(app_module.JobdOperationService):
+class _StoppedCompletionService(app_module.BatchedOperationService):
     """Accept the reservation and retain the submitted worker without running it."""
 
     def __init__(self) -> None:
@@ -34,7 +34,7 @@ class _StoppedCompletionService(app_module.JobdOperationService):
         self.submissions: list[tuple] = []
 
     def submit_reserved(self, reservation, function, *args) -> bool:
-        assert isinstance(reservation, app_module.JobdOperationReservation)
+        assert isinstance(reservation, app_module.BatchedOperationReservation)
         self.submissions.append((function, args))
         return True
 
@@ -45,7 +45,7 @@ class _StoppedCompletionService(app_module.JobdOperationService):
 def _watch_diff_app(monkeypatch, tmp_path, roots: list[str]):
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     webapp = app_module.TmuxWebtermApp([])
-    webapp.jobd_operation_service = _StoppedCompletionService()
+    webapp.batchd_operation_service = _StoppedCompletionService()
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: list(roots))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
     return webapp
@@ -61,7 +61,7 @@ def test_watch_diff_route_accepts_every_root_count_the_client_index_admits(monke
     try:
         dispatch()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     payload, status = writes[0]
@@ -71,7 +71,7 @@ def test_watch_diff_route_accepts_every_root_count_the_client_index_admits(monke
     assert payload["operation"]["context"]["roots"] == root_count
     assert payload["operation"]["context"]["batches"] == expected_batches
     assert payload["operation"]["progress"]["batches_total"] == expected_batches
-    function, args = webapp.jobd_operation_service.submissions[0]
+    function, args = webapp.batchd_operation_service.submissions[0]
     assert function == webapp.complete_filesystem_watch_diff_operation
     assert args[2] == roots
 
@@ -82,7 +82,7 @@ def test_watch_diff_route_reports_no_roots_as_a_ready_empty_plan(monkeypatch, tm
     try:
         dispatch()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     payload, status = writes[0]
@@ -91,7 +91,7 @@ def test_watch_diff_route_reports_no_roots_as_a_ready_empty_plan(monkeypatch, tm
     assert payload["data"]["mode"] == "full"
     assert payload["data"]["reason"] == "forced"
     assert payload["data"]["removed_roots"] == []
-    assert webapp.jobd_operation_service.submissions == []
+    assert webapp.batchd_operation_service.submissions == []
 
 
 def test_watch_diff_route_rejects_more_roots_than_the_client_index_admits(monkeypatch, tmp_path):
@@ -103,7 +103,7 @@ def test_watch_diff_route_rejects_more_roots_than_the_client_index_admits(monkey
     try:
         dispatch()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     payload, status = writes[0]
@@ -119,7 +119,7 @@ def test_watch_diff_route_rejects_more_roots_than_the_client_index_admits(monkey
         "operation": "GET /api/fs/watch-diff",
         "code": "invalid_request",
     }]
-    assert webapp.jobd_operation_service.submissions == []
+    assert webapp.batchd_operation_service.submissions == []
 
 
 @pytest.mark.parametrize(
@@ -144,7 +144,7 @@ def test_fs_batch_route_returns_a_typed_400_for_an_invalid_request_list(monkeypa
     try:
         dispatch()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     payload, status = writes[0]
@@ -247,7 +247,7 @@ def test_watch_batch_partition_covers_every_root_exactly_once(monkeypatch, tmp_p
     try:
         batches = webapp.submit_filesystem_watch_batches(roots, "seed")
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     limit = app_module.filesystem.MAX_BATCH_REQUESTS
@@ -285,7 +285,7 @@ def test_watch_batch_partition_keeps_repeated_roots_on_their_own_index(monkeypat
         }]
         merged = webapp.filesystem_watch_payload_from_products({"mode": "full"}, roots, products)
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert len(batches) == 1
@@ -299,7 +299,7 @@ def _pending_batches(count: int) -> tuple:
     limit = app_module.filesystem.MAX_BATCH_REQUESTS
     return tuple(
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(
+            producer=app_module.BatchedProductOperation(
                 job_id=f"job-{index}",
                 product_key=f"fs-watch:chunk-{index}",
                 generation=1,
@@ -325,7 +325,7 @@ def _chunk_product(offset: int, count: int, *, failed_ids: frozenset = frozenset
 def test_out_of_order_child_completion_still_merges_in_root_order(monkeypatch, tmp_path):
     """The last chunk finishes first; the merged payload is still parent root order.
 
-    jobd numbers every batch's responses from zero, so both children arrive claiming ids
+    batchd numbers every batch's responses from zero, so both children arrive claiming ids
     ``0..63``.  Without the per-chunk offset the later chunk would overwrite the earlier one and
     half the roots would silently report "filesystem batch result missing".
     """
@@ -337,12 +337,12 @@ def test_out_of_order_child_completion_still_merges_in_root_order(monkeypatch, t
     # back warm, while the first child is still cold and has to be waited for.
     batches = (
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id="job-0", product_key="fs-watch:c0", generation=1),
+            producer=app_module.BatchedProductOperation(job_id="job-0", product_key="fs-watch:c0", generation=1),
             root_offset=0,
             root_count=limit,
         ),
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:c1", generation=1),
+            producer=app_module.BatchedProductOperation(job_id="job-1", product_key="fs-watch:c1", generation=1),
             ready_product=_chunk_product(limit, limit),
             root_offset=limit,
             root_count=limit,
@@ -355,12 +355,12 @@ def test_out_of_order_child_completion_still_merges_in_root_order(monkeypatch, t
         waited.append(producer.job_id)
         return _chunk_product(0, limit)
 
-    monkeypatch.setattr(webapp, "wait_for_jobd_operation_product", wait_for_product)
+    monkeypatch.setattr(webapp, "wait_for_batchd_operation_product", wait_for_product)
     try:
         products = webapp.resolve_filesystem_watch_batches(batches, 0.0)
         merged = webapp.filesystem_watch_payload_from_products({"mode": "full"}, roots, products)
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert waited == ["job-0"], "the already-complete child must not be waited for again"
@@ -378,13 +378,13 @@ def test_one_failed_child_batch_keeps_its_own_roots_failed_and_the_rest_listed(m
     webapp = _watch_diff_app(monkeypatch, tmp_path, roots)
     batches = (
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id="job-0", product_key="fs-watch:c0", generation=1),
+            producer=app_module.BatchedProductOperation(job_id="job-0", product_key="fs-watch:c0", generation=1),
             ready_product=_chunk_product(0, limit),
             root_offset=0,
             root_count=limit,
         ),
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:c1", generation=1),
+            producer=app_module.BatchedProductOperation(job_id="job-1", product_key="fs-watch:c1", generation=1),
             ready_product=_chunk_product(limit, 3, failed_ids=frozenset({0, 1, 2})),
             root_offset=limit,
             root_count=3,
@@ -394,7 +394,7 @@ def test_one_failed_child_batch_keeps_its_own_roots_failed_and_the_rest_listed(m
         products = webapp.resolve_filesystem_watch_batches(batches, 0.0)
         merged = webapp.filesystem_watch_payload_from_products({"mode": "full"}, roots, products)
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert merged["listing_summary"]["roots_requested"] == limit + 3
@@ -408,7 +408,7 @@ def test_one_failed_child_batch_keeps_its_own_roots_failed_and_the_rest_listed(m
 
 
 def test_a_failed_child_submission_fails_the_whole_parent_operation(monkeypatch, tmp_path):
-    """A chunk jobd refuses is a request failure with a typed cause, never a partial answer."""
+    """A chunk batchd refuses is a request failure with a typed cause, never a partial answer."""
 
     limit = app_module.filesystem.MAX_BATCH_REQUESTS
     roots = [f"/repo-{index:03d}" for index in range(limit + 1)]
@@ -419,7 +419,7 @@ def test_a_failed_child_submission_fails_the_whole_parent_operation(monkeypatch,
         def produce(self, task, payload, **kwargs):
             del task
             if accepted:
-                return {"ok": False, "error": "jobd rejected the second watch chunk"}, b""
+                return {"ok": False, "error": "batchd rejected the second watch chunk"}, b""
             accepted.append(payload)
             return {
                 "ok": True,
@@ -430,10 +430,10 @@ def test_a_failed_child_submission_fails_the_whole_parent_operation(monkeypatch,
 
     webapp.job_client = SecondChunkRefusingJob()
     try:
-        with pytest.raises(app_module.JobdOperationUnavailable, match="jobd rejected the second watch chunk"):
+        with pytest.raises(app_module.BatchedOperationUnavailable, match="batchd rejected the second watch chunk"):
             webapp.submit_filesystem_watch_batches(roots, "seed", delivery="ready_or_receipt")
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert len(accepted) == 1
@@ -464,7 +464,7 @@ def test_watch_diff_request_replays_its_retained_multi_batch_product_without_res
         )
         payload, status = webapp.filesystem_watch_diff_http_payload(force_full=True, request_id="r-web-retained")
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
@@ -484,11 +484,11 @@ def test_accepted_watch_diff_threads_one_absolute_deadline_through_every_child(m
     try:
         receipt, status = webapp.filesystem_watch_diff_http_payload(force_full=True, request_id="r-deadline")
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert status == HTTPStatus.ACCEPTED, receipt
-    _function, args = webapp.jobd_operation_service.submissions[0]
+    _function, args = webapp.batchd_operation_service.submissions[0]
     # args == (flight, base_payload, roots, identity_seed)
     deadline_at = args[0].deadline_at
     # One absolute deadline, set at acceptance -- not a per-child relative timeout.
@@ -497,7 +497,7 @@ def test_accepted_watch_diff_threads_one_absolute_deadline_through_every_child(m
     # A child dequeued after a queue delay still waits against that same absolute deadline.
     batches = tuple(
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
+            producer=app_module.BatchedProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
             root_offset=index * limit,
             root_count=min(limit, len(roots) - index * limit),
         )
@@ -510,7 +510,7 @@ def test_accepted_watch_diff_threads_one_absolute_deadline_through_every_child(m
         observed_deadlines.append(child_deadline_at)
         return _chunk_product(0, limit)
 
-    monkeypatch.setattr(webapp, "wait_for_jobd_operation_product", wait_for_product)
+    monkeypatch.setattr(webapp, "wait_for_batchd_operation_product", wait_for_product)
     webapp.resolve_filesystem_watch_batches(batches, deadline_at)
     assert observed_deadlines == [deadline_at, deadline_at], "every child shares the one acceptance deadline"
 
@@ -522,7 +522,7 @@ def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_chi
     limit = app_module.filesystem.MAX_BATCH_REQUESTS
     roots = [f"/repo-{index:03d}" for index in range(limit + 1)]
     webapp = _watch_diff_app(monkeypatch, tmp_path, roots)
-    flight = app_module.JobdOperationFlight(
+    flight = app_module.BatchedOperationFlight(
         lane="bulk",
         key="fs-watch-request:cancelled",
         deadline_at=time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS,
@@ -531,7 +531,7 @@ def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_chi
 
     cold_batches = tuple(
         app_module.FilesystemWatchBatchProduct(
-            producer=app_module.JobdProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
+            producer=app_module.BatchedProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
             root_offset=index * limit,
             root_count=min(limit, len(roots) - index * limit),
         )
@@ -551,7 +551,7 @@ def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_chi
             "seed",
         )
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert terminalized == [], "a cancelled parent must publish no result or error"

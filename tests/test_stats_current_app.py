@@ -160,7 +160,7 @@ def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
         lambda: {
             "indexd": lambda: {"service": "indexd", "pid": 0, "resources": {}},
             "statsd": lambda: {"service": "statsd", "pid": 21, "resources": {"cpu_percent": 4, "rss_bytes": 400}},
-            "jobd": lambda: {"service": "jobd", "pid": 0, "resources": {}},
+            "batchd": lambda: {"service": "batchd", "pid": 0, "resources": {}},
             "statusd": lambda: {"service": "statusd", "pid": 0, "resources": {}},
             "watchd": lambda: {"service": "watchd", "pid": 0, "resources": {}},
             "approvald": lambda: {"service": "approvald", "pid": 0, "resources": {}},
@@ -895,7 +895,7 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
         stop_periodic=lambda: calls.append("pricing"),
     )
     webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
-    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("jobd"))
+    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("batchd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
     webapp.metadata_warm_lock = threading.Lock()
     webapp.metadata_warm_record = SimpleNamespace(stop_event=threading.Event())
@@ -918,7 +918,7 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
 
     webapp.demote_background_owner()
 
-    assert calls == ["pricing", "current", "jobd", "indexes", "publish"]
+    assert calls == ["pricing", "current", "batchd", "indexes", "publish"]
     assert webapp.activity_transcript_service.tabber_warmer_record.wake.is_set() is False  # fresh replacement record
     assert webapp.metadata_warm_record.stop_event.is_set()
     assert webapp.session_files_service.work_records == {}
@@ -933,8 +933,8 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
     )
     webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
     webapp.queued_delivery_compaction_owner = SimpleNamespace(stop=lambda: calls.append("compaction"))
-    webapp.jobd_operation_service = SimpleNamespace(stop=lambda: calls.append("operations"))
-    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("jobd"))
+    webapp.batchd_operation_service = SimpleNamespace(stop=lambda: calls.append("operations"))
+    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("batchd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
     webapp.approval_client = SimpleNamespace(
         request=lambda *args, **kwargs: calls.append("approval"),
@@ -948,7 +948,7 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
 
     webapp.stop_auto_approve_all()
 
-    assert calls == ["pricing", "current", "compaction", "operations", "jobd", "approval", "owner", "yoagent", "control"]
+    assert calls == ["pricing", "current", "compaction", "operations", "batchd", "approval", "owner", "yoagent", "control"]
 
 
 def test_legacy_stats_handlers_and_scheduler_bodies_are_deleted():

@@ -5,7 +5,7 @@ from threading import Thread
 
 import pytest
 
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib.local_services import client as local_service_client_mod
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services import rpc
@@ -61,7 +61,7 @@ def test_lease_release_terminal_upgrade_response_is_recorded_without_retry(monke
 
 @pytest.mark.parametrize("method", ("result", "product"))
 def test_job_client_observation_does_not_launch_an_absent_service(method, tmp_path, monkeypatch):
-    client = jobd.JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
     attempts = []
     launch_calls = []
 
@@ -87,7 +87,7 @@ def test_job_client_observation_does_not_launch_an_absent_service(method, tmp_pa
 
 @pytest.mark.parametrize("method", ("submit", "produce"))
 def test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget(method, tmp_path, monkeypatch):
-    client = jobd.JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
     clock = [100.0]
     waits = []
     attempts = []
@@ -125,7 +125,7 @@ def test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget(metho
 
 
 def test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget(tmp_path, monkeypatch):
-    client = jobd.JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
     clock = [100.0]
     attempts = []
     responses = iter((
@@ -154,7 +154,7 @@ def test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget(tmp
 
 
 def test_job_client_does_not_retry_generic_busy_without_prehandler_provenance(tmp_path, monkeypatch):
-    client = jobd.JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
     attempts = []
 
     def request_once(payload, timeout, request_binary=b"", *, probe=False):
@@ -317,7 +317,7 @@ def test_registry_release_lease_retries_capacity_busy_then_succeeds(tmp_path, mo
 
 
 def test_job_client_does_not_retry_ambiguous_service_unavailable_response(tmp_path, monkeypatch):
-    client = jobd.JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
     attempts = []
 
     def request_once(payload, timeout, request_binary=b"", *, probe=False):

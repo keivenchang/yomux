@@ -190,6 +190,6 @@ def test_socket_budget_enumerates_product_candidates_not_a_guessed_suffix(tmp_pa
     paths = common.resolve_yolomux_roots({"YOLOMUX_ROOT": "/tmp/yr"}, identity=_identity())
     candidates = common.runtime_socket_candidates(paths)
 
-    assert {path.name for path in candidates} >= {"statusd.sock", "jobd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}
+    assert {path.name for path in candidates} >= {"statusd.sock", "batchd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}
     assert any(path.name.startswith("statsd.p24s7.") for path in candidates)
     assert max(candidates, key=lambda path: len(str(path).encode())) in candidates

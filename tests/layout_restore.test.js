@@ -1848,7 +1848,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(htmlPreview.classList.contains('code-preview-body'), false);
     assert.equal(htmlPreview.children.length, 2);
     assert.equal(htmlPreview.children[0].className, 'file-editor-html-js-notice');
-    assert.equal(htmlPreview.children[0].children[1].href, '/api/fs/html-preview?path=%2Fhome%2Ftest%2Findex.html');
+    assert.equal(htmlPreview.children[0].children[1].href, '/api/batch/html-preview?path=%2Fhome%2Ftest%2Findex.html');
     assert.equal(htmlPreview.children[0].children[1].dataset.htmlPreviewAuth, '1');
     assert.equal((htmlPreview.children[0].children[1].listeners.get('click') || []).length, 1);
     assert.equal(htmlPreview.children[1].className, 'file-editor-html-preview');

@@ -222,7 +222,7 @@ class PersistentApprovalService(LocalRpcServiceState):
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         # `lease_id` is THE shared local-service wire key for the id being refreshed:
         # it is what `LocalServiceRegistry.acquire_lease` sends and what statusd,
-        # watchd and jobd read. Dropping it made every refresh look like a first
+        # watchd and batchd read. Dropping it made every refresh look like a first
         # acquisition to `acquire_client_lease`, which MINTS a row each time. Nothing
         # reaps those rows (only DEAD clients are reaped), so one healthy long-lived
         # client walks the table to LOCAL_SERVICE_MAX_CLIENT_LEASES, is then refused

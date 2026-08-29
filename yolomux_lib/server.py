@@ -385,7 +385,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     """Composed owner for FilesystemHttpAdapter."""
 
     def handle_fs_fast_list(self, parsed: Any) -> None:
-        """Return one non-recursive directory snapshot without entering jobd."""
+        """Return one non-recursive directory snapshot without entering batchd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "/") or "/")
         try:
@@ -464,7 +464,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             return
         # A first editor open needs only one authorized descriptor walk, stat, bounded read, and
         # binary check. Keep that small operation in this request thread instead of sending it
-        # through jobd's point queue and receipt polling. Git is explicitly deferred to the
+        # through batchd's point queue and receipt polling. Git is explicitly deferred to the
         # include_git path because repository snapshots can be arbitrarily slow.
         try:
             payload = filesystem.read_file(raw_path, include_git=False)
@@ -538,7 +538,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         ref = query_one(qs, "ref", None)
-        self.submit_filesystem_operation("GET /api/blame", "blame", raw_path, {"ref": ref})
+        self.submit_filesystem_operation("GET /api/batch/blame", "blame", raw_path, {"ref": ref})
 
     def submit_filesystem_operation(
         self,
@@ -566,7 +566,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         self.write_json(response.payload, status=response.status)
 
     def handle_fs_raw(self, parsed: Any) -> None:
-        """Serve one bounded authorized file directly; raw media must not wait behind jobd."""
+        """Serve one bounded authorized file directly; raw media must not wait behind batchd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
@@ -589,7 +589,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         self.submit_filesystem_relay(
-            "GET /api/fs/zip",
+            "GET /api/batch/zip",
             "zip",
             raw_path,
             {"filename": fs_zip_attachment_filename(raw_path), "max_bytes": self.file_transfer_max_bytes()},
@@ -598,7 +598,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_count(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/count", "count", raw_path)
+        self.submit_filesystem_operation("GET /api/batch/count", "count", raw_path)
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -616,7 +616,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             )
             return
         locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        self.submit_filesystem_relay("GET /api/fs/html-preview", "html_preview", raw_path, {"locale": locale})
+        self.submit_filesystem_relay("GET /api/batch/html-preview", "html_preview", raw_path, {"locale": locale})
 
     def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
         """Forward browser-owned filesystem bytes through the shared product writer."""
@@ -2219,6 +2219,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_fs_search(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_search(self, parsed)
 
+    def handle_batch_search(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_batch_search(self, parsed)
+
     def handle_fs_index_status(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_index_status(self, parsed)
 
@@ -3523,8 +3526,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "persistent_request_stop"):
             self.persistent_request_stop.set()
-        if hasattr(self, "app") and hasattr(self.app, "stop_jobd_operation_service"):
-            self.app.stop_jobd_operation_service()
+        if hasattr(self, "app") and hasattr(self.app, "stop_batchd_operation_service"):
+            self.app.stop_batchd_operation_service()
         if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):

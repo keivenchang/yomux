@@ -991,7 +991,7 @@ function htmlPreviewHasDisabledJavaScript(text) {
 }
 
 function htmlPreviewUrl(path) {
-  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+  return `/api/batch/html-preview?path=${encodeURIComponent(path)}`;
 }
 
 function renderRawImagePreviewInto(container, path, state = null, options = {}) {

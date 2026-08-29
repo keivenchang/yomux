@@ -5,7 +5,7 @@
 import threading
 
 from yolomux_lib import app as app_module
-from yolomux_lib.infra.state_services import JobdOperationService, SessionFilesService
+from yolomux_lib.infra.state_services import BatchedOperationService, SessionFilesService
 
 
 def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_it():
@@ -62,8 +62,8 @@ def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_i
     coordinator.stop()
 
 
-def test_jobd_operation_service_wait_for_idle_keeps_completion_service_running():
-    service = JobdOperationService(worker_limit=1, operation_limit=1)
+def test_batchd_operation_service_wait_for_idle_keeps_completion_service_running():
+    service = BatchedOperationService(worker_limit=1, operation_limit=1)
     operation_started = threading.Event()
     release_operation = threading.Event()
 
@@ -84,8 +84,8 @@ def test_jobd_operation_service_wait_for_idle_keeps_completion_service_running()
     service.stop()
 
 
-def test_jobd_operation_service_stop_joins_running_accepted_operation_before_returning():
-    service = JobdOperationService(worker_limit=1, operation_limit=1)
+def test_batchd_operation_service_stop_joins_running_accepted_operation_before_returning():
+    service = BatchedOperationService(worker_limit=1, operation_limit=1)
     operation_started = threading.Event()
     release_operation = threading.Event()
     stop_returned = threading.Event()
@@ -106,7 +106,7 @@ def test_jobd_operation_service_stop_joins_running_accepted_operation_before_ret
         service.stop()
         stop_returned.set()
 
-    stopper = threading.Thread(target=stop_service, name="jobd-operation-stop-regression")
+    stopper = threading.Thread(target=stop_service, name="batchd-operation-stop-regression")
     stopper.start()
     assert service.stop_event.wait(timeout=1)
     returned_before_operation_finished = stop_returned.wait(timeout=0.1)
@@ -119,7 +119,7 @@ def test_jobd_operation_service_stop_joins_running_accepted_operation_before_ret
     assert service.futures == set()
 
 
-def test_jobd_product_wait_stops_before_another_rpc_when_its_owner_is_cancelled():
+def test_batchd_product_wait_stops_before_another_rpc_when_its_owner_is_cancelled():
     stop_event = threading.Event()
     product_calls = []
 
@@ -129,7 +129,7 @@ def test_jobd_product_wait_stops_before_another_rpc_when_its_owner_is_cancelled(
             stop_event.set()
             return {"ok": True, "state": "pending", "generation": 1}, b""
 
-    result = app_module.wait_for_jobd_product(
+    result = app_module.wait_for_batchd_product(
         Client(),
         "metadata-product",
         2,

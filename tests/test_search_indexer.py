@@ -7,7 +7,7 @@ import pytest
 from yolomux_lib import search_indexer
 from yolomux_lib.filesystem import paths
 from yolomux_lib.filesystem import search
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.local_services import runtime as local_service_runtime
@@ -235,9 +235,9 @@ def test_index_search_authority_survives_the_path_only_app_adapter(tmp_path, mon
     assert sent == [({**authority}, search_indexer.INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)]
 
 
-def test_http_search_descriptor_threads_cursor_through_the_jobd_executor(monkeypatch):
+def test_http_search_descriptor_threads_cursor_through_the_batchd_executor(monkeypatch):
     # Step 4: the HTTP `/api/fs/search?cursor=` param reaches `filesystem.search_files` through the
-    # jobd filesystem-operation descriptor. An absent cursor is a snapshot; an opaque cursor selects
+    # batchd filesystem-operation descriptor. An absent cursor is a snapshot; an opaque cursor selects
     # the bounded committed-journal delta read.
     calls = []
 
@@ -245,10 +245,10 @@ def test_http_search_descriptor_threads_cursor_through_the_jobd_executor(monkeyp
         calls.append((path, query, limit, recursive, cursor))
         return {"root": path, "query": query, "changes": [], "cursor": "C2", "more": False}
 
-    monkeypatch.setattr(jobd.filesystem, "search_files", _capture)
+    monkeypatch.setattr(batchd.filesystem, "search_files", _capture)
 
-    jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})
-    jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})
+    batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})
+    batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})
 
     assert calls == [("/repo", "t5t", 25, True, "C1"), ("/repo", "t5t", 400, True, None)]
 

@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Cross-port confused-deputy contract for shared-jobd filesystem execution.
+"""Cross-port confused-deputy contract for shared-batchd filesystem execution.
 
 A filesystem job descriptor carries `op`, `path` and `args`.  Nothing on it says which server
-accepted the request, so the shared `jobd` daemon authorizes the path with `YOLOMUX_FS_ROOTS` from
+accepted the request, so the shared `batchd` daemon authorizes the path with `YOLOMUX_FS_ROOTS` from
 its own process environment -- the environment of whichever server launched it first.  Two servers
 on two ports with different configured roots therefore do not get their own access policy: they get
 the launcher's.  A restricted caller's own read returns `403 fs.error.outsideRoots`, and the very
-same descriptor executed by a jobd launched under a broader policy returns the file contents.
+same descriptor executed by a batchd launched under a broader policy returns the file contents.
 
 These tests execute the real registered task function with the daemon's environment installed,
 which is exactly what the worker process does with the descriptor the accepting server built.
@@ -24,7 +24,7 @@ import pytest
 from yolomux_lib import app as app_module
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import paths
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 
 BLOCKED_SENTINEL = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 
@@ -64,15 +64,15 @@ def _descriptor(operation: str, path: Path, args: dict | None = None) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _refusal_or_leak(descriptor: bytes) -> jobd.JobdFilesystemOperationFailure:
+def _refusal_or_leak(descriptor: bytes) -> batchd.BatchedFilesystemOperationFailure:
     """Execute the descriptor in the daemon's environment; fail loudly with any leaked bytes."""
     try:
-        body = jobd.run_registered_task("filesystem_operation", descriptor)
-    except jobd.JobdFilesystemOperationFailure as refusal:
+        body = batchd.run_registered_task("filesystem_operation", descriptor)
+    except batchd.BatchedFilesystemOperationFailure as refusal:
         return refusal
     leaked = json.loads(body.decode("utf-8"))
     pytest.fail(
-        "jobd executed a descriptor its accepting server's policy refuses and returned "
+        "batchd executed a descriptor its accepting server's policy refuses and returned "
         f"content={leaked.get('content')!r}"
     )
 
@@ -126,7 +126,7 @@ def test_narrow_daemon_must_not_deny_a_broad_callers_descriptor(monkeypatch, two
     descriptor = _descriptor("read", secret)
 
     _use_roots(monkeypatch, narrow)
-    result = json.loads(jobd.run_registered_task("filesystem_operation", descriptor).decode("utf-8"))
+    result = json.loads(batchd.run_registered_task("filesystem_operation", descriptor).decode("utf-8"))
     assert BLOCKED_SENTINEL in result["content"]
 
 
@@ -192,7 +192,7 @@ def test_a_broad_daemon_must_not_execute_a_narrow_callers_batch(monkeypatch, two
     )
 
     _use_roots(monkeypatch, broad)
-    response = jobd.run_registered_task(
+    response = batchd.run_registered_task(
         "filesystem_batch",
         json.dumps(batch_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
     )
@@ -237,7 +237,7 @@ def test_two_policies_never_share_one_retained_product(monkeypatch, two_policies
 # Test fixtures are in scope because they were the ones that got this wrong: three stand-ins for
 # `filesystem_operation_http_payload`, `filesystem_operation_relay` and `fs_batch_http_payload`
 # each hand-rolled their own descriptor, and eight filesystem routes answered 403/500.  The earlier
-# version of this test read only `app.py` and `jobd.py`, so it could not see them.
+# version of this test read only `app.py` and `batchd.py`, so it could not see them.
 #
 # The count is part of the key on purpose: allowlisting a line by text alone would let a second,
 # genuinely hand-built copy of that same line through.
@@ -279,57 +279,57 @@ _DESCRIPTOR_LITERAL_ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
      '"post_fs_batch": _json_body([{"id": "route-sweep-read", "op": "read", "path": str(fixture.text_file)}]),'): (
         1, "an HTTP request body; the real route captures the policy at accept time",
     ),
-    ("tests/test_jobd.py", 'accepting server does rather than hand-rolling `{"op": ..., "path": ...}`.'): (
+    ("tests/test_batchd.py", 'accepting server does rather than hand-rolling `{"op": ..., "path": ...}`.'): (
         1, "a docstring naming the forbidden shape",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      'read = service._queue_record("filesystem_operation", {"op": "read"}, "point", 1, "point-read")'): (
         1, "lane classification only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "abs-deadline", deadline_at=deadline,'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "still-deleting",'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "wedged",'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "backstopped",'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      'record = service._queue_record("filesystem_operation", {"op": "delete"}, "interactive", 1, "running-delete")'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "done-then-late-pump",'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      '"filesystem_operation", {"op": "delete"}, "interactive", 1, "never-answers",'): (
         1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py",
+    ("tests/test_batchd.py",
      'index_status = service._queue_record("filesystem_operation", {"op": "index_status"}, "point", 1, "point-index")'): (
         1, "lane classification only; `_queue_record` never executes the payload",
     ),
-    ("tests/test_jobd.py", '"task": "json_compact", "payload": {"op": "read", "path": "/repo/note.md"},'): (
+    ("tests/test_batchd.py", '"task": "json_compact", "payload": {"op": "read", "path": "/repo/note.md"},'): (
         1, "a `json_compact` payload; it never reaches a filesystem operation",
     ),
-    ("tests/test_jobd.py", '"payload": {"op": "read", "path": "/repo/note.md"},'): (
+    ("tests/test_batchd.py", '"payload": {"op": "read", "path": "/repo/note.md"},'): (
         1, "a `json_compact` payload; it never reaches a filesystem operation",
     ),
     ("tests/test_search_indexer.py",
-     'jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})'): (
+     'batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})'): (
         1, "authorizer-dispatch test; proves the opaque `cursor` param reaches `filesystem.search_files`, not a production descriptor site",
     ),
     ("tests/test_search_indexer.py",
-     'jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})'): (
+     'batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})'): (
         1, "authorizer-dispatch test; an absent cursor is a snapshot read, not a production descriptor site",
     ),
 }
@@ -339,7 +339,7 @@ _DESCRIPTOR_LITERAL_ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
 def test_one_owner_builds_every_filesystem_job_descriptor():
     """No second construction site, in product source OR a test fixture, may build a descriptor."""
 
-    for module in (app_module, jobd):
+    for module in (app_module, batchd):
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert '{"op":' not in source, f"{module.__name__} builds a filesystem descriptor inline"
     app_source = Path(app_module.__file__).read_text(encoding="utf-8")

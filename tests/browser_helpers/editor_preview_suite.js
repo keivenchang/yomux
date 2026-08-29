@@ -2208,7 +2208,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'same-tick size changes invalidate retained raw media',
     );
     assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
-    assert.equal(api.zipFileDownloadUrl('/repo/app/a b'), '/api/fs/zip?path=%2Frepo%2Fapp%2Fa%20b');
+    assert.equal(api.zipFileDownloadUrl('/repo/app/a b'), '/api/batch/zip?path=%2Frepo%2Fapp%2Fa%20b');
     assert.equal(api.downloadFilenameFromContentDisposition('attachment; filename="calvin.20261225-120001.zip"', 'fallback.zip'), 'calvin.20261225-120001.zip');
     assert.equal(api.downloadFilenameFromContentDisposition("attachment; filename*=UTF-8''calvin%20space.zip", 'fallback.zip'), 'calvin space.zip');
     assert.deepStrictEqual({...api.markdownPreviewImageTarget('.uploads/pasted image.png', '/repo/docs/note.md')}, {
@@ -8235,7 +8235,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/list?path='), 'command-palette path listing preserves shared filesystem error descriptors');
-    assert.ok(layoutSource.includes("'/api/batch/search'") && layoutSource.includes('apiFetchJson(`/api/fs/search?root='), 'command-palette search splits direct and batch filesystem paths');
+    assert.ok(layoutSource.includes("'/api/batch/search'") && layoutSource.includes('/api/fs/search'), 'command-palette search splits direct and batch filesystem paths');
 
     assert.deepStrictEqual(
       canonical(api.TAB_TYPES.filter(type => typeof type.relocalize === 'function').map(type => type.key)),

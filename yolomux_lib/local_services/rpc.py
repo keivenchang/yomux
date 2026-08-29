@@ -123,7 +123,7 @@ def retry_local_service_prehandler_busy(
 
 # --- Retained per-service request/error/latency accounting -------------------------------
 #
-# One owner for all six services, chosen over normalizing statsd's and jobd's bespoke
+# One owner for all six services, chosen over normalizing statsd's and batchd's bespoke
 # in-service metrics.  See `LocalServiceTrafficLedger` for the recorded reason.
 LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION = 1
 LOCAL_SERVICE_TRAFFIC_WORK = "work"
@@ -300,7 +300,7 @@ class LocalServiceTrafficLedger:
     """The one retained request/error/latency aggregate for one local service.
 
     Decision (M6): one common aggregator for all six services, not a normalized projection
-    over the bespoke metrics statsd and jobd already keep.  Three reasons.  First, uniform
+    over the bespoke metrics statsd and batchd already keep.  Three reasons.  First, uniform
     accepted/completed/error/latency exit criteria are required, and statusd, watchd, indexd
     and approvald expose no RPC ledger at all -- a projection would have to invent four of the
     six rows.  Second, an in-service counter is destroyed by the service restart the monitor

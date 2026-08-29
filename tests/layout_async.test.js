@@ -2266,8 +2266,8 @@ async function runLayoutAsyncSuite() {
       ['read', '/api/fs/read?path=%2Ftmp%2Fa'],
       ['info', '/api/fs/info?path=%2Ftmp%2Fa'],
       ['diff', '/api/fs/diff?path=%2Ftmp%2Fa'],
-      ['blame', '/api/blame?path=%2Ftmp%2Fa'],
-      ['count', '/api/fs/count?path=%2Ftmp'],
+      ['blame', '/api/batch/blame?path=%2Ftmp%2Fa'],
+      ['count', '/api/batch/count?path=%2Ftmp'],
       ['write', '/api/fs/write'],
       ['delete', '/api/fs/delete'],
       ['unindex', '/api/fs/unindex?root=%2Ftmp'],
@@ -8834,7 +8834,7 @@ async function runLayoutAsyncSuite() {
         api.setFetchForTest((url, options = {}) => {
           const text = String(url || '');
           deleteCalls.push({url: text, method: options.method || 'GET', body: options.body || ''});
-          if (text.startsWith('/api/fs/count')) {
+          if (text.startsWith('/api/batch/count')) {
             if (fetchRejectsCount) return Promise.reject(new Error('count failed'));
             return Promise.resolve(jsonResponse({path, kind: 'dir', files: count, recursive: true}));
           }
@@ -8861,7 +8861,7 @@ async function runLayoutAsyncSuite() {
 
       result = await runDelete({path: '/home/test/file.txt', kind: 'file', count: 99, confirmResponses: [true]});
       assert.equal(result.confirms.length, 1, 'single file delete still has only one confirm');
-      assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/count')), false, 'single file delete does not fetch a directory count');
+      assert.equal(result.calls.some(call => call.url.startsWith('/api/batch/count')), false, 'single file delete does not fetch a directory count');
       assert.equal(result.calls.some(call => call.url.startsWith('/api/fs/delete')), true, 'single file delete proceeds unchanged');
 
       result = await runDelete({path: '/home/test/unknown', count: 0, confirmResponses: [true, false], fetchRejectsCount: true});

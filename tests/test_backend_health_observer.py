@@ -67,8 +67,9 @@ from yolomux_lib.local_services.rpc import local_service_traffic_ledger
 from yolomux_lib.local_services.rpc import local_service_traffic_snapshot
 from yolomux_lib.local_services.rpc import reset_local_service_traffic
 from yolomux_lib.statusd_client import StatusClient
-from yolomux_lib.infra.jobd import JobClient
-from yolomux_lib.infra.jobd import JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yolomux_lib.infra import batchd
+from yolomux_lib.infra.batchd import BatchClient
+from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
 from yolomux_lib.approval.approvald import ApprovalClient
 
 
@@ -131,7 +132,7 @@ def test_a_demand_scoped_absent_service_is_not_a_failure():
     assert observed_health({"pid": 0, "demand_started": True}) == ("starting", "service_absent")
     assert observed_health({"pid": 0, "last_failure": "start blocked"}) == ("down", "exited")
     # ...and a service that declares NEITHER excuse still reads as down. That is the safety
-    # direction and it is deliberately the default: statsd and jobd-with-the-scheduler-lease
+    # direction and it is deliberately the default: statsd and batchd-with-the-scheduler-lease
     # are absent only when they have really failed.
     assert observed_health({"pid": 0}) == ("down", "service_absent")
 
@@ -181,23 +182,23 @@ def test_approvald_absent_with_no_auto_approve_target_is_idle_not_an_alarm(tmp_p
     assert observed_health(row) == ("starting", "service_absent")
 
 
-def test_jobd_absence_is_an_outage_only_while_this_process_owns_scheduling(tmp_path: Path):
-    """The whole jobd decision in one test: the lease is what makes absence a failure.
+def test_batchd_absence_is_an_outage_only_while_this_process_owns_scheduling(tmp_path: Path):
+    """The whole batchd decision in one test: the lease is what makes absence a failure.
 
-    jobd is NOT demand-scoped -- `start_for_scheduler()` pins the broker with a registry lease
+    batchd is NOT demand-scoped -- `start_for_scheduler()` pins the broker with a registry lease
     and the broker refuses to idle out while any lease is held. So a scheduling owner that
-    cannot see jobd is looking at a real outage and must alarm. The mirror case is the reason
+    cannot see batchd is looking at a real outage and must alarm. The mirror case is the reason
     the typed field exists: before this process wins the election, or when it never does,
-    nothing here is scheduling and jobd's absence is expected rather than broken.
+    nothing here is scheduling and batchd's absence is expected rather than broken.
     """
 
-    client = JobClient(tmp_path / "jobd.sock")
+    client = batchd.BatchClient(tmp_path / "batchd.sock")
 
     assert client.holds_scheduler_lease is False
     idle_row = _absent_row(client.runtime_status)
-    assert idle_row["absence_expected_reason"] == JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE, idle_row
+    assert idle_row["absence_expected_reason"] == BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE, idle_row
     assert "demand_started" not in idle_row, idle_row
-    assert observed_health(idle_row) == ("starting", JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE)
+    assert observed_health(idle_row) == ("starting", BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE)
 
     # Now this process owns background scheduling. Nothing else about the row changes.
     client._scheduler_lease_id = "lease-1"
@@ -225,7 +226,7 @@ def test_statsd_declares_neither_excuse_because_a_loop_keeps_it_hot():
     "row",
     [
         {"pid": 0, "demand_started": True, "last_failure": "statusd exited (1)"},
-        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "jobd exited (1)"},
+        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "batchd exited (1)"},
         {"pid": 0, "demand_started": True, "terminal_failure": True},
         {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "terminal_failure": True},
         {"pid": 0, "demand_started": True, "transport_reason": "connection refused"},
@@ -267,7 +268,7 @@ def test_an_unreadable_absence_reason_cannot_excuse_an_absence(value: Any):
 
 
 def test_an_empty_absence_reason_is_readable_and_excuses_nothing():
-    """"" is the resting value jobd publishes while it owns scheduling; it is not an error."""
+    """"" is the resting value batchd publishes while it owns scheduling; it is not an error."""
     assert observed_health({"pid": 0, "absence_expected_reason": ""}) == ("down", "service_absent")
     assert observed_health({"pid": 0, "absence_expected_reason": "   "}) == ("down", "service_absent")
 
@@ -276,17 +277,17 @@ def _idle_machine(harness: Harness) -> None:
     """Shape the six rows the way a real idle host publishes them.
 
     statsd is up because a background loop keeps it hot. indexd, watchd, statusd and approvald
-    are absent because nothing has asked for them. jobd is absent because this process has not
+    are absent because nothing has asked for them. batchd is absent because this process has not
     won the background-owner election. None of that is a failure and none of it may alarm.
     """
     for name in ("indexd", "watchd", "statusd", "approvald"):
         harness.services[name].absent()
     # statsd declares neither excuse, exactly as `statsd_runtime_status` publishes it.
     harness.services["statsd"].row.pop("demand_started")
-    jobd = harness.services["jobd"]
-    jobd.absent()
-    jobd.row.pop("demand_started")
-    jobd.row["absence_expected_reason"] = "scheduler_not_owned"
+    batchd = harness.services["batchd"]
+    batchd.absent()
+    batchd.row.pop("demand_started")
+    batchd.row["absence_expected_reason"] = "scheduler_not_owned"
 
 
 def test_an_idle_machine_raises_no_alarm_at_all(harness: Harness):
@@ -302,7 +303,7 @@ def test_an_idle_machine_raises_no_alarm_at_all(harness: Harness):
     assert harness.states() == {
         "indexd": "starting",
         "statsd": "ready",
-        "jobd": "starting",
+        "batchd": "starting",
         "statusd": "starting",
         "watchd": "starting",
         "approvald": "starting",
@@ -380,26 +381,26 @@ def test_recovery_to_ready_needs_two_consecutive_observations(harness: Harness):
 
 def test_one_failed_probe_cannot_flicker_the_indicator(harness: Harness):
     harness.cycle(2)
-    assert harness.states()["jobd"] == "ready"
+    assert harness.states()["batchd"] == "ready"
     published_before = len(harness.published)
 
-    harness.services["jobd"].error = RuntimeError("socket hiccup")
+    harness.services["batchd"].error = RuntimeError("socket hiccup")
     cycle = harness.cycle()
-    assert cycle.probe_outcomes["jobd"] == PROBE_FAILED
+    assert cycle.probe_outcomes["batchd"] == PROBE_FAILED
     # One bad probe is a candidate, not a transition: the UI does not move.
-    assert harness.states()["jobd"] == "ready"
+    assert harness.states()["batchd"] == "ready"
     assert cycle.published is False
     assert len(harness.published) == published_before
 
-    harness.services["jobd"].error = None
+    harness.services["batchd"].error = None
     harness.cycle()
-    assert harness.states()["jobd"] == "ready"
+    assert harness.states()["batchd"] == "ready"
     assert len(harness.published) == published_before
 
     # Two consecutive failures do move it.
-    harness.services["jobd"].error = RuntimeError("socket hiccup")
+    harness.services["batchd"].error = RuntimeError("socket hiccup")
     harness.cycle(2)
-    assert harness.states()["jobd"] == "unknown"
+    assert harness.states()["batchd"] == "unknown"
     assert len(harness.published) == published_before + 1
 
 
@@ -931,13 +932,13 @@ def test_a_failing_cycle_is_recorded_and_does_not_end_the_loop(harness: Harness)
 
 
 def test_observer_probes_never_enter_the_user_work_aggregate(harness: Harness):
-    ledger = local_service_traffic_ledger("jobd")
+    ledger = local_service_traffic_ledger("batchd")
     ledger.record_completion(LOCAL_SERVICE_TRAFFIC_WORK, client_elapsed_ms=12.0)
-    work_before = local_service_traffic_snapshot()["jobd"][LOCAL_SERVICE_TRAFFIC_WORK]["accepted"]
+    work_before = local_service_traffic_snapshot()["batchd"][LOCAL_SERVICE_TRAFFIC_WORK]["accepted"]
 
     harness.cycle(2)
 
-    snapshot = local_service_traffic_snapshot()["jobd"]
+    snapshot = local_service_traffic_snapshot()["batchd"]
     assert snapshot[LOCAL_SERVICE_TRAFFIC_WORK]["accepted"] == work_before
     # Every producer saw itself classified as probe traffic, in every cycle, for every service.
     for service in harness.services.values():

@@ -110,7 +110,7 @@ def _control_filesystem_operation_product(
 def _settle_controlled_filesystem_operation(gate_browser_runtime, release):
     """Release the fake product and retain its patch until the accepted completion is terminal."""
     release.set()
-    gate_browser_runtime.runtime.app.wait_for_jobd_operations_terminal(3)
+    gate_browser_runtime.runtime.app.wait_for_batchd_operations_terminal(3)
 
 
 DIFFER_TERMINAL_STATE_TIMEOUT_MS = 12_000
@@ -670,7 +670,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
             "status_url": f"/api/operations/{operation_id}",
             "events_url": f"/api/client-events?operation_id={operation_id}",
             "cursor": {"epoch": operation_epoch, "seq": 0},
-            "progress": {"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"},
+            "progress": {"phase": "waiting_for_product", "producer": "batchd", "producer_state": "queued"},
         },
     }
     ready = {
@@ -684,14 +684,14 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
     application_error = {
         "code": "service_unavailable",
         "message": {"key": "common.requestFailed", "params": {}, "fallback": "service socket is absent"},
-        "origin": "local_services.jobd",
+        "origin": "local_services.batchd",
         "retryable": False,
-        "details": {"service": "jobd", "reason": "absent"},
+        "details": {"service": "batchd", "reason": "absent"},
         "stack": [
             {"component": "server.http", "operation": "GET /api/session-files", "code": "dependency_failed"},
             {
-                "component": "local_services.jobd",
-                "operation": "jobd.result",
+                "component": "local_services.batchd",
+                "operation": "batchd.result",
                 "code": "service_unavailable",
                 "exception": {"type": "FileNotFoundError", "message": "service socket is absent"},
                 "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}],
@@ -804,7 +804,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
         evidence=metrics,
     )
     assert_terminal_transition(
-        contract_id="jobd-product-operation-completion",
+        contract_id="batchd-product-operation-completion",
         pending_observed=metrics.get("pending", {}).get("refreshing") is True,
         terminal_observed=terminal.get("refreshing") is False and terminal.get("loaded") is True,
         evidence=metrics,
@@ -1281,7 +1281,7 @@ def test_c1_c2_vanished_working_file_keeps_enabled_differ_and_renders_git_diff(
         expected_api_error,
         method="GET",
         path="/api/fs/read",
-        source="jobd-operation",
+        source="batchd-operation",
         code="path_not_found",
     )
 

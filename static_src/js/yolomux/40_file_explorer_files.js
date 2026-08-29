@@ -3836,7 +3836,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
 }
 
 function zipFileDownloadUrl(path) {
-  return `/api/fs/zip?path=${encodeURIComponent(path)}`;
+  return `/api/batch/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {

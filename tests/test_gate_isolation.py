@@ -2065,7 +2065,7 @@ def test_browser_fixture_finish_retires_page_before_settling_delayed_app_work(mo
     ]
 
 
-def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_jobd():
+def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_batchd():
     calls = []
     watcher_stop = threading.Event()
 
@@ -2091,8 +2091,8 @@ def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_jobd(
             calls.append("client-event-watcher")
             watcher_stop.set()
 
-        def wait_for_jobd_operations_terminal(self, timeout):
-            calls.append(("jobd-operations", timeout))
+        def wait_for_batchd_operations_terminal(self, timeout):
+            calls.append(("batchd-operations", timeout))
 
     gate_harness_module.settle_fixture_app_evidence_boundary(
         FixtureApp(),
@@ -2104,7 +2104,7 @@ def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_jobd(
         "tmux-signal-joined",
         ("session-files", 3),
         (
-            "jobd-operations",
+            "batchd-operations",
             gate_harness_module.FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS,
         ),
     ]
@@ -2451,8 +2451,8 @@ def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_pa
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
 
-        def stop_jobd_operation_service(self):
-            calls.append("jobd-operations")
+        def stop_batchd_operation_service(self):
+            calls.append("batchd-operations")
 
         def demote_background_owner(self):
             calls.append("background-owner")
@@ -2495,7 +2495,7 @@ def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_pa
     with pytest.raises((OSError, RuntimeError), match=failure_stage.replace("-", " ")):
         browser_layout.start_browser_server(monkeypatch, tmp_path, App())
 
-    assert calls[:4] == ["client-watcher", "jobd-operations", "background-owner", "auto-approve"]
+    assert calls[:4] == ["client-watcher", "batchd-operations", "background-owner", "auto-approve"]
     assert ("server-close" in calls) is (failure_stage != "bind")
 
 
@@ -2534,8 +2534,8 @@ def test_stateful_journey_start_rolls_back_background_owner_failure_and_reacquir
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
 
-        def stop_jobd_operation_service(self):
-            calls.append("jobd-operations")
+        def stop_batchd_operation_service(self):
+            calls.append("batchd-operations")
 
         def demote_background_owner(self):
             calls.append("background-owner")
@@ -2574,7 +2574,7 @@ def test_stateful_journey_start_rolls_back_background_owner_failure_and_reacquir
         journey.start()
 
     assert calls == [
-        "release", "client-watcher", "jobd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
+        "release", "client-watcher", "batchd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
     ]
     assert journey.app is None and journey.server is None and journey.thread is None
 
@@ -2591,11 +2591,11 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
 
-        def stop_jobd_operation_service(self):
-            calls.append("jobd-operations")
+        def stop_batchd_operation_service(self):
+            calls.append("batchd-operations")
 
         def demote_background_owner(self):
-            # Production's ``demote_background_owner`` releases the jobd scheduler lease here; the
+            # Production's ``demote_background_owner`` releases the batchd scheduler lease here; the
             # fake models that release so the rollback teardown cannot leak the pinned lease.
             self.job_client.stop_for_scheduler()
             calls.append("background-owner")
@@ -2648,7 +2648,7 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         next(generator)
 
     assert calls == [
-        "release", "client-watcher", "jobd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
+        "release", "client-watcher", "batchd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
     ]
     # The pin was taken before the thread-construction failure, and the rollback released it
     # exactly once -- no leaked lease, no double release -- even though two teardown owners each
@@ -2835,7 +2835,7 @@ def test_server_ring_validator_rejects_malformed_continuity(payload):
         browser_console.validate_server_log_ring_payload(payload)
 
 
-def test_fixture_stops_accepted_jobd_operations_before_demoting_local_services():
+def test_fixture_stops_accepted_batchd_operations_before_demoting_local_services():
     calls = []
 
     class FixtureApp:
@@ -2845,24 +2845,24 @@ def test_fixture_stops_accepted_jobd_operations_before_demoting_local_services()
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
 
-        def wait_for_jobd_operations_terminal(self, timeout):
+        def wait_for_batchd_operations_terminal(self, timeout):
             assert timeout == gate_harness_module.FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS
-            calls.append("jobd-operations-terminal")
+            calls.append("batchd-operations-terminal")
 
-        def stop_jobd_operation_service(self):
-            calls.append("jobd-operations")
+        def stop_batchd_operation_service(self):
+            calls.append("batchd-operations")
 
         def demote_background_owner(self):
             calls.append("background-demotion")
 
         def stop_auto_approve_all(self):
-            self.stop_jobd_operation_service()
+            self.stop_batchd_operation_service()
             calls.append("auto-approve")
 
     stop_fixture_app_runtime(FixtureApp(), label="fixture accepted-operation ordering")
 
-    assert calls.index("jobd-operations-terminal") < calls.index("jobd-operations")
-    assert calls.index("jobd-operations") < calls.index("background-demotion")
+    assert calls.index("batchd-operations-terminal") < calls.index("batchd-operations")
+    assert calls.index("batchd-operations") < calls.index("background-demotion")
 
 
 def test_fixture_joins_metadata_product_worker_after_retiring_local_services():
@@ -2891,11 +2891,11 @@ def test_fixture_joins_metadata_product_worker_after_retiring_local_services():
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             assert not worker_finished.is_set()
 
         def demote_background_owner(self):
-            # The worker runs in jobd. It must stay joinable while jobd and its
+            # The worker runs in batchd. It must stay joinable while batchd and its
             # local services retire, then be joined before fixture teardown returns.
             assert not worker_finished.is_set()
 
@@ -2984,7 +2984,7 @@ def test_fixture_app_writers_stop_before_single_pass_root_removal(tmp_path, monk
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3045,7 +3045,7 @@ def test_fixture_runtime_seals_local_service_demand_before_late_producer_can_rep
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3095,7 +3095,7 @@ def test_fixture_runtime_seals_every_sibling_local_service_registry_before_demot
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3114,7 +3114,7 @@ def test_fixture_stops_whole_owned_local_service_group_before_waiting(monkeypatc
 
     class FixtureProcess:
         pid = 43210
-        args = ["python3", "-m", "yolomux_lib.jobd", "--serve"]
+        args = ["python3", "-m", "yolomux_lib.batchd", "--serve"]
 
         def poll(self):
             return -15 if state["group_stopped"] else None
@@ -3144,7 +3144,7 @@ def test_fixture_stops_whole_owned_local_service_group_before_waiting(monkeypatc
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3185,7 +3185,7 @@ def test_fixture_runtime_keeps_each_processless_registry_owner(monkeypatch):
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3233,7 +3233,7 @@ def test_fixture_stops_retained_service_group_after_its_leader_already_exited(mo
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3520,7 +3520,7 @@ def test_fixture_escalates_stubborn_owned_service_group_within_original_bound(mo
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3634,7 +3634,7 @@ def test_fixture_kill_waits_for_exact_owned_descendant_exit_event(tmp_path, monk
 
 @pytest.mark.parametrize(
     "failure_phase",
-    ("client-watcher", "jobd-operations", "background-demotion", "auto-approve"),
+    ("client-watcher", "batchd-operations", "background-demotion", "auto-approve"),
 )
 def test_fixture_runtime_attempts_every_later_owner_after_one_phase_fails(monkeypatch, failure_phase):
     calls = []
@@ -3669,8 +3669,8 @@ def test_fixture_runtime_attempts_every_later_owner_after_one_phase_fails(monkey
         def stop_client_event_watcher(self):
             self.phase("client-watcher")
 
-        def stop_jobd_operation_service(self):
-            self.phase("jobd-operations")
+        def stop_batchd_operation_service(self):
+            self.phase("batchd-operations")
 
         def demote_background_owner(self):
             self.phase("background-demotion")
@@ -3687,7 +3687,7 @@ def test_fixture_runtime_attempts_every_later_owner_after_one_phase_fails(monkey
     with pytest.raises(RuntimeError, match=f"injected {failure_phase} failure"):
         stop_fixture_app_runtime(FixtureApp(), label="fixture phase continuation")
 
-    assert calls == ["client-watcher", "jobd-operations", "background-demotion", "auto-approve", "local-service"]
+    assert calls == ["client-watcher", "batchd-operations", "background-demotion", "auto-approve", "local-service"]
 
 
 def test_fixture_runtime_raises_structured_group_after_attempting_all_failed_phases():
@@ -3701,8 +3701,8 @@ def test_fixture_runtime_raises_structured_group_after_attempting_all_failed_pha
         def stop_client_event_watcher(self):
             self.fail("client-watcher")
 
-        def stop_jobd_operation_service(self):
-            self.fail("jobd-operations")
+        def stop_batchd_operation_service(self):
+            self.fail("batchd-operations")
 
         def demote_background_owner(self):
             self.fail("background-demotion")
@@ -3713,10 +3713,10 @@ def test_fixture_runtime_raises_structured_group_after_attempting_all_failed_pha
     with pytest.raises(BaseExceptionGroup) as failure:
         stop_fixture_app_runtime(FixtureApp(), label="fixture grouped failures")
 
-    assert calls == ["client-watcher", "jobd-operations", "background-demotion", "auto-approve"]
+    assert calls == ["client-watcher", "batchd-operations", "background-demotion", "auto-approve"]
     assert [str(error) for error in failure.value.exceptions] == [
         "injected client-watcher failure",
-        "injected jobd-operations failure",
+        "injected batchd-operations failure",
         "injected background-demotion failure",
         "injected auto-approve failure",
     ]
@@ -3758,7 +3758,7 @@ def test_fixture_runtime_attempts_each_captured_service_after_one_process_stop_f
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3812,7 +3812,7 @@ def test_fixture_refuses_recycled_foreign_service_group_without_signalling(monke
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3902,7 +3902,7 @@ def test_fixture_real_registry_refuses_foreign_generation_group_without_signalli
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):
@@ -3952,7 +3952,7 @@ def test_fixture_refuses_service_process_without_spawn_ownership(monkeypatch):
         def stop_client_event_watcher(self):
             pass
 
-        def stop_jobd_operation_service(self):
+        def stop_batchd_operation_service(self):
             pass
 
         def demote_background_owner(self):

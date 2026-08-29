@@ -707,7 +707,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
         app.status_client = client
         app.notification_transition_seconds = lambda: 30.0
         app.cached_session_files_payloads_for_infos = lambda infos, hours=24.0: {name: {"files": [], "repos": []} for name in infos}
-        app.compute_tabber_activity_rows_via_jobd = lambda infos, **_kwargs: {name: {"agents": [], "agent_windows": []} for name in infos}
+        app.compute_tabber_activity_rows_via_batchd = lambda infos, **_kwargs: {name: {"agents": [], "agent_windows": []} for name in infos}
         return app
 
     def snapshot():

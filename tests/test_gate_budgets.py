@@ -25,10 +25,10 @@ from yolomux_lib.local_services import client as local_service_client_module
 from yolomux_lib.local_services import registry as local_services_registry
 from yolomux_lib.local_services import rpc as local_service_rpc_module
 from yolomux_lib.approval.approvald import ApprovalClient
-from yolomux_lib.infra import jobd as jobd_module
+from yolomux_lib.infra import batchd as batchd_module
 from yolomux_lib.filesystem import git_ops
-from yolomux_lib.infra.jobd import JobClient
-from yolomux_lib.infra.jobd import PersistentJobBroker
+from yolomux_lib.infra.batchd import BatchClient
+from yolomux_lib.infra.batchd import PersistentJobBroker
 from yolomux_lib.local_services.client import LocalServiceClient
 from yolomux_lib.local_services.client import local_service_failure_is_transient
 from yolomux_lib.local_services.rpc import local_service_traffic_ledger
@@ -716,7 +716,7 @@ def test_l6_absent_socket_recovery_does_not_emit_a_transport_error(
 @pytest.mark.parametrize(
     ("service", "action"),
     (
-        pytest.param("jobd", "status", id="class-1-jobd-absent"),
+        pytest.param("batchd", "status", id="class-1-batchd-absent"),
         pytest.param("approvald", "status", id="class-2-approvald-absent"),
     ),
 )
@@ -728,7 +728,7 @@ def test_l6_idle_exited_service_request_recovers_without_transport_error(
 ):
     monkeypatch.setenv(local_services_registry.LOCAL_SERVICE_IDLE_SECONDS_ENV, "0.1")
     socket_path = gate_runtime_paths.runtime_dir / "services" / f"{service}-{action}.sock"
-    client = JobClient(socket_path) if service == "jobd" else ApprovalClient(socket_path)
+    client = BatchClient(socket_path) if service == "batchd" else ApprovalClient(socket_path)
     request = {"action": action}
 
     assert client.ensure_started() is True
@@ -780,14 +780,14 @@ def test_l6_idle_exited_service_request_recovers_without_transport_error(
     ("handler_limit", "served_while_occupied"),
     (
         pytest.param(
-            jobd_module.JOBD_CONCURRENT_HANDLER_LIMIT,
+            batchd_module.BATCHD_CONCURRENT_HANDLER_LIMIT,
             True,
             id="shipped-capacity-serves-a-second-client",
         ),
         pytest.param(0, False, id="negative-control-serial-listener-cannot"),
     ),
 )
-def test_l6_jobd_serves_a_product_read_while_another_handler_is_occupied(
+def test_l6_batchd_serves_a_product_read_while_another_handler_is_occupied(
     gate_runtime_paths,
     monkeypatch,
     handler_limit,
@@ -795,14 +795,14 @@ def test_l6_jobd_serves_a_product_read_while_another_handler_is_occupied(
 ):
     """A cheap last-known-good `product` read must not be charged another client's handler.
 
-    jobd's `_relay` blocks on its job's completion event for up to JOBD_MAX_DEADLINE_MS.  On a
+    batchd's `_relay` blocks on its job's completion event for up to BATCHD_MAX_DEADLINE_MS.  On a
     serial listener that wait is charged to every other client while staying invisible on the
     wire, because `accept_to_read_ms` starts after `accept()` returns and the envelope omits its
     queue/capacity fields while `capacity_limit` is 0 -- which is exactly why the caller's only
     available diagnosis is the literally unattributed `LocalRpcError: unattributed_latency`.
     """
-    socket_path = gate_runtime_paths.runtime_dir / "services" / f"jobd-capacity-{handler_limit}.sock"
-    monkeypatch.setattr(jobd_module, "JOBD_CONCURRENT_HANDLER_LIMIT", handler_limit)
+    socket_path = gate_runtime_paths.runtime_dir / "services" / f"batchd-capacity-{handler_limit}.sock"
+    monkeypatch.setattr(batchd_module, "BATCHD_CONCURRENT_HANDLER_LIMIT", handler_limit)
     service = PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
     handle = service.handle
     occupied = threading.Event()
@@ -818,7 +818,7 @@ def test_l6_jobd_serves_a_product_read_while_another_handler_is_occupied(
     service.handle = occupy_one_handler
     service_thread = threading.Thread(target=service.run, daemon=True)
     service_thread.start()
-    client = JobClient(socket_path)
+    client = BatchClient(socket_path)
     WebDriverWait(client, 4.0, poll_frequency=0.02).until(lambda _client: client.registry.healthy())
 
     read: list[tuple[dict, bytes]] = []
@@ -832,7 +832,7 @@ def test_l6_jobd_serves_a_product_read_while_another_handler_is_occupied(
     )
     try:
         contender.start()
-        assert occupied.wait(4.0) is True, "the contender never reached jobd's handler"
+        assert occupied.wait(4.0) is True, "the contender never reached batchd's handler"
         second_client.start()
         second_client.join(timeout=2.0)
         served = not second_client.is_alive()
@@ -912,7 +912,7 @@ def test_l6_local_service_over_budget_response_is_delivered_not_raised():
     ) is False
 
 
-def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
+def test_l6_batchd_product_response_past_deadline_is_delivered_not_retried(
     gate_runtime_paths,
     monkeypatch,
 ):
@@ -924,7 +924,7 @@ def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
     503 on GET /api/fs/read. Now the late-valid bytes are simply returned: there is no error to
     retry, no Error is logged, and the budget breach is visible only as telemetry.
     """
-    socket_path = gate_runtime_paths.runtime_dir / "services" / "jobd-product-deadline.sock"
+    socket_path = gate_runtime_paths.runtime_dir / "services" / "batchd-product-deadline.sock"
     service = PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
     handle = service.handle
 
@@ -937,7 +937,7 @@ def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
     service.handle = delayed_product
     service_thread = threading.Thread(target=service.run, daemon=True)
     service_thread.start()
-    client = JobClient(socket_path)
+    client = BatchClient(socket_path)
     WebDriverWait(client, 2.0, poll_frequency=0.02).until(lambda _client: client.registry.healthy())
 
     envelope_factory = local_service_client_module.new_envelope
@@ -958,7 +958,7 @@ def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
             entry for entry in SERVER_LOGS.payload()["logs"]
             if int(entry.get("id") or 0) > boundary
             and entry["level"] == "error"
-            and entry["source"] == "local-service:jobd"
+            and entry["source"] == "local-service:batchd"
         ]
 
         # The complete late-valid response is returned: no product for the key means state none.
@@ -972,7 +972,7 @@ def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
         assert "exception_type" not in payload and "_transport_error" not in payload
 
         # The budget breach is visible only as telemetry: a completion carrying a diagnostic label.
-        work = local_service_traffic_ledger("jobd").snapshot()["work"]
+        work = local_service_traffic_ledger("batchd").snapshot()["work"]
         assert (work["completed"], work["errors"]) == (1, 0)
         assert work["over_budget"] == 1
         assert work["over_budget_by_reason"] == {"peer_handler_slow": 1}

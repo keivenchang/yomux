@@ -57,7 +57,7 @@ from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yolomux_lib.server_logs import SERVER_LOGS
 from yolomux_lib.filesystem import exclusions
 from yolomux_lib.filesystem import paths as filesystem_paths
-from yolomux_lib.infra import jobd as jobd_module
+from yolomux_lib.infra import batchd as batchd_module
 from yolomux_lib.infra.common import runtime_root
 from yolomux_lib.infra.host_partition import host_partitioned_state_dir
 
@@ -204,9 +204,9 @@ def operation_terminal_response(server, status_url, timeout=10):
 
 
 @pytest.fixture
-def isolated_real_jobd_runtime(monkeypatch, tmp_path):
-    runtime_dir = tmp_path / "jobd-runtime"
-    monkeypatch.setattr(jobd_module, "RUNTIME_DIR", runtime_dir)
+def isolated_real_batchd_runtime(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "batchd-runtime"
+    monkeypatch.setattr(batchd_module, "RUNTIME_DIR", runtime_dir)
     return runtime_dir
 
 
@@ -231,7 +231,7 @@ def retire_expected_session_files_failure_logs(
     ]
     owners = [(entry.get("source"), entry.get("category")) for entry in failures]
     structured_owners = [
-        ("jobd-operation", "operation"),
+        ("batchd-operation", "operation"),
         ("api-response", "api"),
     ]
     assert transition["droppedCount"] == 0, transition
@@ -239,13 +239,13 @@ def retire_expected_session_files_failure_logs(
         # The transport owner deliberately deduplicates identical submit failures for five
         # seconds. The typed operation and API owners are never deduplicated and must remain exact.
         assert owners in [
-            [("local-service:jobd", "transport"), *structured_owners],
+            [("local-service:batchd", "transport"), *structured_owners],
             structured_owners,
         ], failures
     else:
         assert owners == structured_owners, failures
 
-    if owners[0] == ("local-service:jobd", "transport"):
+    if owners[0] == ("local-service:batchd", "transport"):
         transport = failures[0]
         message = str(transport.get("message") or "")
         assert message.startswith("action=submit request_id="), transport
@@ -259,7 +259,7 @@ def retire_expected_session_files_failure_logs(
     for payload in structured:
         assert payload["request"]["id"] == request_id, payload
         assert payload["code"] == expected_code, payload
-        assert payload["origin"] == "local_services.jobd", payload
+        assert payload["origin"] == "local_services.batchd", payload
         assert payload["stack"][0]["operation"] == "GET /api/session-files", payload
         assert payload["stack"][-1]["operation"] == stack_operation, payload
     assert str(structured[0]["operation"]["id"] or "") == str(operation_id or ""), structured[0]
@@ -295,15 +295,15 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
-def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(
-    isolated_real_jobd_runtime, monkeypatch, tmp_path,
+def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
+    isolated_real_batchd_runtime, monkeypatch, tmp_path,
 ):
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.1")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp([])
     webapp.refresh_sessions = lambda: []
-    assert jobd_module.RUNTIME_DIR == isolated_real_jobd_runtime
-    assert webapp.job_client.socket_path == jobd_module.default_socket_path()
+    assert batchd_module.RUNTIME_DIR == isolated_real_batchd_runtime
+    assert webapp.job_client.socket_path == batchd_module.default_socket_path()
     assert webapp.job_client.start_for_scheduler()
     first_pid = int(webapp.job_client.registry._read_record()["pid"])
     server = thread = None
@@ -346,11 +346,11 @@ def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(
 
 
 def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
+    monkeypatch.setattr(app_module.BatchClient, "start_for_scheduler", lambda self: False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp([])
     webapp.refresh_sessions = lambda: []
-    webapp.job_client = app_module.JobClient(tmp_path / "services" / "jobd.sock")
+    webapp.job_client = app_module.BatchClient(tmp_path / "services" / "batchd.sock")
     monkeypatch.setattr(webapp.job_client.registry, "_spawn", lambda: None)
     server = thread = None
     try:
@@ -365,15 +365,15 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
         assert body["state"] == "failed"
         assert body["request"]["id"].startswith("r-")
         assert body["error"]["code"] == "service_unavailable"
-        assert body["error"]["origin"] == "local_services.jobd"
+        assert body["error"]["origin"] == "local_services.batchd"
         assert body["error"]["retryable"] is False
-        assert body["error"]["stack"][-1]["operation"] == "jobd.submit"
+        assert body["error"]["stack"][-1]["operation"] == "batchd.submit"
         assert "operation" not in body
         retired = retire_expected_session_files_failure_logs(
             server,
             request_id=body["request"]["id"],
             operation_id=None,
-            stack_operation="jobd.submit",
+            stack_operation="batchd.submit",
             expect_transport=True,
         )
         assert len(retired) in {2, 3}
@@ -667,7 +667,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         files = [path for path in fixture_root.rglob("yolomux-git-view-*") if path.is_file()]
         return len(files), sum(path.stat().st_blocks * 512 for path in files)
 
-    def warm_jobd_lane(priority: str) -> None:
+    def warm_batchd_lane(priority: str) -> None:
         response = job_client.submit(
             "json_compact", {"e3": "warm", "priority": priority}, priority=priority,
             generation=1, coalesce_key=f"e3-physical-warm-{priority}", deadline_ms=5_000,
@@ -684,14 +684,14 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
     owner = follower = observer = job_client = differ = finder = None
     try:
         effective_runtime = runtime_root(environ={"YOLOMUX_RUNTIME_DIR": str(runtime_base)})
-        job_client = jobd_module.JobClient(effective_runtime / "services" / jobd_module.JOBD_SOCKET_NAME)
+        job_client = batchd_module.BatchClient(effective_runtime / "services" / batchd_module.BATCHD_SOCKET_NAME)
         # The scheduler lease establishes the exact broker before the boundary, so the worker
         # process counters are comparable rather than born halfway through the measurement.
         assert job_client.start_for_scheduler()
         # Both session-files lanes have one stable worker before the physical boundary. The warm
         # products are a fixture lifecycle cost, not part of the session-files counters below.
-        warm_jobd_lane("interactive")
-        warm_jobd_lane("freshness")
+        warm_batchd_lane("interactive")
+        warm_batchd_lane("freshness")
         owner = start_isolated_dev_server(
             "session-files-physical-owner", Path(__file__).resolve().parents[1], owner_paths, runtime,
             env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base)}, port=gate_http_port.release(),
@@ -794,7 +794,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         status_after = job_client.runtime_status()
         pids_after = qualified_pids(status_after)
         assert set(pids_before).issubset(pids_after), "physical E3 gate refuses a worker replacement inside one generation"
-        assert len(pids_after) <= len(pids_before) + 1, "browser cache delivery may activate one pre-warmed jobd lane, not accumulate workers"
+        assert len(pids_after) <= len(pids_before) + 1, "browser cache delivery may activate one pre-warmed batchd lane, not accumulate workers"
         product_before = status_before["product_counters"].get("session_files_view", {})
         product_after = status_after["product_counters"].get("session_files_view", {})
         work_before = status_before["product_work_totals"].get("session_files_view", {})
@@ -1037,12 +1037,12 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
     repo.mkdir(); init_repo(repo)
     pane = PaneInfo(session="5", window="0", pane="0", pane_id="%1", target="5:0.0", current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=11)
     info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, [])); monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache"); monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, [])); monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache"); monkeypatch.setattr(app_module, "SESSION_FILES_BATCHD_WAIT_SECONDS", 0.0)
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json", raising=False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     release_result, terminal_published, changed_terminal_published = threading_module.Event(), threading_module.Event(), threading_module.Event()
     published, submissions, submission_requesters, result_calls, durable_writes, result_path = [], [], [], [], [], ["done.py"]
-    class ControlledJobClient:
+    class ControlledBatchClient:
         def start_for_scheduler(self):
             return None
         def stop_for_scheduler(self):
@@ -1058,12 +1058,12 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 7}, b""
         def result(self, job_id, *, timeout):
-            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS; assert release_result.wait(2.0), "test did not release the accepted job"
+            assert 0 < timeout <= app_module.BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS; assert release_result.wait(2.0), "test did not release the accepted job"
             result_calls.append(job_id)
             path = "done.py" if job_id == "job-session-files-ready" else result_path[0]
             payload = {"session": "5", "loaded": True, "files": [{"path": path}], "repos": [], "errors": []}
             return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": {"payload": payload, "status": int(HTTPStatus.OK), "repository_identities": {str(repo.resolve()): ["producer-derived"]}}}}
-    webapp = TmuxWebtermApp(["5"]); webapp.job_client = ControlledJobClient(); webapp.refresh_sessions = lambda: []
+    webapp = TmuxWebtermApp(["5"]); webapp.job_client = ControlledBatchClient(); webapp.refresh_sessions = lambda: []
     def producer_derived_git_identity(*_args):
         assert release_result.is_set(), "accepted HTTP request performed unwatched Git identity work before 202"
         return ("producer-derived",), "test-derived"
@@ -1106,7 +1106,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert operation["id"].startswith("op-"); assert operation["status_url"] == f"/api/operations/{operation['id']}"
         assert operation["events_url"] == f"/api/client-events?operation_id={operation['id']}"; assert operation["cursor"]["seq"] == 0
         assert operation["context"] == {"session": "5", "from_ref": "HEAD~3", "to_ref": "current", "hours": 7.5, "repo_refs": {"/repo/z": {"from": "HEAD~2", "to": "current"}}}
-        assert operation["progress"] == {"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"}
+        assert operation["progress"] == {"phase": "waiting_for_product", "producer": "batchd", "producer_state": "queued"}
         assert duplicate_receipt["operation"]["id"] != operation["id"]; assert len(submissions) == 2
         assert submissions[0]["coalesce_key"] == submissions[1]["coalesce_key"]; assert submissions[0]["generation"] == submissions[1]["generation"]
         assert submissions[0]["fresh_only"] is submissions[1]["fresh_only"] is False
@@ -1157,7 +1157,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert cache_only_payload["data"]["files"] == [{"path": "done.py"}]
         assert len(submissions) == 2, f"a follower cache-only revalidation must not submit another producer: {submission_requesters}"
         assert webapp.read_session_files_cache_view(cache_view, "5", 7.5, "other", "current", None) is None
-        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.wait_for_idle(5)
         submissions_before_mismatch = len(submissions)
         received_http_requests = []
         cache_view_reads = []
@@ -1205,7 +1205,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         result_path[0] = "forced-fresh.py"
         forced_fresh_receipt = request_session_files(f"{request_path}&force=1&fresh_git=1")
         assert forced_fresh_receipt["state"] == "queued"
-        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.wait_for_idle(5)
         forced_fresh_terminal = published[-1]
         assert forced_fresh_terminal["operation"]["id"] == forced_fresh_receipt["operation"]["id"]
         assert forced_fresh_terminal["result"]["data"]["files"] == [{"path": "forced-fresh.py"}]
@@ -1216,7 +1216,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         watch_record.filesystem_roots = (str(repo.resolve()),)
         result_path[0] = "watched.py"
         watched_receipt = request_session_files(f"{request_path}&fresh_git=1")
-        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.wait_for_idle(5)
         watched_terminal = published[-1]
         assert watched_terminal["operation"]["id"] == watched_receipt["operation"]["id"]
         assert watched_terminal["result"]["data"]["files"] == [{"path": "watched.py"}]
@@ -1249,7 +1249,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         malformed_payload = json.loads(malformed_response.read().decode("utf-8")); connection.close()
         assert malformed_response.status == HTTPStatus.ACCEPTED
         assert malformed_payload["state"] == "queued" and malformed_payload["status"] == "pending"
-        assert len(submissions) == submission_count, "a malformed cache view must not submit jobd work"
+        assert len(submissions) == submission_count, "a malformed cache view must not submit batchd work"
     finally:
         release_result.set()
         if server is not None: stop_browser_server(server, thread)
@@ -1273,7 +1273,7 @@ def test_session_files_completion_before_receipt_persistence_terminalizes_after_
         flight.future.set_result(({"files": [{"path": "ready.py"}], "repos": [], "errors": []}, HTTPStatus.OK, None))
         product_completed.set()
         flight.wait_for_owner()
-        webapp.jobd_operation_service.release_flight(flight)
+        webapp.batchd_operation_service.release_flight(flight)
 
     original_accept = webapp.queued_delivery_ledger.accept_operation
 
@@ -1322,12 +1322,12 @@ def test_session_files_completion_before_receipt_persistence_terminalizes_after_
         assert receipt["request"]["id"]
         assert terminal_event["operation"]["cursor"]["seq"] == 1
         assert webapp.queued_delivery_ledger.open_operations() == []
-        assert webapp.jobd_operation_service.wait_for_idle(5)
-        assert webapp.jobd_operation_service.flights == {}
+        assert webapp.batchd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.flights == {}
     finally:
         allow_accept.set()
         starter.join(timeout=5)
-        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.batchd_operation_service.wait_for_idle(5)
         webapp.control_server.stop()
 
 
@@ -1350,7 +1350,7 @@ def test_session_files_operation_completion_separates_replacement_intent(no_cont
         assert release.wait(timeout=5)
         flight.future.set_result(({"files": [{"path": f"replace-{replace}.py"}], "repos": [], "errors": []}, HTTPStatus.OK, None))
         flight.wait_for_owner()
-        webapp.jobd_operation_service.release_flight(flight)
+        webapp.batchd_operation_service.release_flight(flight)
 
     webapp.submit_session_files_job, webapp.complete_session_files_operation = submit, complete
     try:
@@ -1359,14 +1359,14 @@ def test_session_files_operation_completion_separates_replacement_intent(no_cont
         second, second_status = webapp.start_session_files_operation(None, {}, 24.0, None, None, None, ("request-b", ()), priority="freshness", requester="test", replace=True)
         assert (first_status, second_status) == (HTTPStatus.ACCEPTED, HTTPStatus.ACCEPTED)
         assert both_started.wait(timeout=1), started
-        release.set(); assert webapp.jobd_operation_service.wait_for_idle(5)
+        release.set(); assert webapp.batchd_operation_service.wait_for_idle(5)
         first_result, _ = webapp.queued_delivery_ledger.operation_status(first["operation"]["id"])
         second_result, _ = webapp.queued_delivery_ledger.operation_status(second["operation"]["id"])
         assert first_result["data"]["files"] == [{"path": "replace-False.py"}]
         assert second_result["data"]["files"] == [{"path": "replace-True.py"}]
     finally:
         release.set()
-        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.batchd_operation_service.wait_for_idle(5)
         webapp.control_server.stop()
 
 
@@ -1378,13 +1378,13 @@ def test_forced_synchronous_session_files_replaces_a_fresh_cache(no_control_sock
     cache_key = webapp.session_files_cache_key("payload", {}, None, 24.0, None, None, None)
     calls = []
 
-    def forced_jobd(*_args, **kwargs):
+    def forced_batchd(*_args, **kwargs):
         calls.append(kwargs["replace"])
         return new_payload, HTTPStatus.OK
 
     try:
         webapp.compute_session_files_cache_entry(cache_key, lambda: (old_payload, HTTPStatus.OK))
-        webapp.compute_session_files_payload_via_jobd = forced_jobd
+        webapp.compute_session_files_payload_via_batchd = forced_batchd
 
         payload, status = webapp.session_files_payload_for_infos(
             None,
@@ -1414,7 +1414,7 @@ def test_session_files_post_accept_failure_terminalizes_receipt_and_releases_own
     def complete(flight, *_args):
         flight.future.set_result(({"files": [], "repos": [], "errors": []}, HTTPStatus.OK, None))
         flight.wait_for_owner()
-        webapp.jobd_operation_service.release_flight(flight)
+        webapp.batchd_operation_service.release_flight(flight)
 
     webapp.complete_session_files_operation = complete
     original_accept = webapp.queued_delivery_ledger.accept_operation
@@ -1434,10 +1434,10 @@ def test_session_files_post_accept_failure_terminalizes_receipt_and_releases_own
         assert result["state"] == "failed"
         assert webapp.queued_delivery_ledger.operation_status(operation_id) == (result, status)
         assert webapp.queued_delivery_ledger.open_operations() == []
-        assert webapp.jobd_operation_service.wait_for_idle(5)
-        assert webapp.jobd_operation_service.flights == {}
+        assert webapp.batchd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.flights == {}
     finally:
-        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.batchd_operation_service.wait_for_idle(5)
         webapp.control_server.stop()
 
 
@@ -1481,7 +1481,7 @@ def test_session_files_producer_journal_failure_terminalizes_and_releases_flight
         )
 
         release_product.set()
-        assert webapp.jobd_operation_service.wait_for_idle(5)
+        assert webapp.batchd_operation_service.wait_for_idle(5)
 
         result, terminal_status = QueuedDeliveryLedger(state_path=state_path).operation_status(operation_id)
         assert terminal_status == HTTPStatus.INTERNAL_SERVER_ERROR
@@ -1492,10 +1492,10 @@ def test_session_files_producer_journal_failure_terminalizes_and_releases_flight
             "message": "disk full",
         }
         assert webapp.queued_delivery_ledger.open_operations() == []
-        assert webapp.jobd_operation_service.flights == {}
+        assert webapp.batchd_operation_service.flights == {}
     finally:
         release_product.set()
-        webapp.jobd_operation_service.wait_for_idle(5)
+        webapp.batchd_operation_service.wait_for_idle(5)
         webapp.control_server.stop()
 
 
@@ -1529,10 +1529,10 @@ def test_session_files_operation_publishes_under_immutable_producer_identity(cha
             settings["index_exclude_dir_names"].append("vendorcache")
         current_key = webapp.session_files_cache_key("payload", infos, "s1", 24.0, None, None, None)
         assert current_key != original_key
-        release.set(); assert webapp.jobd_operation_service.wait_for_idle(5)
+        release.set(); assert webapp.batchd_operation_service.wait_for_idle(5)
         assert original_key in webapp.session_files_service.cache; assert current_key not in webapp.session_files_service.cache
     finally:
-        release.set(); webapp.jobd_operation_service.wait_for_idle(5); webapp.control_server.stop()
+        release.set(); webapp.batchd_operation_service.wait_for_idle(5); webapp.control_server.stop()
 
 
 @pytest.mark.parametrize("failure_stage", ["result", "deadline"])
@@ -1544,16 +1544,16 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
     info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(app_module, "SESSION_FILES_BATCHD_WAIT_SECONDS", 0.0)
     if failure_stage == "deadline":
-        monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_JOB_DEADLINE_MS", 25)
+        monkeypatch.setattr(app_module, "SESSION_FILES_BATCHD_JOB_DEADLINE_MS", 25)
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json", raising=False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     terminal_published = threading_module.Event()
     published, submissions = [], []
     root_cause = {"exception": {"type": "FileNotFoundError", "message": "service socket is absent"}, "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}]}
 
-    class FailingJobClient:
+    class FailingBatchClient:
         def start_for_scheduler(self):
             return None
 
@@ -1568,7 +1568,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
             return {"ok": True, "state": "pending", "generation": 9}, b""
 
         def result(self, job_id, *, timeout):
-            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
+            assert 0 < timeout <= app_module.BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS
             assert job_id == "job-session-files-failed"
             if failure_stage == "deadline":
                 return {"ok": True, "job": {"job_id": job_id, "status": "queued"}}
@@ -1581,7 +1581,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
             }
 
     webapp = TmuxWebtermApp(["5"])
-    webapp.job_client = FailingJobClient()
+    webapp.job_client = FailingBatchClient()
     webapp.refresh_sessions = lambda: []
     webapp.shared_git_identity = lambda *_args: (("canonical",), "canonical")
     original_publish = webapp.publish_client_event
@@ -1613,7 +1613,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
         expected_code = "deadline_expired" if failure_stage == "deadline" else "service_unavailable"
         assert terminal["status"] == expected_status
         assert result["error"]["code"] == expected_code
-        expected_operation = "jobd.result"
+        expected_operation = "batchd.result"
         assert result["error"]["stack"][-1]["operation"] == expected_operation
         if failure_stage == "result":
             assert result["error"]["stack"][-1]["exception"] == root_cause["exception"]
@@ -1650,18 +1650,18 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
 def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch, tmp_path):
     operation_state_path = tmp_path / "operations" / "session-files.json"
     ledger = QueuedDeliveryLedger(state_path=operation_state_path)
-    initial_producer = {"service": "jobd", "chain": [{"stage": "requested", "job_id": "job-abandoned", "state": "completed"}]}
+    initial_producer = {"service": "batchd", "chain": [{"stage": "requested", "job_id": "job-abandoned", "state": "completed"}]}
     receipt = ledger.accept_operation(
         request_id="r-recovered-session-files",
         route="GET /api/session-files",
         deadline_at=time.time() + 30,
-        progress={"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"},
+        progress={"phase": "waiting_for_product", "producer": "batchd", "producer_state": "queued"},
         producer=initial_producer,
         kind="session_files",
         context={"session": "5"},
     )
     operation_id = receipt["operation"]["id"]
-    canonical_producer = {"service": "jobd", "chain": [*initial_producer["chain"], {"stage": "canonical", "job_id": "job-canonical-abandoned", "state": "running"}]}
+    canonical_producer = {"service": "batchd", "chain": [*initial_producer["chain"], {"stage": "canonical", "job_id": "job-canonical-abandoned", "state": "running"}]}
     assert ledger.update_operation_producer(operation_id, canonical_producer)
     queued, queued_status = QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation_id)
     assert queued_status == HTTPStatus.ACCEPTED
@@ -1688,10 +1688,10 @@ def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch,
     )
 
 
-def test_session_files_public_deleted_root_cache_keeps_jobd_serving(
-    isolated_real_jobd_runtime, monkeypatch, tmp_path,
+def test_session_files_public_deleted_root_cache_keeps_batchd_serving(
+    isolated_real_batchd_runtime, monkeypatch, tmp_path,
 ):
-    """A retired worktree cached by transcript scanning must not crash jobd or poison later demands."""
+    """A retired worktree cached by transcript scanning must not crash batchd or poison later demands."""
     monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
     retired_root = tmp_path / "retired-worktree"
     retired_root.mkdir()
@@ -1712,8 +1712,8 @@ def test_session_files_public_deleted_root_cache_keeps_jobd_serving(
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp(["5"])
     webapp.refresh_sessions = lambda: []
-    assert jobd_module.RUNTIME_DIR == isolated_real_jobd_runtime
-    assert webapp.job_client.socket_path == jobd_module.default_socket_path()
+    assert batchd_module.RUNTIME_DIR == isolated_real_batchd_runtime
+    assert webapp.job_client.socket_path == batchd_module.default_socket_path()
     server = thread = None
     try:
         assert webapp.job_client.start_for_scheduler()
@@ -5137,7 +5137,7 @@ def test_session_files_cache_key_canonicalizes_ref_override_paths(tmp_path, monk
 
 
 def test_session_files_view_coalesce_identity_is_stable_and_source_scoped(tmp_path, monkeypatch):
-    """Two apps sharing one jobd socket + disk-cache dir must derive the SAME product coalesce_key
+    """Two apps sharing one batchd socket + disk-cache dir must derive the SAME product coalesce_key
     for the same view (cross-port single execution), and a source-generation change must move it."""
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp_a = TmuxWebtermApp([])

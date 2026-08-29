@@ -5138,7 +5138,7 @@ async function terminalReferenceProviderLinks(session, term, y) {
   if (!fileRefs.length) return links;
   // This provider runs once for each visible terminal line. Its output is only a visual underline:
   // right-click determines the syntactic path and the selected editor tab owns the real read/error.
-  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // Do not turn terminal repaint into one batchd admission per token merely to decide whether to draw
   // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
   for (const ref of fileRefs) {
     const link = terminalReferenceXtermLink(ref);
@@ -6920,7 +6920,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
   // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
   // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
-  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on batchd's
   // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
   const optimisticFilePath = terminalReference?.type === 'file'
     ? terminalFileReferenceAbsolutePath(session, terminalReference)

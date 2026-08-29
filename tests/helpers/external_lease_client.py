@@ -3,7 +3,7 @@
 """One stand-in external client for every daemon's client-lease fence.
 
 ``runtime.acquire_client_lease`` is the single owner of the lease table for
-jobd, watchd, statsd, statusd, approvald and the search indexer, so the
+batchd, watchd, statsd, statusd, approvald and the search indexer, so the
 self-connection exclusion it enforces is one rule, not six. A harness that calls
 ``service.handle({"action": "lease", "client_pid": os.getpid()})`` in-process IS
 the daemon, and the fence correctly refuses it. Production is not shaped like
@@ -89,7 +89,7 @@ def assert_self_lease_is_refused(
 def assert_daemon_refuses_a_self_lease(daemon: Any) -> None:
     """NEGATIVE CONTROL for the daemons that spell one lease request the same way.
 
-    jobd's broker, its status service and the interaction-lease harness all reach
+    batchd's broker, its status service and the interaction-lease harness all reach
     the fence through ``handle({"action": "lease", "client_pid": pid})`` and all
     keep the table on ``.leases``, so binding that shape was already copied per
     test file. It is bound ONCE here instead: watchd and statsd wrap the same

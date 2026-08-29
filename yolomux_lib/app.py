@@ -248,10 +248,10 @@ from .state_services import ClientEventWatcherRecord
 from .state_services import ClientWatchDescriptor
 from .state_services import ClientWatchRootValidationError
 from .state_services import ClientWatchService
-from .state_services import JobdOperationFlight
-from .state_services import JobdOperationService
-from .state_services import JobdOperationReservation
-from .state_services import jobd_operation_lane
+from .state_services import BatchedOperationFlight
+from .state_services import BatchedOperationService
+from .state_services import BatchedOperationReservation
+from .state_services import batchd_operation_lane
 from .state_services import SessionFilesDiskPruneRecord
 from .state_services import SessionFilesGitSnapshotRecord
 from .state_services import SessionFilesOperationLifecycle, SessionFilesOperationProduct
@@ -403,19 +403,19 @@ SESSION_FILES_CACHE_SECONDS = 30.0
 # refresh over an unchanged repo skips the `git` spawn, with a short time backstop for watcher misses.
 AGENT_WINDOW_GIT_INVENTORY_MAX_AGE_SECONDS = 10.0
 AGENT_WINDOW_GIT_INVENTORY_CACHE_MAX = 128
-# jobd `session_files_view` product wait budget for the owner-side background refresh worker. The
+# batchd `session_files_view` product wait budget for the owner-side background refresh worker. The
 # worker runs in a dedicated thread, so a bounded block-poll here keeps the git/discovery CPU in the
-# jobd worker process without ever touching an HTTP request thread.
-SESSION_FILES_JOBD_JOB_DEADLINE_MS = 30_000
-SESSION_FILES_JOBD_WAIT_SECONDS = 25.0
-# A product can take seconds while jobd performs git/transcript work.  Polling its Unix socket every
+# batchd worker process without ever touching an HTTP request thread.
+SESSION_FILES_BATCHD_JOB_DEADLINE_MS = 30_000
+SESSION_FILES_BATCHD_WAIT_SECONDS = 25.0
+# A product can take seconds while batchd performs git/transcript work.  Polling its Unix socket every
 # 50 ms from each owner-side worker was needless broker/web CPU; completed and stale products still
 # return on the first read, while pending work is checked at this bounded shared cadence.
-JOBD_PRODUCT_POLL_INITIAL_SECONDS = 0.25
-JOBD_PRODUCT_POLL_MAX_SECONDS = 1.0
+BATCHD_PRODUCT_POLL_INITIAL_SECONDS = 0.25
+BATCHD_PRODUCT_POLL_MAX_SECONDS = 1.0
 
 
-def remaining_jobd_rpc_timeout(deadline_at: float) -> float:
+def remaining_batchd_rpc_timeout(deadline_at: float) -> float:
     """Return the bounded transport budget remaining before one operation deadline."""
 
     return min(
@@ -424,8 +424,8 @@ def remaining_jobd_rpc_timeout(deadline_at: float) -> float:
     )
 
 
-class SessionFilesJobdUnavailable(RuntimeError):
-    """jobd could not materialize a session-files product (submit rejected or product not ready).
+class SessionFilesBatchedUnavailable(RuntimeError):
+    """batchd could not materialize a session-files product (submit rejected or product not ready).
 
     Raised out of the owner-side compute so the single-flight record is released and NOTHING stale is
     cached; the next request re-triggers. It never falls back to inline git in the caller's thread.
@@ -445,8 +445,8 @@ class SessionFilesJobdUnavailable(RuntimeError):
         self.status = status
 
 
-class JobdOperationUnavailable(RuntimeError):
-    """An accepted jobd product could not reach one durable terminal result."""
+class BatchedOperationUnavailable(RuntimeError):
+    """An accepted batchd product could not reach one durable terminal result."""
 
     def __init__(
         self,
@@ -462,8 +462,10 @@ class JobdOperationUnavailable(RuntimeError):
         self.status = status
 
 
-class JobdInteractionLease:
-    """One reference-counted jobd client lease held across an active fs-batch/differ interaction.
+
+
+class BatchedInteractionLease:
+    """One reference-counted batchd client lease held across an active fs-batch/differ interaction.
 
     Measured W15 #4 root cause: under a saturated gate the fs-batch completion worker's product
     poll can be starved longer than the broker's idle window, so between two ``/api/fs/batch``
@@ -523,12 +525,14 @@ class JobdInteractionLease:
             return bool(self._lease_id)
 
 
-TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS = 15_000
-TABBER_ACTIVITY_JOBD_WAIT_SECONDS = 20.0
 
 
-class TabberActivityJobdUnavailable(RuntimeError):
-    """jobd could not materialize a tabber-activity product for the changed-session batch.
+TABBER_ACTIVITY_BATCHD_JOB_DEADLINE_MS = 15_000
+TABBER_ACTIVITY_BATCHD_WAIT_SECONDS = 20.0
+
+
+class TabberActivityBatchedUnavailable(RuntimeError):
+    """batchd could not materialize a tabber-activity product for the changed-session batch.
 
     Raised so the caller can serve last-known-good per-session rows (or the bounded empty shape)
     instead of falling back to an in-process rebuild of the batch.
@@ -538,19 +542,19 @@ class TabberActivityJobdUnavailable(RuntimeError):
 # A fresh metadata warm may make several bounded Git and provider requests. Keep the web caller's
 # 25-second responsiveness limit below this worker deadline so a completed product can still warm
 # the next cycle, while retaining a hard upper bound on background work.
-METADATA_WARM_JOBD_JOB_DEADLINE_MS = 60_000
-METADATA_WARM_JOBD_WAIT_SECONDS = 25.0
+METADATA_WARM_BATCHD_JOB_DEADLINE_MS = 60_000
+METADATA_WARM_BATCHD_WAIT_SECONDS = 25.0
 
 
-class MetadataWarmJobdUnavailable(RuntimeError):
-    """jobd could not materialize a metadata-warm product for the session batch.
+class MetadataWarmBatchedUnavailable(RuntimeError):
+    """batchd could not materialize a metadata-warm product for the session batch.
 
     Raised so the caller skips this warm cycle entirely (the periodic warmer retries later) instead
     of falling back to an in-process GitHub/Linear network fetch or git spawn.
     """
 
 
-class JobdProductRpcUnavailable(RuntimeError):
+class BatchedProductRpcUnavailable(RuntimeError):
     """The broker could not answer a product read during a bounded owner-side wait."""
 
 
@@ -563,7 +567,7 @@ class ActivitySummaryStatusdUnavailable(RuntimeError):
         self.response = copy.deepcopy(response)
 
 
-def wait_for_jobd_product(
+def wait_for_batchd_product(
     job_client: BatchClient,
     coalesce_key: str,
     generation: int,
@@ -571,14 +575,14 @@ def wait_for_jobd_product(
     *,
     stop_event: threading.Event | None = None,
 ) -> tuple[dict[str, Any] | None, bytes | None, str]:
-    """Read one matching jobd product without spinning the owner worker while it is pending.
+    """Read one matching batchd product without spinning the owner worker while it is pending.
 
     Returns ``(meta, body, state)`` when the expected generation is ready or stale, and
     ``(None, None, state)`` when the fixed caller budget expires.  Broker transport failures remain
     distinct so callers can preserve their feature-specific unavailable error and fallback policy.
     """
     deadline = time.monotonic() + wait_seconds
-    poll_seconds = JOBD_PRODUCT_POLL_INITIAL_SECONDS
+    poll_seconds = BATCHD_PRODUCT_POLL_INITIAL_SECONDS
     state = "pending"
     while stop_event is None or not stop_event.is_set():
         remaining = deadline - time.monotonic()
@@ -586,11 +590,11 @@ def wait_for_jobd_product(
             return None, None, state
         meta, body = job_client.product(
             coalesce_key,
-            timeout=min(JOBD_PRODUCT_RPC_TIMEOUT_SECONDS, remaining),
+            timeout=min(BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS, remaining),
         )
         if not meta.get("ok"):
             if not local_service_failure_is_busy(meta):
-                raise JobdProductRpcUnavailable("jobd product rpc unavailable")
+                raise BatchedProductRpcUnavailable("batchd product rpc unavailable")
             state = "busy"
         else:
             state = str(meta.get("state") or "")
@@ -605,7 +609,7 @@ def wait_for_jobd_product(
                 return None, None, "stopped"
         else:
             time.sleep(wait_for)
-        poll_seconds = min(JOBD_PRODUCT_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        poll_seconds = min(BATCHD_PRODUCT_POLL_MAX_SECONDS, poll_seconds * 2.0)
     return None, None, "stopped"
 
 
@@ -651,8 +655,8 @@ SESSION_FILES_OPERATION_POLL_MAX_SECONDS = 0.5
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
-# A prune that jobd DECLINED never ran, so it must not spend the cooldown that exists to space out
-# work that did. Maintenance stopped cold-starting jobd, which means a decline is now the normal
+# A prune that batchd DECLINED never ran, so it must not spend the cooldown that exists to space out
+# work that did. Maintenance stopped cold-starting batchd, which means a decline is now the normal
 # answer on an idle instance; charging it the full five minutes could postpone housekeeping
 # indefinitely on exactly the instances that are idle enough to need it. This is the same
 # `next_at` field on the same record - no second timer, no loop, and still a real floor so a
@@ -697,7 +701,7 @@ INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 # Essential = this server drives the service itself and a user-visible capability is wrong
 # when it FAILS. A recorded failure is always reportable:
 #   indexd    Quick Open results silently go stale -- the 0.7.0 QA incident.
-#   jobd      every /api/fs/* request is executed there.
+#   batchd      every /api/fs/* request is executed there.
 #   statusd   the tmux status/roster the session UI renders.
 #   statsd    the YO!stats database writer.
 #   approvald auto-approval; a dead approver must never read as "nothing to approve".
@@ -708,7 +712,7 @@ INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 # it is checked before this set is consulted. Keeping the exclusion as well meant one rule lived
 # in two places and could disagree -- and it also said, falsely, that a watchd which recorded a
 # real failure was less important than the other five.
-ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "jobd", "statusd", "statsd", "watchd", "approvald"})
+ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "batchd", "statusd", "statsd", "watchd", "approvald"})
 
 # THE ONE ABSENCE statsd MAY HAVE EXCUSED, AND ITS EXACT BOUND
 # ------------------------------------------------------------
@@ -732,7 +736,7 @@ ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "jobd", "statusd", "statsd", "wa
 #       state the excuse. The ordering in `cli.main()` is what makes the fact available at all.
 #   the ordering alone, excuse removed (17784): first cycle at +2.911s, statsd already serving,
 #       no `down`. It closes the window on THIS host only because `start_background_owner()`
-#       synchronously takes jobd's scheduler lease (~2.2s) while statsd needs ~1.6s -- a 1.3s
+#       synchronously takes batchd's scheduler lease (~2.2s) while statsd needs ~1.6s -- a 1.3s
 #       margin that is timing, not a guarantee.
 #   both (17782): first cycle at +2.738s, statsd `starting` -> `ready` at +4.750s, no `down`.
 # So the ordering is what closes the measured window and the excuse is what stops the guarantee
@@ -1365,7 +1369,7 @@ class BackgroundRefreshEventLogRecord:
 
 
 @dataclass(frozen=True)
-class JobdProductOperation:
+class BatchedProductOperation:
     job_id: str
     product_key: str
     generation: int
@@ -1417,8 +1421,8 @@ def filesystem_artifact_http_response(
     lease_id = str(opened.get("lease_id") or "")
     opened_product = opened.get("product") if isinstance(opened.get("product"), dict) else None
     if opened.get("ok") is not True or not lease_id or opened_product != dict(product):
-        raise JobdOperationUnavailable(
-            str(opened.get("error") or "jobd artifact unavailable"),
+        raise BatchedOperationUnavailable(
+            str(opened.get("error") or "batchd artifact unavailable"),
             dict(opened),
         )
     transfer = FilesystemArtifactTransfer(job_client, lease_id, dict(opened_product))
@@ -1429,12 +1433,12 @@ def filesystem_artifact_http_response(
 class FilesystemWatchBatchProduct:
     """One child batch of a partitioned watch-diff request.
 
-    ``root_offset`` is the index of this chunk's first root inside the parent root list.  jobd
+    ``root_offset`` is the index of this chunk's first root inside the parent root list.  batchd
     numbers each batch's responses from zero, so the offset is what lets independently completing
     children merge back onto parent root order without colliding.
     """
 
-    producer: JobdProductOperation
+    producer: BatchedProductOperation
     ready_product: dict[str, Any] | None = None
     root_offset: int = 0
     root_count: int = 0
@@ -1449,7 +1453,7 @@ class FilesystemWatchCompletionOutcome:
 
 
 @dataclass(frozen=True)
-class TranscriptProductOperation(JobdProductOperation):
+class TranscriptProductOperation(BatchedProductOperation):
     cache_key: tuple[Any, ...]
     expected_generation: tuple[int, int]
     expected_identity: tuple[int, int]
@@ -1882,7 +1886,7 @@ def filesystem_batch_submission(
     canonical_payload = {
         **copy.deepcopy(payload),
         "requests": canonical_requests,
-        # Captured HERE, on the accepting server's request thread, so the shared jobd worker
+        # Captured HERE, on the accepting server's request thread, so the shared batchd worker
         # authorizes with this server's roots instead of its launcher's.  It sits inside the
         # canonical payload, so it is part of the product/coalescing identity below: two servers
         # with different policies can never share one retained batch product.
@@ -1908,7 +1912,7 @@ FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 
 # Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
 # result right now (an editor open, a file probe, an index badge).  These are the only filesystem
-# operations that take jobd's `point` lane.  Everything else -- recursive `list`, `search`,
+# operations that take batchd's `point` lane.  Everything else -- recursive `list`, `search`,
 # `count`, `diff`, `blame`, recursive `delete`, Finder batches, watch-diff fanouts, forced
 # session-files transforms -- stays on the shared `interactive` lane, because its cost is unbounded
 # in the input and it is exactly the work that used to put an editor open behind it head-of-line.
@@ -1918,7 +1922,7 @@ FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status", "resolv
 # one path in, one bounded side effect, a browser waiting on it right now.  These satisfy exactly
 # the `point` test but are NOT `point`, because `point` means a coalescable retained read -- the
 # stat-derived content key and `fresh_only` are gated on `priority == "point"` -- while a mutation
-# must never be coalesced with another mutation.  They take jobd's sibling `mutation` lane, which
+# must never be coalesced with another mutation.  They take batchd's sibling `mutation` lane, which
 # is bounded and physically separate from both the read lane and the shared `interactive` lane.
 #
 # `delete` is here, but ONLY in its bounded form.  `delete` used to be excluded wholesale because
@@ -1938,7 +1942,7 @@ FILESYSTEM_RECURSIVE_MUTATION = "delete"
 
 
 def filesystem_operation_priority(operation: str, args: Mapping[str, Any] | None = None) -> str:
-    """Return the one jobd lane priority that owns a filesystem operation and its arguments."""
+    """Return the one batchd lane priority that owns a filesystem operation and its arguments."""
     name = str(operation)
     # A directory Diff first paints its metadata-only history index. Per-commit file and diff
     # materialization starts only after an explicit disclosure, and must not queue ahead of a
@@ -2060,7 +2064,7 @@ def filesystem_watch_request_product_key(roots: list[str], identity_seed: str) -
 def filesystem_watch_product_at_offset(product: dict[str, Any], offset: int) -> dict[str, Any]:
     """Re-base one child batch product's response ids onto the parent root window.
 
-    jobd numbers each submitted batch's responses from zero.  A partitioned watch-diff merges the
+    batchd numbers each submitted batch's responses from zero.  A partitioned watch-diff merges the
     children by response id, so every child but the first has to be shifted by the index of its
     first root before the merge, or later chunks would overwrite earlier ones.
     """
@@ -3616,12 +3620,12 @@ class WatchBridge:
         try:
             product = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise JobdOperationUnavailable(
+            raise BatchedOperationUnavailable(
                 "malformed completed filesystem batch product",
                 {"error": str(error), "status": "malformed_product"},
             ) from error
         if not isinstance(product, dict) or not isinstance(product.get("responses"), list):
-            raise JobdOperationUnavailable(
+            raise BatchedOperationUnavailable(
                 "malformed completed filesystem batch product",
                 {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
             )
@@ -3634,7 +3638,7 @@ class WatchBridge:
         *,
         delivery: str = "receipt",
     ) -> tuple[FilesystemWatchBatchProduct, ...]:
-        """Partition one bounded root list into jobd batches and submit each exactly once.
+        """Partition one bounded root list into batchd batches and submit each exactly once.
 
         This is the only place watch roots are split.  Each chunk is a consecutive slice of the
         caller's root order, so chunk ``n`` owns roots ``[offset, offset + len(chunk))`` and its
@@ -3660,9 +3664,9 @@ class WatchBridge:
         offset: int = 0,
         delivery: str = "receipt",
     ) -> FilesystemWatchBatchProduct:
-        """Submit one jobd batch for a chunk that already fits the per-job request limit."""
+        """Submit one batchd batch for a chunk that already fits the per-job request limit."""
         if len(roots) > filesystem.MAX_BATCH_REQUESTS:
-            raise JobdOperationUnavailable(
+            raise BatchedOperationUnavailable(
                 f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
                 {
                     "error": f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
@@ -3688,18 +3692,18 @@ class WatchBridge:
         state = str(job.get("status") or "")
         if response.get("ok") is not True or not job_id or state not in {"queued", "running", "completed"}:
             failure = dict(response)
-            raise JobdOperationUnavailable(
-                str(failure.get("error") or "jobd did not accept filesystem watch batch"),
+            raise BatchedOperationUnavailable(
+                str(failure.get("error") or "batchd did not accept filesystem watch batch"),
                 failure,
             )
         if body and delivery == "receipt":
-            raise JobdOperationUnavailable(
+            raise BatchedOperationUnavailable(
                 "receipt-only filesystem watch batch unexpectedly returned product bytes",
                 {"error": "receipt-only filesystem watch batch unexpectedly returned product bytes"},
             )
         ready_product = app.decode_filesystem_watch_batch_product(body) if body else None
         return FilesystemWatchBatchProduct(
-            producer=JobdProductOperation(job_id=job_id, product_key=product_key, generation=1),
+            producer=BatchedProductOperation(job_id=job_id, product_key=product_key, generation=1),
             ready_product=ready_product,
             root_offset=int(offset),
             root_count=len(roots),
@@ -3776,13 +3780,13 @@ class WatchBridge:
                     batch.root_offset,
                 ))
                 continue
-            product = app.wait_for_jobd_operation_product(
+            product = app.wait_for_batchd_operation_product(
                 batch.producer,
                 deadline_at,
                 cancel_event=cancel_event,
             )
             if not isinstance(product.get("responses"), list):
-                raise JobdOperationUnavailable(
+                raise BatchedOperationUnavailable(
                     "malformed completed filesystem batch product",
                     {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
                 )
@@ -3799,30 +3803,30 @@ class WatchBridge:
 
     def complete_filesystem_watch_diff_operation(
         self, app,
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         base_payload: dict[str, Any],
         roots: list[str],
         identity_seed: str,
     ) -> None:
-        operation = "jobd.produce"
+        operation = "batchd.produce"
         data: dict[str, Any] | None = None
         failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
-        # Hold the jobd interaction lease across the whole submit+product-poll window, exactly as
+        # Hold the batchd interaction lease across the whole submit+product-poll window, exactly as
         # POST /api/fs/batch does (W15 #4).  Under a saturated gate this completion worker can be
         # starved between the submit ``produce`` and the product poll for longer than the broker's
         # idle window; the held lease vetoes the broker's idle shutdown so its socket cannot vanish
-        # mid-interaction, which was the live ``GET /api/fs/watch-diff`` jobd-404.  This is the same
+        # mid-interaction, which was the live ``GET /api/fs/watch-diff`` batchd-404.  This is the same
         # ONE lease owner fs/batch holds -- best-effort liveness, never a safety gate -- so the
         # ``try/finally`` always releases even when acquire could not pin the broker (release is
         # ref-counted and no-ops at holders==0).
-        app.jobd_fs_batch_lease.acquire()
+        app.batchd_fs_batch_lease.acquire()
         try:
             batches = app.submit_filesystem_watch_batches(
                 roots,
                 identity_seed,
                 delivery="ready_or_receipt",
             )
-            operation = "jobd.product"
+            operation = "batchd.product"
             products = app.resolve_filesystem_watch_batches(
                 batches,
                 flight.deadline_at,
@@ -3838,7 +3842,7 @@ class WatchBridge:
                 products,
                 product_keys={request_product_key, *(batch.producer.product_key for batch in batches)},
             )
-        except JobdOperationUnavailable as error:
+        except BatchedOperationUnavailable as error:
             failure = (error.failure, operation, error.status, error.code)
         except Exception as error:
             failure = (
@@ -3848,13 +3852,13 @@ class WatchBridge:
                 "producer_failed",
             )
         finally:
-            app.jobd_fs_batch_lease.release()
+            app.batchd_fs_batch_lease.release()
         flight.future.set_result(FilesystemWatchCompletionOutcome(data=data, failure=failure))
         # The producer may finish before the owner persists its receipt. Keep the in-flight claim
         # until that receipt either exists or is cancelled, so an equivalent caller cannot start a
         # second producer in the gap between product publication and owner acceptance.
         flight.wait_for_owner()
-        app.jobd_operation_service.release_flight(flight)
+        app.batchd_operation_service.release_flight(flight)
 
     def terminalize_filesystem_watch_diff_receipt(
         self,
@@ -3870,7 +3874,7 @@ class WatchBridge:
             status = HTTPStatus.OK
         else:
             failure_payload, failure_operation, status, code = outcome.failure
-            result = app.jobd_operation_failure_result(
+            result = app.batchd_operation_failure_result(
                 request_id,
                 failure_payload,
                 route="GET /api/fs/watch-diff",
@@ -3885,7 +3889,7 @@ class WatchBridge:
         request_id: str,
         base_payload: dict[str, Any],
         roots: list[str],
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         *,
         owns_producer: bool,
     ) -> tuple[dict[str, Any], HTTPStatus]:
@@ -3899,12 +3903,12 @@ class WatchBridge:
                 deadline_at=flight.deadline_at,
                 progress={
                     "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
-                    "producer": "jobd",
+                    "producer": "batchd",
                     "producer_state": "submitting",
                     "batches_total": batch_count,
                 },
                 producer={
-                    "service": "jobd",
+                    "service": "batchd",
                     "delivery": "ready_or_receipt",
                 },
                 kind="fs_watch_diff",
@@ -3917,7 +3921,7 @@ class WatchBridge:
                 },
             )
         except Exception:
-            app.jobd_operation_service.release_flight_participant(flight)
+            app.batchd_operation_service.release_flight_participant(flight)
             if owns_producer:
                 flight.cancel_owner()
             raise
@@ -3943,7 +3947,7 @@ class WatchBridge:
             return base_payload, HTTPStatus.OK
         # The watch-root contract is CLIENT_WATCH_ROOT_LIMIT, not the per-job batch size: a
         # snapshot of 65-128 roots is accepted upstream by SharedWatchRootIndex and is split into
-        # jobd batches of at most MAX_BATCH_REQUESTS by submit_filesystem_watch_batches().
+        # batchd batches of at most MAX_BATCH_REQUESTS by submit_filesystem_watch_batches().
         if len(roots) > CLIENT_WATCH_ROOT_LIMIT:
             return common.error_payload(
                 f"filesystem watch roots must contain at most {CLIENT_WATCH_ROOT_LIMIT} items",
@@ -3973,17 +3977,17 @@ class WatchBridge:
                 cached_products,
                 product_keys={product_key},
             ), HTTPStatus.OK
-        flight, reservation, owns_producer = app.jobd_operation_service.claim(
+        flight, reservation, owns_producer = app.batchd_operation_service.claim(
             "bulk",
             product_key,
             time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS,
         )
         if flight is None:
-            result = app.jobd_operation_failure_result(
+            result = app.batchd_operation_failure_result(
                 request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                {"error": "batchd operation completion pool is full", "status": "service_busy"},
                 route="GET /api/fs/watch-diff",
-                operation="jobd.produce",
+                operation="batchd.produce",
                 code="service_busy",
             )
             app.record_operation_failure("", result)
@@ -4016,11 +4020,11 @@ class WatchBridge:
                 # terminalizes from the cached product instead of waiting on a producer we skip.
                 flight.cancel_owner()
                 flight.future.set_result(outcome)
-                app.jobd_operation_service.release_flight(flight)
+                app.batchd_operation_service.release_flight(flight)
                 reservation.release()
                 if outcome.failure is not None:
                     failure_payload, failure_operation, status, code = outcome.failure
-                    return app.jobd_operation_failure_result(
+                    return app.batchd_operation_failure_result(
                         request_id,
                         failure_payload,
                         route="GET /api/fs/watch-diff",
@@ -4030,7 +4034,7 @@ class WatchBridge:
                 return data, HTTPStatus.OK
         if owns_producer:
             assert reservation is not None
-            submitted = app.jobd_operation_service.submit_reserved(
+            submitted = app.batchd_operation_service.submit_reserved(
                 reservation,
                 app.complete_filesystem_watch_diff_operation,
                 flight,
@@ -4039,19 +4043,19 @@ class WatchBridge:
                 identity_seed,
             )
             if not submitted:
-                app.jobd_operation_service.release_flight(flight)
+                app.batchd_operation_service.release_flight(flight)
                 flight.cancel_owner()
                 flight.future.set_result(FilesystemWatchCompletionOutcome(failure=(
                     {"error": "filesystem watch completion worker could not start"},
-                    "jobd.produce",
+                    "batchd.produce",
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     "producer_failed",
                 )))
-                return app.jobd_operation_failure_result(
+                return app.batchd_operation_failure_result(
                     request_id,
                     {"error": "filesystem watch completion worker could not start"},
                     route="GET /api/fs/watch-diff",
-                    operation="jobd.produce",
+                    operation="batchd.produce",
                     code="producer_failed",
                 ), HTTPStatus.SERVICE_UNAVAILABLE
         return app.accept_filesystem_watch_diff_operation(
@@ -4273,7 +4277,7 @@ class WatchBridge:
                 force=False,
                 requester="background-refresh",
                 # A watcher notification is invalidation evidence, not permission to perform
-                # an unbounded Git snapshot in the watcher thread.  Return a receipt now; jobd
+                # an unbounded Git snapshot in the watcher thread.  Return a receipt now; batchd
                 # owns the bounded, coalesced materialization after this revision is published.
                 accepted_operation=True,
             )
@@ -4759,7 +4763,7 @@ class SessionFilesCoordinator:
         """Snapshot the configured Differ exclusion policy in the WEB process.
 
         Settings are read here and nowhere below: the snapshot is signed into the cache identity
-        and shipped in the jobd task payload, so a worker judging paths can never be judging by a
+        and shipped in the batchd task payload, so a worker judging paths can never be judging by a
         different policy than the one the cached answer is keyed on.
         """
 
@@ -4781,7 +4785,7 @@ class SessionFilesCoordinator:
             # Building a cache key must not spawn Git.  The watcher advances this generation when it
             # is available; SESSION_FILES_CACHE_SECONDS is the bounded invalidation backstop when it
             # is not.  One identity on both sides of watcher activation prevents an unchanged view
-            # from becoming a second jobd product merely because a browser opened.
+            # from becoming a second batchd product merely because a browser opened.
             repo_signatures.append((repo_text, app.repo_dirty_generation(repo_text)))
         return (
             kind,
@@ -4793,7 +4797,7 @@ class SessionFilesCoordinator:
             repo_refs_cache_signature(repo_refs),
             # The exclusion policy decides which files the answer CONTAINS, so it belongs in the
             # identity of that answer. Without it, editing Preferences leaves every cached payload
-            # -- memory, disk and the jobd coalesce key derived from this tuple -- serving rows the
+            # -- memory, disk and the batchd coalesce key derived from this tuple -- serving rows the
             # new policy excludes.
             app.session_files_exclusion_policy().signature,
             tuple((name, session_files_info_cache_signature(info)) for name, info in sorted(infos.items())),
@@ -4994,7 +4998,7 @@ class SessionFilesCoordinator:
                     "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
                 },
                 priority="maintenance",
-                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
+                launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
                 generation=1,
                 coalesce_key="session-files-cache-prune",
                 delivery="receipt",
@@ -5016,7 +5020,7 @@ class SessionFilesCoordinator:
                     "submitted": accepted,
                     "reason": reason,
                     "job_id": str(job.get("job_id") or ""),
-                    **({"error": str(response.get("error") or "jobd did not accept session-files cache prune")} if not accepted else {}),
+                    **({"error": str(response.get("error") or "batchd did not accept session-files cache prune")} if not accepted else {}),
                 }
         return accepted
     def session_files_payload_signature(self, app, payload: SessionFilesPayload | dict[str, Any]) -> str:
@@ -5444,9 +5448,9 @@ class SessionFilesCoordinator:
         """Cross-port product identity for `session_files_view`.
 
         The coalesce_key is the stable view signature plus the replaceable info+repo source
-        generation, so two web ports sharing one jobd socket and one disk-cache dir dedupe to ONE
+        generation, so two web ports sharing one batchd socket and one disk-cache dir dedupe to ONE
         worker execution for the same product. The numeric generation is derived from that same
-        source signature and drives jobd's generation guard, so an older completion can never
+        source signature and drives batchd's generation guard, so an older completion can never
         overwrite a newer product for the same view.
         """
         _path, signature = app.session_files_disk_cache_path(cache_key)
@@ -5454,8 +5458,8 @@ class SessionFilesCoordinator:
         coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
         generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
         return coalesce_key, generation
-    def session_files_jobd_source_profile(self, app, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
-        """Return bounded source-change facts for jobd diagnostics, never raw cache-key contents."""
+    def session_files_batchd_source_profile(self, app, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
+        """Return bounded source-change facts for batchd diagnostics, never raw cache-key contents."""
         _path, stable_view = app.session_files_disk_cache_path(cache_key)
         repo_generations = [item[1] for item in cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
         return {
@@ -5467,8 +5471,8 @@ class SessionFilesCoordinator:
             "repo_dirty_generation_max": max(repo_generations, default=0),
         }
     @staticmethod
-    def session_files_jobd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
-        """Pass only watcher-authoritative repository generations to jobd's Git-facts cache."""
+    def session_files_batchd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
+        """Pass only watcher-authoritative repository generations to batchd's Git-facts cache."""
         states = []
         for item in cache_key[-1]:
             if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
@@ -5490,8 +5494,8 @@ class SessionFilesCoordinator:
             "to_ref": str(to_ref or ""),
             "repo_refs": repo_refs or {},
             "include_cross_session_attribution": not bool(session),
-            "source": app.session_files_jobd_source_profile(cache_key, requester),
-            "repository_states": app.session_files_jobd_repository_states(cache_key),
+            "source": app.session_files_batchd_source_profile(cache_key, requester),
+            "repository_states": app.session_files_batchd_repository_states(cache_key),
             # An explicit Git action intentionally bypasses the worker's generation cache.  The
             # ordinary path stays cacheable; this is the one user-requested correctness boundary.
             "fresh_git": bool(replace),
@@ -5504,14 +5508,14 @@ class SessionFilesCoordinator:
             priority=priority,
             generation=generation,
             coalesce_key=coalesce_key,
-            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+            deadline_ms=SESSION_FILES_BATCHD_JOB_DEADLINE_MS,
             # Ordinary pane convergence may be one generation behind until normal revalidation;
             # it may reuse the completed product. An explicit Git/ref action passes replace=True
             # and must produce a fresh view instead.
             fresh_only=bool(replace),
         )
         return response, coalesce_key, generation
-    def compute_session_files_payload_via_jobd(
+    def compute_session_files_payload_via_batchd(
         self, app, session: str | None, infos: dict[str, SessionInfo], hours: float,
         from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
         cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
@@ -5531,42 +5535,42 @@ class SessionFilesCoordinator:
             replace=replace,
         )
         if not response.get("ok"):
-            raise SessionFilesJobdUnavailable(
-                str(response.get("error") or "jobd submit rejected"),
+            raise SessionFilesBatchedUnavailable(
+                str(response.get("error") or "batchd submit rejected"),
                 response,
             )
         try:
-            _meta, body, state = wait_for_jobd_product(
-                app.job_client, coalesce_key, generation, SESSION_FILES_JOBD_WAIT_SECONDS
+            _meta, body, state = wait_for_batchd_product(
+                app.job_client, coalesce_key, generation, SESSION_FILES_BATCHD_WAIT_SECONDS
             )
-        except JobdProductRpcUnavailable as error:
-            raise SessionFilesJobdUnavailable(str(error)) from error
+        except BatchedProductRpcUnavailable as error:
+            raise SessionFilesBatchedUnavailable(str(error)) from error
         if body is None:
-            raise SessionFilesJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            raise SessionFilesBatchedUnavailable(f"batchd product not ready (state={state or 'none'})")
         return app.session_files_payload_from_product(body)
     def session_files_payload_from_product(self, app, body: bytes) -> tuple[SessionFilesPayload, HTTPStatus]:
         data = json.loads(body.decode("utf-8"))
         payload = data.get("payload") if isinstance(data, dict) else None
         if not isinstance(payload, dict):
-            raise SessionFilesJobdUnavailable("malformed jobd session-files product")
+            raise SessionFilesBatchedUnavailable("malformed batchd session-files product")
         status = HTTPStatus(int(data.get("status") or int(HTTPStatus.OK)))
         return payload, status
     def session_files_payload_from_job(self, app, job: dict[str, Any]) -> tuple[SessionFilesPayload, HTTPStatus]:
         result = job.get("result")
         payload = result.get("payload") if isinstance(result, dict) else None
         if not isinstance(payload, dict):
-            raise SessionFilesJobdUnavailable(
-                "malformed jobd session-files result",
-                {"error": "malformed jobd session-files result", "status": str(job.get("status") or "")},
+            raise SessionFilesBatchedUnavailable(
+                "malformed batchd session-files result",
+                {"error": "malformed batchd session-files result", "status": str(job.get("status") or "")},
             )
         status = HTTPStatus(int(result.get("status") or int(HTTPStatus.OK)))
         return payload, status
     def wait_for_session_files_operation_job( self, app, job_id: str, deadline_at: float, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         """Wait only in the accepted-operation worker; HTTP returns before this loop starts."""
         try:
-            job = app.wait_for_jobd_operation_job(job_id, deadline_at)
-        except JobdOperationUnavailable as error:
-            raise SessionFilesJobdUnavailable(
+            job = app.wait_for_batchd_operation_job(job_id, deadline_at)
+        except BatchedOperationUnavailable as error:
+            raise SessionFilesBatchedUnavailable(
                 str(error),
                 error.failure,
                 code=error.code,
@@ -5578,7 +5582,7 @@ class SessionFilesCoordinator:
     def accepted_session_files_job(response: dict[str, Any]) -> tuple[str, str]:
         return SessionFilesOperationLifecycle.accepted_job(response)
     def complete_session_files_operation(
-        self, app, flight: JobdOperationFlight, job_id: str, session: str | None,
+        self, app, flight: BatchedOperationFlight, job_id: str, session: str | None,
         infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None,
         repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], deadline_at: float,
         replace: bool, priority: str, requester: str,
@@ -5599,7 +5603,7 @@ class SessionFilesCoordinator:
             priority,
             requester,
             cache_refresh_seconds=SESSION_FILES_CACHE_SECONDS,
-            unavailable_type=SessionFilesJobdUnavailable,
+            unavailable_type=SessionFilesBatchedUnavailable,
             exception_cause=local_service_exception_cause,
         )
     def start_session_files_operation(
@@ -5626,7 +5630,7 @@ class SessionFilesCoordinator:
             priority=priority,
             requester=requester,
             replace=replace,
-            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+            deadline_ms=SESSION_FILES_BATCHD_JOB_DEADLINE_MS,
             context=context,
             exception_cause=local_service_exception_cause,
         )
@@ -5660,7 +5664,7 @@ class SessionFilesCoordinator:
         try:
             payload, status, _cache_hit, _age_seconds = app.compute_session_files_cache_entry(
                 cache_key,
-                lambda: app.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester=requester),
+                lambda: app.compute_session_files_payload_via_batchd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester=requester),
                 reserved=True,
             )
             compute_ms = (time.perf_counter() - started) * 1000
@@ -5688,10 +5692,10 @@ class SessionFilesCoordinator:
                 message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
             )
             app.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
-        except SessionFilesJobdUnavailable as exc:
-            # jobd could not produce the product this cycle. The single-flight is already released by
+        except SessionFilesBatchedUnavailable as exc:
+            # batchd could not produce the product this cycle. The single-flight is already released by
             # compute_session_files_cache_entry; nothing stale is cached and the next request retries.
-            logger.info("session-files refresh deferred (jobd) for %s: %s", cache_key, exc)
+            logger.info("session-files refresh deferred (batchd) for %s: %s", cache_key, exc)
         except Exception as exc:
             logger.warning("session-files refresh failed for %s: %s", cache_key, exc)
             raise
@@ -5772,9 +5776,9 @@ class SessionFilesCoordinator:
                         try:
                             payload, _status, _hit, _age = app.compute_session_files_cache_entry(
                                 key,
-                                lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
+                                lambda: app.compute_session_files_payload_via_batchd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
                             )
-                        except SessionFilesJobdUnavailable:
+                        except SessionFilesBatchedUnavailable:
                             # Serve the stale bytes already read above; never resurrect inline git here.
                             pass
             return payload
@@ -5809,19 +5813,19 @@ class SessionFilesCoordinator:
                 try:
                     payload, _status, _hit, _age = app.compute_session_files_cache_entry(
                         key,
-                        lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
+                        lambda: app.compute_session_files_payload_via_batchd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
                     )
                     return copy.deepcopy(payload)
-                except SessionFilesJobdUnavailable:
+                except SessionFilesBatchedUnavailable:
                     pass
             return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
         try:
             payload, _status, _hit, _age = app.compute_session_files_cache_entry(
                 key,
-                lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-cache-miss"),
+                lambda: app.compute_session_files_payload_via_batchd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-cache-miss"),
             )
             return copy.deepcopy(payload)
-        except SessionFilesJobdUnavailable:
+        except SessionFilesBatchedUnavailable:
             return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
     def warm_start_session_files_payload_cache(self, app) -> None:
         if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
@@ -5882,9 +5886,9 @@ class SessionFilesCoordinator:
         cached = None if fresh_git else app.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
         priority = "interactive" if fresh_git else "freshness"
 
-        def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
+        def compute_via_batchd() -> tuple[SessionFilesPayload, HTTPStatus]:
             app.client_watch_service.note_owner_invocation("session_files_materialization")
-            return app.compute_session_files_payload_via_jobd(
+            return app.compute_session_files_payload_via_batchd(
                 session,
                 infos,
                 hours,
@@ -5918,7 +5922,7 @@ class SessionFilesCoordinator:
                     app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                     if app.background_refresh_should_fallback(refresh_result):
                         try:
-                            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_batchd)
                             cache_meta = {
                                 "hit": cache_hit,
                                 "stale": False,
@@ -5926,7 +5930,7 @@ class SessionFilesCoordinator:
                                 "refresh_seconds": max_age,
                                 "fallback": True,
                             }
-                        except SessionFilesJobdUnavailable:
+                        except SessionFilesBatchedUnavailable:
                             cache_meta["refreshing_elsewhere"] = True
                     else:
                         cache_meta["refreshing_elsewhere"] = True
@@ -5950,7 +5954,7 @@ class SessionFilesCoordinator:
                 }
             else:
                 try:
-                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd, replace=fresh_git)
+                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_batchd, replace=fresh_git)
                     cache_meta = {
                         "hit": cache_hit,
                         "stale": False,
@@ -5958,7 +5962,7 @@ class SessionFilesCoordinator:
                         "refresh_seconds": max_age,
                         "refreshing": False,
                     }
-                except SessionFilesJobdUnavailable as error:
+                except SessionFilesBatchedUnavailable as error:
                     payload = {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": str(error), "terminal": True}
                     status = HTTPStatus.SERVICE_UNAVAILABLE
                     cache_meta = {"hit": False, "stale": False, "refreshing_elsewhere": False}
@@ -6520,13 +6524,13 @@ class ActivityCache:
         coalesce_key = f"tabber_activity:{scope}:{bounded_hours}:{source_signature}"[:256]
         generation = int(hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:12], 16)
         return coalesce_key, generation
-    def compute_tabber_activity_rows_via_jobd( self, app, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
+    def compute_tabber_activity_rows_via_batchd( self, app, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
         """Gather impure per-session inputs (tmux screen state, attention/cooldown, path/git) in the
-        web owner, then submit the WHOLE changed-session batch to jobd for pure assembly in one call.
+        web owner, then submit the WHOLE changed-session batch to batchd for pure assembly in one call.
 
-        All gathering happens here (a jobd spawn worker has no tmux/app-state access); the worker only
+        All gathering happens here (a batchd spawn worker has no tmux/app-state access); the worker only
         reconstructs SessionInfo and runs assemble_agent_window_rows/build_recent_agents_payload.
-        Raises TabberActivityJobdUnavailable (never falls back to inline assembly here) when jobd
+        Raises TabberActivityBatchedUnavailable (never falls back to inline assembly here) when batchd
         cannot produce a matching product within the bounded wait; the caller decides the fallback.
         """
         if not changed_sessions:
@@ -6569,22 +6573,22 @@ class ActivityCache:
             priority="freshness",
             generation=generation,
             coalesce_key=coalesce_key,
-            deadline_ms=TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS,
+            deadline_ms=TABBER_ACTIVITY_BATCHD_JOB_DEADLINE_MS,
         )
         if not response.get("ok"):
-            raise TabberActivityJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+            raise TabberActivityBatchedUnavailable(str(response.get("error") or "batchd submit rejected"))
         try:
-            _meta, body, state = wait_for_jobd_product(
-                app.job_client, coalesce_key, generation, TABBER_ACTIVITY_JOBD_WAIT_SECONDS
+            _meta, body, state = wait_for_batchd_product(
+                app.job_client, coalesce_key, generation, TABBER_ACTIVITY_BATCHD_WAIT_SECONDS
             )
-        except JobdProductRpcUnavailable as error:
-            raise TabberActivityJobdUnavailable(str(error)) from error
+        except BatchedProductRpcUnavailable as error:
+            raise TabberActivityBatchedUnavailable(str(error)) from error
         if body is None:
-            raise TabberActivityJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            raise TabberActivityBatchedUnavailable(f"batchd product not ready (state={state or 'none'})")
         data = json.loads(body.decode("utf-8"))
         rows = data.get("session_rows") if isinstance(data, dict) else None
         if not isinstance(rows, dict):
-            raise TabberActivityJobdUnavailable("malformed jobd tabber-activity product")
+            raise TabberActivityBatchedUnavailable("malformed batchd tabber-activity product")
         return rows
     def build_activity_payload(self, app, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
         session_names, scope_errors, scope = app.activity_session_names(session_scope)
@@ -6648,7 +6652,7 @@ class ActivityCache:
         rebuilt = 0
         if changed_sessions:
             try:
-                jobd_rows = app.compute_tabber_activity_rows_via_jobd(
+                batchd_rows = app.compute_tabber_activity_rows_via_batchd(
                     changed_sessions,
                     discovered_sessions=sessions,
                     session_files_by_session=session_files_by_session,
@@ -6661,13 +6665,13 @@ class ActivityCache:
                     source_signature=app.stable_client_event_payload_signature(sorted(session_signatures.items())),
                 )
                 for session in changed_sessions:
-                    row = jobd_rows.get(session)
+                    row = batchd_rows.get(session)
                     if isinstance(row, dict):
                         session_rows[session] = row
                         rebuilt += 1
-            except TabberActivityJobdUnavailable as exc:
-                logger.info("tabber activity batch refresh deferred (jobd) for %d session(s): %s", len(changed_sessions), exc)
-            # A changed session jobd could not (re)compute keeps serving its last-known-good rows
+            except TabberActivityBatchedUnavailable as exc:
+                logger.info("tabber activity batch refresh deferred (batchd) for %d session(s): %s", len(changed_sessions), exc)
+            # A changed session batchd could not (re)compute keeps serving its last-known-good rows
             # (stale) rather than substituting an empty payload; a genuinely new session with no
             # prior rows gets an explicit empty shape instead of vanishing from the response.
             for session in changed_sessions:
@@ -7282,7 +7286,7 @@ class SystemStatusProjector:
         labels = {
             "indexd": "Quick Open index",
             "statsd": "YO!stats",
-            "jobd": "Background batches",
+            "batchd": "Background batches",
             "statusd": "Tmux status",
             # watchd had no entry, so the System row named it "watchd" -- the raw id -- while
             # every other service got a capability name. This label is what the System row and the
@@ -7318,7 +7322,7 @@ class SystemStatusProjector:
         # This panel used to decide `running`/`idle`/`issue`/`unavailable` from the row itself,
         # in parallel with `backend_health.observer.observed_health` deciding
         # `ready`/`starting`/`degraded`/`down` from the same row. Two classifiers, one fact:
-        # an absent jobd on a process that lost the scheduler lease read `unavailable` and
+        # an absent batchd on a process that lost the scheduler lease read `unavailable` and
         # `alerting` here while the topbar indicator read `starting` and stayed quiet, because
         # only the observer knew about `absence_expected_reason`.
         #
@@ -7485,7 +7489,7 @@ class SystemStatusProjector:
         return {
             "indexd": app.search_indexer.runtime_status,
             "statsd": app.statsd_runtime_status,
-            "jobd": app.job_client.runtime_status,
+            "batchd": app.job_client.runtime_status,
             "statusd": app.status_client.runtime_status,
             "watchd": app.watchd_runtime_status,
             "approvald": app.approval_client.runtime_status,
@@ -7511,7 +7515,7 @@ class SystemStatusProjector:
         """
         return {
             "statsd": app.stats_current_client.retry,
-            "jobd": app.job_client.retry,
+            "batchd": app.job_client.retry,
             "statusd": app.status_client.retry,
             "watchd": app.watch_client.retry,
             "approvald": app.approval_client.retry,
@@ -8083,10 +8087,10 @@ class TmuxWebtermApp:
         # rather than publishing zeros. See `attach_backend_health_store`.
         self._system_status_projector = SystemStatusProjector(self)
         self.job_client = BatchClient()
-        # Pins the jobd broker up for the duration of an fs-batch/differ browser interaction so a
+        # Pins the batchd broker up for the duration of an fs-batch/differ browser interaction so a
         # saturated gate cannot idle-shut the broker between two /api/fs/batch calls (W15 #4).
-        self.jobd_fs_batch_lease = JobdInteractionLease(self.job_client)
-        self.jobd_operation_service = JobdOperationService()
+        self.batchd_fs_batch_lease = BatchedInteractionLease(self.job_client)
+        self.batchd_operation_service = BatchedOperationService()
         self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
         self.status_client = StatusClient()
@@ -8896,7 +8900,7 @@ class TmuxWebtermApp:
                 status.get("generation", {}),
                 message_key="events.message.backgroundOwner.acquired",
             )
-        # jobd is started only by the elected scheduler owner.  HTTP handlers
+        # batchd is started only by the elected scheduler owner.  HTTP handlers
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
@@ -8907,7 +8911,7 @@ class TmuxWebtermApp:
         # constructed a session-files cache key synchronously; an uncovered repository turns
         # that key into a full pinned Git object-store snapshot.  That made a large repository
         # keep the whole HTTP listener unavailable during startup.  Session-files requests own
-        # their deferred jobd refresh after the listener is live instead.
+        # their deferred batchd refresh after the listener is live instead.
         self.warm_start_tabber_activity_cache()
         self.start_tabber_activity_cache_warmer()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
@@ -9057,7 +9061,7 @@ class TmuxWebtermApp:
         """Refuse a filesystem request the web thread can already prove the worker will reject.
 
         Acceptance is what makes this necessary rather than cosmetic.  A single filesystem request
-        is answered with a 202 receipt and completed in the jobd operation pool, so a descriptor
+        is answered with a 202 receipt and completed in the batchd operation pool, so a descriptor
         that cannot succeed -- an empty, relative or NUL/newline path, or a rename to an empty or
         illegal child name -- would otherwise reserve a bounded completion slot, submit a job, and
         terminalize `invalid_request` after the caller has already read its response.  That
@@ -9069,7 +9073,7 @@ class TmuxWebtermApp:
         `validate_request_path_lexical` through `parsed_request_path`/`safe_path`/`safe_parent` and
         calls `validated_child_name` from `rename_path` -- so refusal and execution cannot
         disagree, and the refusal payload is identical to the typed failure the worker would have
-        produced.  `jobd._filesystem_operation_untyped` coerces `new_name` with `str(... or "")`,
+        produced.  `batchd._filesystem_operation_untyped` coerces `new_name` with `str(... or "")`,
         so the same coercion is applied here rather than a second reading of the same argument.
 
         Acceptance calls the LEXICAL owner only, never `parsed_request_path`.  Expanding `~user`
@@ -9120,7 +9124,7 @@ class TmuxWebtermApp:
             message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
             canonical=True,
             code=code,
-            origin="local_services.jobd",
+            origin="local_services.batchd",
             retryable=False,
             details={
                 "status": int(status),
@@ -9135,8 +9139,8 @@ class TmuxWebtermApp:
                     "code": "dependency_failed",
                 },
                 {
-                    "component": "local_services.jobd",
-                    "operation": "jobd.result",
+                    "component": "local_services.batchd",
+                    "operation": "batchd.result",
                     "code": code,
                 },
             ],
@@ -9226,14 +9230,14 @@ class TmuxWebtermApp:
         return cls.local_service_operation_failure_result(
             request_id,
             failure,
-            service="jobd",
+            service="batchd",
             route=route,
             operation_id=operation_id,
             operation=operation,
             code=code,
         )
 
-    jobd_operation_failure_result = batch_operation_failure_result
+    batchd_operation_failure_result = batch_operation_failure_result
 
     @classmethod
     def session_files_failure_result(
@@ -9242,10 +9246,10 @@ class TmuxWebtermApp:
         failure: dict[str, Any],
         *,
         operation_id: str = "",
-        operation: str = "jobd.request",
+        operation: str = "batchd.request",
         code: str = "service_unavailable",
     ) -> dict[str, Any]:
-        return cls.jobd_operation_failure_result(
+        return cls.batchd_operation_failure_result(
             request_id,
             failure,
             route="GET /api/session-files",
@@ -9268,7 +9272,7 @@ class TmuxWebtermApp:
 
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
         details = error.get("details") if isinstance(error.get("details"), dict) else {}
-        service = str(details.get("service") or "jobd")
+        service = str(details.get("service") or "batchd")
         emit_server_log(
             failure_record_level(error),
             f"{service}-operation",
@@ -9307,7 +9311,7 @@ class TmuxWebtermApp:
         for record in self.queued_delivery_ledger.open_operations():
             operation_id = str(record.get("id") or "")
             request_id = str(record.get("request_id") or self.new_api_request_id())
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
                 {
                     "error": "accepted producer was abandoned when the server instance stopped",
@@ -9315,7 +9319,7 @@ class TmuxWebtermApp:
                 },
                 route=str(record.get("route") or "GET /api/operations/{id}"),
                 operation_id=operation_id,
-                operation="jobd.result",
+                operation="batchd.result",
                 code="producer_abandoned",
             )
             if str(record.get("kind") or "") == "session_files" and isinstance(record.get("producer"), dict): result["producer"] = copy.deepcopy(record["producer"])
@@ -9366,7 +9370,7 @@ class TmuxWebtermApp:
             "queued_delivery_compact",
             {"state_path": str(state_path)},
             priority="maintenance",
-            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
+            launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
             generation=1,
             coalesce_key=coalesce_key,
             delivery="receipt",
@@ -9381,22 +9385,22 @@ class TmuxWebtermApp:
         operation_session = str(context.get("session") or "")
         return bool(operation_session and operation_session in {str(session) for session in sessions})
 
-    def wait_for_jobd_operations_terminal(self, timeout: float) -> None:
+    def wait_for_batchd_operations_terminal(self, timeout: float) -> None:
         """Keep the completion owner live until every accepted operation is terminal."""
 
-        settled = self.jobd_operation_service.wait_for_idle(timeout)
+        settled = self.batchd_operation_service.wait_for_idle(timeout)
         open_operations = self.queued_delivery_ledger.open_operations()
         if not settled or open_operations:
             raise AssertionError({
                 "accepted_operations_settled": settled,
                 "open_operations": open_operations,
-                "jobd_status": self.job_client.request_if_running({"action": "status"}, timeout=0.5),
-                "jobd_profile": self.job_client.request_if_running({"action": "profile"}, timeout=0.5),
+                "batchd_status": self.job_client.request_if_running({"action": "status"}, timeout=0.5),
+                "batchd_profile": self.job_client.request_if_running({"action": "profile"}, timeout=0.5),
             })
 
-    def stop_jobd_operation_service(self) -> None:
+    def stop_batchd_operation_service(self) -> None:
         self.queued_delivery_compaction_owner.stop()
-        self.jobd_operation_service.stop()
+        self.batchd_operation_service.stop()
 
     def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         was_owner = self.background_owner.is_owner()
@@ -10787,7 +10791,7 @@ class TmuxWebtermApp:
 
     def complete_filesystem_watch_diff_operation(
         self,
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         base_payload: dict[str, Any],
         roots: list[str],
         identity_seed: str,
@@ -10812,7 +10816,7 @@ class TmuxWebtermApp:
         request_id: str,
         base_payload: dict[str, Any],
         roots: list[str],
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         *,
         owns_producer: bool,
     ) -> tuple[dict[str, Any], HTTPStatus]:
@@ -11053,12 +11057,12 @@ class TmuxWebtermApp:
     def session_files_view_coalesce_identity(self, cache_key: tuple[Any, ...]) -> tuple[str, int]:
         return self._session_files_coordinator.session_files_view_coalesce_identity(self, cache_key)
 
-    def session_files_jobd_source_profile(self, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
-        return self._session_files_coordinator.session_files_jobd_source_profile(self, cache_key, requester)
+    def session_files_batchd_source_profile(self, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
+        return self._session_files_coordinator.session_files_batchd_source_profile(self, cache_key, requester)
 
     @staticmethod
-    def session_files_jobd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
-        return SessionFilesCoordinator.session_files_jobd_repository_states(cache_key)
+    def session_files_batchd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
+        return SessionFilesCoordinator.session_files_batchd_repository_states(cache_key)
 
     def submit_session_files_job(
         self, session: str | None, infos: dict[str, SessionInfo], hours: float,
@@ -11070,13 +11074,13 @@ class TmuxWebtermApp:
             self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key,
             priority=priority, requester=requester, replace=replace,
         )
-    def compute_session_files_payload_via_jobd(
+    def compute_session_files_payload_via_batchd(
         self, session: str | None, infos: dict[str, SessionInfo], hours: float,
         from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None,
         cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown",
         replace: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.compute_session_files_payload_via_jobd(
+        return self._session_files_coordinator.compute_session_files_payload_via_batchd(
             self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key,
             priority=priority, requester=requester, replace=replace,
         )
@@ -11088,7 +11092,7 @@ class TmuxWebtermApp:
     def wait_for_session_files_operation_job( self, job_id: str, deadline_at: float, ) -> tuple[SessionFilesPayload, HTTPStatus]:
         return self._session_files_coordinator.wait_for_session_files_operation_job(self, job_id, deadline_at)
     def complete_session_files_operation(
-        self, flight: JobdOperationFlight, job_id: str, session: str | None,
+        self, flight: BatchedOperationFlight, job_id: str, session: str | None,
         infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None,
         repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], deadline_at: float,
         replace: bool, priority: str, requester: str,
@@ -12574,7 +12578,7 @@ class TmuxWebtermApp:
                 "transcripts_payload": transcripts_payload_refreshing,
             },
             # Bounded by trigger reason (fs_changed, transcripts_changed, ...), not by event volume:
-            # how many jobd-product-backed refreshes the server-side watch loop actually published,
+            # how many batchd-product-backed refreshes the server-side watch loop actually published,
             # by the source that drove each one (checkbox 8/10 dependency-invalidation diagnostics).
             "dependency_invalidations": dependency_invalidations,
             "owner_invocations": owner_invocations,
@@ -13001,8 +13005,8 @@ class TmuxWebtermApp:
     def tabber_activity_view_coalesce_identity(self, scope: str, bounded_hours: float, source_signature: str) -> tuple[str, int]:
         return self._activity_cache.tabber_activity_view_coalesce_identity(self, scope, bounded_hours, source_signature)
 
-    def compute_tabber_activity_rows_via_jobd( self, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
-        return self._activity_cache.compute_tabber_activity_rows_via_jobd(self, changed_sessions, discovered_sessions=discovered_sessions, session_files_by_session=session_files_by_session, activity_snapshot=activity_snapshot, preclassified_by_session=preclassified_by_session, owned_agent_rows=owned_agent_rows, snapshot_revision=snapshot_revision, scope=scope, bounded_hours=bounded_hours, source_signature=source_signature, locale=locale)
+    def compute_tabber_activity_rows_via_batchd( self, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
+        return self._activity_cache.compute_tabber_activity_rows_via_batchd(self, changed_sessions, discovered_sessions=discovered_sessions, session_files_by_session=session_files_by_session, activity_snapshot=activity_snapshot, preclassified_by_session=preclassified_by_session, owned_agent_rows=owned_agent_rows, snapshot_revision=snapshot_revision, scope=scope, bounded_hours=bounded_hours, source_signature=source_signature, locale=locale)
 
     def build_activity_payload(self, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
         return self._activity_cache.build_activity_payload(self, session_scope, hours)
@@ -13530,7 +13534,7 @@ class TmuxWebtermApp:
             return copy.deepcopy(future.result())
 
         try:
-            self.client_watch_service.note_owner_invocation("jobd_work_graph_rebuild")
+            self.client_watch_service.note_owner_invocation("batchd_work_graph_rebuild")
             graph = session_work_graph(info, self.metadata_cache, allow_network=False)
             completed_generation = self.session_work_graph_source_generation(info, graph)
             stable_during_build = (
@@ -13556,7 +13560,7 @@ class TmuxWebtermApp:
                     service.work_graph_futures.pop(future_key, None)
 
     def indexed_repo_roots_snapshot(self) -> list[str]:
-        """Return the last jobd discovery immediately and advance it asynchronously."""
+        """Return the last batchd discovery immediately and advance it asynchronously."""
         settings = self.settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
         indexed_dirs = self.indexed_repo_discovery_dirs(file_explorer)
@@ -13631,7 +13635,7 @@ class TmuxWebtermApp:
                 "indexed_repo_roots",
                 {"indexed_dirs": list(indexed_dirs)},
                 priority="maintenance",
-                launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
+                launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
                 generation=generation,
                 coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
                 deadline_ms=120_000,
@@ -13951,7 +13955,7 @@ class TmuxWebtermApp:
         sessions: dict[str, SessionInfo],
         repository_generations: tuple[tuple[str, int], ...] = (),
     ) -> str:
-        """Return the jobd product identity for metadata work, excluding UI-only churn.
+        """Return the batchd product identity for metadata work, excluding UI-only churn.
 
         The worker receives complete session records to do its work, but its cross-port product
         key must follow the same repository-relevant identity used by the in-process warm cache.
@@ -13962,16 +13966,16 @@ class TmuxWebtermApp:
         rows = tuple((name, metadata_warm_session_signature(info)) for name, info in sorted(sessions.items()))
         return self.client_event_payload_signature((rows, repository_generations))
 
-    def warm_metadata_cache_via_jobd(
+    def warm_metadata_cache_via_batchd(
         self,
         sessions: dict[str, SessionInfo],
         repository_generations: tuple[tuple[str, int], ...] = (),
     ) -> None:
-        """Materialize GitHub/Linear/git metadata for `sessions` in a jobd worker, then replay the
+        """Materialize GitHub/Linear/git metadata for `sessions` in a batchd worker, then replay the
         returned cache entries into `self.metadata_cache`.
 
-        ALL network calls and git spawns happen in the jobd worker. Raises
-        `MetadataWarmJobdUnavailable` (never falls back to an inline network fetch) so the caller
+        ALL network calls and git spawns happen in the batchd worker. Raises
+        `MetadataWarmBatchedUnavailable` (never falls back to an inline network fetch) so the caller
         skips this warm cycle and the next periodic warm retries.
         """
         sessions_payload = {name: asdict(info) for name, info in sessions.items()}
@@ -13981,31 +13985,31 @@ class TmuxWebtermApp:
             "metadata_warm_view",
             {"sessions": sessions_payload},
             priority="maintenance",
-            launch=False,  # maintenance never cold-starts jobd; see JobClient.submit
+            launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
             generation=generation,
             coalesce_key=coalesce_key,
-            deadline_ms=METADATA_WARM_JOBD_JOB_DEADLINE_MS,
+            deadline_ms=METADATA_WARM_BATCHD_JOB_DEADLINE_MS,
         )
         if not response.get("ok"):
-            raise MetadataWarmJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+            raise MetadataWarmBatchedUnavailable(str(response.get("error") or "batchd submit rejected"))
         with self.metadata_warm_lock:
             stop_event = self.metadata_warm_record.stop_event
         try:
-            _meta, body, state = wait_for_jobd_product(
+            _meta, body, state = wait_for_batchd_product(
                 self.job_client,
                 coalesce_key,
                 generation,
-                METADATA_WARM_JOBD_WAIT_SECONDS,
+                METADATA_WARM_BATCHD_WAIT_SECONDS,
                 stop_event=stop_event,
             )
-        except JobdProductRpcUnavailable as error:
-            raise MetadataWarmJobdUnavailable(str(error)) from error
+        except BatchedProductRpcUnavailable as error:
+            raise MetadataWarmBatchedUnavailable(str(error)) from error
         if body is None:
-            raise MetadataWarmJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            raise MetadataWarmBatchedUnavailable(f"batchd product not ready (state={state or 'none'})")
         data = json.loads(body.decode("utf-8"))
         entries = data.get("entries") if isinstance(data, dict) else None
         if not isinstance(entries, dict):
-            raise MetadataWarmJobdUnavailable("malformed jobd metadata-warm product")
+            raise MetadataWarmBatchedUnavailable("malformed batchd metadata-warm product")
         for key, entry in entries.items():
             if not isinstance(entry, dict):
                 continue
@@ -14025,14 +14029,14 @@ class TmuxWebtermApp:
                         completion = self.metadata_warm_record.completed.get(info.session)
                     if completion is not None and completion[0] == signature and completion[1] > now:
                         continue
-                    # One jobd round trip per session (not one batched submission for the whole
+                    # One batchd round trip per session (not one batched submission for the whole
                     # sessions dict) so a demotion between sessions stops here, before the NEXT
                     # session's network/git work is ever submitted -- the same between-session
                     # granularity the old inline loop had.
                     try:
-                        self.warm_metadata_cache_via_jobd({info.session: info}, signature[1])
-                    except MetadataWarmJobdUnavailable as exc:
-                        logger.info("metadata warm deferred (jobd) for session %s: %s", info.session, exc)
+                        self.warm_metadata_cache_via_batchd({info.session: info}, signature[1])
+                    except MetadataWarmBatchedUnavailable as exc:
+                        logger.info("metadata warm deferred (batchd) for session %s: %s", info.session, exc)
                     else:
                         with self.metadata_warm_lock:
                             self.metadata_warm_record.completed[info.session] = (
@@ -14041,7 +14045,7 @@ class TmuxWebtermApp:
                             )
                     if stop_event.is_set():
                         break
-                    # The foreground payload intentionally avoids GitHub work. Once the jobd warm
+                    # The foreground payload intentionally avoids GitHub work. Once the batchd warm
                     # above fills the cache, rebuild only when the canonical graph actually changed;
                     # otherwise a warm build would leave YO!info showing its stale no-PR graph
                     # until a later unrelated refresh, or continuously schedule itself.
@@ -14168,12 +14172,12 @@ class TmuxWebtermApp:
         info: SessionInfo | None = None,
         agent_override: AgentInfo | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus, TranscriptProductOperation | None]:
-        """Return cached compact facts, scheduling bounded parsing in jobd.
+        """Return cached compact facts, scheduling bounded parsing in batchd.
 
         This selector is deliberately the only request-path bridge to the
         transcript parser.  It keys results by file identity plus byte
         generation, never retains raw transcript text, and degrades to a
-        stable pending payload if jobd is unavailable.
+        stable pending payload if batchd is unavailable.
         """
         errors: list[str] = []
         if info is None:
@@ -14197,7 +14201,7 @@ class TmuxWebtermApp:
         stable_identity = transcript_cache_identity(str(path))
         since_text = since.astimezone(timezone.utc).isoformat() if since is not None else ""
         expected_identity = [int(stable_identity[1]), int(stable_identity[2])]
-        # Fold the parser generation into the memory cache key AND the jobd keys so a parser-shape
+        # Fold the parser generation into the memory cache key AND the batchd keys so a parser-shape
         # change (bumped TRANSCRIPT_PARSER_GENERATION) busts every previously cached entry/product.
         cache_key = (TRANSCRIPT_PARSER_GENERATION, stable_identity, generation, safe_messages, safe_lines, str(agent.kind or ""), since_text)
         # The product key is deliberately byte-generation-STRIPPED (no mtime/size). mtime+size busts
@@ -14373,7 +14377,7 @@ class TmuxWebtermApp:
     def transcript_product_view(self, product_key: str, expected_identity: list[int]) -> dict[str, Any] | None:
         """Return decoded last-known-good product bytes for stale-while-revalidate, or None.
 
-        Serves the newest complete compact facts jobd has for this file identity + shape when the
+        Serves the newest complete compact facts batchd has for this file identity + shape when the
         exact byte-generation result is not yet available. Product bytes are always fully parsed
         compact items, never the raw appended line. A transport failure (`unavailable`) and a
         `pending`/`none` state both return None so the caller emits the empty pending shape.
@@ -14425,19 +14429,19 @@ class TmuxWebtermApp:
             }
         raise ValueError("unknown context product kind")
 
-    def wait_for_jobd_operation_job(self, job_id: str, deadline_at: float) -> dict[str, Any]:
+    def wait_for_batchd_operation_job(self, job_id: str, deadline_at: float) -> dict[str, Any]:
         """Wait in the bounded completion service, never in an HTTP handler."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
         transient_polls = 0
         last_transient: dict[str, Any] = {}
         polling_capabilities = local_service_polling_capabilities(self.job_client)
         with deferred_transport_errors(self.job_client) as deferred_transport:
-            while not self.jobd_operation_service.stop_event.is_set():
-                rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+            while not self.batchd_operation_service.stop_event.is_set():
+                rpc_timeout = remaining_batchd_rpc_timeout(deadline_at)
                 if rpc_timeout <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls, last_transient, "result",
                     )
                 response = self.job_client.result(job_id, timeout=rpc_timeout)
@@ -14446,64 +14450,64 @@ class TmuxWebtermApp:
                 if response.get("ok") is not True:
                     failure = dict(response)
                     if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                        raise JobdOperationUnavailable(
-                            str(failure.get("error") or "jobd result unavailable"),
+                        raise BatchedOperationUnavailable(
+                            str(failure.get("error") or "batchd result unavailable"),
                             failure,
                         )
                     transient_polls += 1
                     last_transient = failure
                 elif not job:
-                    raise JobdOperationUnavailable(
-                        "malformed jobd result response",
-                        {"error": "malformed jobd result response", "status": "malformed_result"},
+                    raise BatchedOperationUnavailable(
+                        "malformed batchd result response",
+                        {"error": "malformed batchd result response", "status": "malformed_result"},
                     )
                 elif state == "completed":
                     return job
                 elif state in {"failed", "cancelled", "superseded", "timed_out"}:
-                    raise JobdOperationUnavailable(
-                        str(job.get("error") or f"jobd producer {state}"),
+                    raise BatchedOperationUnavailable(
+                        str(job.get("error") or f"batchd producer {state}"),
                         dict(job),
                     )
                 remaining = deadline_at - time.time()
                 if remaining <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls, last_transient, "result",
                     )
-                self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+                self.batchd_operation_service.stop_event.wait(min(poll_seconds, remaining))
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
-        raise JobdOperationUnavailable(
-            "jobd result completion stopped",
-            {"error": "jobd result completion stopped", "status": "producer_abandoned"},
+        raise BatchedOperationUnavailable(
+            "batchd result completion stopped",
+            {"error": "batchd result completion stopped", "status": "producer_abandoned"},
             code="producer_abandoned",
         )
 
-    def wait_for_jobd_operation_product(
+    def wait_for_batchd_operation_product(
         self,
-        producer: JobdProductOperation,
+        producer: BatchedProductOperation,
         deadline_at: float,
         *,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        """Read a potentially large accepted result through jobd's binary product frame."""
+        """Read a potentially large accepted result through batchd's binary product frame."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
         transient_polls = 0
         last_transient: dict[str, Any] = {}
         polling_capabilities = local_service_polling_capabilities(self.job_client)
         with deferred_transport_errors(self.job_client) as deferred_transport:
-            while not self.jobd_operation_service.stop_event.is_set():
+            while not self.batchd_operation_service.stop_event.is_set():
                 if cancel_event is not None and cancel_event.is_set():
-                    raise JobdOperationUnavailable(
-                        "jobd product completion cancelled",
-                        {"error": "jobd product completion cancelled", "status": "producer_abandoned"},
+                    raise BatchedOperationUnavailable(
+                        "batchd product completion cancelled",
+                        {"error": "batchd product completion cancelled", "status": "producer_abandoned"},
                         code="producer_abandoned",
                     )
-                rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                rpc_timeout = remaining_batchd_rpc_timeout(deadline_at)
                 if rpc_timeout <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls,
                         last_transient,
                     )
@@ -14513,10 +14517,10 @@ class TmuxWebtermApp:
                 )
                 state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
                 if not isinstance(metadata, dict) or metadata.get("ok") is not True:
-                    failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
+                    failure = dict(metadata) if isinstance(metadata, dict) else {"error": "batchd product unavailable"}
                     if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                        raise JobdOperationUnavailable(
-                            str(failure.get("error") or "jobd product unavailable"),
+                        raise BatchedOperationUnavailable(
+                            str(failure.get("error") or "batchd product unavailable"),
                             failure,
                         )
                     transient_polls += 1
@@ -14525,11 +14529,11 @@ class TmuxWebtermApp:
                     if remaining <= 0:
                         if deferred_transport is not None:
                             deferred_transport.publish()
-                        raise self.jobd_deadline_failure(
+                        raise self.batchd_deadline_failure(
                             transient_polls,
                             last_transient,
                         )
-                    wait_event = cancel_event or self.jobd_operation_service.stop_event
+                    wait_event = cancel_event or self.batchd_operation_service.stop_event
                     wait_event.wait(min(poll_seconds, remaining))
                     poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
                     continue
@@ -14537,22 +14541,22 @@ class TmuxWebtermApp:
                     try:
                         product = json.loads(body.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                        raise JobdOperationUnavailable(
-                            "malformed completed jobd product",
+                        raise BatchedOperationUnavailable(
+                            "malformed completed batchd product",
                             {"error": str(error), "status": "malformed_product"},
                         ) from error
                     if not isinstance(product, dict):
-                        raise JobdOperationUnavailable(
-                            "malformed completed jobd product",
-                            {"error": "malformed completed jobd product", "status": "malformed_product"},
+                        raise BatchedOperationUnavailable(
+                            "malformed completed batchd product",
+                            {"error": "malformed completed batchd product", "status": "malformed_product"},
                         )
                     return product
                 if state == "none" and metadata.get("inflight") is not True:
-                    result_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                    result_timeout = remaining_batchd_rpc_timeout(deadline_at)
                     if result_timeout <= 0:
                         if deferred_transport is not None:
                             deferred_transport.publish()
-                        raise self.jobd_deadline_failure(
+                        raise self.batchd_deadline_failure(
                             transient_polls,
                             last_transient,
                         )
@@ -14565,49 +14569,49 @@ class TmuxWebtermApp:
                     if response.get("ok") is not True:
                         failure = dict(response)
                         if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                            raise JobdOperationUnavailable(
-                                str(failure.get("error") or "jobd result unavailable"),
+                            raise BatchedOperationUnavailable(
+                                str(failure.get("error") or "batchd result unavailable"),
                                 failure,
                             )
                         transient_polls += 1
                         last_transient = failure
                     elif not job:
-                        raise JobdOperationUnavailable(
-                            "malformed jobd result response",
-                            {"error": "malformed jobd result response", "status": "malformed_result"},
+                        raise BatchedOperationUnavailable(
+                            "malformed batchd result response",
+                            {"error": "malformed batchd result response", "status": "malformed_result"},
                         )
                     elif job_state in {"failed", "cancelled", "superseded", "timed_out"}:
-                        raise JobdOperationUnavailable(
-                            str(job.get("error") or f"jobd producer {job_state}"),
+                        raise BatchedOperationUnavailable(
+                            str(job.get("error") or f"batchd producer {job_state}"),
                             dict(job),
                         )
                 remaining = deadline_at - time.time()
                 if remaining <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls,
                         last_transient,
                     )
-                wait_event = cancel_event or self.jobd_operation_service.stop_event
+                wait_event = cancel_event or self.batchd_operation_service.stop_event
                 wait_event.wait(min(poll_seconds, remaining))
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
-        raise JobdOperationUnavailable(
-            "jobd product completion stopped",
-            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
+        raise BatchedOperationUnavailable(
+            "batchd product completion stopped",
+            {"error": "batchd product completion stopped", "status": "producer_abandoned"},
             code="producer_abandoned",
         )
 
     @staticmethod
-    def jobd_deadline_failure(
+    def batchd_deadline_failure(
         transient_polls: int,
         last_transient: Mapping[str, Any],
         subject: str = "product",
-    ) -> JobdOperationUnavailable:
-        """Build the one deadline failure shared by every jobd polling edge."""
+    ) -> BatchedOperationUnavailable:
+        """Build the one deadline failure shared by every batchd polling edge."""
 
-        message = f"jobd {subject} deadline expired"
-        return JobdOperationUnavailable(
+        message = f"batchd {subject} deadline expired"
+        return BatchedOperationUnavailable(
             message,
             {
                 "error": message,
@@ -14620,37 +14624,37 @@ class TmuxWebtermApp:
             status=HTTPStatus.GATEWAY_TIMEOUT,
         )
 
-    def accept_jobd_product_operation(
+    def accept_batchd_product_operation(
         self,
         *,
         route: str,
         kind: str,
         context: dict[str, Any],
-        producer: JobdProductOperation | None,
+        producer: BatchedProductOperation | None,
         deadline_seconds: float,
         completion: Callable[..., None],
         completion_args: tuple[Any, ...] = (),
-        reservation: JobdOperationReservation | None = None,
+        reservation: BatchedOperationReservation | None = None,
         lane: str = "bulk",
     ) -> tuple[dict[str, Any], HTTPStatus]:
         request_id = self.new_api_request_id()
         if producer is None:
             if reservation is not None:
                 reservation.release()
-            return self.jobd_operation_failure_result(
+            return self.batchd_operation_failure_result(
                 request_id,
-                {"error": "jobd did not return an accepted product receipt"},
+                {"error": "batchd did not return an accepted product receipt"},
                 route=route,
-                operation="jobd.produce",
+                operation="batchd.produce",
             ), HTTPStatus.SERVICE_UNAVAILABLE
         if reservation is None:
-            reservation = self.jobd_operation_service.reserve(lane)
+            reservation = self.batchd_operation_service.reserve(lane)
             if reservation is None:
-                return self.jobd_operation_failure_result(
+                return self.batchd_operation_failure_result(
                     request_id,
-                    {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                    {"error": "batchd operation completion pool is full", "status": "service_busy"},
                     route=route,
-                    operation="jobd.produce",
+                    operation="batchd.produce",
                     code="service_busy",
                 ), HTTPStatus.SERVICE_UNAVAILABLE
         deadline_at = time.time() + max(1.0, float(deadline_seconds))
@@ -14661,11 +14665,11 @@ class TmuxWebtermApp:
                 deadline_at=deadline_at,
                 progress={
                     "phase": "waiting_for_product",
-                    "producer": "jobd",
+                    "producer": "batchd",
                     "producer_state": "queued",
                 },
                 producer={
-                    "service": "jobd",
+                    "service": "batchd",
                     "job_id": producer.job_id,
                     "coalesce_key": producer.product_key,
                     "generation": producer.generation,
@@ -14677,7 +14681,7 @@ class TmuxWebtermApp:
             reservation.release()
             raise
         operation_id = str(receipt["operation"]["id"])
-        submitted = self.jobd_operation_service.submit_reserved(
+        submitted = self.batchd_operation_service.submit_reserved(
             reservation,
             completion,
             operation_id,
@@ -14688,12 +14692,12 @@ class TmuxWebtermApp:
         )
         if submitted:
             return receipt, HTTPStatus.ACCEPTED
-        result = self.jobd_operation_failure_result(
+        result = self.batchd_operation_failure_result(
             request_id,
-            {"error": "jobd operation completion worker could not start"},
+            {"error": "batchd operation completion worker could not start"},
             route=route,
             operation_id=operation_id,
-            operation="jobd.produce",
+            operation="batchd.produce",
             code="producer_failed",
         )
         self.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
@@ -14711,20 +14715,20 @@ class TmuxWebtermApp:
         deadline_at: float,
     ) -> None:
         try:
-            job = self.wait_for_jobd_operation_job(producer.job_id, deadline_at)
+            job = self.wait_for_batchd_operation_job(producer.job_id, deadline_at)
             if not isinstance(job.get("result"), dict):
-                raise JobdOperationUnavailable(
-                    "malformed completed jobd product",
-                    {"error": "malformed completed jobd product", "status": str(job.get("status") or "")},
+                raise BatchedOperationUnavailable(
+                    "malformed completed batchd product",
+                    {"error": "malformed completed batchd product", "status": str(job.get("status") or "")},
                 )
             product = dict(job["result"])
             if not self.cache_transcript_product_result(producer, product):
-                result = self.jobd_operation_failure_result(
+                result = self.batchd_operation_failure_result(
                     request_id,
                     {"error": "transcript changed before the accepted product completed", "status": "stale_product"},
                     route=route,
                     operation_id=operation_id,
-                    operation="jobd.result",
+                    operation="batchd.result",
                     code="stale_product",
                 )
                 self.terminalize_operation(operation_id, result, HTTPStatus.CONFLICT)
@@ -14738,18 +14742,18 @@ class TmuxWebtermApp:
             }
             data = self.context_product_data(kind, completed_payload, messages)
             self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
-        except JobdOperationUnavailable as error:
-            result = self.jobd_operation_failure_result(
+        except BatchedOperationUnavailable as error:
+            result = self.batchd_operation_failure_result(
                 request_id,
                 error.failure,
                 route=route,
                 operation_id=operation_id,
-                operation="jobd.result",
+                operation="batchd.result",
                 code=error.code,
             )
             self.terminalize_operation(operation_id, result, error.status)
         except Exception as error:
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
                 {"error": str(error), "cause": local_service_exception_cause(error)},
                 route=route,
@@ -14768,7 +14772,7 @@ class TmuxWebtermApp:
         payload: dict[str, Any],
         producer: TranscriptProductOperation | None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self.accept_jobd_product_operation(
+        return self.accept_batchd_product_operation(
             route=route,
             kind=kind,
             context={"messages": messages, "session": str(payload.get("session") or "")},
@@ -14783,35 +14787,35 @@ class TmuxWebtermApp:
         operation_id: str,
         request_id: str,
         request_ids: tuple[Any, ...],
-        producer: JobdProductOperation,
+        producer: BatchedProductOperation,
         deadline_at: float,
     ) -> None:
         route = "POST /api/fs/batch"
-        # Hold the jobd interaction lease across the whole product-poll window.  Under a saturated
+        # Hold the batchd interaction lease across the whole product-poll window.  Under a saturated
         # gate this poll thread can be starved past the broker's idle window; the held lease vetoes
         # its idle shutdown so the socket cannot vanish out from under this operation (W15 #4).
-        self.jobd_fs_batch_lease.acquire()
+        self.batchd_fs_batch_lease.acquire()
         try:
-            product = self.wait_for_jobd_operation_product(producer, deadline_at)
+            product = self.wait_for_batchd_operation_product(producer, deadline_at)
             if not isinstance(product.get("responses"), list):
-                raise JobdOperationUnavailable(
+                raise BatchedOperationUnavailable(
                     "malformed completed filesystem batch product",
                     {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
                 )
             data = self.materialize_filesystem_batch_product(product, request_ids)
             self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
-        except JobdOperationUnavailable as error:
-            result = self.jobd_operation_failure_result(
+        except BatchedOperationUnavailable as error:
+            result = self.batchd_operation_failure_result(
                 request_id,
                 error.failure,
                 route=route,
                 operation_id=operation_id,
-                operation="jobd.result",
+                operation="batchd.result",
                 code=error.code,
             )
             self.terminalize_operation(operation_id, result, error.status)
         except Exception as error:
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
                 {"error": str(error), "cause": local_service_exception_cause(error)},
                 route=route,
@@ -14821,7 +14825,7 @@ class TmuxWebtermApp:
             )
             self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
         finally:
-            self.jobd_fs_batch_lease.release()
+            self.batchd_fs_batch_lease.release()
 
     @staticmethod
     def materialize_filesystem_batch_product(
@@ -14830,7 +14834,7 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         responses = product.get("responses")
         if not isinstance(responses, list):
-            raise JobdOperationUnavailable(
+            raise BatchedOperationUnavailable(
                 "malformed completed filesystem batch product",
                 {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
             )
@@ -14896,14 +14900,14 @@ class TmuxWebtermApp:
             requests = filesystem.validated_batch_requests(payload)
         except ValueError as error:
             return self.fs_batch_invalid_request_result(payload, error), HTTPStatus.BAD_REQUEST
-        reservation = self.jobd_operation_service.reserve("bulk")
+        reservation = self.batchd_operation_service.reserve("bulk")
         if reservation is None:
             request_id = self.new_api_request_id()
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                {"error": "batchd operation completion pool is full", "status": "service_busy"},
                 route="POST /api/fs/batch",
-                operation="jobd.produce",
+                operation="batchd.produce",
                 code="service_busy",
             )
             self.record_operation_failure("", result)
@@ -14913,11 +14917,11 @@ class TmuxWebtermApp:
             key_prefix="fs-batch",
         )
         generation = 1
-        # Hold the jobd interaction lease while contacting the broker so it cannot idle-shut its
+        # Hold the batchd interaction lease while contacting the broker so it cannot idle-shut its
         # socket during this exchange (W15 #4).  The accepted-operation completion worker below
         # re-holds its own lease across the long product-poll window between the two /api/fs/batch
         # calls; this acquire also spawns the broker if it had idled out before this request.
-        self.jobd_fs_batch_lease.acquire()
+        self.batchd_fs_batch_lease.acquire()
         try:
             response, body = self.job_client.produce(
                 "filesystem_batch",
@@ -14926,7 +14930,7 @@ class TmuxWebtermApp:
                 generation=generation,
                 coalesce_key=product_key,
                 deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
-                # jobd atomically checks its product store without waiting in the
+                # batchd atomically checks its product store without waiting in the
                 # serial RPC handler. Warm products return here; cold work keeps
                 # using the accepted-operation SSE path below.
                 delivery="ready_or_receipt",
@@ -14935,18 +14939,18 @@ class TmuxWebtermApp:
             reservation.release()
             raise
         finally:
-            self.jobd_fs_batch_lease.release()
+            self.batchd_fs_batch_lease.release()
         if body and response.get("ok") is True:
             reservation.release()
             try:
                 product = self.decode_filesystem_watch_batch_product(body)
                 return self.materialize_filesystem_batch_product(product, request_ids), HTTPStatus.OK
-            except JobdOperationUnavailable as error:
-                result = self.jobd_operation_failure_result(
+            except BatchedOperationUnavailable as error:
+                result = self.batchd_operation_failure_result(
                     self.new_api_request_id(),
                     error.failure,
                     route="POST /api/fs/batch",
-                    operation="jobd.product",
+                    operation="batchd.product",
                     code=error.code,
                 )
                 self.record_operation_failure("", result)
@@ -14960,17 +14964,17 @@ class TmuxWebtermApp:
             if body:
                 failure["error"] = "filesystem batch returned unusable product bytes"
             elif not failure.get("error"):
-                failure["error"] = "jobd did not return an accepted filesystem batch receipt"
-            result = self.jobd_operation_failure_result(
+                failure["error"] = "batchd did not return an accepted filesystem batch receipt"
+            result = self.batchd_operation_failure_result(
                 self.new_api_request_id(),
                 failure,
                 route="POST /api/fs/batch",
-                operation="jobd.produce",
+                operation="batchd.produce",
             )
             self.record_operation_failure("", result)
             return result, HTTPStatus.SERVICE_UNAVAILABLE
-        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=generation)
-        return self.accept_jobd_product_operation(
+        producer = BatchedProductOperation(job_id=job_id, product_key=product_key, generation=generation)
+        return self.accept_batchd_product_operation(
             route="POST /api/fs/batch",
             kind="fs_batch",
             context={
@@ -14988,17 +14992,17 @@ class TmuxWebtermApp:
 
     def wait_for_filesystem_operation_product(
         self,
-        producer: JobdProductOperation,
+        producer: BatchedProductOperation,
         deadline_at: float,
     ) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
         """Read one retained filesystem product without interpreting opaque bytes."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
         transient_polls = 0
         last_transient: dict[str, Any] = {}
-        while not self.jobd_operation_service.stop_event.is_set():
-            rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+        while not self.batchd_operation_service.stop_event.is_set():
+            rpc_timeout = remaining_batchd_rpc_timeout(deadline_at)
             if rpc_timeout <= 0:
-                raise self.jobd_deadline_failure(
+                raise self.batchd_deadline_failure(
                     transient_polls,
                     last_transient,
                 )
@@ -15008,26 +15012,26 @@ class TmuxWebtermApp:
             )
             state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
             if not isinstance(metadata, dict) or metadata.get("ok") is not True:
-                failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
+                failure = dict(metadata) if isinstance(metadata, dict) else {"error": "batchd product unavailable"}
                 # A transient transport blip on one poll is not the producer failing.  Treating the
                 # first non-OK product read as terminal turned a recoverable RPC timeout into a
                 # failed editor open even though the operation still had most of its 120s budget
                 # and the worker went on to produce the bytes.  Genuine producer terminal states
                 # are handled below and still fail immediately.
                 if not local_service_failure_is_transient(failure):
-                    raise JobdOperationUnavailable(
-                        str(failure.get("error") or "jobd product unavailable"),
+                    raise BatchedOperationUnavailable(
+                        str(failure.get("error") or "batchd product unavailable"),
                         failure,
                     )
                 transient_polls += 1
                 last_transient = failure
                 remaining = deadline_at - time.time()
                 if remaining <= 0:
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls,
                         last_transient,
                     )
-                self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+                self.batchd_operation_service.stop_event.wait(min(poll_seconds, remaining))
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
                 continue
             product = metadata.get("product") if isinstance(metadata.get("product"), dict) else None
@@ -15039,9 +15043,9 @@ class TmuxWebtermApp:
                     schedule["transient_polls"] = transient_polls
                 return dict(product), body, schedule
             if state == "none" and metadata.get("inflight") is not True:
-                result_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                result_timeout = remaining_batchd_rpc_timeout(deadline_at)
                 if result_timeout <= 0:
-                    raise self.jobd_deadline_failure(
+                    raise self.batchd_deadline_failure(
                         transient_polls,
                         last_transient,
                     )
@@ -15060,14 +15064,14 @@ class TmuxWebtermApp:
                         typed_failure = self.typed_filesystem_operation_failure(failure)
                         if typed_failure is not None:
                             filesystem_error, status = typed_failure
-                            raise JobdOperationUnavailable(
+                            raise BatchedOperationUnavailable(
                                 str(filesystem_error.get("error") or "filesystem operation failed"),
                                 {"filesystem_error": filesystem_error, "status": int(status)},
                                 code=str(filesystem_error.get("user_message", {}).get("key") or "filesystem_error"),
                                 status=status,
                             )
-                        raise JobdOperationUnavailable(
-                            str(failure.get("error") or "jobd producer unavailable"),
+                        raise BatchedOperationUnavailable(
+                            str(failure.get("error") or "batchd producer unavailable"),
                             failure,
                         )
                 elif job_state in {"failed", "cancelled", "superseded", "timed_out"}:
@@ -15075,27 +15079,27 @@ class TmuxWebtermApp:
                     typed_failure = self.typed_filesystem_operation_failure(failure)
                     if typed_failure is not None:
                         filesystem_error, status = typed_failure
-                        raise JobdOperationUnavailable(
+                        raise BatchedOperationUnavailable(
                             str(filesystem_error.get("error") or "filesystem operation failed"),
                             {"filesystem_error": filesystem_error, "status": int(status)},
                             code=str(filesystem_error.get("user_message", {}).get("key") or "filesystem_error"),
                             status=status,
                         )
-                    raise JobdOperationUnavailable(
-                        str(failure.get("error") or f"jobd producer {job_state or 'unavailable'}"),
+                    raise BatchedOperationUnavailable(
+                        str(failure.get("error") or f"batchd producer {job_state or 'unavailable'}"),
                         failure,
                     )
             remaining = deadline_at - time.time()
             if remaining <= 0:
-                raise self.jobd_deadline_failure(
+                raise self.batchd_deadline_failure(
                     transient_polls,
                     last_transient,
                 )
-            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            self.batchd_operation_service.stop_event.wait(min(poll_seconds, remaining))
             poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
-        raise JobdOperationUnavailable(
-            "jobd product completion stopped",
-            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
+        raise BatchedOperationUnavailable(
+            "batchd product completion stopped",
+            {"error": "batchd product completion stopped", "status": "producer_abandoned"},
             code="producer_abandoned",
         )
 
@@ -15118,7 +15122,7 @@ class TmuxWebtermApp:
         product.  The operation deadline is NOT extended -- one receipt, one deadline -- so a subtree
         that cannot finish inside it expires honestly instead of silently outliving its promise.
         """
-        reservation = self.jobd_operation_service.reserve("bulk")
+        reservation = self.batchd_operation_service.reserve("bulk")
         if reservation is None:
             return False
         try:
@@ -15140,11 +15144,11 @@ class TmuxWebtermApp:
             if body or response.get("ok") is not True or not job_id:
                 reservation.release()
                 return False
-            producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=1)
+            producer = BatchedProductOperation(job_id=job_id, product_key=product_key, generation=1)
         except Exception:
             reservation.release()
             raise
-        return self.jobd_operation_service.submit_reserved(
+        return self.batchd_operation_service.submit_reserved(
             reservation,
             self.complete_filesystem_operation,
             operation_id,
@@ -15163,20 +15167,20 @@ class TmuxWebtermApp:
         route: str,
         reload_yolo_rules: bool,
         delete_escalation: dict[str, Any] | None,
-        producer: JobdProductOperation,
+        producer: BatchedProductOperation,
         deadline_at: float,
     ) -> None:
         try:
             product, body, schedule = self.wait_for_filesystem_operation_product(producer, deadline_at)
             self.queued_delivery_ledger.record_operation_schedule(operation_id, schedule)
             if product.get("format") != "json":
-                raise JobdOperationUnavailable(
+                raise BatchedOperationUnavailable(
                     "filesystem operation returned an unsupported product format",
                     {"error": "filesystem operation returned an unsupported product format", "status": "malformed_product"},
                 )
             data = json.loads(body.decode("utf-8"))
             if not isinstance(data, dict):
-                raise JobdOperationUnavailable(
+                raise BatchedOperationUnavailable(
                     "malformed completed filesystem product",
                     {"error": "malformed completed filesystem product", "status": "malformed_product"},
                 )
@@ -15191,7 +15195,7 @@ class TmuxWebtermApp:
                 ):
                     # Deliberately NOT terminal: the same operation is now waiting on the bulk lane.
                     return
-                raise JobdOperationUnavailable(
+                raise BatchedOperationUnavailable(
                     "recursive delete could not be scheduled on the bulk lane",
                     {"error": "recursive delete could not be scheduled on the bulk lane", "status": "service_busy"},
                     code="service_busy",
@@ -15200,7 +15204,7 @@ class TmuxWebtermApp:
             if reload_yolo_rules:
                 data["yolo_rules"] = yolo_rules.reload_rules()
             self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
-        except JobdOperationUnavailable as error:
+        except BatchedOperationUnavailable as error:
             typed_failure = self.typed_filesystem_operation_failure(error.failure)
             if typed_failure is not None:
                 filesystem_error, status = typed_failure
@@ -15212,17 +15216,17 @@ class TmuxWebtermApp:
                     operation_id=operation_id,
                 )
             else:
-                result = self.jobd_operation_failure_result(
+                result = self.batchd_operation_failure_result(
                     request_id,
                     error.failure,
                     route=route,
                     operation_id=operation_id,
-                    operation="jobd.result",
+                    operation="batchd.result",
                     code=error.code,
                 )
             self.terminalize_operation(operation_id, result, error.status)
         except Exception as error:
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
                 {"error": str(error), "cause": local_service_exception_cause(error)},
                 route=route,
@@ -15260,13 +15264,13 @@ class TmuxWebtermApp:
         # reserves the point lane and a bounded mutation the mutation lane, so neither can be
         # refused or stranded because bulk completion polls hold the shared pool.
         priority = filesystem_operation_priority(operation, operation_args)
-        reservation = self.jobd_operation_service.reserve(jobd_operation_lane(priority))
+        reservation = self.batchd_operation_service.reserve(batchd_operation_lane(priority))
         if reservation is None:
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                {"error": "batchd operation completion pool is full", "status": "service_busy"},
                 route=route,
-                operation="jobd.produce",
+                operation="batchd.produce",
                 code="service_busy",
             )
             self.record_operation_failure("", result)
@@ -15341,11 +15345,11 @@ class TmuxWebtermApp:
                 filesystem_error, status = typed_failure
                 return FilesystemOperationHttpResponse(filesystem_error, status)
             failure = dict(response)
-            failure.setdefault("error", "jobd did not return an accepted filesystem operation receipt")
-            result = self.jobd_operation_failure_result(request_id, failure, route=route, operation="jobd.produce")
+            failure.setdefault("error", "batchd did not return an accepted filesystem operation receipt")
+            result = self.batchd_operation_failure_result(request_id, failure, route=route, operation="batchd.produce")
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
-        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=generation)
+        producer = BatchedProductOperation(job_id=job_id, product_key=product_key, generation=generation)
         # A bounded `delete` may come back saying the target is a nonempty directory.  That is not a
         # failure and not a second request: this names the SAME operation re-produced with
         # `recursive=True`, so the completion can move it to the bulk lane under one receipt.
@@ -15354,7 +15358,7 @@ class TmuxWebtermApp:
             if operation == FILESYSTEM_RECURSIVE_MUTATION and priority == "mutation"
             else None
         )
-        payload, status = self.accept_jobd_product_operation(
+        payload, status = self.accept_batchd_product_operation(
             route=route,
             kind="filesystem_operation",
             # `uncoalesced` names why a point read had to take a non-coalescing key, so a lane full
@@ -15365,7 +15369,7 @@ class TmuxWebtermApp:
             completion=self.complete_filesystem_operation,
             completion_args=(route, reload_yolo_rules, delete_escalation),
             reservation=reservation,
-            lane=jobd_operation_lane(priority),
+            lane=batchd_operation_lane(priority),
         )
         return FilesystemOperationHttpResponse(payload, status)
 
@@ -15380,11 +15384,11 @@ class TmuxWebtermApp:
         """Relay one browser-consumed byte product without a receipt protocol.
 
         There is no browser receipt to fall back on for a raw/download/preview/zip byte stream, so
-        this response is synchronous.  It no longer BLOCKS a serial jobd handler slot for the whole
+        this response is synchronous.  It no longer BLOCKS a serial batchd handler slot for the whole
         job: it submits with a zero-wait ``produce`` (warm bytes return immediately) and, on a cold
         receipt, waits for the product on the ONE shared filesystem product-poll owner
         (``wait_for_filesystem_operation_product``) rather than inside the daemon.  The former
-        ``relay`` action held one of jobd's bounded concurrent-handler slots for the entire job, so
+        ``relay`` action held one of batchd's bounded concurrent-handler slots for the entire job, so
         enough concurrent downloads refused every other client with ``service busy``.
         """
         request_id = self.new_api_request_id()
@@ -15408,8 +15412,8 @@ class TmuxWebtermApp:
         if response.get("ok") is True and response.get("state") in {"ready", "stale"} and product is not None and response.get("artifact") is True:
             try:
                 return filesystem_artifact_http_response(self.job_client, product_key, 1, product)
-            except JobdOperationUnavailable as error:
-                result = self.jobd_operation_failure_result(request_id, error.failure, route=route, operation="jobd.artifact_open", code=error.code)
+            except BatchedOperationUnavailable as error:
+                result = self.batchd_operation_failure_result(request_id, error.failure, route=route, operation="batchd.artifact_open", code=error.code)
                 self.record_operation_failure("", result)
                 return FilesystemOperationHttpResponse(result, error.status)
         job = response.get("job") if isinstance(response.get("job"), dict) else {}
@@ -15421,26 +15425,26 @@ class TmuxWebtermApp:
                 filesystem_error, status = typed_failure
                 return FilesystemOperationHttpResponse(filesystem_error, status)
             failure = dict(response)
-            failure.setdefault("error", "jobd did not return an accepted filesystem operation receipt")
-            result = self.jobd_operation_failure_result(request_id, failure, route=route, operation="jobd.produce")
+            failure.setdefault("error", "batchd did not return an accepted filesystem operation receipt")
+            result = self.batchd_operation_failure_result(request_id, failure, route=route, operation="batchd.produce")
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
-        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=1)
+        producer = BatchedProductOperation(job_id=job_id, product_key=product_key, generation=1)
         try:
             product_meta, product_body, schedule = self.wait_for_filesystem_operation_product(
                 producer,
                 time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS,
             )
-        except JobdOperationUnavailable as error:
+        except BatchedOperationUnavailable as error:
             typed_failure = self.typed_filesystem_operation_failure(error.failure)
             if typed_failure is not None:
                 filesystem_error, status = typed_failure
                 return FilesystemOperationHttpResponse(filesystem_error, status)
-            result = self.jobd_operation_failure_result(
+            result = self.batchd_operation_failure_result(
                 request_id,
                 error.failure,
                 route=route,
-                operation="jobd.product",
+                operation="batchd.product",
                 code=error.code,
             )
             self.record_operation_failure("", result)
@@ -15448,8 +15452,8 @@ class TmuxWebtermApp:
         if not product_body and schedule.get("artifact") is True:
             try:
                 return filesystem_artifact_http_response(self.job_client, product_key, 1, product_meta)
-            except JobdOperationUnavailable as error:
-                result = self.jobd_operation_failure_result(request_id, error.failure, route=route, operation="jobd.artifact_open", code=error.code)
+            except BatchedOperationUnavailable as error:
+                result = self.batchd_operation_failure_result(request_id, error.failure, route=route, operation="batchd.artifact_open", code=error.code)
                 self.record_operation_failure("", result)
                 return FilesystemOperationHttpResponse(result, error.status)
         return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=product_body, product=dict(product_meta))
@@ -17430,7 +17434,7 @@ class TmuxWebtermApp:
 
         Returns the same JSON-serializable `gathered_agents` shape `assemble_agent_window_rows`
         consumes, so a caller may either assemble it locally (the default,
-        `agent_window_status_payloads`) or batch it into a jobd `tabber_activity_view` submission
+        `agent_window_status_payloads`) or batch it into a batchd `tabber_activity_view` submission
         for sessions whose signature changed, deferring only the pure assembly/sort to the worker.
         """
         if info is None:
@@ -17811,7 +17815,7 @@ class TmuxWebtermApp:
     def stop_auto_approve_all(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
-        self.stop_jobd_operation_service()
+        self.stop_batchd_operation_service()
         self.job_client.stop_for_scheduler()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
         port = int(self.background_owner.port or 0)

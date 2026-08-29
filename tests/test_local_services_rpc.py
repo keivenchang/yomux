@@ -332,7 +332,7 @@ def test_local_service_runtime_self_connection_is_excluded_from_on_client(tmp_pa
 class _ClaimState:
     """Minimal stand-in for a service exposing the two attributes
     ``claim_gated_idle_due`` reads/writes -- every real service (watchd,
-    jobd, statusd, approvald, search_indexer) uses this exact shared
+    batchd, statusd, approvald, search_indexer) uses this exact shared
     function against its own ``last_client_at``/``idle_seconds``.
     """
 
@@ -948,7 +948,7 @@ def test_local_service_transport_has_no_pickle_or_decompression_surface():
         "yolomux_lib/local_services/rpc.py",
         "yolomux_lib/local_services/runtime.py",
         "yolomux_lib/local_services/registry.py",
-        "yolomux_lib/infra/jobd.py",
+        "yolomux_lib/infra/batchd.py",
         "yolomux_lib/stats_current/service.py",
         "yolomux_lib/approvald.py",
     ]

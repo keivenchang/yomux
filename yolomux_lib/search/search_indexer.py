@@ -253,7 +253,7 @@ class PersistentSearchIndexer:
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         # `lease_id` is THE shared local-service wire key for the id being
         # refreshed: it is what `LocalServiceRegistry.acquire_lease` sends and what
-        # statusd, watchd and jobd read. Reading any other spelling here is not a
+        # statusd, watchd and batchd read. Reading any other spelling here is not a
         # cosmetic mismatch -- the key simply never arrives, so `acquire_client_lease`
         # sees an empty existing id, skips the refresh branch and MINTS a row on
         # every call. Nothing reaps those rows (only DEAD clients are reaped), so one

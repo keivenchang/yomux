@@ -487,7 +487,7 @@ def gate_runtime_paths(
         tempfile.tempdir = previous_tempdir
         # Removing the root is the last act of this fixture, so every writer it
         # owns has to be retired first.  A local-service daemon spawned straight
-        # from gate_runtime_paths (JobClient/ApprovalClient, no app) unlinks its
+        # from gate_runtime_paths (BatchClient/ApprovalClient, no app) unlinks its
         # socket and record inside runtime/services WHILE it exits, and no test
         # body joins that exit: shutil.rmtree then walks a directory another
         # process is still mutating and fails with a masked ENOENT.  Route the
@@ -632,7 +632,7 @@ class GateLiveServerOptions:
     thread_name: str = "fixture-http-server"
     label: str = "fixture-owned gate"
     clear_server_logs: bool = False
-    pin_jobd_scheduler: bool = False
+    pin_batchd_scheduler: bool = False
 
 
 def start_fixture_live_server(
@@ -658,8 +658,8 @@ def start_fixture_live_server(
     server = None
     thread = None
     try:
-        if options.pin_jobd_scheduler:
-            pin_fixture_jobd_scheduler(app)
+        if options.pin_batchd_scheduler:
+            pin_fixture_batchd_scheduler(app)
         if options.tls_context is None:
             server = TmuxWebtermHTTPServer(options.address, app)
         else:
@@ -928,7 +928,7 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
     monkeypatch.setattr(workdir_module, "start_agent_auth_status_refresh", lambda *, force=False: False)
     for method_name in (
         "stop_client_event_watcher",
-        "stop_jobd_operation_service",
+        "stop_batchd_operation_service",
         "demote_background_owner",
         "stop_auto_approve_all",
     ):
@@ -940,11 +940,11 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
 
 @runtime_checkable
 class FixtureSchedulerClient(Protocol):
-    """The jobd scheduler-lease seam the gate fixture pins on setup and releases on teardown.
+    """The batchd scheduler-lease seam the gate fixture pins on setup and releases on teardown.
 
-    Both halves act on one object: the real ``JobClient`` (``yolomux_lib/infra/jobd.py``) and any
+    Both halves act on one object: the real ``BatchClient`` (``yolomux_lib/infra/batchd.py``) and any
     fixture stand-in must expose the SAME two calls, so setup pins and teardown releases can never
-    diverge onto different owners.  ``start_for_scheduler`` takes the lease that pins jobd up;
+    diverge onto different owners.  ``start_for_scheduler`` takes the lease that pins batchd up;
     ``stop_for_scheduler`` releases it; ``holds_scheduler_lease`` reports whether the lease is held.
     """
 
@@ -957,7 +957,7 @@ class FixtureSchedulerClient(Protocol):
 
 
 class FixtureSchedulerApp(Protocol):
-    """The app-ownership seam ``pin_fixture_jobd_scheduler`` requires of any fixture app.
+    """The app-ownership seam ``pin_fixture_batchd_scheduler`` requires of any fixture app.
 
     Both the real gate ``TmuxWebtermApp`` and the rollback fake app satisfy this one contract, so
     the pin routes through a typed seam rather than an ad-hoc attribute assumption, and the same
@@ -968,11 +968,11 @@ class FixtureSchedulerApp(Protocol):
 
 
 class RecordingSchedulerClient:
-    """A jobd scheduler-lease stand-in that records every pin and release for fixture tests.
+    """A batchd scheduler-lease stand-in that records every pin and release for fixture tests.
 
     It satisfies ``FixtureSchedulerClient`` so a fixture app with no real broker still exercises
     the exact pin/release seam, and its counters prove exactly-once release on the rollback
-    teardown path.  It models the real ``JobClient.stop_for_scheduler`` idempotence: teardown
+    teardown path.  It models the real ``BatchClient.stop_for_scheduler`` idempotence: teardown
     calls the release from two owners (``demote_background_owner`` and ``stop_auto_approve_all``),
     but only the first, while a lease is held, actually releases -- so ``releases`` counts the one
     effective release, not the two idempotent calls.
@@ -1002,25 +1002,25 @@ class RecordingSchedulerClient:
         return self._leased
 
 
-def pin_fixture_jobd_scheduler(app: FixtureSchedulerApp) -> None:
-    """Pin jobd for the whole fixture window, exactly as the elected owner does in production.
+def pin_fixture_batchd_scheduler(app: FixtureSchedulerApp) -> None:
+    """Pin batchd for the whole fixture window, exactly as the elected owner does in production.
 
     The gate app is a local background owner: ``DisabledBackgroundOwner.is_owner()`` and
     ``can_run(role)`` both return True, so a Finder/session-files interaction starts the
     owner-side session-files background refresh worker, and that worker submits
-    ``session_files_view`` to jobd (``submit_session_files_job`` -> ``job_client.submit``).
+    ``session_files_view`` to batchd (``submit_session_files_job`` -> ``job_client.submit``).
     In production the owner first takes the scheduler lease
     (``handle_background_owner_acquired`` -> ``job_client.start_for_scheduler``), which spawns
-    jobd and keeps its Unix socket present and warm before any refresh worker submits.  Without
-    this pin the fixture served those owner-side producers against an unpinned jobd, so every
-    jobd interaction was an on-demand cold start that, under -n16 CPU contention, raced an
+    batchd and keeps its Unix socket present and warm before any refresh worker submits.  Without
+    this pin the fixture served those owner-side producers against an unpinned batchd, so every
+    batchd interaction was an on-demand cold start that, under -n16 CPU contention, raced an
     absent socket (``FileNotFoundError`` at ``client.connect``) or timed out on a 0.5s per-call
-    budget -- and the strict browser-journey gate caught the emitted ``local-service:jobd``
+    budget -- and the strict browser-journey gate caught the emitted ``local-service:batchd``
     transport error.  The 5s spawn budget of this single setup pin, plus the 60s idle the
     fixture sets, guarantees the socket stays present for the bounded window.  Teardown already
     releases the lease symmetrically via ``demote_background_owner`` -> ``stop_for_scheduler``;
     only setup was missing its half.  ``start_for_scheduler`` is the same primitive the stateful
-    journey reaches through ``start_background_owner``, so there is one jobd-pin owner, not two.
+    journey reaches through ``start_background_owner``, so there is one batchd-pin owner, not two.
     """
 
     app.job_client.start_for_scheduler()
@@ -1951,7 +1951,7 @@ class FixtureLocalServiceLedger:
     """Record every local-service writer created while one gate test owns its root.
 
     The runtime-root owner cannot discover these from an app: gate tests build
-    ``JobClient``/``ApprovalClient`` directly against ``gate_runtime_paths``, so
+    ``BatchClient``/``ApprovalClient`` directly against ``gate_runtime_paths``, so
     the registry never reaches an app attribute and nothing retires the daemon
     it spawned.  Recording every registry at construction gives the root owner
     the one list it needs to retire before removing the tree.
@@ -2225,7 +2225,7 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
 
     def stop_session_files_work() -> None:
         # Session-files refresh can still be materializing Git object pins after the last browser
-        # receipt. Fence and join that producer before jobd retirement and fixture-root removal.
+        # receipt. Fence and join that producer before batchd retirement and fixture-root removal.
         coordinator = vars(app).get("_session_files_coordinator")
         if coordinator is not None:
             coordinator.stop()
@@ -2259,15 +2259,15 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
     attempt(stop_transcript_payload_work)
     attempt(app.stop_client_event_watcher)
     if vars(app).get("queued_delivery_ledger") is not None:
-        attempt(lambda: app.wait_for_jobd_operations_terminal(
+        attempt(lambda: app.wait_for_batchd_operations_terminal(
             FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS,
         ))
     attempt(seal_local_service_starts)
-    # Capture immutable group ownership before asking jobd to stop. Its leader can exit while
+    # Capture immutable group ownership before asking batchd to stop. Its leader can exit while
     # process-pool workers still inherit the group; the saved proof is what lets retirement signal
     # those workers instead of losing the only owner record with the leader.
     attempt(capture_local_services)
-    attempt(app.stop_jobd_operation_service)
+    attempt(app.stop_batchd_operation_service)
     attempt(app.demote_background_owner)
     attempt(capture_local_services)
     attempt(stop_tabber_warmer)
@@ -2278,8 +2278,8 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
         fixture_local_service_registries(app),
         label=label,
     ))
-    # metadata_warm_view runs in jobd, not in this observer thread. Retire and reap the fixture's
-    # jobd process before joining the observer so no worker can write under the fixture root after
+    # metadata_warm_view runs in batchd, not in this observer thread. Retire and reap the fixture's
+    # batchd process before joining the observer so no worker can write under the fixture root after
     # teardown returns.
     attempt(join_metadata_warmer)
     if len(errors) == 1:
@@ -2306,7 +2306,7 @@ def settle_fixture_app_evidence_boundary(app: Any, *, label: str) -> None:
             f"{label} session-files work did not settle before the browser evidence boundary"
         )
     if vars(app).get("queued_delivery_ledger") is not None:
-        app.wait_for_jobd_operations_terminal(FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS)
+        app.wait_for_batchd_operations_terminal(FIXTURE_ACCEPTED_OPERATION_SETTLE_TIMEOUT_SECONDS)
 
 
 def stop_fixture_http_app(app: Any, server: TmuxWebtermHTTPServer, thread: threading.Thread, *, label: str) -> None:
@@ -3189,7 +3189,7 @@ def finish_browser_fixture_boundary(
         finally:
             current_browser._yolomux_server_log_boundary = None
     # Retire every page before joining app-owned producers. A page that remains live can enqueue an
-    # 8 ms filesystem batch after its quiescence sample, racing a newly accepted jobd operation into
+    # 8 ms filesystem batch after its quiescence sample, racing a newly accepted batchd operation into
     # the gap between wait_for_idle() and the ledger read. Atomic retirement closes that admission
     # source; the final ring snapshot below still catches any warning/error emitted while app work
     # settles.
@@ -3837,7 +3837,7 @@ def _serve_gate_live_server(
             thread_name="gate-http-server",
             label="fixture-owned gate",
             clear_server_logs=True,
-            pin_jobd_scheduler=True,
+            pin_batchd_scheduler=True,
         ),
         tmux=gate_tmux,
         paths=gate_runtime_paths,

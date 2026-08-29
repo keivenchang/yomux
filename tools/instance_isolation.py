@@ -54,7 +54,7 @@ AUTO_ROOT_IGNORED_AMBIENT_KEYS = (
 ROOTED_SOCKET_RELATIVE_PATHS = (
     Path("control/yolomux-4194304-ffffffffffffffff.sock"),
     Path("services/statusd.sock"),
-    Path("services/jobd.sock"),
+    Path("services/batchd.sock"),
     Path("services/watchd.sock"),
     Path("services/approvald.sock"),
     Path("services/statsd.p24s7.ffffffffffffffff.sock"),

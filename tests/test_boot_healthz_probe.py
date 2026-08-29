@@ -105,7 +105,7 @@ class ProbeApp:
     """An app that records and refuses every attribute the request path did not already own.
 
     Refusing by AttributeError is what makes this a measurement rather than a mock: a handler
-    that reached for tmux, jobd, watchd, statusd, the filesystem, or a local-service client would
+    that reached for tmux, batchd, watchd, statusd, the filesystem, or a local-service client would
     both be recorded here and fail the request.
     """
 

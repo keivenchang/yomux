@@ -707,7 +707,7 @@ def test_clean_configured_roots_dedupes_and_drops_non_string(tmp_path):
 
 # --------------------------------------------------------------------------
 # Slice C item 5 - lookup separated from crawl scheduling: a cached hit returns
-# on the bounded read path without a jobd/crawler wait, carries coverage
+# on the bounded read path without a batchd/crawler wait, carries coverage
 # metadata, and asynchronously promotes a not-yet-covered scope's frontier.
 # --------------------------------------------------------------------------
 
@@ -731,7 +731,7 @@ def _commit_layer_one_only(root):
     return build
 
 
-def test_cache_hit_returns_within_budget_while_crawler_and_jobd_blocked(tmp_path, monkeypatch):
+def test_cache_hit_returns_within_budget_while_crawler_and_batchd_blocked(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "t5t.md").write_text("x", encoding="utf-8")
@@ -742,7 +742,7 @@ def test_cache_hit_returns_within_budget_while_crawler_and_jobd_blocked(tmp_path
     monkeypatch.setattr(file_index, "_start_build", lambda *_a, **_k: None)
     monkeypatch.setattr(file_index, "_load_disk", lambda *_a, **_k: None)
 
-    # jobd / owner RPCs blocked: any SYNCHRONOUS call on the query thread would hang for 30s.
+    # batchd / owner RPCs blocked: any SYNCHRONOUS call on the query thread would hang for 30s.
     def _blocked(*_a, **_k):
         time.sleep(30)
         return {}
@@ -754,7 +754,7 @@ def test_cache_hit_returns_within_budget_while_crawler_and_jobd_blocked(tmp_path
     started = time.perf_counter()
     result = fs_search.search_files(str(root), "t5t", recursive=True)
     elapsed = time.perf_counter() - started
-    # The cache hit returns on the bounded read path, NOT behind the 30s jobd/crawler block.
+    # The cache hit returns on the bounded read path, NOT behind the 30s batchd/crawler block.
     assert elapsed < 2.0
     assert "t5t.md" in {entry["name"] for entry in result["files"]}
     assert result["index_state"] == "warming"
@@ -767,7 +767,7 @@ def test_cache_hit_returns_within_budget_while_crawler_and_jobd_blocked(tmp_path
     assert isinstance(baseline, str) and baseline
 
     # A delta read with that cursor stays on the SAME bounded, read-only committed-journal path: it
-    # returns within budget too, without waiting behind the 30s crawler/jobd block, and the cursor
+    # returns within budget too, without waiting behind the 30s crawler/batchd block, and the cursor
     # round-trips (same root/policy/generation -> accepted, not a rebase). This is exactly what the
     # HTTP `cursor=` param drives through `search_files`.
     started_delta = time.perf_counter()

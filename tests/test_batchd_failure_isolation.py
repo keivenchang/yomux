@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Failure ownership regressions for the jobd control plane."""
+"""Failure ownership regressions for the batchd control plane."""
 
 import os
 import threading
 
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 
 
 def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(tmp_path):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     acquire_calls = []
 
     class ContendedLock:
@@ -26,7 +26,7 @@ def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(t
 
     response, body = broker.handle({
         "action": "result",
-        "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+        "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
         "job_id": "missing",
     })
 
@@ -36,7 +36,7 @@ def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(t
 
 
 def test_state_lock_contention_records_a_pending_shutdown_request(tmp_path):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
 
     class ContendedLock:
         def acquire(self, *, blocking=True):
@@ -49,7 +49,7 @@ def test_state_lock_contention_records_a_pending_shutdown_request(tmp_path):
 
     response, body = broker.handle({
         "action": "shutdown",
-        "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+        "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
     })
 
     assert response == {"ok": True, "shutdown": True}
@@ -59,10 +59,10 @@ def test_state_lock_contention_records_a_pending_shutdown_request(tmp_path):
 
 
 def test_contended_shutdown_reports_draining_when_cached_status_predates_accepted_work(tmp_path):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     submitted, submitted_body = broker.handle({
         "action": "submit",
-        "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+        "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
         "task": "json_compact",
         "payload": {"value": 1},
         "coalesce_key": "stale-status-drain",
@@ -78,27 +78,27 @@ def test_contended_shutdown_reports_draining_when_cached_status_predates_accepte
             lock_held.set()
             assert release_lock.wait(timeout=2.0)
 
-    holder = threading.Thread(target=hold_state_lock, name="jobd-test-stale-status-holder")
+    holder = threading.Thread(target=hold_state_lock, name="batchd-test-stale-status-holder")
     holder.start()
     assert lock_held.wait(timeout=1.0) is True
     try:
         status, status_body = broker.handle({
             "action": "status",
-            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
         })
         assert status["busy"] is True
         assert status["active_records"] == []
-        assert status["queues"] == {priority: 0 for priority in jobd.JOBD_PRIORITIES}
+        assert status["queues"] == {priority: 0 for priority in batchd.BATCHD_PRIORITIES}
         assert status_body == b""
 
         shutdown, shutdown_body = broker.handle({
             "action": "shutdown",
-            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
             "retirement_handshake": True,
         })
         assert shutdown == {
             "ok": True,
-            "version": jobd.JOBD_PROTOCOL_VERSION,
+            "version": batchd.BATCHD_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "started_at": broker.started_at,
             "source_epoch": broker.source_epoch,
@@ -116,7 +116,7 @@ def test_contended_shutdown_reports_draining_when_cached_status_predates_accepte
 
 
 def test_shutdown_that_wins_admission_refuses_the_overlapping_submit(tmp_path, monkeypatch):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     validation_entered = threading.Event()
     release_validation = threading.Event()
     submit_result = {}
@@ -132,19 +132,19 @@ def test_shutdown_that_wins_admission_refuses_the_overlapping_submit(tmp_path, m
     def submit() -> None:
         response, body = broker.handle({
             "action": "submit",
-            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
             "task": "json_compact",
             "payload": {"value": 1},
             "coalesce_key": "shutdown-wins",
         })
         submit_result.update(response=response, body=body)
 
-    submitter = threading.Thread(target=submit, name="jobd-test-overlapping-submit")
+    submitter = threading.Thread(target=submit, name="batchd-test-overlapping-submit")
     submitter.start()
     assert validation_entered.wait(timeout=1.0) is True
     shutdown, shutdown_body = broker.handle({
         "action": "shutdown",
-        "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+        "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
     })
     assert shutdown == {"ok": True, "shutdown": True}
     assert shutdown_body == b""
@@ -169,7 +169,7 @@ def test_shutdown_that_wins_admission_refuses_the_overlapping_submit(tmp_path, m
 
 
 def test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops(tmp_path, monkeypatch):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     acceptance_completed = threading.Event()
     release_submit = threading.Event()
     submit_result = {}
@@ -186,19 +186,19 @@ def test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops(tmp
     def submit() -> None:
         response, body = broker.handle({
             "action": "submit",
-            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
             "task": "json_compact",
             "payload": {"value": 1},
             "coalesce_key": "submit-wins",
         })
         submit_result.update(response=response, body=body)
 
-    submitter = threading.Thread(target=submit, name="jobd-test-accepted-submit")
+    submitter = threading.Thread(target=submit, name="batchd-test-accepted-submit")
     submitter.start()
     assert acceptance_completed.wait(timeout=1.0) is True
     shutdown, shutdown_body = broker.handle({
         "action": "shutdown",
-        "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+        "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
     })
     assert shutdown == {"ok": True, "shutdown": True}
     assert shutdown_body == b""
@@ -220,7 +220,7 @@ def test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops(tmp
 
 
 def test_first_contended_status_is_complete_and_contention_is_counted(tmp_path):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     lock_held = threading.Event()
     release_lock = threading.Event()
     holder_failures = []
@@ -231,30 +231,30 @@ def test_first_contended_status_is_complete_and_contention_is_counted(tmp_path):
             if not release_lock.wait(timeout=2.0):
                 holder_failures.append("state lock release timed out")
 
-    holder = threading.Thread(target=hold_state_lock, name="jobd-test-first-status-holder")
+    holder = threading.Thread(target=hold_state_lock, name="batchd-test-first-status-holder")
     holder.start()
     assert lock_held.wait(timeout=1.0) is True
     try:
-        status, status_body = broker.handle({"action": "status", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
-        ping, ping_body = broker.handle({"action": "ping", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
+        status, status_body = broker.handle({"action": "status", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
+        ping, ping_body = broker.handle({"action": "ping", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
         busy, busy_body = broker.handle({
             "action": "result",
-            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "protocol_version": batchd.BATCHD_PROTOCOL_VERSION,
             "job_id": "missing",
         })
 
         assert status["ok"] is True
         assert status["busy"] is True
         assert status["worker_count"] == sum(
-            broker._lane_capacity(lane) for lane in jobd.JOBD_LANE_PRIORITIES
+            broker._lane_capacity(lane) for lane in batchd.BATCHD_LANE_PRIORITIES
         )
         assert status["lanes"] == {
-            "point": {"capacity": jobd.JOBD_POINT_WORKERS, "active": 0, "queued": 0},
-            "mutation": {"capacity": jobd.JOBD_MUTATION_WORKERS, "active": 0, "queued": 0},
-            "interactive": {"capacity": jobd.JOBD_INTERACTIVE_WORKERS, "active": 0, "queued": 0},
+            "point": {"capacity": batchd.BATCHD_POINT_WORKERS, "active": 0, "queued": 0},
+            "mutation": {"capacity": batchd.BATCHD_MUTATION_WORKERS, "active": 0, "queued": 0},
+            "interactive": {"capacity": batchd.BATCHD_INTERACTIVE_WORKERS, "active": 0, "queued": 0},
             "bulk": {"capacity": 1, "active": 0, "queued": 0},
         }
-        assert status["queues"] == {priority: 0 for priority in jobd.JOBD_PRIORITIES}
+        assert status["queues"] == {priority: 0 for priority in batchd.BATCHD_PRIORITIES}
         assert status["scheduler_pump"] == {"failures": 0, "last_failure": {}}
         assert status["request_counters"] == {"status": 1}
         assert status["contention_counters"] == {"status": 1}
@@ -273,8 +273,8 @@ def test_first_contended_status_is_complete_and_contention_is_counted(tmp_path):
 
 
 def test_real_state_lock_contention_keeps_registry_control_plane_healthy(tmp_path, monkeypatch):
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    baseline_status, baseline_body = broker.handle({"action": "status", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
+    baseline_status, baseline_body = broker.handle({"action": "status", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
     assert baseline_status["ok"] is True
     assert baseline_body == b""
     lock_held = threading.Event()
@@ -287,20 +287,20 @@ def test_real_state_lock_contention_keeps_registry_control_plane_healthy(tmp_pat
             if not release_lock.wait(timeout=2.0):
                 holder_failures.append("state lock release timed out")
 
-    holder = threading.Thread(target=hold_state_lock, name="jobd-test-state-lock-holder")
+    holder = threading.Thread(target=hold_state_lock, name="batchd-test-state-lock-holder")
     holder.start()
     assert lock_held.wait(timeout=1.0) is True
     try:
-        ping, ping_body = broker.handle({"action": "ping", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
-        status, status_body = broker.handle({"action": "status", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
-        busy, busy_body = broker.handle({"action": "result", "protocol_version": jobd.JOBD_PROTOCOL_VERSION, "job_id": "missing"})
+        ping, ping_body = broker.handle({"action": "ping", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
+        status, status_body = broker.handle({"action": "status", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
+        busy, busy_body = broker.handle({"action": "result", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION, "job_id": "missing"})
 
         assert ping["ok"] is True
-        assert ping["version"] == jobd.JOBD_PROTOCOL_VERSION
+        assert ping["version"] == batchd.BATCHD_PROTOCOL_VERSION
         assert ping["pid"] > 1
         assert ping_body == b""
         assert status["ok"] is True
-        assert status["version"] == jobd.JOBD_PROTOCOL_VERSION
+        assert status["version"] == batchd.BATCHD_PROTOCOL_VERSION
         assert status["pid"] == ping["pid"]
         assert status["started_at"] == ping["started_at"]
         assert status["source_epoch"] == ping["source_epoch"]
@@ -318,21 +318,21 @@ def test_real_state_lock_contention_keeps_registry_control_plane_healthy(tmp_pat
 
         registry = LocalServiceRegistry(
             tmp_path,
-            LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+            LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
             socket_path=broker.socket_path,
             service_dir=tmp_path,
         )
 
         def broker_request(method, payload=None, timeout=0.2, protocol_version=None):
             del timeout
-            selected_version = jobd.JOBD_PROTOCOL_VERSION if protocol_version is None else protocol_version
+            selected_version = batchd.BATCHD_PROTOCOL_VERSION if protocol_version is None else protocol_version
             response, _body = broker.handle({"action": method, "protocol_version": selected_version, **(payload or {})})
             return response
 
         monkeypatch.setattr(registry, "_request", broker_request)
         assert registry.healthy() is True
         assert registry.status()["healthy"] is True
-        shutdown, shutdown_body = broker.handle({"action": "shutdown", "protocol_version": jobd.JOBD_PROTOCOL_VERSION})
+        shutdown, shutdown_body = broker.handle({"action": "shutdown", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})
         assert shutdown == {"ok": True, "shutdown": True}
         assert shutdown_body == b""
         assert broker.shutdown_requested.is_set() is True

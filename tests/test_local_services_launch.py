@@ -17,7 +17,7 @@ import pytest
 from yolomux_lib.infra.host_identity import LocalProcessReason
 from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib import approvald
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services.client import LocalServiceClient
 from yolomux_lib.local_services.client import TransportFailure
@@ -118,7 +118,7 @@ def test_registry_prunes_only_unlocked_stale_runtime_lock_generations(tmp_path):
     active_lock = active_socket.with_suffix(".lock")
     stale_lock = service_dir / "statsd.p24s7.stale.lock"
     held_lock = service_dir / "statsd.p24s7.held.lock"
-    foreign_lock = service_dir / "jobd.p31.foreign.lock"
+    foreign_lock = service_dir / "batchd.p31.foreign.lock"
     for path in (active_lock, stale_lock, held_lock, foreign_lock, registry.lock_path):
         path.write_text("", encoding="utf-8")
     held_fd = os.open(held_lock, os.O_RDWR)
@@ -538,7 +538,7 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
         "yolomux_lib.local_services",
         "yolomux_lib.local_services.rpc",
         "yolomux_lib.stats_current.service",
-        "yolomux_lib.jobd",
+        "yolomux_lib.batchd",
         "yolomux_lib.approvald",
     ):
         assert importlib.util.find_spec(module_name) is not None
@@ -556,14 +556,14 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
         starts.append((args, kwargs))
         return FakeProcess()
 
-    socket_path = tmp_path / ("state with spaces " * 8).strip() / "jobd.sock"
+    socket_path = tmp_path / ("state with spaces " * 8).strip() / "batchd.sock"
     registry = LocalServiceRegistry(
         socket_path.parent,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
+            "batchd",
+            "yolomux_lib.batchd",
             socket_path.name,
-            jobd.JOBD_PROTOCOL_VERSION,
+            batchd.BATCHD_PROTOCOL_VERSION,
             idle_seconds=12.5,
             extra_args=("--workers", "1"),
         ),
@@ -574,7 +574,7 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert registry._spawn() is not None
     args, kwargs = starts[0]
 
-    assert args[:3] == [sys.executable, "-m", "yolomux_lib.jobd"]
+    assert args[:3] == [sys.executable, "-m", "yolomux_lib.batchd"]
     assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
     inherited_paths = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
     assert all(path in inherited_paths for path in sys.path if path)
@@ -636,7 +636,7 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
         monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "different-prefix"))
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
         popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
     )
 
@@ -674,7 +674,7 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.5")
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION, idle_seconds=60),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION, idle_seconds=60),
         popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
     )
 
@@ -696,7 +696,7 @@ def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch
     monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
         popen=lambda _args, **_kwargs: FakeProcess(),
     )
 
@@ -716,7 +716,7 @@ def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43231,
@@ -753,7 +753,7 @@ def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monk
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43234,
@@ -782,7 +782,7 @@ def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_p
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43250,
@@ -809,7 +809,7 @@ def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_p
 def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43239,
@@ -845,7 +845,7 @@ def test_registry_rejects_recycled_retained_child_identity(tmp_path, monkeypatch
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43241,
@@ -1021,10 +1021,10 @@ def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
-            jobd.JOBD_PROTOCOL_VERSION,
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
+            batchd.BATCHD_PROTOCOL_VERSION,
             idle_seconds=30,
             extra_args=("--workers", "1"),
         ),
@@ -1466,7 +1466,7 @@ def test_registry_resources_reads_cpu_and_rss_via_ps_without_proc(tmp_path, monk
     clock_values = iter([100.0, 101.0])
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1),
         clock=lambda: next(clock_values),
     )
 
@@ -1486,7 +1486,7 @@ def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, m
         stdout = ""
 
     monkeypatch.setattr(registry_mod.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted())
-    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1))
+    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1))
 
     assert registry.resources(999999) == {"cpu_percent": None, "rss_bytes": None}
 
@@ -1507,7 +1507,7 @@ def test_registry_resources_for_pids_aggregates_verified_workers_and_resets_on_m
     clock_values = iter([100.0, 101.0, 102.0])
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1),
         clock=lambda: next(clock_values),
     )
 
@@ -1673,7 +1673,7 @@ def test_registry_recovers_a_lost_status_on_the_next_attempt_with_a_real_record(
         {"ok": True, "version": 1, "pid": 0},
         {"ok": True, "version": 1, "pid": 1},
         {"ok": True, "version": 2, "pid": os.getpid()},
-        {"ok": True, "version": 1, "pid": os.getpid(), "service": "jobd"},
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": "batchd"},
         {"ok": True, "version": 1, "pid": 4242},
     ),
     ids=(
@@ -2444,8 +2444,8 @@ def test_verified_orphan_diagnostics_must_distinguish_a_recorded_survivor(tmp_pa
         encoding="utf-8",
     )
     table = _table([
-        (7001, 1, 7001, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {recorded_socket}", 8001),
-        (7002, 1, 7002, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {recordless_socket}", 8002),
+        (7001, 1, 7001, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {recorded_socket}", 8001),
+        (7002, 1, 7002, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {recordless_socket}", 8002),
     ])
 
     rows = registry_mod.verified_orphan_diagnostics(service_dir, table)
@@ -2787,7 +2787,7 @@ def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     ("module", "service_name", "client_factory", "extra_args"),
     (
-        (jobd, "jobd", jobd.JobClient, ()),
+        (batchd, "batchd", batchd.BatchClient, ()),
         (approvald, "approvald", approvald.ApprovalClient, ()),
         (
             stats_current_service,
@@ -2900,7 +2900,7 @@ def _write_service_record(service_dir, name, pid, socket_path):
 def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated_launcher_groups(tmp_path):
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    target_socket = service_dir / "jobd.sock"
+    target_socket = service_dir / "batchd.sock"
     bystander_socket = service_dir / "statusd.sock"
 
     # A local-service record with NO spawn generation is retained rather than
@@ -2908,10 +2908,10 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     # which would make every escalation assertion below vacuous.
     generation = uuid.uuid4().hex
     target_record = FixtureLocalServiceRecordBuilder(
-        service="jobd", socket_path=target_socket, pid=500,
+        service="batchd", socket_path=target_socket, pid=500,
         fields={"launcher_pid": 700, "launcher_port": 8881, "spawn_generation": generation},
     ).build()
-    (service_dir / "jobd.service.json").write_text(registry_mod.json.dumps(target_record), encoding="utf-8")
+    (service_dir / "batchd.service.json").write_text(registry_mod.json.dumps(target_record), encoding="utf-8")
 
     bystander_record = FixtureLocalServiceRecordBuilder(
         service="statusd", socket_path=bystander_socket, pid=600,
@@ -2919,7 +2919,7 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     ).build()
     (service_dir / "statusd.service.json").write_text(registry_mod.json.dumps(bystander_record), encoding="utf-8")
 
-    # The jobd leader (500) is a wedged holdout that ignores SIGTERM and only dies
+    # The batchd leader (500) is a wedged holdout that ignores SIGTERM and only dies
     # on SIGKILL; its worker (501) exits as soon as its own SIGKILL lands. The
     # unrelated launcher's group (600/601) stays alive with an unchanged identity
     # throughout and must never be signalled.
@@ -2929,7 +2929,7 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     def table_reader():
         rows = []
         if alive[500]:
-            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {target_socket} --idle-seconds 60", 1500))
+            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {target_socket} --idle-seconds 60", 1500))
         if alive[501]:
             # Reparented to init once its leader is gone; the process GROUP is what
             # binds it to the leader, and that is unchanged by the leader exiting.
@@ -3002,9 +3002,9 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
 
 
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
-    socket_path = tmp_path / "services" / "jobd.sock"
-    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=socket_path, pid=100).build()
-    with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
+    socket_path = tmp_path / "services" / "batchd.sock"
+    record = FixtureLocalServiceRecordBuilder(service="batchd", socket_path=socket_path, pid=100).build()
+    with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
 
@@ -3018,13 +3018,13 @@ def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
 
 def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path):
     service_dir = tmp_path / "services"
-    jobd_socket = service_dir / "jobd.sock"
+    batchd_socket = service_dir / "batchd.sock"
     stale_socket = service_dir / "statsd.sock"
-    _write_service_record(service_dir, "jobd", 200, jobd_socket)
+    _write_service_record(service_dir, "batchd", 200, batchd_socket)
     _write_service_record(service_dir, "statsd", 300, stale_socket)
     table = _table(
         [
-            (200, 1, 200, 10.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60"),
+            (200, 1, 200, 10.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60"),
             (201, 200, 200, 90.0, "python3 -c multiprocessing-spawn-worker"),
             (202, 200, 200, 80.0, "python3 -c multiprocessing-spawn-worker"),
             # Same-name stranger in ANOTHER process group: never a member.
@@ -3036,7 +3036,7 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
 
     groups = registry_mod.tracked_local_service_groups(service_dir, table)
 
-    assert [group["service"] for group in groups] == ["jobd"]
+    assert [group["service"] for group in groups] == ["batchd"]
     assert groups[0]["pid"] == 200
     assert groups[0]["pgid"] == 200
     assert groups[0]["member_pids"] == (200, 201, 202)
@@ -3044,10 +3044,10 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
 
 def test_tracked_local_service_groups_preserve_darwin_member_identity(tmp_path):
     service_dir = tmp_path / "services"
-    socket_path = service_dir / "jobd.sock"
-    _write_service_record(service_dir, "jobd", 200, socket_path)
+    socket_path = service_dir / "batchd.sock"
+    _write_service_record(service_dir, "batchd", 200, socket_path)
     table = {
-        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yolomux_lib.jobd --socket {socket_path}", 1200, 200, "proc:1200"),
+        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yolomux_lib.batchd --socket {socket_path}", 1200, 200, "proc:1200"),
         201: registry_mod.ProcessTableEntry(200, 200, 1.0, "python3 worker", 1201, 200, "darwin:1201"),
     }
 
@@ -3107,7 +3107,7 @@ def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, 
     registry_mod.set_local_service_launch_context(8881)
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", protocol_version=3),
+        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", protocol_version=3),
     )
 
     record = registry._record_from_status(
@@ -3232,12 +3232,12 @@ class _VirtualLifetimeClock:
         self.generation = uuid.uuid4().hex
         self.service_dir = tmp_path / "services"
         self.service_dir.mkdir(parents=True, exist_ok=True)
-        self.socket_path = self.service_dir / "jobd.sock"
+        self.socket_path = self.service_dir / "batchd.sock"
         self.bystander_socket = self.service_dir / "statusd.sock"
-        (self.service_dir / "jobd.service.json").write_text(
+        (self.service_dir / "batchd.service.json").write_text(
             registry_mod.json.dumps(
                 FixtureLocalServiceRecordBuilder(
-                    service="jobd",
+                    service="batchd",
                     socket_path=self.socket_path,
                     pid=500,
                     fields={
@@ -3277,7 +3277,7 @@ class _VirtualLifetimeClock:
     def _rows(self):
         rows = []
         if self._is_alive(500):
-            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {self.socket_path} --idle-seconds 60", 1500))
+            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {self.socket_path} --idle-seconds 60", 1500))
         if self._is_alive(600):
             rows.append((600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {self.bystander_socket} --idle-seconds 60", 1600))
         return _table(rows)
@@ -3957,7 +3957,7 @@ def test_adoption_targets_only_the_requested_survivor(tmp_path):
     processes = [_spawn_claimable_survivor(generation) for _index in range(2)]
     ledger = registry_mod.service_claim_ledger(
         tmp_path / "state",
-        "jobd",
+        "batchd",
         private_root=False,
         host_identity=identity,
     )
@@ -3989,7 +3989,7 @@ def test_orphan_repair_refuses_force_signal_after_pid_identity_reuse(tmp_path, m
     current_generation = uuid.uuid4().hex
     ledger = registry_mod.service_claim_ledger(
         tmp_path / "state",
-        "jobd",
+        "batchd",
         private_root=False,
         host_identity=identity,
     )
@@ -4009,7 +4009,7 @@ def test_orphan_repair_refuses_force_signal_after_pid_identity_reuse(tmp_path, m
             ppid=1,
             pgid=pid,
             cpu_seconds=0.0,
-            command="jobd",
+            command="batchd",
             start_time=111,
             start_identity="proc:111",
             spawn_generation=old_generation,
@@ -4052,7 +4052,7 @@ def test_orphan_repair_refuses_force_signal_after_pid_identity_reuse(tmp_path, m
         ledger,
         claim_path,
         claim,
-        service_name="jobd",
+        service_name="batchd",
         service_dir=tmp_path / "services",
         current_generation=current_generation,
         identity=identity,

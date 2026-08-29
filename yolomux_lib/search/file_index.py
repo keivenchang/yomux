@@ -1258,7 +1258,7 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
     """Fire-and-forget: ask the indexer to promote a root's frontier to user-visible-demand.
 
     Item 5: a Quick Open query for a not-yet-fully-covered scope promotes that root's frontier
-    priority. It must NOT block the query, wait behind ``jobd``'s single interactive worker, or
+    priority. It must NOT block the query, wait behind ``batchd``'s single interactive worker, or
     launch a second crawl -- so the request is dispatched on a daemon thread and its result is
     ignored, and repeated queries for the same root within a short window coalesce into one
     dispatch. Returns whether a dispatch was scheduled (False when debounced or no owner is wired).

@@ -2595,7 +2595,7 @@ def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_c
         "session_discovery": 1,
         "transcript_tail_scan": 0,
         "session_files_materialization": 0,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     }
 
     # The monkeypatch is process-global, so a surviving watcher for another app
@@ -2624,7 +2624,7 @@ def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_c
         "session_discovery": 1,
         "transcript_tail_scan": 0,
         "session_files_materialization": 0,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     }
 
     panes.append(_pane("alpha", pane="1", pane_id="%2", pid=102))
@@ -2635,7 +2635,7 @@ def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_c
         "session_discovery": 2,
         "transcript_tail_scan": 0,
         "session_files_materialization": 0,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     }
     assert webapp.client_watch_service.owner_invocation_snapshot() == expected_counters
     assert webapp.runtime_refresh_state({}, {"services": []})["owner_invocations"] == expected_counters
@@ -2673,7 +2673,7 @@ def test_transcript_tail_owner_counter_advances_only_for_the_cache_miss(tmp_path
         "session_discovery": 0,
         "transcript_tail_scan": 1,
         "session_files_materialization": 0,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     }
 
 
@@ -2688,7 +2688,7 @@ def test_session_files_owner_counter_advances_only_for_the_materialized_cache_mi
     monkeypatch.setattr(webapp, "get_session_files_cache", lambda *_args, **_kwargs: next(cache_reads))
     monkeypatch.setattr(
         webapp,
-        "compute_session_files_payload_via_jobd",
+        "compute_session_files_payload_via_batchd",
         lambda *_args, **_kwargs: materializations.append("run") or (payload, HTTPStatus.OK),
     )
     monkeypatch.setattr(
@@ -2708,7 +2708,7 @@ def test_session_files_owner_counter_advances_only_for_the_materialized_cache_mi
         "session_discovery": 0,
         "transcript_tail_scan": 0,
         "session_files_materialization": 1,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     }
 
 

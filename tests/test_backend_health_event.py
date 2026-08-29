@@ -175,9 +175,9 @@ def test_coalescing_keeps_only_the_latest_revision_per_resource(live: BrokerHarn
     try:
         # Never drained between transitions: this is a browser that stopped reading.
         live.cycle(2)
-        live.services["jobd"].down("jobd exited")
+        live.services["batchd"].down("batchd exited")
         live.cycle()
-        live.services["jobd"].up()
+        live.services["batchd"].up()
         live.cycle(2)
 
         events = [event for event in drain(live.broker, core_id) if event["type"] == BACKEND_HEALTH_EVENT]

@@ -609,7 +609,7 @@ class TerminationOutcome:
 class TerminationRequest:
     """One authorized target inside a single bounded escalation.
 
-    ``target`` is the caller's name for it ("web", "jobd", "tracked-member") and
+    ``target`` is the caller's name for it ("web", "batchd", "tracked-member") and
     is carried straight through onto the outcome, so an incident report is the
     owner's measured rows rather than a second vocabulary mapped onto them.
 

@@ -1,6 +1,6 @@
-"""Bounded stateless CPU broker for YOLOmux background transforms.
+"""Bounded stateless batch broker for YOLOmux background transforms.
 
-The web process submits only registered, immutable JSON payloads.  ``jobd``
+The web process submits only registered, immutable JSON payloads.  ``batchd``
 owns priority ordering, coalescing, cancellation, and bounded spawn-based
 executor capacity so CPU-bound Python work cannot run in HTTP request threads.
 """
@@ -106,7 +106,7 @@ from ..web import html_preview_document
 # v22: retires the blocking `relay` action.  A browser byte download now submits with a zero-wait
 # `produce` and polls `product` on the web side, so no handler blocks a serial listener slot for a
 # whole job.  A v21 daemon still accepts `relay` and would block; a v22 web process never sends it,
-# and a v21 web process sending `relay` to a v22 daemon gets `unknown jobd action`, so the fence
+# and a v21 web process sending `relay` to a v22 daemon gets `unknown batchd action`, so the fence
 # retires the mismatched pair.
 # v23: raw and zip products are private, file-backed artifacts consumed through bounded chunk
 # leases. A v22 peer can only retain/return whole byte products, so mixed peers must be fenced.
@@ -116,38 +116,32 @@ from ..web import html_preview_document
 # v26: each scheduler lane owns independently replaceable one-worker slots.  A deadline-backstop
 # quarantine fences a kernel-stuck slot without taking its healthy lane siblings down.
 # A v24 daemon returns an indistinguishable generic busy response and must not remain attached.
-JOBD_PROTOCOL_VERSION = 26
-JOBD_DEFAULT_IDLE_SECONDS = 60.0
-JOBD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
-# `batchd` is the human-facing name for this broker. Keep the protocol and task
-# identities stable while the compatibility entry point is migrated.
-BATCHD_PROTOCOL_VERSION = JOBD_PROTOCOL_VERSION
-BATCHD_DEFAULT_IDLE_SECONDS = JOBD_DEFAULT_IDLE_SECONDS
-BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
+BATCHD_PROTOCOL_VERSION = 26
+BATCHD_DEFAULT_IDLE_SECONDS = 60.0
+BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
 BATCHD_SERVICE_NAME = "batchd"
-LEGACY_JOBD_SERVICE_NAME = "jobd"
 
-# jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
-# owner pins it up with a registry lease (`JobClient.start_for_scheduler`, called at
+# batchd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
+# owner pins it up with a registry lease (`BatchClient.start_for_scheduler`, called at
 # `app.py:2962` when this process acquires background ownership and released at `app.py:3381`
 # on demote), and `_idle_should_stop` refuses to retire the broker while any lease is held. A
-# process that owns scheduling and cannot see jobd is looking at a real outage.
+# process that owns scheduling and cannot see batchd is looking at a real outage.
 #
 # The one legitimate absence is the other side of that same lease: before this process wins the
-# election, or when it never does, nothing here is scheduling and jobd is expected to be absent.
+# election, or when it never does, nothing here is scheduling and batchd is expected to be absent.
 # That is a DYNAMIC fact about this process, not a static property of the service, so it is
 # published as a bounded `absence_expected_reason` token and NOT as `demand_started` -- see
 # `yolomux_lib/backend_health/observer.py:ABSENCE_EXPECTED_REASON_FIELD`.
-JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
-# No jobd handler waits by contract anymore: every action is zero-wait.  `produce` atomically
+BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
+# No batchd handler waits by contract anymore: every action is zero-wait.  `produce` atomically
 # submits and inspects the product store and returns a receipt; the web process polls `product`
 # for cold work on its own side (the former blocking `relay` action, which held one handler slot
-# for the whole job, has been retired).  So jobd takes the same shared concurrency limit as
+# for the whole job, has been retired).  So batchd takes the same shared concurrency limit as
 # watchd and statusd, and no cheap last-known-good `product` read is charged for another client's
 # in-flight job.
-JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
+BATCHD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # One scheduler owner, three explicitly bounded lanes.  Every declared priority maps to exactly
-# one executor through JOBD_PRIORITY_LANES, and JOBD_PRIORITIES is derived from that same table so
+# one executor through BATCHD_PRIORITY_LANES, and BATCHD_PRIORITIES is derived from that same table so
 # a priority can never exist without a lane that runs it.
 #
 # `point` exists because bounded single-target filesystem work (an editor open's `read`, an `info`
@@ -171,50 +165,50 @@ JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # one `rmdir` probe that returns a typed `pending: "subtree"` WITHOUT enumerating anything.  A
 # recursive `delete` walks and unlinks a whole subtree -- measured at 20,001 destructive syscalls
 # for one 20,000-entry directory -- so it stays on the bulk-shared `interactive` lane.
-JOBD_MAX_WORKERS = 2
-JOBD_INTERACTIVE_WORKERS = 1
-JOBD_POINT_WORKERS = 2
-JOBD_MUTATION_WORKERS = 2
-JOBD_LANE_PRIORITIES: dict[str, tuple[str, ...]] = {
+BATCHD_MAX_WORKERS = 2
+BATCHD_INTERACTIVE_WORKERS = 1
+BATCHD_POINT_WORKERS = 2
+BATCHD_MUTATION_WORKERS = 2
+BATCHD_LANE_PRIORITIES: dict[str, tuple[str, ...]] = {
     "point": ("point",),
     "mutation": ("mutation",),
     "interactive": ("interactive",),
     "bulk": ("freshness", "maintenance"),
 }
-JOBD_PRIORITY_LANES: dict[str, str] = {
-    priority: lane for lane, priorities in JOBD_LANE_PRIORITIES.items() for priority in priorities
+BATCHD_PRIORITY_LANES: dict[str, str] = {
+    priority: lane for lane, priorities in BATCHD_LANE_PRIORITIES.items() for priority in priorities
 }
 # Fixed per-lane worker capacity.  `bulk` is deliberately absent: its capacity is the instance's
 # general worker count, derived from the host CPU count when the broker is constructed.
-JOBD_LANE_WORKERS: dict[str, int] = {
-    "point": JOBD_POINT_WORKERS,
-    "mutation": JOBD_MUTATION_WORKERS,
-    "interactive": JOBD_INTERACTIVE_WORKERS,
+BATCHD_LANE_WORKERS: dict[str, int] = {
+    "point": BATCHD_POINT_WORKERS,
+    "mutation": BATCHD_MUTATION_WORKERS,
+    "interactive": BATCHD_INTERACTIVE_WORKERS,
 }
-JOBD_SESSION_FILES_REQUESTERS = frozenset({
+BATCHD_SESSION_FILES_REQUESTERS = frozenset({
     "api-session-files", "api-session-files-batch", "background-refresh",
     "background-info-refresh", "metadata-cache-miss", "metadata-follower-fallback",
 })
-JOBD_MAX_QUEUE = 64
-JOBD_MAX_PAYLOAD_BYTES = 256 * 1024
-JOBD_MAX_RESULT_BYTES = 512 * 1024
-JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES = LOCAL_RPC_MAX_BINARY_BYTES
-JOBD_MAX_RETAINED_RESULT_BYTES = 32 * 1024 * 1024
-JOBD_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
-JOBD_MAX_ARTIFACTS = 64
-JOBD_MAX_ARTIFACT_LEASES = 128
-JOBD_ARTIFACT_CHUNK_BYTES = 1024 * 1024
-JOBD_ARTIFACT_LEASE_SECONDS = 120.0
-JOBD_MAX_RECORDS = 256
+BATCHD_MAX_QUEUE = 64
+BATCHD_MAX_PAYLOAD_BYTES = 256 * 1024
+BATCHD_MAX_RESULT_BYTES = 512 * 1024
+BATCHD_MAX_FILESYSTEM_BATCH_RESULT_BYTES = LOCAL_RPC_MAX_BINARY_BYTES
+BATCHD_MAX_RETAINED_RESULT_BYTES = 32 * 1024 * 1024
+BATCHD_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
+BATCHD_MAX_ARTIFACTS = 64
+BATCHD_MAX_ARTIFACT_LEASES = 128
+BATCHD_ARTIFACT_CHUNK_BYTES = 1024 * 1024
+BATCHD_ARTIFACT_LEASE_SECONDS = 120.0
+BATCHD_MAX_RECORDS = 256
 # The last-known-good product store is keyed by coalesce_key (per file/session), so bound it
 # independently of the job-record ring and evict the oldest completed bytes past this many keys.
-JOBD_MAX_PRODUCTS = 256
-JOBD_MAX_SOURCE_DIAGNOSTICS = 256
-JOBD_MAX_DEADLINE_MS = 120_000
-JOBD_SCHEDULER_POLL_SECONDS = 0.05
+BATCHD_MAX_PRODUCTS = 256
+BATCHD_MAX_SOURCE_DIAGNOSTICS = 256
+BATCHD_MAX_DEADLINE_MS = 120_000
+BATCHD_SCHEDULER_POLL_SECONDS = 0.05
 # Shutdown must not enumerate executor children while the scheduler can still submit another
 # one. This bound covers a scheduler already across the lock-to-submit boundary.
-JOBD_SCHEDULER_SHUTDOWN_SECONDS = 2.0
+BATCHD_SCHEDULER_SHUTDOWN_SECONDS = 2.0
 # How long past its deadline a RUNNING job may still be, before the broker terminalizes it without
 # its worker's answer.  A worker that honors its deadline stops by itself and owns the terminal
 # state, so this is a backstop for work that cannot stop -- an uninterruptible syscall on a wedged
@@ -225,39 +219,36 @@ JOBD_SCHEDULER_SHUTDOWN_SECONDS = 2.0
 # first per-entry check: measured 0.71 us/entry (0.143 s at 200,000 entries), so 0.326 s at the
 # 457,364-entry directory this codebase already cites.  One entry's own stat+unlink between checks
 # measured 63.8 us, the worker-raise-to-broker-visible round trip measured 1.3 ms, and the broker's
-# own maintenance poll is JOBD_SCHEDULER_POLL_SECONDS.  Measured worst sum ~= 0.378 s; 2.0 s is
+# own maintenance poll is BATCHD_SCHEDULER_POLL_SECONDS.  Measured worst sum ~= 0.378 s; 2.0 s is
 # roughly 5x that, which is the headroom for a cold page cache that no constant can bound exactly.
 # When a directory IS large enough to blow through this, the backstop fires and the worker's partial
 # evidence is retained instead of discarded -- that retention is what makes an imperfect bound safe.
-JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS = 2.0
+BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS = 2.0
 # At most this many unkillable predecessors may remain alive across the whole broker.  This is a
 # daemon-wide memory bound, not a per-lane convenience limit: allowing two stuck workers in every
 # lane would turn one wedged mount into an unbounded replacement storm.
-JOBD_MAX_QUARANTINED_PREDECESSORS = 2
-JOBD_SOCKET_NAME = "jobd.sock"
+BATCHD_MAX_QUARANTINED_PREDECESSORS = 2
 BATCHD_SOCKET_NAME = "batchd.sock"
-JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
-JOBD_BROKER_ACTIONS = frozenset({
+BATCHD_PRIORITIES = tuple(BATCHD_PRIORITY_LANES)
+BATCHD_BROKER_ACTIONS = frozenset({
     "ping", "status", "profile", "submit", "result", "product", "produce", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
 })
-JOBD_ARTIFACT_ACTION_METHODS = {
+BATCHD_ARTIFACT_ACTION_METHODS = {
     "artifact_open": "open",
     "artifact_chunk": "chunk",
     "artifact_close": "close",
 }
-JOBD_REQUEST_ACTIONS = frozenset((*JOBD_BROKER_ACTIONS, *JOBD_ARTIFACT_ACTION_METHODS))
-JOBD_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in JOBD_BROKER_ACTIONS})
-JOBD_ARTIFACT_COMMAND_ROUTER = LocalServiceCommandRouter(JOBD_ARTIFACT_ACTION_METHODS)
-JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
+BATCHD_REQUEST_ACTIONS = frozenset((*BATCHD_BROKER_ACTIONS, *BATCHD_ARTIFACT_ACTION_METHODS))
+BATCHD_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in BATCHD_BROKER_ACTIONS})
+BATCHD_ARTIFACT_COMMAND_ROUTER = LocalServiceCommandRouter(BATCHD_ARTIFACT_ACTION_METHODS)
+BATCHD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(RUNTIME_DIR / "services" / JOBD_SOCKET_NAME, prefix="yolomux-jobd")
-
-
-def default_batchd_socket_path() -> Path:
     return safe_socket_path(RUNTIME_DIR / "services" / BATCHD_SOCKET_NAME, prefix="yolomux-batchd")
+
+
 
 
 def batchd_artifact_root() -> Path:
@@ -265,23 +256,23 @@ def batchd_artifact_root() -> Path:
 
 
 def artifact_root() -> Path:
-    return RUNTIME_DIR / "jobd-artifacts"
+    return batchd_artifact_root()
 
 
 def _private_artifact_root() -> Path:
     root = artifact_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if root.is_symlink():
-        raise OSError("jobd artifact root must not be a symlink")
+        raise OSError("batchd artifact root must not be a symlink")
     root_stat = root.stat()
     if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.getuid():
-        raise OSError("jobd artifact root has an invalid owner or type")
+        raise OSError("batchd artifact root has an invalid owner or type")
     os.chmod(root, 0o700)
     return root
 
 
 def default_worker_count(cpu_count: int | None = None) -> int:
-    return max(1, min(JOBD_MAX_WORKERS, max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)) - 1)))
+    return max(1, min(BATCHD_MAX_WORKERS, max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)) - 1)))
 
 
 def _json_compact(payload: bytes) -> bytes:
@@ -381,7 +372,7 @@ def _transcript_view(payload: bytes) -> bytes:
     }
     # A transcript item is already bounded by the parser, but preserve the
     # broker's contract even for a pathological number of tool blocks.
-    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > JOBD_MAX_RESULT_BYTES - 4096 and result["items"]:
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > BATCHD_MAX_RESULT_BYTES - 4096 and result["items"]:
         result["items"].pop(0)
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -393,7 +384,7 @@ def _session_files_view(payload: bytes) -> bytes:
     ``session_files`` (import-safe, no app/web) so it is unit-testable without a broker socket.
     """
     value = json.loads(payload.decode("utf-8"))
-    result = session_files.session_files_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    result = session_files.session_files_view_result(value, max_bytes=BATCHD_MAX_RESULT_BYTES - 4096)
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -405,7 +396,7 @@ def _tabber_activity_view(payload: bytes) -> bytes:
     (import-safe, no app/web) so it is unit-testable without a broker socket.
     """
     value = json.loads(payload.decode("utf-8"))
-    result = tabber_activity_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    result = tabber_activity_view_result(value, max_bytes=BATCHD_MAX_RESULT_BYTES - 4096)
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -417,7 +408,7 @@ def _metadata_warm_view(payload: bytes) -> bytes:
     unit-testable without a broker socket.
     """
     value = json.loads(payload.decode("utf-8"))
-    result = metadata_warm_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    result = metadata_warm_view_result(value, max_bytes=BATCHD_MAX_RESULT_BYTES - 4096)
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -430,7 +421,7 @@ def _filesystem_batch(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _filesystem_operation_untyped(payload: bytes) -> bytes | JobdTaskResult | JobdArtifactResult:
+def _filesystem_operation_untyped(payload: bytes) -> bytes | BatchedTaskResult | BatchedArtifactResult:
     """Execute one typed filesystem snapshot descriptor outside the web process.
 
     This daemon is shared by every server on every port, so the descriptor's own access policy --
@@ -446,7 +437,7 @@ def _filesystem_operation_untyped(payload: bytes) -> bytes | JobdTaskResult | Jo
         return _filesystem_operation_authorized(value)
 
 
-def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskResult | JobdArtifactResult:
+def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | BatchedTaskResult | BatchedArtifactResult:
     operation = str(value.get("op") or "")
     path = str(value.get("path") or "")
     args = value.get("args", {})
@@ -465,7 +456,7 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
             path,
             str(args.get("locale") or "en"),
         ).encode("utf-8")
-        return JobdTaskResult(body, {
+        return BatchedTaskResult(body, {
             "format": "opaque_bytes",
             "content_type": "text/html; charset=utf-8",
             "length": len(body),
@@ -528,7 +519,7 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _filesystem_transfer_artifact(operation: str, path: str, args: dict[str, Any]) -> JobdArtifactResult:
+def _filesystem_transfer_artifact(operation: str, path: str, args: dict[str, Any]) -> BatchedArtifactResult:
     root = _private_artifact_root()
     descriptor, raw_name = tempfile.mkstemp(prefix="transfer-", dir=root)
     basename = Path(raw_name).name
@@ -545,7 +536,7 @@ def _filesystem_transfer_artifact(operation: str, path: str, args: dict[str, Any
                 disposition = "attachment"
                 filename = product_filename(args.get("filename") or f"{Path(path).name or 'archive'}.zip", fallback="archive.zip")
         artifact_stat = os.fstat(descriptor)
-        return JobdArtifactResult(
+        return BatchedArtifactResult(
             basename=basename,
             device=artifact_stat.st_dev,
             inode=artifact_stat.st_ino,
@@ -574,17 +565,17 @@ def _filesystem_transfer_artifact(operation: str, path: str, args: dict[str, Any
 
 
 def _filesystem_operation(payload: bytes) -> bytes:
-    """Preserve every filesystem facade failure across the jobd process boundary."""
+    """Preserve every filesystem facade failure across the batchd process boundary."""
     try:
         return _filesystem_operation_untyped(payload)
     except filesystem.FilesystemError as exc:
         value = json.loads(payload.decode("utf-8"))
         path = str(value.get("path") or "") if isinstance(value, dict) else ""
-        raise JobdFilesystemOperationFailure(exc.status, exc.payload(path=path)) from exc
+        raise BatchedFilesystemOperationFailure(exc.status, exc.payload(path=path)) from exc
 
 
 def _session_files_cache_prune(payload: bytes) -> bytes:
-    """Prune the durable session-files cache in a jobd worker process."""
+    """Prune the durable session-files cache in a batchd worker process."""
     value = json.loads(payload.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("session-files cache prune payload must be an object")
@@ -601,7 +592,7 @@ def _session_files_cache_prune(payload: bytes) -> bytes:
 
 
 def _queued_delivery_compact(payload: bytes) -> bytes:
-    """Compact one private operation journal in a jobd worker process."""
+    """Compact one private operation journal in a batchd worker process."""
 
     value = json.loads(payload.decode("utf-8"))
     if not isinstance(value, dict) or set(value) != {"state_path"}:
@@ -629,7 +620,7 @@ REGISTERED_TASKS = {
 
 
 @dataclass(frozen=True)
-class JobdTaskResult:
+class BatchedTaskResult:
     """Opaque task bytes plus the uniform product metadata retained with them."""
 
     body: bytes
@@ -637,13 +628,15 @@ class JobdTaskResult:
 
 
 @dataclass(frozen=True)
-class JobdArtifactResult:
+class BatchedArtifactResult:
     """Worker-created private artifact adopted by the broker through one pinned descriptor."""
 
     basename: str
     device: int
     inode: int
     product: dict[str, object]
+
+
 
 
 @dataclass(slots=True)
@@ -670,13 +663,13 @@ class StoredJobProduct:
 
 
 @dataclass(slots=True)
-class JobdArtifactLease:
+class BatchedArtifactLease:
     descriptor: int
     product: dict[str, object]
     expires_at: float
 
 
-class JobdFilesystemOperationFailure(RuntimeError):
+class BatchedFilesystemOperationFailure(RuntimeError):
     """Preserve a worker filesystem error's HTTP payload across the process boundary."""
 
     def __init__(self, status: int, payload: dict[str, object]):
@@ -686,6 +679,8 @@ class JobdFilesystemOperationFailure(RuntimeError):
 
     def __reduce__(self) -> tuple[object, tuple[int, dict[str, object]]]:
         return type(self), (self.status, self.payload)
+
+
 
 
 def _validated_product_metadata(body: bytes, product: dict[str, object], *, expected_length: int | None = None) -> dict[str, object]:
@@ -706,7 +701,7 @@ def _validated_product_metadata(body: bytes, product: dict[str, object], *, expe
 
 
 @dataclass(frozen=True, slots=True)
-class JobdTaskControl:
+class BatchedTaskControl:
     """The bounds one dispatched job carries into its worker process.
 
     ``deadline_monotonic`` is an ABSOLUTE ``time.monotonic()`` instant read in the broker process.
@@ -721,17 +716,17 @@ class JobdTaskControl:
 
 # One worker process runs exactly one task at a time, so the active control is process-local state
 # rather than a registry.  ``run_registered_task_result`` is the only writer.
-_active_task_control: JobdTaskControl | None = None
-_NO_TASK_CONTROL = JobdTaskControl()
+_active_task_control: BatchedTaskControl | None = None
+_NO_TASK_CONTROL = BatchedTaskControl()
 
 
-def current_task_control() -> JobdTaskControl:
+def current_task_control() -> BatchedTaskControl:
     """The control for the task this process is running, or an empty one outside a task."""
     return _active_task_control if _active_task_control is not None else _NO_TASK_CONTROL
 
 
 @contextlib.contextmanager
-def active_task_control(control: JobdTaskControl | None) -> Iterator[None]:
+def active_task_control(control: BatchedTaskControl | None) -> Iterator[None]:
     """Install one task's control for the duration of that task and always clear it after.
 
     Clearing is not optional even when the task raises: a leaked deadline would be inherited by
@@ -749,8 +744,8 @@ def active_task_control(control: JobdTaskControl | None) -> Iterator[None]:
 def run_registered_task_result(
     task: str,
     payload: bytes,
-    control: JobdTaskControl | None = None,
-) -> JobdTaskResult | JobdArtifactResult:
+    control: BatchedTaskControl | None = None,
+) -> BatchedTaskResult | BatchedArtifactResult:
     """Executor entry point that preserves opaque task bodies for broker retention.
 
     This is the ONE entry point every registered task is dispatched through, so it is also where a
@@ -760,23 +755,23 @@ def run_registered_task_result(
     """
     if task not in REGISTERED_TASKS:
         raise ValueError("unknown task")
-    if len(payload) > JOBD_MAX_PAYLOAD_BYTES:
+    if len(payload) > BATCHD_MAX_PAYLOAD_BYTES:
         raise ValueError("payload too large")
     with active_task_control(control):
         result = REGISTERED_TASKS[task](payload)
-    if isinstance(result, JobdArtifactResult):
+    if isinstance(result, BatchedArtifactResult):
         _validated_product_metadata(b"", result.product, expected_length=int(result.product.get("length") or -1))
         return result
-    if isinstance(result, JobdTaskResult):
+    if isinstance(result, BatchedTaskResult):
         body = result.body
         product = _validated_product_metadata(body, result.product)
     else:
         body = result
         product = inline_json_product_metadata(body)
-    result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
+    result_limit = BATCHD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if task == "filesystem_batch" else BATCHD_MAX_RESULT_BYTES
     if len(body) > result_limit:
         raise ValueError("result too large")
-    return JobdTaskResult(body, product)
+    return BatchedTaskResult(body, product)
 
 
 def run_registered_task(task: str, payload: bytes) -> bytes:
@@ -822,13 +817,13 @@ class JobProductStore:
 
     def __init__(self) -> None:
         self.entries: dict[str, StoredJobProduct] = {}
-        self.leases: dict[str, JobdArtifactLease] = {}
+        self.leases: dict[str, BatchedArtifactLease] = {}
 
     @staticmethod
     def _artifact_directory_fd() -> int:
         return os.open(_private_artifact_root(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
 
-    def _adopt_artifact(self, result: JobdArtifactResult) -> StoredArtifactProduct:
+    def _adopt_artifact(self, result: BatchedArtifactResult) -> StoredArtifactProduct:
         if Path(result.basename).name != result.basename or result.basename in {"", ".", ".."}:
             raise ValueError("invalid artifact basename")
         directory_fd = self._artifact_directory_fd()
@@ -851,7 +846,7 @@ class JobProductStore:
             digest = hashlib.sha256()
             offset = 0
             while offset < artifact_stat.st_size:
-                chunk = os.pread(descriptor, min(JOBD_ARTIFACT_CHUNK_BYTES, artifact_stat.st_size - offset), offset)
+                chunk = os.pread(descriptor, min(BATCHD_ARTIFACT_CHUNK_BYTES, artifact_stat.st_size - offset), offset)
                 if not chunk:
                     raise ValueError("artifact ended before its manifest length")
                 digest.update(chunk)
@@ -876,7 +871,7 @@ class JobProductStore:
         if artifact is not None:
             os.close(artifact.descriptor)
 
-    def discard_artifact_result(self, result: JobdArtifactResult) -> None:
+    def discard_artifact_result(self, result: BatchedArtifactResult) -> None:
         self._close_artifact(self._adopt_artifact(result))
 
     def store_inline(
@@ -894,7 +889,7 @@ class JobProductStore:
             return
         entry.inline = StoredInlineProduct(generation, body, time.time() if stored_at is None else stored_at, dict(product))
         entry.schedule = dict(schedule)
-        while self.inline_count() > JOBD_MAX_PRODUCTS or self.inline_bytes() > JOBD_MAX_RETAINED_RESULT_BYTES:
+        while self.inline_count() > BATCHD_MAX_PRODUCTS or self.inline_bytes() > BATCHD_MAX_RETAINED_RESULT_BYTES:
             oldest_key = min(
                 (candidate for candidate, retained in self.entries.items() if retained.inline is not None),
                 key=lambda candidate: self.entries[candidate].inline.stored_at,  # type: ignore[union-attr]
@@ -910,7 +905,7 @@ class JobProductStore:
         *,
         key: str,
         generation: int,
-        result: JobdArtifactResult,
+        result: BatchedArtifactResult,
         schedule: dict[str, object],
     ) -> dict[str, object]:
         artifact = self.prepare_artifact(result)
@@ -921,7 +916,7 @@ class JobProductStore:
             schedule=schedule,
         )
 
-    def prepare_artifact(self, result: JobdArtifactResult) -> StoredArtifactProduct:
+    def prepare_artifact(self, result: BatchedArtifactResult) -> StoredArtifactProduct:
         """Verify and unlink one worker artifact without touching the shared product index."""
         return self._adopt_artifact(result)
 
@@ -940,7 +935,7 @@ class JobProductStore:
             if entry.artifact is not None
         )
         incoming_bytes = int(artifact.product.get("length") or 0)
-        if self.artifact_count() >= JOBD_MAX_ARTIFACTS or current_bytes + incoming_bytes > JOBD_MAX_ARTIFACT_BYTES:
+        if self.artifact_count() >= BATCHD_MAX_ARTIFACTS or current_bytes + incoming_bytes > BATCHD_MAX_ARTIFACT_BYTES:
             self._close_artifact(artifact)
             raise ValueError("artifact capacity full")
         artifact.generation = generation
@@ -1003,11 +998,11 @@ class JobProductStore:
         return None if retained is None else (retained.generation, retained.stored_at)
 
     def handle(self, action: str, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
-        response = JOBD_ARTIFACT_COMMAND_ROUTER.dispatch(self, action, request, body)
-        return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
+        response = BATCHD_ARTIFACT_COMMAND_ROUTER.dispatch(self, action, request, body)
+        return response if response is not None else ({"ok": False, "error": "unknown batchd action"}, b"")
 
     def open(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        if len(self.leases) >= JOBD_MAX_ARTIFACT_LEASES:
+        if len(self.leases) >= BATCHD_MAX_ARTIFACT_LEASES:
             return {"ok": False, "error": "artifact lease capacity full"}, b""
         entry = self.entries.get(str(request.get("coalesce_key") or ""))
         if entry is None or entry.artifact is None:
@@ -1017,10 +1012,10 @@ class JobProductStore:
         if artifact.generation != requested_generation:
             return {"ok": False, "error": "artifact generation unavailable"}, b""
         lease_id = uuid.uuid4().hex
-        self.leases[lease_id] = JobdArtifactLease(
+        self.leases[lease_id] = BatchedArtifactLease(
             descriptor=os.dup(artifact.descriptor),
             product=dict(artifact.product),
-            expires_at=time.monotonic() + JOBD_ARTIFACT_LEASE_SECONDS,
+            expires_at=time.monotonic() + BATCHD_ARTIFACT_LEASE_SECONDS,
         )
         return {"ok": True, "lease_id": lease_id, "product": dict(artifact.product)}, b""
 
@@ -1031,16 +1026,16 @@ class JobProductStore:
             return {"ok": False, "error": "artifact lease unavailable"}, b""
         try:
             offset = int(request.get("offset") or 0)
-            requested = int(request.get("max_bytes") or JOBD_ARTIFACT_CHUNK_BYTES)
+            requested = int(request.get("max_bytes") or BATCHD_ARTIFACT_CHUNK_BYTES)
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid artifact chunk range"}, b""
         length = int(lease.product["length"])
         if offset < 0 or offset > length or requested < 1:
             return {"ok": False, "error": "invalid artifact chunk range"}, b""
-        chunk = os.pread(lease.descriptor, min(requested, JOBD_ARTIFACT_CHUNK_BYTES, length - offset), offset)
+        chunk = os.pread(lease.descriptor, min(requested, BATCHD_ARTIFACT_CHUNK_BYTES, length - offset), offset)
         if not chunk and offset < length:
             return {"ok": False, "error": "artifact ended before its declared length"}, b""
-        lease.expires_at = time.monotonic() + JOBD_ARTIFACT_LEASE_SECONDS
+        lease.expires_at = time.monotonic() + BATCHD_ARTIFACT_LEASE_SECONDS
         return {
             "ok": True,
             "offset": offset,
@@ -1111,19 +1106,19 @@ class JobProductStore:
 class PersistentJobBroker:
     """One local broker with bounded spawn-only capacity for typed CPU jobs."""
 
-    def __init__(self, socket_path: Path, idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS, workers: int | None = None, *, service_name: str = "jobd"):
-        self.service_name = str(service_name)
+    def __init__(self, socket_path: Path, idle_seconds: float = BATCHD_DEFAULT_IDLE_SECONDS, workers: int | None = None):
+        self.service_name = BATCHD_SERVICE_NAME
         self.socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{self.service_name}")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.stop_event = multiprocessing.get_context("spawn").Event()
         self.idle_seconds = max(1.0, float(idle_seconds))
-        self.general_worker_count = max(1, min(JOBD_MAX_WORKERS, int(workers or default_worker_count())))
+        self.general_worker_count = max(1, min(BATCHD_MAX_WORKERS, int(workers or default_worker_count())))
         self.started_at = time.time()
         self.source_epoch = uuid.uuid4().hex
         self.last_client_at = time.monotonic()
         self.leases: dict[str, object] = {}
         self.records: dict[str, JobRecord] = {}
-        self.queues = {priority: deque() for priority in JOBD_PRIORITIES}
+        self.queues = {priority: deque() for priority in BATCHD_PRIORITIES}
         self.coalesced: dict[tuple[str, str], str] = {}
         self.latest_generation: dict[str, int] = {}
         # Materialized-product layer: newest completed bytes per coalesce_key (last-known-good),
@@ -1143,7 +1138,7 @@ class PersistentJobBroker:
         self.product_phase_runtime_ms: dict[str, dict[str, dict[str, float]]] = {}
         self.product_work_totals: dict[str, dict[str, int]] = {}
         self.owner_invocations: dict[str, int] = {
-            "jobd_work_graph_rebuild": 0,
+            "batchd_work_graph_rebuild": 0,
             "provider_metadata_rebuild": 0,
         }
         self.source_diagnostics: dict[str, dict[str, str | int]] = {}
@@ -1160,11 +1155,11 @@ class PersistentJobBroker:
         # one disposable executor and a monotonically increasing publication generation.
         self.executor_slots: dict[str, list[ExecutorSlot]] = {
             lane: [ExecutorSlot() for _ in range(self._lane_capacity(lane))]
-            for lane in JOBD_LANE_PRIORITIES
+            for lane in BATCHD_LANE_PRIORITIES
         }
         # Compatibility projection for control-plane callers and old status consumers.  It always
         # names slot zero; scheduling exclusively uses executor_slots.
-        self.executors: dict[str, ProcessPoolExecutor | None] = {lane: None for lane in JOBD_LANE_PRIORITIES}
+        self.executors: dict[str, ProcessPoolExecutor | None] = {lane: None for lane in BATCHD_LANE_PRIORITIES}
         self.state_lock = threading.RLock()
         # Submission acceptance and shutdown share this short critical section. A shutdown that
         # wins it closes admission before setting the pending-drain flag; a submission that wins it
@@ -1189,7 +1184,7 @@ class PersistentJobBroker:
         counters[name] = counters.get(name, 0) + 1
 
     def _record_request_action(self, action: str, *, contention: bool = False) -> None:
-        action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
+        action_counter = action if action in BATCHD_REQUEST_ACTIONS else "unknown"
         with self.request_counter_lock:
             counters = self.contention_counters if contention else self.request_counters
             counters[action_counter] = counters.get(action_counter, 0) + 1
@@ -1198,7 +1193,7 @@ class PersistentJobBroker:
     def _session_files_requester_key(payload: dict[str, Any]) -> str:
         source = payload.get("source")
         requester = source.get("requester") if isinstance(source, dict) else None
-        return requester if requester in JOBD_SESSION_FILES_REQUESTERS else "unknown"
+        return requester if requester in BATCHD_SESSION_FILES_REQUESTERS else "unknown"
 
     def _record_runtime_ms(self, task: str, elapsed_ms: float) -> None:
         stats = self.product_runtime_ms.setdefault(task, {"count": 0.0, "total_ms": 0.0, "max_ms": 0.0})
@@ -1281,7 +1276,7 @@ class PersistentJobBroker:
             "repo_dirty_generation_count": dirty_count,
             "repo_dirty_generation_max": dirty_max,
         }
-        while len(self.source_diagnostics) > JOBD_MAX_SOURCE_DIAGNOSTICS:
+        while len(self.source_diagnostics) > BATCHD_MAX_SOURCE_DIAGNOSTICS:
             self.source_diagnostics.pop(next(iter(self.source_diagnostics)))
 
     @staticmethod
@@ -1303,20 +1298,20 @@ class PersistentJobBroker:
     @staticmethod
     def _lane_for_priority(priority: str) -> str:
         """Map one declared priority onto its single owning executor lane."""
-        lane = JOBD_PRIORITY_LANES.get(str(priority))
+        lane = BATCHD_PRIORITY_LANES.get(str(priority))
         if lane is None:
             # `_validated_submission` rejects unknown priorities, so reaching here means a caller
             # built a JobRecord directly with a priority no lane runs.  Name it rather than
             # silently dispatching the work onto whichever pool happens to be first.
-            raise ValueError(f"no jobd lane owns priority {priority!r}")
+            raise ValueError(f"no batchd lane owns priority {priority!r}")
         return lane
 
     def _lane_capacity(self, lane: str) -> int:
         """Return one lane's bounded worker capacity, refusing a lane no table describes."""
-        if lane not in JOBD_LANE_PRIORITIES:
-            raise ValueError(f"unknown jobd lane {lane!r}")
-        if lane in JOBD_LANE_WORKERS:
-            return JOBD_LANE_WORKERS[lane]
+        if lane not in BATCHD_LANE_PRIORITIES:
+            raise ValueError(f"unknown batchd lane {lane!r}")
+        if lane in BATCHD_LANE_WORKERS:
+            return BATCHD_LANE_WORKERS[lane]
         return self.general_worker_count
 
     @staticmethod
@@ -1351,7 +1346,7 @@ class PersistentJobBroker:
         slot = self.executor_slots[lane][record.executor_slot]
         if slot.generation != record.executor_generation or slot.executor is None:
             return False
-        if self._quarantined_predecessor_count() >= JOBD_MAX_QUARANTINED_PREDECESSORS:
+        if self._quarantined_predecessor_count() >= BATCHD_MAX_QUARANTINED_PREDECESSORS:
             return False
         predecessor = slot.executor
         predecessor.shutdown(wait=False, cancel_futures=True)
@@ -1406,7 +1401,7 @@ class PersistentJobBroker:
         registers an `atexit` hook (`multiprocessing.util._exit_function`) that unconditionally
         `join()`s every still-`active_children()` process with NO timeout. If a worker was mid-git
         subprocess (or any other blocking call) when the lane was told to stop, that worker never
-        exits on its own, and the whole jobd process then hangs forever inside Python's own
+        exits on its own, and the whole batchd process then hangs forever inside Python's own
         interpreter-shutdown thread-join -- reachable via `sample`/`py-spy` as `wait_for_thread_shutdown`,
         with the listening socket already unlinked, looking alive but serving nothing. Terminating
         (then killing, if needed) every worker here, synchronously and with bounded timeouts, means
@@ -1483,7 +1478,7 @@ class PersistentJobBroker:
         it stops by itself and its typed result -- including which paths a partial delete actually
         removed -- becomes the terminal state.  Terminalizing here at the same instant would race
         that answer and publish `timed_out` while the filesystem was still changing.  So this waits
-        JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS past the deadline, which is derived from measured
+        BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS past the deadline, which is derived from measured
         cooperative-stop latency, and only then acts for work that could not stop at all.
 
         A queued job has no worker to answer for it, so its expiry stays exact.
@@ -1496,15 +1491,15 @@ class PersistentJobBroker:
                     continue
                 self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
             else:
-                if now < record.deadline_at + JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS:
+                if now < record.deadline_at + BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS:
                     continue
                 self._mark_terminal(record, "timed_out", "deadline exceeded while executing")
                 self._quarantine_slot(record)
             self._bump_counter(record.task, "timed_out")
 
-    def _handle_finished_futures(self, *, finalize_artifacts: bool) -> list[tuple[JobRecord, JobdArtifactResult]]:
+    def _handle_finished_futures(self, *, finalize_artifacts: bool) -> list[tuple[JobRecord, BatchedArtifactResult]]:
         restart_slots: list[JobRecord] = []
-        pending_artifacts: list[tuple[JobRecord, JobdArtifactResult]] = []
+        pending_artifacts: list[tuple[JobRecord, BatchedArtifactResult]] = []
         for record in self.records.values():
             if record.future is None or not record.future.done() or record.artifact_finalizing:
                 continue
@@ -1513,7 +1508,7 @@ class PersistentJobBroker:
             if record.executor_slot >= 0 and record.executor_generation != self.executor_slots[lane][record.executor_slot].generation:
                 try:
                     abandoned = future.result()
-                    if isinstance(abandoned, JobdArtifactResult):
+                    if isinstance(abandoned, BatchedArtifactResult):
                         self.product_store.discard_artifact_result(abandoned)
                 except Exception:
                     pass
@@ -1522,9 +1517,9 @@ class PersistentJobBroker:
             if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}:
                 try:
                     abandoned = future.result()
-                    if isinstance(abandoned, JobdArtifactResult):
+                    if isinstance(abandoned, BatchedArtifactResult):
                         self.product_store.discard_artifact_result(abandoned)
-                except JobdFilesystemOperationFailure as exc:
+                except BatchedFilesystemOperationFailure as exc:
                     # The backstop can still beat a worker that DID stop cooperatively.  Its payload
                     # names the entries a partial delete actually removed, and it is the only record
                     # of them: discarding it leaves the requester unable to invalidate those paths.
@@ -1538,15 +1533,15 @@ class PersistentJobBroker:
             try:
                 task_result = future.result()
                 if isinstance(task_result, bytes):
-                    task_result = JobdTaskResult(task_result, inline_json_product_metadata(task_result))
-                if isinstance(task_result, JobdArtifactResult):
+                    task_result = BatchedTaskResult(task_result, inline_json_product_metadata(task_result))
+                if isinstance(task_result, BatchedArtifactResult):
                     if not finalize_artifacts:
                         continue
                     record.artifact_finalizing = True
                     pending_artifacts.append((record, task_result))
                     continue
                 result = task_result.body
-                result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
+                result_limit = BATCHD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else BATCHD_MAX_RESULT_BYTES
                 if len(result) > result_limit:
                     raise ValueError("result too large")
                 decoded_result: dict[str, Any] | None = None
@@ -1569,7 +1564,7 @@ class PersistentJobBroker:
                     self._record_phase_runtime_ms(record.task, decoded_result)
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
-            except JobdFilesystemOperationFailure as exc:
+            except BatchedFilesystemOperationFailure as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(record, "failed", str(exc), {
                         "filesystem_error": dict(exc.payload),
@@ -1618,7 +1613,7 @@ class PersistentJobBroker:
             self._retire_broken_slot(record)
         return pending_artifacts
 
-    def _finalize_artifact(self, record: JobRecord, task_result: JobdArtifactResult) -> None:
+    def _finalize_artifact(self, record: JobRecord, task_result: BatchedArtifactResult) -> None:
         """Verify a large artifact off-lock, then publish its bounded descriptor atomically."""
         artifact: StoredArtifactProduct | None = None
         failure: Exception | None = None
@@ -1677,9 +1672,9 @@ class PersistentJobBroker:
 
     def _prune_records(self) -> None:
         terminal = sorted((record for record in self.records.values() if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}), key=lambda record: record.completed_at)
-        remove_count = max(0, len(self.records) - JOBD_MAX_RECORDS)
+        remove_count = max(0, len(self.records) - BATCHD_MAX_RECORDS)
         retained_result_bytes = sum(len(record.result) for record in self.records.values())
-        while remove_count < len(terminal) and retained_result_bytes > JOBD_MAX_RETAINED_RESULT_BYTES:
+        while remove_count < len(terminal) and retained_result_bytes > BATCHD_MAX_RETAINED_RESULT_BYTES:
             retained_result_bytes -= len(terminal[remove_count].result)
             remove_count += 1
         for record in terminal[:remove_count]:
@@ -1687,7 +1682,7 @@ class PersistentJobBroker:
             if self.coalesced.get((record.task, record.coalesce_key)) == record.job_id:
                 self.coalesced.pop((record.task, record.coalesce_key), None)
 
-    def _refresh_records(self, *, finalize_artifacts: bool = False) -> list[tuple[JobRecord, JobdArtifactResult]]:
+    def _refresh_records(self, *, finalize_artifacts: bool = False) -> list[tuple[JobRecord, BatchedArtifactResult]]:
         """Collect answers first, then expire what never answered.
 
         Order is load-bearing, and this is the one place both owners are called from.  A worker that
@@ -1710,11 +1705,11 @@ class PersistentJobBroker:
 
     def _pump(self) -> None:
         dispatch: list[JobRecord] = []
-        pending_artifacts: list[tuple[JobRecord, JobdArtifactResult]] = []
+        pending_artifacts: list[tuple[JobRecord, BatchedArtifactResult]] = []
         with self.state_lock:
             pending_artifacts = self._refresh_records(finalize_artifacts=True)
             now = time.monotonic()
-            for lane, priorities in JOBD_LANE_PRIORITIES.items():
+            for lane, priorities in BATCHD_LANE_PRIORITIES.items():
                 slots = self.executor_slots[lane]
                 active_slots = {
                     record.executor_slot
@@ -1740,7 +1735,7 @@ class PersistentJobBroker:
                         continue
                     slot_index = next(index for index in range(len(slots)) if index not in active_slots)
                     slot = slots[slot_index]
-                    if slot.executor is None and self._quarantined_predecessor_count() >= JOBD_MAX_QUARANTINED_PREDECESSORS:
+                    if slot.executor is None and self._quarantined_predecessor_count() >= BATCHD_MAX_QUARANTINED_PREDECESSORS:
                         error = "filesystem_worker_quarantined" if lane in {"point", "mutation", "interactive"} else "journal_worker_quarantined"
                         self._mark_terminal(record, "failed", error, {"reason": error})
                         self._bump_counter(record.task, "failed")
@@ -1768,7 +1763,7 @@ class PersistentJobBroker:
                     run_registered_task_result,
                     record.task,
                     record.payload,
-                    JobdTaskControl(deadline_monotonic=record.deadline_at or None),
+                    BatchedTaskControl(deadline_monotonic=record.deadline_at or None),
                 )
             except Exception as exc:
                 with self.state_lock:
@@ -1853,13 +1848,13 @@ class PersistentJobBroker:
             priority = "freshness"
         if task not in REGISTERED_TASKS:
             return None, {"ok": False, "error": "unknown task"}
-        if priority not in JOBD_PRIORITIES:
+        if priority not in BATCHD_PRIORITIES:
             return None, {"ok": False, "error": "invalid priority"}
         payload = request.get("payload")
         if not isinstance(payload, dict):
             return None, {"ok": False, "error": "payload must be an object"}
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if len(encoded) > JOBD_MAX_PAYLOAD_BYTES:
+        if len(encoded) > BATCHD_MAX_PAYLOAD_BYTES:
             return None, {"ok": False, "error": "payload too large"}
         try:
             generation = max(0, int(request.get("generation") or 0))
@@ -1868,7 +1863,7 @@ class PersistentJobBroker:
             return None, {"ok": False, "error": "invalid generation or deadline"}
         if requested_deadline_ms < 0:
             return None, {"ok": False, "error": "invalid deadline"}
-        if requested_deadline_ms > JOBD_MAX_DEADLINE_MS:
+        if requested_deadline_ms > BATCHD_MAX_DEADLINE_MS:
             return None, {"ok": False, "error": "deadline too large"}
         coalesce_key = str(request.get("coalesce_key") or f"{task}:{encoded.hex()}")[:256]
         return {
@@ -1912,7 +1907,7 @@ class PersistentJobBroker:
             if existing is not None and existing.generation >= generation and existing.status in reusable_states:
                 self._bump_counter(task, "coalesced")
                 return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
-            if self._queued_count(lane=self._lane_for_priority(priority)) >= JOBD_MAX_QUEUE:
+            if self._queued_count(lane=self._lane_for_priority(priority)) >= BATCHD_MAX_QUEUE:
                 return {"ok": False, "error": "queue full"}
             self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
             self._supersede_stale_queued(coalesce_key, generation)
@@ -1956,15 +1951,15 @@ class PersistentJobBroker:
         """Submit one product job and return materialized bytes or its accepted receipt.
 
         This is intentionally a zero-wait operation. The broker can atomically submit and inspect
-        its product store, but waiting here would hold one of JOBD_CONCURRENT_HANDLER_LIMIT
+        its product store, but waiting here would hold one of BATCHD_CONCURRENT_HANDLER_LIMIT
         handler slots for the whole job; enough of those and later callers are refused with
-        `service busy` instead of being served. No jobd action waits: a caller with no receipt
+        `service busy` instead of being served. No batchd action waits: a caller with no receipt
         protocol (a browser byte download) submits with `delivery="ready_or_receipt"` and polls
         `product` on its own side. Result bytes remain opaque so a bounded batch keeps every item
         id and result exactly as its registered task emitted them.
         """
         delivery = str(request.get("delivery") or "ready_or_receipt")
-        if delivery not in JOBD_PRODUCT_DELIVERY_MODES:
+        if delivery not in BATCHD_PRODUCT_DELIVERY_MODES:
             return {"ok": False, "error": "invalid product delivery mode"}, b""
         self._refresh_records()
         submission, error = self._validated_submission(request)
@@ -2044,7 +2039,7 @@ class PersistentJobBroker:
     def _control_plane_identity(self) -> dict[str, Any]:
         return {
             "ok": True,
-            "version": JOBD_PROTOCOL_VERSION,
+            "version": BATCHD_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "started_at": self.started_at,
             "source_epoch": self.source_epoch,
@@ -2080,7 +2075,7 @@ class PersistentJobBroker:
             **self._control_plane_identity(),
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "worker_count": sum(self._lane_capacity(lane) for lane in JOBD_LANE_PRIORITIES),
+            "worker_count": sum(self._lane_capacity(lane) for lane in BATCHD_LANE_PRIORITIES),
             # One row per scheduler lane: its bounded capacity and the work actually occupying it.
             # A lane at capacity with a nonzero queue is head-of-line blocking, which total wall
             # time alone cannot show.
@@ -2095,7 +2090,7 @@ class PersistentJobBroker:
                         if (self.records.get(job_id) is not None and self.records[job_id].status == "queued")
                     ),
                 }
-                for lane, priorities in JOBD_LANE_PRIORITIES.items()
+                for lane, priorities in BATCHD_LANE_PRIORITIES.items()
             },
             "executor_slots": {
                 lane: [
@@ -2106,14 +2101,14 @@ class PersistentJobBroker:
                     }
                     for slot in self.executor_slots[lane]
                 ]
-                for lane in JOBD_LANE_PRIORITIES
+                for lane in BATCHD_LANE_PRIORITIES
             },
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
             "active_records": active_records,
             "worker_pids": worker_pids,
             "cache": {
-                "records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS,
+                "records": len(self.records), "coalesced": len(self.coalesced), "record_limit": BATCHD_MAX_RECORDS,
                 "products": self.product_store.inline_count(),
                 # A stored product is "stale" when a newer generation for the same coalesce_key has
                 # since been observed (queued, running, or already completed elsewhere) -- an honest
@@ -2145,7 +2140,7 @@ class PersistentJobBroker:
             # request since, and only ring eviction ever drops it -- a later success does not.
             # It must therefore never be published as `last_failure`: `local_service_failure_text`
             # feeds that name to `observed_health`, which reads any `last_failure` on a live pid as
-            # CURRENT degradation and pins a healthy jobd to `degraded`/`terminal_failure` forever.
+            # CURRENT degradation and pins a healthy batchd to `degraded`/`terminal_failure` forever.
             # The daemon's own current trouble travels as the registry's `failure_reason` instead.
             "last_job_failure": next((record.error for record in reversed(list(self.records.values())) if record.status in {"failed", "timed_out"}), ""),
             "scheduler_pump": {
@@ -2160,12 +2155,12 @@ class PersistentJobBroker:
         return status
 
     def handle(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        protocol_version = request.get("protocol_version", JOBD_PROTOCOL_VERSION)
-        if protocol_version != JOBD_PROTOCOL_VERSION:
+        protocol_version = request.get("protocol_version", BATCHD_PROTOCOL_VERSION)
+        if protocol_version != BATCHD_PROTOCOL_VERSION:
             return {
                 "ok": False,
                 "error": "upgrade_required",
-                "required_protocol_version": JOBD_PROTOCOL_VERSION,
+                "required_protocol_version": BATCHD_PROTOCOL_VERSION,
             }, b""
         action = str(request.get("action") or "")
         self._record_request_action(action)
@@ -2207,12 +2202,12 @@ class PersistentJobBroker:
 
     def _handle_locked(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
         action = str(request.get("action") or "")
-        if action in JOBD_ARTIFACT_ACTION_METHODS:
+        if action in BATCHD_ARTIFACT_ACTION_METHODS:
             self._refresh_records()
             response = self.product_store.handle(action, request, b"")
         else:
-            response = JOBD_COMMAND_ROUTER.dispatch(self, action, request, b"")
-        return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
+            response = BATCHD_COMMAND_ROUTER.dispatch(self, action, request, b"")
+        return response if response is not None else ({"ok": False, "error": "unknown batchd action"}, b"")
 
     def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return self._control_plane_identity(), b""
@@ -2254,7 +2249,7 @@ class PersistentJobBroker:
 
     def _handle_lease(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), self_connection=request_is_self_connection(request))
-        return {**response, "version": JOBD_PROTOCOL_VERSION}, b""
+        return {**response, "version": BATCHD_PROTOCOL_VERSION}, b""
 
     def _handle_release(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return release_client_lease(self.leases, request.get("lease_id")), b""
@@ -2297,7 +2292,7 @@ class PersistentJobBroker:
     def _handle_shutdown_if_idle(self, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
         # ONE definition of idle. This used to gate on `self.leases` alone while
         # `_idle_should_stop` also honoured `_has_active_work()`, so a caller
-        # could shut jobd down out from under queued or running jobs simply by
+        # could shut batchd down out from under queued or running jobs simply by
         # asking through this path instead of waiting for the idle tick. It also
         # reaps first, so a crashed client's unreleasable lease cannot refuse a
         # legitimate idle shutdown either.
@@ -2315,7 +2310,7 @@ class PersistentJobBroker:
         # ping/status before background work competes for CPU.
         apply_service_process_priority()
         while not self.stop_event.is_set():
-            self.scheduler_event.wait(JOBD_SCHEDULER_POLL_SECONDS)
+            self.scheduler_event.wait(BATCHD_SCHEDULER_POLL_SECONDS)
             self.scheduler_event.clear()
             try:
                 self._pump()
@@ -2337,7 +2332,7 @@ class PersistentJobBroker:
                 return
             self.scheduler_thread = threading.Thread(
                 target=self._scheduler_loop,
-                name="jobd-scheduler",
+                name="batchd-scheduler",
                 daemon=True,
             )
             self.scheduler_thread.start()
@@ -2346,16 +2341,16 @@ class PersistentJobBroker:
         """Arm data-plane maintenance only after the listener completes one private accept."""
         def activate() -> None:
             try:
-                envelope = new_envelope(self.service_name, "ping", {"action": "ping", "protocol_version": JOBD_PROTOCOL_VERSION}, timeout_seconds=1.0)
+                envelope = new_envelope(self.service_name, "ping", {"action": "ping", "protocol_version": BATCHD_PROTOCOL_VERSION}, timeout_seconds=1.0)
                 response, _binary = local_service_request(self.socket_path, envelope, timeout_seconds=1.0)
                 if response.get("ok") is not True:
-                    raise RuntimeError("jobd listener readiness ping failed")
+                    raise RuntimeError("batchd listener readiness ping failed")
             except (OSError, RuntimeError) as exc:
                 self._record_scheduler_pump_failure(exc, traceback.format_exc())
                 return
             self._start_scheduler()
 
-        self.scheduler_readiness_thread = threading.Thread(target=activate, name="jobd-listener-readiness", daemon=True)
+        self.scheduler_readiness_thread = threading.Thread(target=activate, name="batchd-listener-readiness", daemon=True)
         self.scheduler_readiness_thread.start()
 
     def _idle_should_stop(self) -> bool:
@@ -2365,7 +2360,7 @@ class PersistentJobBroker:
                 return True
             # claim_gated_idle_due is the one shared owner of the
             # transition/deadline algorithm every local service routes
-            # through; jobd's claim predicate is a held lease OR real
+            # through; batchd's claim predicate is a held lease OR real
             # queued/running work (a bare diagnostic status poll from the
             # backend-health observer is neither).
             return claim_gated_idle_due(self, self.leases or self._has_active_work())
@@ -2375,14 +2370,14 @@ class PersistentJobBroker:
 
         self.scheduler_event.set()
         if self.scheduler_readiness_thread is not None:
-            self.scheduler_readiness_thread.join(timeout=JOBD_SCHEDULER_SHUTDOWN_SECONDS)
+            self.scheduler_readiness_thread.join(timeout=BATCHD_SCHEDULER_SHUTDOWN_SECONDS)
             if self.scheduler_readiness_thread.is_alive():
-                raise RuntimeError("jobd scheduler readiness did not stop before executor retirement")
+                raise RuntimeError("batchd scheduler readiness did not stop before executor retirement")
         if self.scheduler_thread is not None:
-            self.scheduler_thread.join(timeout=JOBD_SCHEDULER_SHUTDOWN_SECONDS)
+            self.scheduler_thread.join(timeout=BATCHD_SCHEDULER_SHUTDOWN_SECONDS)
             if self.scheduler_thread.is_alive():
-                raise RuntimeError("jobd scheduler did not stop before executor retirement")
-        for lane in JOBD_LANE_PRIORITIES:
+                raise RuntimeError("batchd scheduler did not stop before executor retirement")
+        for lane in BATCHD_LANE_PRIORITIES:
             self._shutdown_executor(lane=lane)
         self.product_store.shutdown()
 
@@ -2403,22 +2398,22 @@ class PersistentJobBroker:
             on_idle_failure=self._record_scheduler_pump_failure,
             on_start=self._start_scheduler_after_listener_accepts,
             on_shutdown=self._on_shutdown,
-            concurrent_handlers=JOBD_CONCURRENT_HANDLER_LIMIT,
+            concurrent_handlers=BATCHD_CONCURRENT_HANDLER_LIMIT,
         )
 
 
-class JobClient(LocalServiceClient):
+class BatchClient(LocalServiceClient):
     """Thin cross-port client for the shared stateless CPU broker."""
 
     def __init__(
         self,
         socket_path: Path | None = None,
         *,
-        service_name: str = LEGACY_JOBD_SERVICE_NAME,
-        module: str = "yolomux_lib.jobd",
+        service_name: str = BATCHD_SERVICE_NAME,
+        module: str = "yolomux_lib.batchd",
         default_socket: Path | None = None,
-        protocol_version: int = JOBD_PROTOCOL_VERSION,
-        idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS,
+        protocol_version: int = BATCHD_PROTOCOL_VERSION,
+        idle_seconds: float = BATCHD_DEFAULT_IDLE_SECONDS,
     ):
         requested_socket_path = Path(socket_path or default_socket or default_socket_path())
         requested_service_dir = Path(socket_path).parent if socket_path is not None else RUNTIME_DIR / "services"
@@ -2434,7 +2429,7 @@ class JobClient(LocalServiceClient):
         self._scheduler_lease_lock = threading.Lock()
 
     def start_for_scheduler(self) -> bool:
-        """Keep jobd leased while this process owns background scheduling."""
+        """Keep batchd leased while this process owns background scheduling."""
         with self._scheduler_lease_lock:
             response = self.registry.acquire_lease(self._scheduler_lease_id)
             lease_id = response.get("lease_id")
@@ -2445,7 +2440,7 @@ class JobClient(LocalServiceClient):
 
     @property
     def holds_scheduler_lease(self) -> bool:
-        """Whether this process currently pins jobd up for background scheduling.
+        """Whether this process currently pins batchd up for background scheduling.
 
         Deliberately NOT taken under ``_scheduler_lease_lock``. ``start_for_scheduler`` holds
         that lock across ``registry.acquire_lease()``, which can spawn the broker and wait for
@@ -2468,12 +2463,12 @@ class JobClient(LocalServiceClient):
             return True
 
     def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0, fresh_only: bool = False, launch: bool = True) -> dict[str, Any]:
-        """Submit a job. `launch=False` asks an already-running jobd and never cold-starts one.
+        """Submit a job. `launch=False` asks an already-running batchd and never cold-starts one.
 
         Maintenance must never be the reason a service starts. `result` and `product` already read
         through the non-launching twin for the same reason - observation is not launch demand - and
         `launch=False` extends that one rule to submissions whose work is housekeeping. A denied
-        submission is not lost work: the next submission made for real demand runs it, and jobd is
+        submission is not lost work: the next submission made for real demand runs it, and batchd is
         up by definition whenever real demand exists.
         """
         request = {"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms}
@@ -2481,10 +2476,10 @@ class JobClient(LocalServiceClient):
             request["fresh_only"] = True
         return self.request(request) if launch else self.request_if_running(request)
 
-    def result(self, job_id: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> dict[str, Any]:
+    def result(self, job_id: str, timeout: float = BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS) -> dict[str, Any]:
         return self.request_if_running({"action": "result", "job_id": job_id}, timeout=timeout)
 
-    def product(self, coalesce_key: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> tuple[dict[str, Any], bytes]:
+    def product(self, coalesce_key: str, timeout: float = BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS) -> tuple[dict[str, Any], bytes]:
         """Return the newest completed product bytes for an identity (last-known-good).
 
         The metadata `state` is ready | stale | pending | none; the caller maps a transport
@@ -2498,12 +2493,12 @@ class JobClient(LocalServiceClient):
     def artifact_open(self, coalesce_key: str, generation: int) -> dict[str, Any]:
         return self.request({"action": "artifact_open", "coalesce_key": coalesce_key, "generation": generation})
 
-    def artifact_chunk(self, lease_id: str, offset: int, max_bytes: int = JOBD_ARTIFACT_CHUNK_BYTES) -> tuple[dict[str, Any], bytes]:
+    def artifact_chunk(self, lease_id: str, offset: int, max_bytes: int = BATCHD_ARTIFACT_CHUNK_BYTES) -> tuple[dict[str, Any], bytes]:
         return self.request_with_binary({
             "action": "artifact_chunk",
             "lease_id": lease_id,
             "offset": offset,
-            "max_bytes": min(max_bytes, JOBD_ARTIFACT_CHUNK_BYTES),
+            "max_bytes": min(max_bytes, BATCHD_ARTIFACT_CHUNK_BYTES),
         })
 
     def artifact_close(self, lease_id: str) -> dict[str, Any]:
@@ -2530,10 +2525,10 @@ class JobClient(LocalServiceClient):
         """Submit once and forward ready product bytes without waiting for cold work.
 
         `launch=False` selects the non-launching twin, so a maintenance produce cannot cold-start
-        jobd. That start is not free: measured inside the gate container it took 1.19-1.41 s, and
+        batchd. That start is not free: measured inside the gate container it took 1.19-1.41 s, and
         when it happened underneath a forced interactive canonical operation it consumed 61-73% of
         that operation's two-second terminalization budget while the file itself had already been
-        read. See `JobClient.submit` for why declining is safe.
+        read. See `BatchClient.submit` for why declining is safe.
         """
         sender = self.request_with_binary if launch else self.request_with_binary_if_running
         return sender({
@@ -2555,9 +2550,9 @@ class JobClient(LocalServiceClient):
     def _runtime_status_for_service(self, service_name: str) -> dict[str, Any]:
         """Build this broker's whole System/health row.
 
-        No ``demand_started`` here on purpose: the scheduler lease pins jobd up, so its absence
+        No ``demand_started`` here on purpose: the scheduler lease pins batchd up, so its absence
         while this process owns scheduling is a verified outage, not idleness. See
-        ``JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE`` for the one absence that is expected instead.
+        ``BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE`` for the one absence that is expected instead.
         """
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
@@ -2592,40 +2587,20 @@ class JobClient(LocalServiceClient):
         }, fields_after_failure={
             "last_job_failure": str(payload.get("last_job_failure") or ""),
             "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {},
-            "absence_expected_reason": "" if self.holds_scheduler_lease else JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE,
+            "absence_expected_reason": "" if self.holds_scheduler_lease else BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE,
         })
 
 
-class BatchClient(JobClient):
-    """Canonical client for the human-facing background batch broker."""
-
-    def __init__(self, socket_path: Path | None = None):
-        requested_socket_path = Path(socket_path or default_batchd_socket_path())
-        super().__init__(
-            requested_socket_path,
-            service_name=BATCHD_SERVICE_NAME,
-            module="yolomux_lib.batchd",
-            default_socket=requested_socket_path,
-            protocol_version=BATCHD_PROTOCOL_VERSION,
-            idle_seconds=BATCHD_DEFAULT_IDLE_SECONDS,
-        )
-
-    def runtime_status(self) -> dict[str, Any]:
-        # The projection keeps the legacy id until its persisted inventory and browser schema are
-        # migrated together. The client/daemon identity is still batchd for new launches.
-        return self._runtime_status_for_service(LEGACY_JOBD_SERVICE_NAME)
-
-
-def main(argv: list[str] | None = None, *, service_name: str = "jobd") -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLOmux bounded CPU job broker")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--socket", default=str(default_batchd_socket_path() if service_name == "batchd" else default_socket_path()))
-    parser.add_argument("--idle-seconds", type=float, default=JOBD_DEFAULT_IDLE_SECONDS)
+    parser.add_argument("--socket", default=str(default_socket_path()))
+    parser.add_argument("--idle-seconds", type=float, default=BATCHD_DEFAULT_IDLE_SECONDS)
     parser.add_argument("--workers", type=int, default=default_worker_count())
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
-    return PersistentJobBroker(Path(args.socket), idle_seconds=args.idle_seconds, workers=args.workers, service_name=service_name).run()
+    return PersistentJobBroker(Path(args.socket), idle_seconds=args.idle_seconds, workers=args.workers).run()
 
 
 if __name__ == "__main__":

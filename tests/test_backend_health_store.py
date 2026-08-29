@@ -561,8 +561,8 @@ def test_transitions_evict_the_oldest_row_and_never_exceed_the_bound(tmp_path, c
         assert len(transitions_of(published.document)) <= BACKEND_HEALTH_MAX_TRANSITIONS
     assert len(transitions_of(json.loads(store.document_path.read_text(encoding="utf-8")))) == BACKEND_HEALTH_MAX_TRANSITIONS
     # The bound is per resource, and a second resource keeps its own independent history.
-    publish(store, clock, observation(resource="jobd", state="ready"), observation(state="ready"))
-    assert len(transitions_of(store.document(), "jobd")) == 1
+    publish(store, clock, observation(resource="batchd", state="ready"), observation(state="ready"))
+    assert len(transitions_of(store.document(), "batchd")) == 1
 
 
 def test_a_repeated_state_writes_a_revision_but_no_transition_row(tmp_path, clock, epoch_ids):
@@ -896,12 +896,12 @@ def test_the_resource_count_is_bounded_and_the_overflow_is_reported(tmp_path, cl
 
 def test_a_resource_absent_from_a_snapshot_keeps_its_history(tmp_path, clock, epoch_ids):
     store = build_store(tmp_path, clock, epoch_ids)
-    publish(store, clock, observation(resource="jobd", state="ready"), observation(state="ready"))
+    publish(store, clock, observation(resource="batchd", state="ready"), observation(state="ready"))
     partial = publish(store, clock, observation(state="degraded", reason_code="overload"))
 
-    assert set(partial.document["resources"]) == {"jobd", "statsd"}
-    assert partial.document["resources"]["jobd"]["current"]["state"] == "ready"
-    assert len(transitions_of(partial.document, "jobd")) == 1
+    assert set(partial.document["resources"]) == {"batchd", "statsd"}
+    assert partial.document["resources"]["batchd"]["current"]["state"] == "ready"
+    assert len(transitions_of(partial.document, "batchd")) == 1
     assert [row["new_state"] for row in transitions_of(partial.document)] == ["ready", "degraded"]
 
 

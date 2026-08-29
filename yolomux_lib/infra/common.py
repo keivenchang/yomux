@@ -917,7 +917,7 @@ _METADATA_WARM_WORK_METRICS: contextvars.ContextVar[dict[str, int] | None] = con
 
 @contextmanager
 def metadata_warm_work_metrics() -> Any:
-    """Count only the Git/network work performed by one metadata-warm jobd task."""
+    """Count only the Git/network work performed by one metadata-warm batchd task."""
     metrics = {"git_spawns": 0, "github_http_calls": 0, "linear_http_calls": 0}
     token = _METADATA_WARM_WORK_METRICS.set(metrics)
     try:

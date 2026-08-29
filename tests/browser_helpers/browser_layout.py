@@ -791,10 +791,10 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
         GateLiveServerOptions(
             tls_context=tls_context,
             label="isolated browser",
-            # Browser fixtures also serve small HTTP-only app doubles.  Pin jobd only when the
+            # Browser fixtures also serve small HTTP-only app doubles.  Pin batchd only when the
             # app actually owns that scheduler seam; otherwise the fixture has no producer to
-            # protect and must not manufacture a jobd dependency.
-            pin_jobd_scheduler=hasattr(app, "job_client"),
+            # protect and must not manufacture a batchd dependency.
+            pin_batchd_scheduler=hasattr(app, "job_client"),
         ),
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary

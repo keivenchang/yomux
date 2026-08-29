@@ -18,7 +18,7 @@ import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib import web
@@ -1126,7 +1126,7 @@ def test_html_uses_browser_highlight_js_bundle():
     assert web.static_asset_path("vendor/highlight.min.js").is_file()
 
 
-def test_raw_file_response_reads_the_authorized_file_without_jobd(monkeypatch):
+def test_raw_file_response_reads_the_authorized_file_without_batchd(monkeypatch):
     body = b"<svg/>"
     calls = []
     handler = SimpleNamespace(
@@ -1323,8 +1323,8 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/api/fs/fast/list").role == "readonly"
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
-    assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
-    assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
+    assert route_by_path("GET", "/api/batch/zip").handler is http_routes.get_fs_zip
+    assert route_by_path("GET", "/api/batch/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
 
 
@@ -1469,20 +1469,22 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
-    handler, calls, writes = route_handler("/api/fs/zip?path=/repo", readonly=True)
+    handler, calls, writes = route_handler("/api/batch/zip?path=/repo", readonly=True)
     handler.handle_fs_zip = lambda parsed: writes.append(("fs-zip", parsed.path))
+    handler.headers = {"Cookie": ""}
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
 
-    handler, calls, writes = route_handler("/api/fs/count?path=/repo", readonly=True)
+    handler, calls, writes = route_handler("/api/batch/count?path=/repo", readonly=True)
     handler.handle_fs_count = lambda parsed: writes.append(("fs-count", parsed.path))
+    handler.headers = {"Cookie": ""}
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
 
 
@@ -1720,7 +1722,7 @@ def test_replacement_stream_replays_large_exact_terminal_until_browser_ack(tmp_p
             route="GET /api/fs/watch-diff",
             deadline_at=4102444800.0,
             progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": f"job-replacement-{suffix}"},
+            producer={"service": "batchd", "job_id": f"job-replacement-{suffix}"},
         )
         terminal = ledger.terminalize_operation(
             receipt["operation"]["id"],
@@ -2044,7 +2046,7 @@ def batch_handler(payload, app=None):
     return handler, writes
 
 
-def test_handle_fs_fast_list_returns_one_level_without_jobd_or_git(monkeypatch, tmp_path):
+def test_handle_fs_fast_list_returns_one_level_without_batchd_or_git(monkeypatch, tmp_path):
     (tmp_path / "first").mkdir()
     (tmp_path / "first" / "nested.txt").write_text("nested\n", encoding="utf-8")
     (tmp_path / "top.txt").write_text("top\n", encoding="utf-8")
@@ -2089,7 +2091,7 @@ def test_handle_fs_list_is_direct(monkeypatch):
     assert writes == [(HTTPStatus.OK, {"path": "/repo", "entries": []})]
 
 
-def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monkeypatch):
+def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_batchd_path(monkeypatch):
     calls = []
     writes = []
     handler = object.__new__(Handler)
@@ -2107,7 +2109,7 @@ def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monke
     assert calls == [("GET /api/fs/read", "read", "/repo/slow.txt", {"include_git": True})]
 
 
-def test_handle_fast_git_routes_bypass_jobd(monkeypatch):
+def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
     calls = []
     writes = []
     handler = object.__new__(Handler)
@@ -2186,7 +2188,7 @@ def test_git_history_routes_are_registered_as_readonly_json():
     ("args", "expected_include_repo_info"),
     [({}, True), ({"include_repo_info": False}, False)],
 )
-def test_jobd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
+def test_batchd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
     monkeypatch,
     args,
     expected_include_repo_info,
@@ -2197,10 +2199,10 @@ def test_jobd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_ou
         calls.append((path, include_repo_info))
         return {"path": path, "include_repo_info": include_repo_info}
 
-    monkeypatch.setattr(jobd.filesystem, "list_directory", list_directory)
+    monkeypatch.setattr(batchd.filesystem, "list_directory", list_directory)
 
     descriptor = app_module.filesystem_operation_descriptor("list", "/repo", args=args)
-    result = jobd._filesystem_operation_authorized(descriptor)
+    result = batchd._filesystem_operation_authorized(descriptor)
 
     assert calls == [("/repo", expected_include_repo_info)]
     assert json.loads(result) == {"path": "/repo", "include_repo_info": expected_include_repo_info}
@@ -2503,7 +2505,7 @@ def test_handle_fs_batch_rejects_invalid_shape():
     try:
         Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     status, payload = writes[0]
@@ -2967,7 +2969,7 @@ def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: st
         "error": {
             "code": code,
             "message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
-            "origin": "local_services.jobd",
+            "origin": "local_services.batchd",
             "retryable": False,
             "details": {
                 "status": int(status),
@@ -2977,7 +2979,7 @@ def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: st
             },
             "stack": [
                 {"component": "server.http", "operation": "GET /api/fs/list", "code": "dependency_failed"},
-                {"component": "local_services.jobd", "operation": "jobd.result", "code": code},
+                {"component": "local_services.batchd", "operation": "batchd.result", "code": code},
             ],
         },
     }

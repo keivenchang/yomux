@@ -115,7 +115,7 @@ def test_search_progress_coalesces_to_a_leading_signal_plus_the_latest_trailing(
 def no_detached_local_services(monkeypatch):
     """Ownership unit tests must not leave five-minute service daemons behind."""
 
-    monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
+    monkeypatch.setattr(app_module.BatchClient, "start_for_scheduler", lambda self: False)
     monkeypatch.setattr(app_module.StatsCurrentRuntime, "start", lambda self: True)
 
     def fixture_process_start_identity(pid):
@@ -769,7 +769,7 @@ def test_follower_reads_owner_published_session_files_view_without_git_identity(
         follower.control_server.stop()
 
 
-def test_invalid_session_files_cache_view_returns_pending_before_discovery_or_jobd(monkeypatch, tmp_path):
+def test_invalid_session_files_cache_view_returns_pending_before_discovery_or_batchd(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = app_module.TmuxWebtermApp(["1"])
 
@@ -1235,7 +1235,7 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
             second_release.wait(timeout=2.0)
         return {}
 
-    # The network/git warm itself now runs inside a jobd `metadata_warm_view` task (one
+    # The network/git warm itself now runs inside a batchd `metadata_warm_view` task (one
     # submission per session, so a demotion between sessions still stops here before the NEXT
     # session's job is ever submitted). `metadata.session_work_graph` is the name that task calls;
     # `app_module.session_work_graph` is only the (unrelated) allow_network=False comparison call.
@@ -1375,8 +1375,8 @@ def test_follower_batch_session_files_does_not_spawn_warm_threads(monkeypatch, n
 
 
 def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unresponsive(monkeypatch, no_control_socket, tmp_path):
-    # The bounded fallback compute now routes through the jobd session_files_view
-    # product (checkbox 4/9), not an inline session_files call; mock the jobd
+    # The bounded fallback compute now routes through the batchd session_files_view
+    # product (checkbox 4/9), not an inline session_files call; mock the batchd
     # submit/product RPCs instead of the retired direct compute function.
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = app_module.TmuxWebtermApp(["1"])

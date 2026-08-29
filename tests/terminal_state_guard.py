@@ -46,12 +46,12 @@ TERMINAL_STATE_CONTRACTS = (
         queued_producer_function="start",
     ),
     TerminalStateContract(
-        contract_id="jobd-product-operation-completion",
+        contract_id="batchd-product-operation-completion",
         owner_path=Path("yolomux_lib/app.py"),
-        owner_token="def accept_jobd_product_operation(",
+        owner_token="def accept_batchd_product_operation(",
         proof_path=Path("tests/test_gate_differ.py"),
         proof_test="test_mock_git_differ_queued_producer_completion_settles_every_visible_surface",
-        queued_producer_function="accept_jobd_product_operation",
+        queued_producer_function="accept_batchd_product_operation",
     ),
     TerminalStateContract(
         contract_id="session-files-http-operation-completion",

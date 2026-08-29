@@ -126,7 +126,7 @@ def live_client_claim(
     ``bool(self.leases)`` is not the same question.  A client that was hard-killed
     cannot release its lease, so the table keeps an entry naming a process that no
     longer exists and the daemon's idle deadline is refreshed forever by a ghost.
-    ``statusd``, ``watchd`` and ``jobd`` each reaped before deciding; ``approvald``
+    ``statusd``, ``watchd`` and ``batchd`` each reaped before deciding; ``approvald``
     and ``indexd`` did not, so those two alone could be pinned indefinitely by one
     crashed caller.  Two spellings of one predicate is what produced that gap, so
     there is now one.

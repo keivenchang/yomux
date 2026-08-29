@@ -95,11 +95,10 @@ LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
 LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
-# jobd accepts request deadlines up to 120 seconds and gives an executing worker a two-second
-# cooperative-stop backstop. Registry cannot import jobd without creating a cycle, so keep the
+# batchd accepts request deadlines up to 120 seconds and gives an executing worker a two-second
+# cooperative-stop backstop. Registry cannot import batchd without creating a cycle, so keep the
 # replacement-side bound explicit and leave one second for the broker to publish terminal state.
-LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS = 123.0
-LOCAL_SERVICE_BATCHD_NAMES = frozenset({"jobd", "batchd"})
+LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS = 123.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
@@ -135,7 +134,7 @@ _TRANSPORT_TEARDOWNS_TOTAL = 0
 _TRANSPORT_TEARDOWNS_BY_EXCEPTION: dict[str, int] = {}
 
 
-def jobd_retirement_state(
+def batchd_retirement_state(
     response: Mapping[str, Any],
     *,
     service_name: str,
@@ -144,13 +143,13 @@ def jobd_retirement_state(
     source_epoch: str,
     shutdown_handshake: bool,
 ) -> str:
-    """Return one exact jobd identity's stopped or draining retirement state."""
+    """Return one exact batchd identity's stopped or draining retirement state."""
 
     response_pid = response.get("pid")
     response_version = response.get("version")
     response_source_epoch = response.get("source_epoch")
     if (
-        service_name not in LOCAL_SERVICE_BATCHD_NAMES
+        service_name != "batchd"
         or response.get("ok") is not True
         or isinstance(response_pid, bool)
         or not isinstance(response_pid, int)
@@ -2567,8 +2566,8 @@ class LocalServiceRegistry:
             )
             if not legacy_identity_matches:
                 return False
-            if self.spec.name in LOCAL_SERVICE_BATCHD_NAMES:
-                legacy_retirement_state = jobd_retirement_state(
+            if self.spec.name == "batchd":
+                legacy_retirement_state = batchd_retirement_state(
                     legacy_status,
                     service_name=self.spec.name,
                     service_pid=record_pid,
@@ -2603,7 +2602,7 @@ class LocalServiceRegistry:
                 "retirement_handshake": True,
                 "expected_source_epoch": retained_source_epoch,
             }
-            if self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
+            if self.spec.name == "batchd"
             else None
         )
         if shutdown_protocol_version is None:
@@ -2620,7 +2619,7 @@ class LocalServiceRegistry:
                 protocol_version=shutdown_protocol_version,
             )
         grace_seconds = LOCAL_SERVICE_RETIRE_GRACE_SECONDS
-        retirement_state = jobd_retirement_state(
+        retirement_state = batchd_retirement_state(
             shutdown_response,
             service_name=self.spec.name,
             service_pid=service_pid,
@@ -2635,15 +2634,15 @@ class LocalServiceRegistry:
         ):
             retirement_state = "stopped"
         if (
-            self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
+            self.spec.name == "batchd"
             and isinstance(shutdown_response.get("draining"), bool)
             and not retirement_state
         ):
             return False
         if retirement_state == "draining":
-            grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
+            grace_seconds = LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS
         if (
-            self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
+            self.spec.name == "batchd"
             and not retirement_state
             and shutdown_response.get("ok") is True
             and shutdown_response.get("shutdown") is True
@@ -2654,7 +2653,7 @@ class LocalServiceRegistry:
                 timeout=0.2,
                 protocol_version=retirement_protocol_version,
             )
-            status_state = jobd_retirement_state(
+            status_state = batchd_retirement_state(
                 drain_status,
                 service_name=self.spec.name,
                 service_pid=service_pid,
@@ -2665,7 +2664,7 @@ class LocalServiceRegistry:
             if drain_status.get("ok") is True and not status_state:
                 return False
             if status_state == "draining":
-                grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
+                grace_seconds = LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS
 
         def retained_process_state() -> str:
             """Classify the retained identity through the ONE zombie-aware fence.
@@ -3875,7 +3874,7 @@ class LocalServiceRegistry:
         """Return one CPU/RSS reading for a service broker and its verified direct workers.
 
         A process-pool worker does the costly work while its broker stays mostly idle.  Sampling
-        only the broker made the System view materially underreport jobd.  Membership is part of
+        only the broker made the System view materially underreport batchd.  Membership is part of
         the CPU baseline: a spawn/exit yields an honest unknown CPU for one sample rather than a
         false spike from mixing cumulative process times.
         """

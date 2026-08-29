@@ -132,7 +132,7 @@ def test_an_expired_deadline_mid_walk_reports_a_partial_delete_with_its_exact_pr
 ):
     """The production stop path, which had no post-mutation regression at all.
 
-    jobd hands the worker an absolute monotonic deadline and NO cancel event, so the deadline is the
+    batchd hands the worker an absolute monotonic deadline and NO cancel event, so the deadline is the
     only mechanism that can stop a live recursive delete part-way. The pre-mutation deadline case and
     both cancel-event cases were covered; this one -- deadline expiring after real destructive work --
     was not, even though it is the only mid-walk stop a broker can actually cause.

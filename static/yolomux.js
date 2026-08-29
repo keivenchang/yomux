@@ -7647,7 +7647,7 @@ async function terminalReferenceProviderLinks(session, term, y) {
   if (!fileRefs.length) return links;
   // This provider runs once for each visible terminal line. Its output is only a visual underline:
   // right-click determines the syntactic path and the selected editor tab owns the real read/error.
-  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // Do not turn terminal repaint into one batchd admission per token merely to decide whether to draw
   // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
   for (const ref of fileRefs) {
     const link = terminalReferenceXtermLink(ref);
@@ -9429,7 +9429,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
   // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
   // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
-  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on batchd's
   // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
   const optimisticFilePath = terminalReference?.type === 'file'
     ? terminalFileReferenceAbsolutePath(session, terminalReference)
@@ -24389,7 +24389,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
 }
 
 function zipFileDownloadUrl(path) {
-  return `/api/fs/zip?path=${encodeURIComponent(path)}`;
+  return `/api/batch/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {
@@ -26558,7 +26558,7 @@ async function fetchFilePathInfo(path, options = {}) {
 
 async function fetchDirectoryFileCount(path) {
   const normalized = normalizeDirectoryPath(path);
-  return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
+  return apiFetchJson(`/api/batch/count?path=${encodeURIComponent(normalized)}`);
 }
 
 function finderRelativeCopyEntryForSelection(path, info, options = {}) {
@@ -28703,7 +28703,7 @@ async function fetchFilesystemOperationPayload(url, operation, options = {}) {
 async function fetchFileReadPayload(path, options = {}) {
   const url = `/api/fs/read?path=${encodeURIComponent(path)}${options.includeGit === true ? '&include_git=1' : ''}`;
   // The first content read is a browser-owned direct lifecycle: it paints into the already-open
-  // tab and resolves to bytes or a typed file state without a jobd receipt. Git enrichment stays
+  // tab and resolves to bytes or a typed file state without a batchd receipt. Git enrichment stays
   // on the retained-operation path because it may inspect repository history.
   if (options.includeGit !== true) {
     return apiFetchJson(url, {startupImmediate: true, ...(options.signal ? {signal: options.signal} : {})}, {
@@ -29116,7 +29116,7 @@ function markOpenFileExternalError(path, error) {
 // can collapse into one /api/fs/read.
 //
 // The duplicate was always there; it was hidden by accident. Before filesystem reads had their own
-// jobd lane, a read could not be dispatched while the explicit reload's directory batch held the
+// batchd lane, a read could not be dispatched while the explicit reload's directory batch held the
 // single shared interactive worker, so the explicit reload's read always went first and the push
 // refresh found nothing left to do. Once reads got a reserved lane the two ran concurrently and the
 // same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
@@ -30055,7 +30055,7 @@ function codeMirrorWrapMarkerExtension(api) {
 async function fetchEditorBlame(path) {
   return dedupeInflight(editorBlameFetches, path, true, () => (async () => {
     try {
-      const data = await apiFetchJson(`/api/blame?path=${encodeURIComponent(path)}`);
+      const data = await apiFetchJson(`/api/batch/blame?path=${encodeURIComponent(path)}`);
       setEditorBlameForPath(path, data);
       return data;
     } catch (_error) {
@@ -70950,7 +70950,7 @@ function htmlPreviewHasDisabledJavaScript(text) {
 }
 
 function htmlPreviewUrl(path) {
-  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+  return `/api/batch/html-preview?path=${encodeURIComponent(path)}`;
 }
 
 function renderRawImagePreviewInto(container, path, state = null, options = {}) {

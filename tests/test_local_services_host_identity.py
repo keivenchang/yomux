@@ -162,7 +162,7 @@ SERVICE_SPAWN_GENERATION = "fixture-spawn-generation-500"
 
 
 def _service_environment(tmp_path: Path, *, record_overrides: dict, command: str | None = None):
-    """One tracked jobd generation on disk plus the exact live process table row.
+    """One tracked batchd generation on disk plus the exact live process table row.
 
     The unmodified pair is provably actionable (see the ``live_claim`` control
     row below); every parametrised case perturbs exactly one identity dimension
@@ -170,10 +170,10 @@ def _service_environment(tmp_path: Path, *, record_overrides: dict, command: str
     """
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    socket_path = service_dir / "jobd.sock"
+    socket_path = service_dir / "batchd.sock"
     socket_path.write_bytes(b"inert-socket-artifact")
     record = FixtureLocalServiceRecordBuilder(
-        service="jobd",
+        service="batchd",
         socket_path=socket_path,
         pid=SERVICE_PID,
         process_start_ticks=SERVICE_START_TICKS,
@@ -185,8 +185,8 @@ def _service_environment(tmp_path: Path, *, record_overrides: dict, command: str
         },
     ).build()
     record.update(record_overrides)
-    (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
-    live_command = command or f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60"
+    (service_dir / "batchd.service.json").write_text(json.dumps(record), encoding="utf-8")
+    live_command = command or f"python3 -m yolomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60"
     table = {
         SERVICE_PID: ProcessTableEntry(1, SERVICE_PID, 1.0, live_command, SERVICE_START_TICKS),
         # A co-tenant of the SAME process group that the record never named.
@@ -344,9 +344,9 @@ def test_one_typed_orphan_row_per_ambiguous_survivor_and_never_a_silent_one(tmp_
         encoding="utf-8",
     )
     table = {
-        7001: ProcessTableEntry(1, 7001, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {ghost_socket}", 8001),
-        7002: ProcessTableEntry(1, 7002, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {unreadable_socket}", 8002),
-        7003: ProcessTableEntry(1, 7003, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {superseded_socket}", 8003),
+        7001: ProcessTableEntry(1, 7001, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {ghost_socket}", 8001),
+        7002: ProcessTableEntry(1, 7002, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {unreadable_socket}", 8002),
+        7003: ProcessTableEntry(1, 7003, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {superseded_socket}", 8003),
     }
 
     ledger = registry_mod.OrphanObservationLedger()
@@ -572,7 +572,7 @@ def test_every_leased_service_routes_departures_through_the_shared_lease_reaper(
         "yolomux_lib/watchd.py",
         "yolomux_lib/approval/approvald.py",
         "yolomux_lib/search/search_indexer.py",
-        "yolomux_lib/infra/jobd.py",
+        "yolomux_lib/infra/batchd.py",
         "yolomux_lib/stats_current/service.py",
     }
     repo_root = Path(__file__).resolve().parents[1]

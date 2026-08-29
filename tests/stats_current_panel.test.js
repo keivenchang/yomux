@@ -422,7 +422,7 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
     const peerWeb = {key: 'cpu:port:7001', processCpu: true};
     const systemCpu = {key: 'systemCpu'};
     const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
-    const daemon = {key: 'serviceLoad:jobd', serviceLoad: true};
+    const daemon = {key: 'serviceLoad:batchd', serviceLoad: true};
     const items = [web, peerWeb, systemCpu, hostProcess, daemon];
     result = {
       daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true}, items).map(series => series.key).sort(),
@@ -431,7 +431,7 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   `, context);
   // Membership, not paint order: the daemon chart owns every yolomux.py web line alongside the
   // services, and the CPU chart keeps only the host binaries and the system total.
-  assert.deepEqual([...context.result.daemons], ['cpu:port:7001', 'cpu:port:7442', 'serviceLoad:jobd']);
+  assert.deepEqual([...context.result.daemons], ['cpu:port:7001', 'cpu:port:7442', 'serviceLoad:batchd']);
   assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
 });
 
@@ -4518,7 +4518,7 @@ test('Daemons chart mirrors the server continuous one-second service-load cadenc
 test('Daemons keep unique stable color and line-pattern identities beyond nine services', () => {
   const visualSource = sourceFunction('debugGraphStablePaletteIndex', 'debugGraphSelectedModelTokenBucketValue');
   const seriesSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
-  const serviceKeys = ['approvald', 'indexd', 'jobd', 'statsd', 'statusd', 'watchd', 'storaged', 'eventd', 'costd', 'schedulerd'];
+  const serviceKeys = ['approvald', 'indexd', 'batchd', 'statsd', 'statusd', 'watchd', 'storaged', 'eventd', 'costd', 'schedulerd'];
   const context = {
     Number,
     String,

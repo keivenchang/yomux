@@ -287,7 +287,7 @@ def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapsho
     """Build and sort agent-window rows from pre-gathered per-agent data.
 
     Pure over its inputs so the identical assembly runs in the web owner and in a
-    jobd worker: every impure value (screen state, working-stopped timestamp,
+    batchd worker: every impure value (screen state, working-stopped timestamp,
     attention keys, acknowledgements, path/git, and the statusd-owned overwrite
     row) is gathered by the caller and passed in as plain data.
     """

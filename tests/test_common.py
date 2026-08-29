@@ -129,8 +129,8 @@ def test_main_process_cpu_work_has_named_allowlist():
     for pattern in retired_patterns:
         assert pattern not in source
 
-    jobd_source = (root / "yolomux_lib" / "infra" / "jobd.py").read_text(encoding="utf-8")
-    assert '"transcript_view": _transcript_view' in jobd_source
+    batchd_source = (root / "yolomux_lib" / "infra" / "batchd.py").read_text(encoding="utf-8")
+    assert '"transcript_view": _transcript_view' in batchd_source
     routes_source = (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
     assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2
 

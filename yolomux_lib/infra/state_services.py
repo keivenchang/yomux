@@ -111,7 +111,7 @@ class FilesystemWatchReadyProductRecord:
 
 
 @dataclass
-class JobdOperationFlight:
+class BatchedOperationFlight:
     """One keyed completion reservation shared by equivalent accepted-operation callers."""
 
     lane: str
@@ -151,7 +151,7 @@ class JobdOperationFlight:
         }
         if code:
             item["code"] = str(code)
-        return {"service": "jobd", "chain": [item]}
+        return {"service": "batchd", "chain": [item]}
 
     def accept_owner(self, operation_id: str) -> None:
         self.owner_operation_id = str(operation_id)
@@ -201,7 +201,7 @@ class JobdOperationFlight:
         with self.producer_lock:
             chain = self.producer.setdefault("chain", [])
             chain.append(attribution["chain"][0])
-            self.producer.setdefault("service", "jobd")
+            self.producer.setdefault("service", "batchd")
             self.producer_generation += 1
             return copy.deepcopy(self.producer), tuple(self.operation_ids), self.producer_generation
 
@@ -215,7 +215,7 @@ class JobdOperationFlight:
         with self.producer_lock:
             chain = self.producer.get("chain")
             if not isinstance(chain, list) or not chain or not isinstance(chain[-1], dict):
-                raise RuntimeError("jobd operation flight has no current producer")
+                raise RuntimeError("batchd operation flight has no current producer")
             chain[-1]["state"] = str(state)
             if code:
                 chain[-1]["code"] = str(code)
@@ -232,7 +232,7 @@ class JobdOperationFlight:
         with self.producer_lock:
             chain = self.producer.get("chain")
             if not isinstance(chain, list) or not chain or not isinstance(chain[-1], dict):
-                raise RuntimeError("jobd operation flight has no current producer")
+                raise RuntimeError("batchd operation flight has no current producer")
             if str(chain[-1].get("state") or "") not in {"completed", "failed"}:
                 chain[-1]["state"] = "failed"
                 chain[-1]["code"] = str(code)
@@ -542,33 +542,33 @@ class SessionFilesService:
             self.compute_slot_condition.notify()
 
 
-# The completion service runs the product-poll thread that waits for an accepted jobd operation
-# to terminalize.  Its lanes mirror jobd's own executor lanes so an interactive point read or a
+# The completion service runs the product-poll thread that waits for an accepted batchd operation
+# to terminalize.  Its lanes mirror batchd's own executor lanes so an interactive point read or a
 # bounded mutation completion never queues behind bulk completion polls: a bulk lane held at
 # capacity (four fs-batch/watch-diff/session-files polls that have not finished) previously
 # occupied every worker of the one shared pool, so the fifth submission -- a point read or a
 # `mkdir` -- was accepted yet could not RUN until a bulk worker freed.  `point` and `mutation`
 # get their own bounded workers and their own admission slots so cross-class isolation holds at
-# the completion boundary too, not only inside jobd.  Everything that is neither a coalescable
+# the completion boundary too, not only inside batchd.  Everything that is neither a coalescable
 # point read nor a bounded mutation (fs-batch, watch-diff, session-files, transcript/context,
 # unbounded reads and writes) shares the `bulk` lane.
-JOBD_OPERATION_LANES: tuple[str, ...] = ("point", "mutation", "bulk")
+BATCHD_OPERATION_LANES: tuple[str, ...] = ("point", "mutation", "bulk")
 
 
-def jobd_operation_lane(priority: str) -> str:
-    """Map one jobd submission priority onto its single completion-service lane.
+def batchd_operation_lane(priority: str) -> str:
+    """Map one batchd submission priority onto its single completion-service lane.
 
     Priority is computed by the caller BEFORE it reserves, so a completion never lands in a lane
     that does not describe its work.  `point` and `mutation` are the two bounded interactive
     classes; every other priority (`interactive`, `freshness`, `maintenance`, or any bulk work)
     routes to the shared `bulk` lane.
     """
-    if priority in JOBD_OPERATION_LANES and priority != "bulk":
+    if priority in BATCHD_OPERATION_LANES and priority != "bulk":
         return priority
     return "bulk"
 
 
-class JobdOperationReservation:
+class BatchedOperationReservation:
     """One held completion-lane slot with EXACTLY-ONCE release.
 
     A reservation is a handle, not a bare counter: the slot it took is released through this
@@ -580,7 +580,7 @@ class JobdOperationReservation:
 
     __slots__ = ("_service", "lane", "_lock", "_released")
 
-    def __init__(self, service: JobdOperationService, lane: str) -> None:
+    def __init__(self, service: BatchedOperationService, lane: str) -> None:
         self._service = service
         self.lane = lane
         self._lock = threading.Lock()
@@ -600,7 +600,7 @@ class JobdOperationReservation:
 
 
 @dataclass
-class JobdOperationService:
+class BatchedOperationService:
     """Bound accepted-operation completion work independently of HTTP handler threads.
 
     `worker_limit` and `operation_limit` are PER LANE, so each named lane owns its own bounded
@@ -614,7 +614,7 @@ class JobdOperationService:
     lock: threading.RLock = field(default_factory=threading.RLock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     futures: set[Future[Any]] = field(default_factory=set)
-    flights: dict[tuple[str, str], JobdOperationFlight] = field(default_factory=dict)
+    flights: dict[tuple[str, str], BatchedOperationFlight] = field(default_factory=dict)
     _lane_slots: dict[str, threading.BoundedSemaphore] = field(init=False)
     _lane_executors: dict[str, ThreadPoolExecutor | None] = field(init=False)
     _idle_condition: threading.Condition = field(init=False)
@@ -623,24 +623,24 @@ class JobdOperationService:
         self.worker_limit = max(1, int(self.worker_limit))
         self.operation_limit = max(self.worker_limit, int(self.operation_limit))
         self.flight_participant_limit = max(1, int(self.flight_participant_limit))
-        self._lane_slots = {lane: threading.BoundedSemaphore(self.operation_limit) for lane in JOBD_OPERATION_LANES}
-        self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
+        self._lane_slots = {lane: threading.BoundedSemaphore(self.operation_limit) for lane in BATCHD_OPERATION_LANES}
+        self._lane_executors = {lane: None for lane in BATCHD_OPERATION_LANES}
         self._idle_condition = threading.Condition(self.lock)
 
-    def reserve(self, lane: str = "bulk") -> JobdOperationReservation | None:
+    def reserve(self, lane: str = "bulk") -> BatchedOperationReservation | None:
         """Admit one completion into a named lane, returning its release-owning handle or None.
 
         Returns None when the service is stopping or the lane is already at its bound; the caller
         maps that to a `service_busy` refusal.  The lane is chosen before admission, never after.
         """
         if lane not in self._lane_slots:
-            raise ValueError(f"unknown jobd completion lane {lane!r}")
+            raise ValueError(f"unknown batchd completion lane {lane!r}")
         with self.lock:
             if self.stop_event.is_set():
                 return None
             if not self._lane_slots[lane].acquire(blocking=False):
                 return None
-            return JobdOperationReservation(self, lane)
+            return BatchedOperationReservation(self, lane)
 
     def claim(
         self,
@@ -649,10 +649,10 @@ class JobdOperationService:
         deadline_at: float,
         *,
         producer: dict[str, Any] | None = None,
-    ) -> tuple[JobdOperationFlight | None, JobdOperationReservation | None, bool]:
+    ) -> tuple[BatchedOperationFlight | None, BatchedOperationReservation | None, bool]:
         """Atomically join one keyed flight or reserve the lane for its first caller."""
         if lane not in self._lane_slots:
-            raise ValueError(f"unknown jobd completion lane {lane!r}")
+            raise ValueError(f"unknown batchd completion lane {lane!r}")
         flight_key = (str(lane), str(key))
         with self.lock:
             existing = self.flights.get(flight_key)
@@ -663,8 +663,8 @@ class JobdOperationService:
                 return existing, None, False
             if self.stop_event.is_set() or not self._lane_slots[lane].acquire(blocking=False):
                 return None, None, False
-            reservation = JobdOperationReservation(self, lane)
-            flight = JobdOperationFlight(
+            reservation = BatchedOperationReservation(self, lane)
+            flight = BatchedOperationFlight(
                 lane=lane,
                 key=str(key),
                 deadline_at=float(deadline_at),
@@ -673,7 +673,7 @@ class JobdOperationService:
             self.flights[flight_key] = flight
             return flight, reservation, True
 
-    def release_flight_participant(self, flight: JobdOperationFlight) -> None:
+    def release_flight_participant(self, flight: BatchedOperationFlight) -> None:
         """Return a claim whose caller failed before it persisted a receipt."""
         with self.lock:
             if flight.participants > 0:
@@ -681,7 +681,7 @@ class JobdOperationService:
 
     def rollback_flight_participant(
         self,
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         operation_id: str,
         *,
         owns_producer: bool,
@@ -693,7 +693,7 @@ class JobdOperationService:
         if owns_producer:
             flight.cancel_owner()
 
-    def release_flight(self, flight: JobdOperationFlight) -> None:
+    def release_flight(self, flight: BatchedOperationFlight) -> None:
         """Release only the current owner for this exact lane/key generation."""
         with self.lock:
             flight_key = (flight.lane, flight.key)
@@ -703,7 +703,7 @@ class JobdOperationService:
     def _release_lane_slot(self, lane: str) -> None:
         self._lane_slots[lane].release()
 
-    def submit_reserved(self, reservation: JobdOperationReservation, function: Callable[..., Any], *args: Any) -> bool:
+    def submit_reserved(self, reservation: BatchedOperationReservation, function: Callable[..., Any], *args: Any) -> bool:
         """Run one accepted completion on its reserved lane; release the handle if it cannot start."""
         with self.lock:
             if self.stop_event.is_set():
@@ -713,7 +713,7 @@ class JobdOperationService:
             if executor is None:
                 executor = ThreadPoolExecutor(
                     max_workers=self.worker_limit,
-                    thread_name_prefix=f"jobd-op-{reservation.lane}",
+                    thread_name_prefix=f"batchd-op-{reservation.lane}",
                 )
                 self._lane_executors[reservation.lane] = executor
             try:
@@ -725,7 +725,7 @@ class JobdOperationService:
             future.add_done_callback(lambda completed: self._finish(completed, reservation))
             return True
 
-    def _finish(self, future: Future[Any], reservation: JobdOperationReservation) -> None:
+    def _finish(self, future: Future[Any], reservation: BatchedOperationReservation) -> None:
         with self._idle_condition:
             self.futures.discard(future)
             reservation.release()
@@ -741,7 +741,7 @@ class JobdOperationService:
         with self.lock:
             self.stop_event.set()
             executors = [executor for executor in self._lane_executors.values() if executor is not None]
-            self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
+            self._lane_executors = {lane: None for lane in BATCHD_OPERATION_LANES}
         for executor in executors:
             executor.shutdown(wait=True, cancel_futures=True)
         with self.lock:
@@ -810,7 +810,7 @@ class SessionFilesOperationLifecycle:
     def complete(
         cls,
         app: Any,
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         job_id: str,
         session: str | None,
         infos: dict[str, Any],
@@ -829,7 +829,7 @@ class SessionFilesOperationLifecycle:
         exception_cause: Callable[[BaseException], dict[str, Any]],
     ) -> None:
         """Resolve one producer into one canonical cache publication."""
-        failure_operation = "jobd.result"
+        failure_operation = "batchd.result"
         outcome = None
         try:
             completed_product = app.wait_for_session_files_operation_job(job_id, deadline_at)
@@ -877,12 +877,12 @@ class SessionFilesOperationLifecycle:
                     flight.future.set_result(outcome)
                 flight.wait_for_owner()
             finally:
-                app.jobd_operation_service.release_flight(flight)
+                app.batchd_operation_service.release_flight(flight)
 
     @staticmethod
     def terminalize_callback(
         app: Any,
-        flight: JobdOperationFlight,
+        flight: BatchedOperationFlight,
         request_id: str,
         operation_id: str,
     ) -> Callable[[Future[Any]], None]:
@@ -940,21 +940,21 @@ class SessionFilesOperationLifecycle:
         if not job_id:
             failure = dict(response)
             if not failure.get("error"):
-                failure["error"] = "jobd did not return an accepted job receipt"
-            result = app.session_files_failure_result(request_id, failure, operation="jobd.submit")
+                failure["error"] = "batchd did not return an accepted job receipt"
+            result = app.session_files_failure_result(request_id, failure, operation="batchd.submit")
             app.record_operation_failure("", result)
             return result, HTTPStatus.SERVICE_UNAVAILABLE
 
         deadline_at = time.time() + (deadline_ms / 1000.0)
-        initial_attribution = JobdOperationFlight.producer_attribution(
+        initial_attribution = BatchedOperationFlight.producer_attribution(
             "requested",
             job_id,
             coalesce_key,
             generation,
             producer_state,
         )
-        flight_key = JobdOperationFlight.completion_key(job_id, replace)
-        flight, reservation, owns_producer = app.jobd_operation_service.claim(
+        flight_key = BatchedOperationFlight.completion_key(job_id, replace)
+        flight, reservation, owns_producer = app.batchd_operation_service.claim(
             "bulk",
             flight_key,
             deadline_at,
@@ -963,8 +963,8 @@ class SessionFilesOperationLifecycle:
         if flight is None:
             result = app.session_files_failure_result(
                 request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
-                operation="jobd.submit",
+                {"error": "batchd operation completion pool is full", "status": "service_busy"},
+                operation="batchd.submit",
                 code="service_busy",
             )
             app.record_operation_failure("", result)
@@ -972,7 +972,7 @@ class SessionFilesOperationLifecycle:
 
         if owns_producer:
             assert reservation is not None
-            submitted = app.jobd_operation_service.submit_reserved(
+            submitted = app.batchd_operation_service.submit_reserved(
                 reservation,
                 app.complete_session_files_operation,
                 flight,
@@ -990,9 +990,9 @@ class SessionFilesOperationLifecycle:
                 requester,
             )
             if not submitted:
-                failure = {"error": "jobd operation completion worker could not start"}
+                failure = {"error": "batchd operation completion worker could not start"}
                 flight.cancel_owner()
-                app.jobd_operation_service.release_flight(flight)
+                app.batchd_operation_service.release_flight(flight)
                 flight.future.set_result((
                     None,
                     HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -1014,7 +1014,7 @@ class SessionFilesOperationLifecycle:
                 deadline_at=deadline_at,
                 progress={
                     "phase": "waiting_for_product",
-                    "producer": "jobd",
+                    "producer": "batchd",
                     "producer_state": producer_state,
                 },
                 producer=initial_attribution,
@@ -1022,7 +1022,7 @@ class SessionFilesOperationLifecycle:
                 context=context,
             )
         except Exception:
-            app.jobd_operation_service.rollback_flight_participant(
+            app.batchd_operation_service.rollback_flight_participant(
                 flight,
                 "",
                 owns_producer=owns_producer,
@@ -1060,7 +1060,7 @@ class SessionFilesOperationLifecycle:
                 else:
                     app.record_operation_failure("", result)
             finally:
-                app.jobd_operation_service.rollback_flight_participant(
+                app.batchd_operation_service.rollback_flight_participant(
                     flight,
                     operation_id,
                     owns_producer=owns_producer,
@@ -1071,7 +1071,7 @@ class SessionFilesOperationLifecycle:
 
 @dataclass
 class IndexedRepoDiscoveryRecord:
-    """Last completed jobd repository discovery plus one in-flight job."""
+    """Last completed batchd repository discovery plus one in-flight job."""
 
     indexed_dirs: tuple[str, ...] = ()
     roots: list[str] = field(default_factory=list)
@@ -1108,7 +1108,7 @@ class ActivityTranscriptService:
     context_items_cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = field(default_factory=dict)
     transcript_job_cache_lock: threading.RLock = field(default_factory=threading.RLock)
     # Parsed, bounded worker facts only.  Do not retain transcript text here:
-    # large JSONL belongs in jobd, never in the HTTP process cache.
+    # large JSONL belongs in batchd, never in the HTTP process cache.
     transcript_job_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
     transcript_job_records: dict[tuple[Any, ...], str] = field(default_factory=dict)
     indexed_repo_lock: threading.RLock = field(default_factory=threading.RLock)
@@ -1126,7 +1126,7 @@ class ClientWatchService:
         "session_discovery": 0,
         "transcript_tail_scan": 0,
         "session_files_materialization": 0,
-        "jobd_work_graph_rebuild": 0,
+        "batchd_work_graph_rebuild": 0,
     })
     # Every descriptor is keyed by the browser's existing client-event client_id.
     # Keeping the demand here rather than in route-local globals prevents one tab's
@@ -1161,7 +1161,7 @@ class ClientWatchService:
     filesystem_history: list[dict[str, Any]] = field(default_factory=list)
     filesystem_ready_product: FilesystemWatchReadyProductRecord = field(default_factory=FilesystemWatchReadyProductRecord)
     event_watcher_record: ClientEventWatcherRecord = field(default_factory=ClientEventWatcherRecord)
-    # Bounded (one entry per trigger reason, not per event) count of jobd-product-backed refreshes
+    # Bounded (one entry per trigger reason, not per event) count of batchd-product-backed refreshes
     # actually published by the server-side watch loop, keyed by the same `trigger` strings already
     # passed to publish_session_files_ready_events/publish_context_items_ready_events.
     invalidation_counts: dict[str, int] = field(default_factory=dict)

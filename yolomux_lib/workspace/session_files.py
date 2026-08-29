@@ -189,7 +189,7 @@ def prune_disk_cache(
     batch_size: int,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Prune the durable session-files cache in jobd, never in the web process."""
+    """Prune the durable session-files cache in batchd, never in the web process."""
 
     cache_dir = Path(cache_dir)
     index_path = disk_cache_index_path(cache_dir)
@@ -628,7 +628,7 @@ SessionFilesPhaseRecorder = Callable[[str, float, dict[str, Any]], None]
 GitSnapshotProvider = Callable[[Path, str | None, str | None], dict[str, Any]]
 PinnedGitRunner = Callable[[list[str], float], Any]
 
-# The jobd product carries only these aggregate timings.  Keeping the vocabulary fixed prevents a
+# The batchd product carries only these aggregate timings.  Keeping the vocabulary fixed prevents a
 # worker result from becoming an unbounded diagnostics channel or exposing session/repository names.
 SESSION_FILES_VIEW_PHASES = frozenset({
     "cross-session-attribution",
@@ -3816,7 +3816,7 @@ def differ_exclusion_policy(policy: ExclusionPolicy | None = None) -> ExclusionP
     """Return the policy Differ admits by, with its one documented exception applied.
 
     The policy is DATA supplied by the caller that read the settings -- the web process, or the
-    ``jobd`` task payload.  Nothing here looks a setting up, so the worker judges paths by exactly
+    ``batchd`` task payload.  Nothing here looks a setting up, so the worker judges paths by exactly
     the policy the cache identity was computed from.  ``None`` means "no configuration was
     supplied", which resolves to the shipped defaults rather than to no policy at all.
     """
@@ -4324,12 +4324,12 @@ def session_files_payload(
     }, HTTPStatus.OK
 
 
-# --- jobd `session_files_view` worker orchestrator (DOIT.offload-web-refreshers, item 4) ----------
+# --- batchd `session_files_view` worker orchestrator (DOIT.offload-web-refreshers, item 4) ----------
 # The session-files COMPUTE (recursive transcript discovery + `git` snapshots) is CPU/IO-bound work
-# that must not run in an HTTP request thread. `jobd` runs this orchestrator in a spawn worker, keyed
+# that must not run in an HTTP request thread. `batchd` runs this orchestrator in a spawn worker, keyed
 # by the same product identity the web disk cache uses, so warm requests read the last-known-good
 # product with ZERO in-process git spawns and ZERO recursive discovery. This module imports no
-# app/web code, so it is safe to import into the `jobd` worker.
+# app/web code, so it is safe to import into the `batchd` worker.
 SESSION_FILES_VIEW_MAX_SESSIONS = 64
 
 

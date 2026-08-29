@@ -39,7 +39,7 @@ from tests.helpers.backend_health_scenarios import RecoveryHarness
 
 from yolomux_lib import cli as cli_module
 from yolomux_lib.app import STATSD_ABSENT_WHILE_PIN_PENDING
-from yolomux_lib.infra.jobd import JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
 from yolomux_lib.app import LocalServiceRecoveryControl
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
@@ -82,7 +82,7 @@ DESTRUCTIVE_OPERATIONS = (
 # The services the app's recovery map can reach. indexd is absent on purpose: `SearchIndexerClient`
 # declares no retry wrapper, and reaching into its registry from the control would put a recovery
 # entrypoint outside the wrapper set `tests/test_backend_health_catalog.py` pins.
-RECOVERABLE = ("statsd", "jobd", "statusd", "watchd", "approvald")
+RECOVERABLE = ("statsd", "batchd", "statusd", "watchd", "approvald")
 
 
 class RecordingClient:
@@ -120,7 +120,7 @@ class RecoveryClientApp:
     def __init__(self, clock: Any = None) -> None:
         self.clients = {name: RecordingClient(name, clock=clock) for name in RECOVERABLE}
         self.stats_current_client = self.clients["statsd"]
-        self.job_client = self.clients["jobd"]
+        self.job_client = self.clients["batchd"]
         self.status_client = self.clients["statusd"]
         self.watch_client = self.clients["watchd"]
         self.approval_client = self.clients["approvald"]
@@ -160,7 +160,7 @@ def wired(tmp_path: Path):
 def idle_machine(harness: RecoveryHarness) -> None:
     """Shape all six rows the way a quiet, correctly-running host shapes them.
 
-    Four demand-started services resting absent, jobd absent because another process won the
+    Four demand-started services resting absent, batchd absent because another process won the
     background-owner election, and statsd absent inside its bounded pin window. Every reason is
     read from the production constant that spells it, so a renamed token fails here.
     """
@@ -169,9 +169,9 @@ def idle_machine(harness: RecoveryHarness) -> None:
         service.absent()
     for name in ("indexd", "statusd", "watchd", "approvald"):
         harness.services[name].row["demand_started"] = True
-    jobd = harness.services["jobd"].row
-    jobd["demand_started"] = False
-    jobd["absence_expected_reason"] = JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE
+    batchd = harness.services["batchd"].row
+    batchd["demand_started"] = False
+    batchd["absence_expected_reason"] = BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
     statsd = harness.services["statsd"].row
     statsd["demand_started"] = False
     statsd["absence_expected_reason"] = STATSD_ABSENT_WHILE_PIN_PENDING
@@ -218,8 +218,8 @@ def test_the_cli_hands_the_observer_the_app_recovery_control(tmp_path: Path, mon
         control = observer.recovery._control
         assert isinstance(control, LocalServiceRecoveryControl), control
         # And it is THIS app's control: a retry through it reaches this app's client.
-        assert control.retry("jobd") is True
-        assert app.calls() == {"statsd": 0, "jobd": 1, "statusd": 0, "watchd": 0, "approvald": 0}
+        assert control.retry("batchd") is True
+        assert app.calls() == {"statsd": 0, "batchd": 1, "statusd": 0, "watchd": 0, "approvald": 0}
         assert app.forbidden() == {}
     finally:
         observer.stop() if observer is not None else None
@@ -264,18 +264,18 @@ def test_a_verified_down_service_is_retried_through_its_own_client_wrapper(wired
 
     app: RecoveryClientApp = wired.app
     wired.tick()
-    assert app.calls()["jobd"] == 0
+    assert app.calls()["batchd"] == 0
 
-    wired.services["jobd"].down("jobd broker exited")
+    wired.services["batchd"].down("batchd broker exited")
     wired.tick()
-    assert wired.observer._accepted["jobd"] == ("down", "exited")
+    assert wired.observer._accepted["batchd"] == ("down", "exited")
     wired.tick(9)
 
-    assert app.calls() == {"statsd": 0, "jobd": BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS, "statusd": 0, "watchd": 0, "approvald": 0}
+    assert app.calls() == {"statsd": 0, "batchd": BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS, "statusd": 0, "watchd": 0, "approvald": 0}
     assert app.forbidden() == {}
     # And the retry is what the retained health says happened, not just what the double counted.
-    assert wired.outcome("jobd") in (RECOVERY_SCHEDULED, "retry_exhausted")
-    assert wired.outcome("jobd") != recovery_blocked_token(BLOCKED_NO_CONTROL)
+    assert wired.outcome("batchd") in (RECOVERY_SCHEDULED, "retry_exhausted")
+    assert wired.outcome("batchd") != recovery_blocked_token(BLOCKED_NO_CONTROL)
 
 
 def test_one_retry_per_backoff_boundary_through_the_real_control(wired: RecoveryHarness):
@@ -304,7 +304,7 @@ def test_one_retry_per_backoff_boundary_through_the_real_control(wired: Recovery
 def test_an_idle_machine_issues_zero_retries(wired: RecoveryHarness):
     """Constraint 3, measured: recovery wired, idle host, ZERO services touched.
 
-    Four demand-started services resting, jobd's lost election and statsd's pin window are all
+    Four demand-started services resting, batchd's lost election and statsd's pin window are all
     fenced by the row itself, and the arming fence is off, so this zero is the row fence and not
     the boot window. The positive control at the end is what makes it a measurement: the same
     harness, one recorded failure, exactly one retry.
@@ -321,7 +321,7 @@ def test_an_idle_machine_issues_zero_retries(wired: RecoveryHarness):
     assert wired.outcome("watchd") == recovery_blocked_token(BLOCKED_DEMAND_STARTED_ABSENT)
     assert wired.outcome("approvald") == recovery_blocked_token(BLOCKED_DEMAND_STARTED_ABSENT)
     assert wired.outcome("indexd") == recovery_blocked_token(BLOCKED_DEMAND_STARTED_ABSENT)
-    assert wired.outcome("jobd") == recovery_blocked_token(JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE)
+    assert wired.outcome("batchd") == recovery_blocked_token(BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE)
     assert wired.outcome("statsd") == recovery_blocked_token(STATSD_ABSENT_WHILE_PIN_PENDING)
 
     # Positive control: one of those same services records a failure, and recovery acts. Two
@@ -330,7 +330,7 @@ def test_an_idle_machine_issues_zero_retries(wired: RecoveryHarness):
     wired.services["approvald"].down("approvald exited")
     wired.tick(2)
     assert app.calls()["approvald"] == 1, app.calls()
-    assert app.calls() == {"statsd": 0, "jobd": 0, "statusd": 0, "watchd": 0, "approvald": 1}
+    assert app.calls() == {"statsd": 0, "batchd": 0, "statusd": 0, "watchd": 0, "approvald": 1}
 
 
 def test_a_demand_started_service_that_comes_back_is_never_retried_again(wired: RecoveryHarness):
@@ -376,7 +376,7 @@ def test_zero_destructive_operations_reach_a_wired_client(wired: RecoveryHarness
 
     assert app.forbidden() == {}
     assert app.calls()["statsd"] > 0 and app.calls()["watchd"] > 0
-    assert app.calls()["jobd"] == 0 and app.calls()["statusd"] == 0 and app.calls()["approvald"] == 0
+    assert app.calls()["batchd"] == 0 and app.calls()["statusd"] == 0 and app.calls()["approvald"] == 0
 
 
 def test_a_client_that_raises_is_recorded_and_never_becomes_a_hot_loop(wired: RecoveryHarness):
@@ -385,24 +385,24 @@ def test_a_client_that_raises_is_recorded_and_never_becomes_a_hot_loop(wired: Re
     app: RecoveryClientApp = wired.app
 
     def explode() -> bool:
-        app.clients["jobd"].calls += 1
-        app.clients["jobd"].times.append(wired.monotonic.value)
-        raise RuntimeError("jobd socket refused")
+        app.clients["batchd"].calls += 1
+        app.clients["batchd"].times.append(wired.monotonic.value)
+        raise RuntimeError("batchd socket refused")
 
-    app.clients["jobd"].retry = explode
+    app.clients["batchd"].retry = explode
     wired.tick()
-    wired.services["jobd"].down("jobd broker exited")
+    wired.services["batchd"].down("batchd broker exited")
     wired.tick(2)
 
-    # The failure is recorded against jobd with its own cause, not swallowed into `none`.
-    assert app.clients["jobd"].calls == 1
-    assert wired.outcome("jobd") == recovery_blocked_token(BLOCKED_CONTROL_ERROR)
+    # The failure is recorded against batchd with its own cause, not swallowed into `none`.
+    assert app.clients["batchd"].calls == 1
+    assert wired.outcome("batchd") == recovery_blocked_token(BLOCKED_CONTROL_ERROR)
 
     # And a control that keeps raising is still bounded by the same four attempts: the boundary
     # is consumed BEFORE the client is touched, so a raising client cannot become a hot loop.
     wired.tick(12)
-    assert app.clients["jobd"].calls == BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
-    assert wired.outcome("jobd") == RECOVERY_EXHAUSTED
+    assert app.clients["batchd"].calls == BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
+    assert wired.outcome("batchd") == RECOVERY_EXHAUSTED
     assert app.forbidden() == {}
 
 
@@ -422,7 +422,7 @@ def test_every_inventory_service_is_either_mapped_or_declares_no_wrapper():
 def test_the_fixtures_shape_the_same_six_rows_production_does():
     """The idle-machine shapes are the inventory, not a subset someone can quietly shrink."""
 
-    assert tuple(LOCAL_SERVICE_INVENTORY) == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
+    assert tuple(LOCAL_SERVICE_INVENTORY) == ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
     assert frozenset(RECOVERABLE) < frozenset(LOCAL_SERVICE_INVENTORY)
     assert FakeService("statusd").row["demand_started"] is True
 

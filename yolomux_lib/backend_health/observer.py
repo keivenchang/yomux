@@ -71,7 +71,7 @@ Eligibility is an ALLOWLIST, not a denylist: only ``down`` with ``service_absent
 or ``probe_failed`` is retried. Every other cause performs zero mutations and publishes its own
 bounded ``retry_blocked_<cause>`` token, so ``upgrade_required``, ``terminal_failure``,
 ``identity_mismatch``, ``revision_mismatch``, a demand-started service that is legitimately
-absent, and jobd's ``scheduler_not_owned`` stay six distinguishable facts rather than one
+absent, and batchd's ``scheduler_not_owned`` stay six distinguishable facts rather than one
 "blocked" string. Collapsing them is the exact defect the health contract names.
 
 THE STARTUP FLASH, AND WHY THE FIRST BOUNDARY IS NOT THE FENCE
@@ -212,9 +212,9 @@ _FENCED_TRANSPORT_REASONS = frozenset({REASON_IDENTITY_MISMATCH, REASON_REVISION
 #   Declared by indexd, watchd, statusd and approvald.
 #
 # `absence_expected_reason: "<token>"` is the DYNAMIC fact that this service IS pinned up by a
-#   named owner in this process, and that owner is not engaged right now. Declared by jobd,
-#   whose broker is pinned by the scheduler lease `JobClient.start_for_scheduler()` holds while
-#   this process owns background scheduling (`infra/jobd.py:1364-1372`, `app.py:2962`).
+#   named owner in this process, and that owner is not engaged right now. Declared by batchd,
+#   whose broker is pinned by the scheduler lease `BatchClient.start_for_scheduler()` holds while
+#   this process owns background scheduling (`infra/batchd.py:1364-1372`, `app.py:2962`).
 #
 # The distinction is the whole point. A service a background loop keeps hot is NOT demand-scoped
 # even though it is lazily created, and flagging it `demand_started` would make a real outage
@@ -420,8 +420,8 @@ def recovery_row_fence(fields: Mapping[str, Any]) -> str:
     does the ORDER, deliberately:
 
     * ``absence_expected_reason`` blocks UNCONDITIONALLY while the service is absent. It means a
-      named owner in this process is not engaging the service right now -- jobd's
-      ``scheduler_not_owned`` is the background-owner election this process lost. Starting jobd
+      named owner in this process is not engaging the service right now -- batchd's
+      ``scheduler_not_owned`` is the background-owner election this process lost. Starting batchd
       to "recover" it would fight the winner, and a recorded failure beside it does not change
       who owns scheduling.
     * ``demand_started`` blocks only when the row records NO failure. That is exactly the
@@ -481,7 +481,7 @@ def recovery_blocked_cause(state: str, reason_code: str) -> str:
             # statusd, approvald, indexd and watchd on an idle machine every 15 seconds.
             return BLOCKED_DEMAND_STARTED_ABSENT
         if reason_code and reason_code != REASON_NONE:
-            # An `absence_expected_reason` token, e.g. jobd's `scheduler_not_owned`. Retrying it
+            # An `absence_expected_reason` token, e.g. batchd's `scheduler_not_owned`. Retrying it
             # would fight the background-owner election this process lost.
             return reason_code
     return ""

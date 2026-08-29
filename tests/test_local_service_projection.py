@@ -83,7 +83,7 @@ def _stub_producers(**overrides):
     rows = {
         "indexd": {"service": "indexd", "pid": 0, "resources": {}},
         "statsd": {"service": "statsd", "pid": 0, "resources": {}},
-        "jobd": {"service": "jobd", "pid": 0, "resources": {}},
+        "batchd": {"service": "batchd", "pid": 0, "resources": {}},
         "statusd": {"service": "statusd", "pid": 0, "resources": {}},
         "watchd": {"service": "watchd", "pid": 0, "resources": {}},
         "approvald": {"service": "approvald", "pid": 0, "resources": {}},
@@ -97,7 +97,7 @@ def _quiet_app(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
     monkeypatch.setattr(webapp, "statsd_runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
-    monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "batchd", "pid": 0, "resources": {}})
     monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {"service": "statusd", "pid": 0, "resources": {}})
     monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
     monkeypatch.setattr(webapp, "runtime_process_ledger", lambda: {})
@@ -435,7 +435,7 @@ def test_the_rendered_payload_publishes_schema_five_and_the_frozen_inventory():
 
     assert (payload["schema_version"], frozenset(payload)) == (5, SNAPSHOT_PAYLOAD_KEYS)
     assert "alert" not in payload
-    assert payload["inventory"] == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
+    assert payload["inventory"] == ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
     assert [service["service"] for service in payload["services"]] == list(payload["inventory"])
 
 
@@ -477,7 +477,7 @@ def test_no_producer_field_is_lost_in_the_extraction():
     caught here rather than in the browser, where the cell just renders an em dash.
     """
     produced = {
-        "service": "jobd",
+        "service": "batchd",
         "pid": 4242,
         "started_at": 500.0,
         "version": 3,
@@ -492,10 +492,10 @@ def test_no_producer_field_is_lost_in_the_extraction():
         "resources": {"cpu_percent": 1.5, "rss_bytes": 2048},
     }
     collector = local_service_projection.LocalServicesCollector(
-        lambda: _stub_producers(jobd=produced), clock=lambda: 560.0
+        lambda: _stub_producers(batchd=produced), clock=lambda: 560.0
     )
     payload = collector.collect().payload(lambda row: dict(row))
-    rendered = next(service for service in payload["services"] if service["service"] == "jobd")
+    rendered = next(service for service in payload["services"] if service["service"] == "batchd")
 
     assert frozenset(rendered) == frozenset(produced) | {"uptime_seconds"}
     for key, value in produced.items():
@@ -594,7 +594,7 @@ def test_the_sampler_reads_the_typed_rows_not_a_reparsed_payload(monkeypatch, tm
         monkeypatch.setattr(
             webapp.job_client,
             "runtime_status",
-            lambda: {"service": "jobd", "pid": 4242, "resources": {"cpu_percent": 3.5, "rss_bytes": 8192}},
+            lambda: {"service": "batchd", "pid": 4242, "resources": {"cpu_percent": 3.5, "rss_bytes": 8192}},
         )
         monkeypatch.setattr(
             app_module.stats_current_collectors,
@@ -608,9 +608,9 @@ def test_the_sampler_reads_the_typed_rows_not_a_reparsed_payload(monkeypatch, tm
 
     samples = {sample.source_id: sample for sample in captured}
     assert tuple(samples) == local_service_projection.LOCAL_SERVICE_INVENTORY
-    assert samples["jobd"].running is True
-    assert samples["jobd"].cpu_percent == 3.5
-    assert samples["jobd"].rss_bytes == 8192.0
+    assert samples["batchd"].running is True
+    assert samples["batchd"].cpu_percent == 3.5
+    assert samples["batchd"].rss_bytes == 8192.0
     assert samples["watchd"].running is True
     assert samples["watchd"].rss_bytes > 0
     assert samples["indexd"].running is False
@@ -701,10 +701,10 @@ def _health(store: BackendHealthStore, *, now: float, web_started_at: float = 0.
 def test_a_row_publishes_the_typed_state_its_age_and_its_bounded_history(tmp_path, quiet_traffic_ledger):
     """The numbers Keiven asked for, on one row: state, when it started, and the transitions."""
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "starting", pid=42, identity="proc:98"),)))
-    store.record(HealthSnapshot(observed_at=102.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "starting", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=102.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
 
-    row = _health(store, now=112.0).service("jobd")
+    row = _health(store, now=112.0).service("batchd")
 
     assert row["observed"] is True and row["unavailable_reason_code"] == ""
     assert (row["state"], row["reason_code"], row["recovery_outcome"]) == ("ready", "none", "none")
@@ -724,7 +724,7 @@ def test_a_row_publishes_the_typed_state_its_age_and_its_bounded_history(tmp_pat
 def test_the_snapshot_level_health_block_carries_revision_age_and_persistence(tmp_path, quiet_traffic_ledger):
     """Revision and age are published once for the document, never copied into six rows."""
     store = _retained_store(tmp_path, port=7801)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
     document = store.status()
 
     health = local_service_projection.RetainedHealth(document=document, now=float(document["written_at"]) + 4.0)
@@ -738,7 +738,7 @@ def test_the_snapshot_level_health_block_carries_revision_age_and_persistence(tm
     assert (payload["persistence_state"], payload["persistence_reason_code"]) == ("ok", "")
     assert payload["observer_epoch"] == document["observer_epoch"]
     # No row repeats any of it: one revision, one age, one epoch, one place.
-    row = health.service("jobd")
+    row = health.service("batchd")
     assert frozenset(row) & frozenset(payload) == frozenset({"reason_code"}), sorted(frozenset(row) & frozenset(payload))
 
 
@@ -754,10 +754,10 @@ def test_counters_total_exactly_across_a_peer_restart(tmp_path, quiet_traffic_le
     number is republished from the other source.
     """
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
-    _work("jobd", epoch="pid:42", completions=(4.0, 10.0), failures=("peer_absent",))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
+    _work("batchd", epoch="pid:42", completions=(4.0, 10.0), failures=("peer_absent",))
 
-    before = _health(store, now=110.0).service("jobd")
+    before = _health(store, now=110.0).service("batchd")
     assert before["metrics"]["request_count"]["value"] == 3
     assert before["metrics"]["completed_count"]["value"] == 2
     assert before["metrics"]["error_count"]["value"] == 1
@@ -766,10 +766,10 @@ def test_counters_total_exactly_across_a_peer_restart(tmp_path, quiet_traffic_le
     assert before["metrics"]["restart_count"]["value"] == 0
 
     # The peer restarts: a new verified epoch in the store, and new work through the ledger.
-    store.record(HealthSnapshot(observed_at=104.0, resources=(_observation("jobd", "ready", pid=77, identity="proc:120"),)))
-    _work("jobd", epoch="pid:77", completions=(1.0,))
+    store.record(HealthSnapshot(observed_at=104.0, resources=(_observation("batchd", "ready", pid=77, identity="proc:120"),)))
+    _work("batchd", epoch="pid:77", completions=(1.0,))
 
-    after = _health(store, now=114.0).service("jobd")
+    after = _health(store, now=114.0).service("batchd")
     # Exact totals: 3 + 1 attempts, 2 + 1 completions, one error, mean (4+10+1)/3, max 10.
     assert after["metrics"]["request_count"]["value"] == 4
     assert after["metrics"]["completed_count"]["value"] == 3
@@ -791,13 +791,13 @@ def test_a_retained_aggregate_with_no_counter_sample_never_renders_as_complete(t
     field verbatim would tell a reader that zero requests is a measured fact.
     """
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
 
-    aggregate = store.document()["resources"]["jobd"]["aggregate"]
+    aggregate = store.document()["resources"]["batchd"]["aggregate"]
     assert aggregate["coverage"] == "full", aggregate
     assert aggregate["request_count"] == 0 and aggregate["last_sample"]["counters_available"] is False
 
-    coverage = _health(store, now=110.0).service("jobd")["coverage"]
+    coverage = _health(store, now=110.0).service("batchd")["coverage"]
     assert coverage["retained_counters"] == "partial", coverage
     assert "counters_not_observed" in coverage["retained_counter_reasons"], coverage
 
@@ -812,14 +812,14 @@ def test_a_retained_counter_sample_keeps_its_own_coverage_verdict(tmp_path, quie
     for observed_at, requests in ((100.0, 0), (102.0, 5)):
         store.record(HealthSnapshot(observed_at=observed_at, resources=(
             ResourceObservation(
-                resource="jobd", state="ready", reason_code="none", pid=42,
+                resource="batchd", state="ready", reason_code="none", pid=42,
                 process_start_identity="proc:98", counters_available=True,
                 request_count=requests, error_count=0, completed_count=requests,
                 latency_total_ms=float(requests), latency_max_ms=1.0,
             ),
         )))
 
-    row = _health(store, now=110.0).service("jobd")
+    row = _health(store, now=110.0).service("batchd")
     assert row["coverage"]["retained_counters"] == "full", row["coverage"]
     assert row["coverage"]["retained_counter_reasons"] == [], row["coverage"]
 
@@ -827,11 +827,11 @@ def test_a_retained_counter_sample_keeps_its_own_coverage_verdict(tmp_path, quie
 def test_an_untimed_service_publishes_no_average_response_time(tmp_path, quiet_traffic_ledger):
     """The ledger publishes `avg_ms: 0.0` with no completion. Zero is not a response time."""
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
-    _work("jobd", failures=("peer_absent",))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
+    _work("batchd", failures=("peer_absent",))
 
-    assert rpc.local_service_traffic_snapshot()["jobd"]["work"]["client_latency_ms"]["avg_ms"] == 0.0
-    metrics = _health(store, now=110.0).service("jobd")["metrics"]
+    assert rpc.local_service_traffic_snapshot()["batchd"]["work"]["client_latency_ms"]["avg_ms"] == 0.0
+    metrics = _health(store, now=110.0).service("batchd")["metrics"]
     for name in ("latency_average_ms", "latency_max_ms"):
         assert metrics[name] == {
             "state": "unavailable",
@@ -847,13 +847,13 @@ def test_an_untimed_service_publishes_no_average_response_time(tmp_path, quiet_t
 def test_counters_are_partial_when_the_retained_history_predates_this_web_process(tmp_path, quiet_traffic_ledger):
     """History survives a web restart; the ledger does not. The row says which window it covers."""
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
     epoch_started_at = float(store.document()["observer_epoch_started_at"])
 
-    same_process = _health(store, now=110.0, web_started_at=epoch_started_at).service("jobd")["coverage"]
+    same_process = _health(store, now=110.0, web_started_at=epoch_started_at).service("batchd")["coverage"]
     assert same_process["counters"] == "full" and same_process["counter_reasons"] == []
 
-    restarted_web = _health(store, now=110.0, web_started_at=epoch_started_at + 60.0).service("jobd")["coverage"]
+    restarted_web = _health(store, now=110.0, web_started_at=epoch_started_at + 60.0).service("batchd")["coverage"]
     assert restarted_web["counters"] == "partial", restarted_web
     assert restarted_web["counter_reasons"] == ["web_process_scope"], restarted_web
 
@@ -861,14 +861,14 @@ def test_counters_are_partial_when_the_retained_history_predates_this_web_proces
 def test_probe_traffic_never_enters_the_published_request_count(tmp_path, quiet_traffic_ledger):
     """The observer probes every service every two seconds. Those are not product requests."""
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
-    ledger = rpc.local_service_traffic_ledger("jobd")
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
+    ledger = rpc.local_service_traffic_ledger("batchd")
     for _ in range(50):
         ledger.record_completion(rpc.LOCAL_SERVICE_TRAFFIC_PROBE, client_elapsed_ms=900.0)
     ledger.record_failure(rpc.LOCAL_SERVICE_TRAFFIC_PROBE, "peer_absent")
-    _work("jobd", completions=(4.0,))
+    _work("batchd", completions=(4.0,))
 
-    metrics = _health(store, now=110.0).service("jobd")["metrics"]
+    metrics = _health(store, now=110.0).service("batchd")["metrics"]
     assert metrics["request_count"]["value"] == 1, metrics
     assert metrics["error_count"]["value"] == 0, metrics
     assert metrics["latency_max_ms"]["value"] == 4.0, metrics
@@ -880,10 +880,10 @@ def test_transitions_are_bounded_and_say_when_older_rows_exist(tmp_path, quiet_t
     states = ("ready", "degraded")
     for index in range(40):
         store.record(HealthSnapshot(observed_at=100.0 + index, resources=(
-            _observation("jobd", states[index % 2], pid=42, identity="proc:98"),
+            _observation("batchd", states[index % 2], pid=42, identity="proc:98"),
         )))
 
-    row = _health(store, now=200.0).service("jobd")
+    row = _health(store, now=200.0).service("batchd")
     assert len(row["transitions"]) == local_service_projection.SYSTEM_STATUS_MAX_TRANSITIONS
     assert row["transitions_total"] == 40 and row["transitions_truncated"] is True
     # The NEWEST rows, not the oldest: a reader acting on this list acts on the recent past.
@@ -910,11 +910,11 @@ def test_the_projection_republishes_the_stores_exactness_answer_rather_than_deci
     guarantee (9 failed).
     """
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
     document = store.status()
-    document["resources"]["jobd"]["transitions_total_exact"] = asserted
+    document["resources"]["batchd"]["transitions_total_exact"] = asserted
 
-    row = local_service_projection.RetainedHealth(document=document, now=200.0).service("jobd")
+    row = local_service_projection.RetainedHealth(document=document, now=200.0).service("batchd")
     assert row["transitions_total_exact"] is asserted, row
 
 
@@ -954,9 +954,9 @@ def test_the_projection_can_never_manufacture_an_exactness_claim_its_owner_did_n
         "transitions_total": 43,
         "transitions_total_exact": flag,
     }
-    document = {"resources": {"jobd": record}, "revision": 1, "written_at": 100.0}
+    document = {"resources": {"batchd": record}, "revision": 1, "written_at": 100.0}
 
-    row = local_service_projection.RetainedHealth(document=document, now=200.0).service("jobd")
+    row = local_service_projection.RetainedHealth(document=document, now=200.0).service("batchd")
     published = row["transitions_total_exact"]
     assert published is True or published is False, row
     owner_says = store_module._transition_totals(record, len(record["transitions"]))[1]
@@ -970,7 +970,7 @@ def test_an_unobserved_service_claims_nothing_about_a_history_it_does_not_have(q
     this module's own answer to its own question, not a copy of the store's rule, and it is why
     the published field stays a real boolean instead of becoming `None` for a row nobody observed.
     """
-    row = local_service_projection.RetainedHealth().service("jobd")
+    row = local_service_projection.RetainedHealth().service("batchd")
     assert row["observed"] is False, row
     assert row["transitions_total"] == 0, row
     assert row["transitions_total_exact"] is False, row
@@ -981,7 +981,7 @@ def test_an_unattached_observer_publishes_a_reason_and_never_zeros(quiet_traffic
     """No observer is not the same fact as a healthy service with no restarts."""
     health = local_service_projection.RetainedHealth()
     payload = health.payload()
-    row = health.service("jobd")
+    row = health.service("batchd")
 
     assert payload["available"] is False and payload["reason_code"] == "observer_unattached"
     assert payload["age_seconds"] is None and payload["revision"] == 0
@@ -996,7 +996,7 @@ def test_an_unattached_observer_publishes_a_reason_and_never_zeros(quiet_traffic
 def test_an_unobserved_resource_is_named_apart_from_an_unattached_observer(tmp_path, quiet_traffic_ledger):
     """Two different failures with two different fixes never collapse into one reason."""
     store = _retained_store(tmp_path)
-    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("jobd", "ready", pid=42, identity="proc:98"),)))
+    store.record(HealthSnapshot(observed_at=100.0, resources=(_observation("batchd", "ready", pid=42, identity="proc:98"),)))
     health = _health(store, now=110.0)
 
     assert health.payload()["available"] is True

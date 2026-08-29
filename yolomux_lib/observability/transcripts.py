@@ -23,7 +23,7 @@ from ..approval.yolo_rules import hard_floor_decision
 
 # Bump when the compact_transcript_* / activity-state parsing SHAPE changes so a parser change
 # busts every cached compact view and product-store entry keyed by this generation. The request
-# path folds this into its memory cache key, jobd coalesce key, and last-known-good product key.
+# path folds this into its memory cache key, batchd coalesce key, and last-known-good product key.
 TRANSCRIPT_PARSER_GENERATION = 1
 
 

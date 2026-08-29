@@ -211,7 +211,7 @@ def _promote_user_visible_scope(root: Path) -> None:
 
     Fire-and-forget through `file_index.request_user_visible_promotion`: it dispatches on a daemon
     thread and debounces per root, so a partial/warming/stale query bumps that root's frontier
-    priority without the query waiting on `jobd`, the crawler, or the RPC, and without launching a
+    priority without the query waiting on `batchd`, the crawler, or the RPC, and without launching a
     second crawl. Only call this when coverage is incomplete.
     """
     file_index.request_user_visible_promotion(str(root))

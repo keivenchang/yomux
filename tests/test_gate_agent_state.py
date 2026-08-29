@@ -30,7 +30,7 @@ from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.approval import approvald
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.local_services.rpc import safe_socket_path
 from yolomux_lib import statusd_client
 from yolomux_lib.approval.prompt_detector import agent_screen_state
@@ -532,8 +532,8 @@ def _assert_runtime_owns_durable_and_service_paths(runtime) -> None:
         prefix="yolomux-statusd",
     )
     assert runtime.app.job_client.socket_path == safe_socket_path(
-        paths.runtime_dir / "services" / jobd.JOBD_SOCKET_NAME,
-        prefix="yolomux-jobd",
+        paths.runtime_dir / "services" / batchd.BATCHD_SOCKET_NAME,
+        prefix="yolomux-batchd",
     )
     assert runtime.app.approval_client.socket_path == safe_socket_path(
         paths.runtime_dir / "services" / approvald.APPROVALD_SOCKET_NAME,
