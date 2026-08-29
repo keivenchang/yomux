@@ -967,10 +967,16 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
     force = query_bool(qs, "force")
+    fresh_git = query_bool(qs, "fresh_git")
+    cache_only = query_bool(qs, "cache_only")
+    cache_view = query_one(qs, "cache_view", "")
     repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
 
     def make_result(hours: float) -> tuple[Any, HTTPStatus]:
-        return request.server.app.session_files_http_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
+        options = {"from_ref": from_ref, "to_ref": to_ref, "repo_refs": repo_refs, "force": force, "cache_only": cache_only, "cache_view": cache_view}
+        if fresh_git:
+            options["fresh_git"] = True
+        return request.server.app.session_files_http_payload(session, hours, **options)
 
     request.write_validated_float_result(
         qs,

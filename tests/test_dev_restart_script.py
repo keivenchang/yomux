@@ -206,6 +206,9 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert "acquire_port_restart_lock \"$port\"" in source
     assert "a YOLOmux restart for port $port is already in progress" in source
     assert "another YOLOmux stack start is already in progress" in startup_common
+    assert "yolomux_report_inotify_capacity" in startup_common
+    assert "WARNING: startup inotify capacity is below the YOLOmux gate floor" in startup_common
+    assert "inotify_capacity_verdict" in startup_common
     assert 'source "$repo_root/tools/startup_common.sh"' in source
     assert "yolomux_acquire_start_lock" in source
     assert "trap yolomux_release_start_lock EXIT" in source

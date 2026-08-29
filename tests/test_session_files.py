@@ -1,8 +1,12 @@
 import contextlib
 import copy as copy_module
+import ctypes
 import dataclasses
 import json
 import os
+import shutil
+import struct
+import tempfile
 import time
 import tracemalloc
 from http import HTTPStatus
@@ -36,14 +40,26 @@ from _git_helpers import git
 from _git_helpers import init_repo
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
+from tests.browser_helpers.browser_layout import WebDriverWait
+from tests.browser_helpers.browser_layout import new_chrome_driver
+from tests.browser_helpers.browser_layout import register_browser_new_document_script
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.gate_harness import gate_http_port
+from tests.isolated_dev_server import build_paths
+from tests.isolated_dev_server import start_isolated_dev_server
+from tests.isolated_dev_server import stop_and_reap_daemons
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.terminal_state_guard import assert_terminal_transition
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yolomux_lib.server_logs import SERVER_LOGS
 from yolomux_lib.filesystem import exclusions
 from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.infra import jobd as jobd_module
+from yolomux_lib.infra.common import runtime_root
+from yolomux_lib.infra.host_partition import host_partitioned_state_dir
 
 
 @contextlib.contextmanager
@@ -77,10 +93,105 @@ def dict_return_args(value):
     return get_args(value)
 
 
+def assert_e3_causal_ceilings(observed: dict[str, int], ceilings: dict[str, int]) -> None:
+    """Fail closed on the frozen E3 physical-fixture budgets, including the loop control."""
+    assert set(observed) == set(ceilings), (observed, ceilings)
+    overruns = {name: observed[name] for name, limit in ceilings.items() if observed[name] > limit}
+    assert not overruns, f"session-files causal ceiling exceeded: observed={observed} ceilings={ceilings} overruns={overruns}"
+
+
+class SessionFilesDiskEventObserver:
+    """Read the kernel events for the two E3 durable owners, without product instrumentation."""
+
+    _EVENT = struct.Struct("iIII")
+    _IN_CLOSE_WRITE = 0x00000008
+    _IN_MOVED_FROM = 0x00000040
+    _IN_MOVED_TO = 0x00000080
+    _IN_DELETE = 0x00000200
+
+    def __init__(self, *directories: Path):
+        if os.name != "posix" or not Path("/proc").is_dir():
+            pytest.skip("E3 physical disk gate requires Linux inotify")
+        libc = ctypes.CDLL(None, use_errno=True)
+        self._init = libc.inotify_init1
+        self._init.argtypes = [ctypes.c_int]
+        self._init.restype = ctypes.c_int
+        self._add_watch = libc.inotify_add_watch
+        self._add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self._add_watch.restype = ctypes.c_int
+        self.fd = self._init(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self.fd < 0:
+            error = ctypes.get_errno()
+            pytest.skip(f"E3 physical disk gate could not allocate inotify: {os.strerror(error)}")
+        self.names: dict[int, Path] = {}
+        mask = self._IN_CLOSE_WRITE | self._IN_MOVED_FROM | self._IN_MOVED_TO | self._IN_DELETE
+        try:
+            for directory in directories:
+                directory.mkdir(parents=True, exist_ok=True)
+                descriptor = self._add_watch(self.fd, os.fsencode(directory), mask)
+                if descriptor < 0:
+                    error = ctypes.get_errno()
+                    pytest.skip(f"E3 physical disk gate could not watch {directory}: {os.strerror(error)}")
+                self.names[descriptor] = directory
+        except BaseException:
+            os.close(self.fd)
+            raise
+
+    def clear(self) -> None:
+        self.snapshot()
+
+    def snapshot(self) -> dict[str, int]:
+        close_writes = renames = unlinks = payload_writes = metadata_writes = event_writes = 0
+        closed_paths: set[Path] = set()
+        pending_moves: dict[int, bool] = {}
+        while True:
+            try:
+                data = os.read(self.fd, 64 * 1024)
+            except BlockingIOError:
+                break
+            offset = 0
+            while offset < len(data):
+                descriptor, mask, cookie, length = self._EVENT.unpack_from(data, offset)
+                offset += self._EVENT.size
+                name = data[offset:offset + length].rstrip(b"\\0").decode("utf-8", errors="replace")
+                offset += length
+                directory = self.names.get(descriptor, Path())
+                path = directory / name
+                if mask & self._IN_CLOSE_WRITE:
+                    close_writes += 1
+                    closed_paths.add(path)
+                if mask & self._IN_MOVED_FROM:
+                    pending_moves[cookie] = path in closed_paths
+                if mask & self._IN_MOVED_TO and pending_moves.pop(cookie, False):
+                    renames += 1
+                    # Atomic writers close a randomized sibling then rename it. Classify the
+                    # durable write by its destination, not that temporary sibling's name.
+                    if path.name == "client-events.json":
+                        event_writes += 1
+                    elif path.name.endswith(".manifest.json") or path.name.startswith("cache-index"):
+                        metadata_writes += 1
+                    elif path.name.endswith(".json"):
+                        payload_writes += 1
+                if mask & self._IN_DELETE:
+                    unlinks += 1
+        return {
+            "close_writes": close_writes,
+            "renames": renames,
+            "unlinks": unlinks,
+            "payload_writes": payload_writes,
+            "metadata_writes": metadata_writes,
+            "event_writes": event_writes,
+        }
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
 def operation_terminal_response(server, status_url, timeout=10):
     deadline = time.monotonic() + timeout
+    port = server.port if hasattr(server, "port") else server.server_address[1]
     while True:
-        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=timeout)
+        connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
         connection.request("GET", status_url)
         response = connection.getresponse()
         payload = json.loads(response.read().decode("utf-8"))
@@ -210,7 +321,7 @@ def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(
 
         server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
-        connection.request("GET", "/api/session-files?force=1")
+        connection.request("GET", "/api/session-files?fresh_git=1")
         response = connection.getresponse()
         body = json.loads(response.read().decode("utf-8"))
         connection.close()
@@ -245,7 +356,7 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
     try:
         server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
-        connection.request("GET", "/api/session-files?force=1")
+        connection.request("GET", "/api/session-files?fresh_git=1")
         response = connection.getresponse()
         body = json.loads(response.read().decode("utf-8"))
         connection.close()
@@ -272,6 +383,655 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
         webapp.control_server.stop()
 
 
+def test_session_files_stale_background_refresh_publishes_materialized_payload(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    fresh_payload = {"session": "5", "loaded": True, "repos": [{"repo": "/fresh"}], "files": [], "errors": []}
+    published = []
+    monkeypatch.setattr(webapp, "background_refresh_event_details", lambda *_args, **_kwargs: {"session": "5", "cache_key_hash": "ready"})
+    monkeypatch.setattr(webapp, "log_sampled_background_refresh_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webapp, "compute_session_files_cache_entry", lambda *_args, **_kwargs: (fresh_payload, HTTPStatus.OK, False, 0.0))
+    monkeypatch.setattr(webapp, "publish_session_files_ready_payload", lambda request, payload, status, **kwargs: published.append((request, payload, status, kwargs)) or True)
+    monkeypatch.setattr(webapp, "publish_background_refresh_done", lambda *_args, **_kwargs: None)
+    try:
+        webapp.refresh_session_files_cache(("payload",), "5", {}, 24.0, "HEAD", "current", {}, "background-refresh", "background-refresh")
+    finally:
+        webapp.control_server.stop()
+
+    assert published == [
+        ({"session": "5", "hours": 24.0, "from_ref": "HEAD", "to_ref": "current", "repo_refs": {}}, fresh_payload, HTTPStatus.OK,
+         {"trigger": "background-refresh", "compute_ms": pytest.approx(published[0][3]["compute_ms"])})
+    ]
+
+
+def test_session_files_refresh_callers_share_one_publication_owner():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    webapp._session_files_coordinator.refresh_session_files_cache = capture
+    try:
+        webapp.refresh_session_files_cache(("payload",), "5", {"5": info}, 24.0, "HEAD", "current", {}, "background-refresh", "background-refresh")
+        webapp.refresh_session_files_cache(("info",), "5", {"5": info}, 24.0, "HEAD", "current", {}, "background-info-refresh", "background-info-refresh")
+    finally:
+        webapp.control_server.stop()
+
+    assert [kwargs["requester"] for _args, kwargs in calls] == ["background-refresh", "background-info-refresh"]
+    assert [kwargs["trigger"] for _args, kwargs in calls] == ["background-refresh", "background-info-refresh"]
+    assert calls[0][0][2:4] == ("5", {"5": info})
+    assert calls[1][0][2:4] == ("5", {"5": info})
+
+
+def test_session_files_http_payload_issues_canonical_descriptor_for_symlinked_repo_ref(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    alias = tmp_path / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    webapp = app_module.TmuxWebtermApp([])
+    payload = {"session": "1", "loaded": True, "repos": [], "files": [], "errors": []}
+    webapp.session_files_payload = lambda *_args, **_kwargs: (payload, HTTPStatus.OK)
+    try:
+        result, status = webapp.session_files_http_payload(
+            "1", 24.0, "HEAD", "current", {str(alias): {"from": "HEAD~1", "to": "current"}},
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    descriptor = result["data"]["cache"]["request_descriptor"]
+    assert descriptor == webapp.session_files_request_descriptor(
+        "1", 24.0, "HEAD", "current", {str(repo): {"from": "HEAD~1", "to": "current"}},
+    )
+    assert len(descriptor) == 64 and str(alias) not in descriptor
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires two fixture-owned server processes")
+def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypatch, tmp_path, gate_http_port):
+    """A follower reads only the owner-published opaque cache view through its own HTTP server."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "changed.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", "changed.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1, session_cwd=repo)
+    shared_state = tmp_path / "shared" / "state"
+    shared_runtime = tmp_path / "shared" / "runtime"
+    shared_runtime.mkdir(parents=True)
+    owner_paths = build_paths(tmp_path / "owner", state_dir=shared_state)
+    follower_paths = build_paths(tmp_path / "follower", state_dir=shared_state)
+
+    def git_view_footprint(*roots: Path) -> tuple[int, int]:
+        entries = [
+            entry
+            for root in roots
+            for entry in root.rglob("yolomux-git-view-*")
+            if entry.is_file()
+        ]
+        return len(entries), sum(entry.stat().st_blocks * 512 for entry in entries)
+
+    def process_io(pid: int) -> dict[str, int]:
+        values = {}
+        for line in Path(f"/proc/{pid}/io").read_text(encoding="utf-8").splitlines():
+            name, value = line.split(":", 1)
+            if name in {"write_bytes", "cancelled_write_bytes"}:
+                values[name] = int(value.strip())
+        return values
+
+    def process_environment_contains(pid: int, name: str, value: Path) -> bool:
+        return f"{name}={value}".encode("utf-8") in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+
+    frozen_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    frozen_object_count = int(next(
+        line.split(":", 1)[1].strip()
+        for line in git(repo, "count-objects", "-v").stdout.splitlines()
+        if line.startswith("count:")
+    ))
+    owner = follower = None
+    try:
+        owner_port = gate_http_port.release()
+        owner = start_isolated_dev_server(
+            "session-files-owner",
+            Path(__file__).resolve().parents[1],
+            owner_paths,
+            runtime,
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime)},
+            port=owner_port,
+        )
+        follower = start_isolated_dev_server(
+            "session-files-follower",
+            Path(__file__).resolve().parents[1],
+            follower_paths,
+            runtime,
+            env_overrides={
+                "YOLOMUX_RUNTIME_DIR": str(shared_runtime),
+                "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port),
+            },
+        )
+        assert process_environment_contains(owner.process.pid, "TMPDIR", owner_paths.tmp_dir), "owner child did not inherit its fixture TMPDIR"
+        assert process_environment_contains(follower.process.pid, "TMPDIR", follower_paths.tmp_dir), "follower child did not inherit its fixture TMPDIR"
+        temp_before = git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir)
+        io_before = {
+            name: process_io(owner.process.pid).get(name, 0) + process_io(follower.process.pid).get(name, 0)
+            for name in ("write_bytes", "cancelled_write_bytes")
+        }
+        session = runtime.sessions[0]
+        request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&force=1"
+        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection.request("GET", request_path)
+        receipt_response = connection.getresponse()
+        receipt = json.loads(receipt_response.read().decode("utf-8"))
+        connection.close()
+        assert receipt_response.status == HTTPStatus.ACCEPTED
+        terminal_status, terminal = operation_terminal_response(owner, receipt["operation"]["status_url"], timeout=20)
+        assert terminal_status == HTTPStatus.OK
+        assert terminal["state"] == "ready"
+        views = sorted(
+            path for path in shared_state.rglob("session-files-cache/*.json")
+            if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}
+        )
+        assert len(views) == 1
+        view_id = views[0].stem
+        assert len(view_id) == 64
+        # Mutate the fixture-owned repository only after the first accepted operation has
+        # terminalized. A real changed worktree must produce one newer canonical generation,
+        # rather than reusing the prior completion or merely replaying its event.
+        (repo / "new-after-terminal.py").write_text("value = 3\n", encoding="utf-8")
+        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection.request("GET", f"{request_path}&fresh_git=1")
+        changed_receipt_response = connection.getresponse()
+        changed_receipt = json.loads(changed_receipt_response.read().decode("utf-8"))
+        connection.close()
+        assert changed_receipt_response.status == HTTPStatus.ACCEPTED
+        changed_terminal_status, changed_terminal = operation_terminal_response(owner, changed_receipt["operation"]["status_url"], timeout=20)
+        assert changed_terminal_status == HTTPStatus.OK and changed_terminal["state"] == "ready"
+        changed_record = json.loads(views[0].read_text(encoding="utf-8"))
+        assert any(file.get("path") == "new-after-terminal.py" for file in changed_terminal["data"].get("files", []))
+        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}")
+        follower_response = connection.getresponse()
+        follower_payload = json.loads(follower_response.read().decode("utf-8"))
+        connection.close()
+        assert follower_response.status == HTTPStatus.OK
+        assert follower_payload["state"] == "ready"
+        expected_payload = dict(changed_terminal["data"])
+        expected_payload.pop("cache", None)
+        follower_payload["data"].pop("cache", None)
+        assert follower_payload["data"] == expected_payload
+        follower.restart()
+        replay_connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        replay_connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}")
+        replay_response = replay_connection.getresponse()
+        replay_payload = json.loads(replay_response.read().decode("utf-8"))
+        replay_connection.close()
+        assert replay_response.status == HTTPStatus.OK
+        replay_payload["data"].pop("cache", None)
+        assert replay_payload["data"] == expected_payload
+        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=other&cache_only=1&cache_view={view_id}")
+        mismatch_response = connection.getresponse()
+        mismatch = json.loads(mismatch_response.read().decode("utf-8"))
+        connection.close()
+        assert mismatch_response.status == HTTPStatus.ACCEPTED
+        assert mismatch["state"] == "queued" and mismatch["status"] == "pending"
+        # This is a causal fixture, not an ambient disk probe: its repository identity and all
+        # server-written paths are frozen below tmp_path. One logical generation leaves no private
+        # Git view behind, cannot mutate the repository, and remains below a deliberately generous
+        # process-I/O ceiling that would catch the original rapid rewrite loop.
+        assert git(repo, "rev-parse", "HEAD").stdout.strip() == frozen_head
+        assert int(next(line.split(":", 1)[1].strip() for line in git(repo, "count-objects", "-v").stdout.splitlines() if line.startswith("count:"))) == frozen_object_count
+        assert git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir) == temp_before
+        io_after = {
+            name: process_io(owner.process.pid).get(name, 0) + process_io(follower.process.pid).get(name, 0)
+            for name in ("write_bytes", "cancelled_write_bytes")
+        }
+        temp_after = git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir)
+        assert_e3_causal_ceilings(
+            {
+                # The fixture performs two owner generations (before and after the owned repo
+                # mutation), one follower opaque read, one stale owner revalidation, and one
+                # mismatched follower refusal. Each is independently
+                # required by this causal sequence; another request is a loop.
+                "http_requests": 5,
+                "canonical_views": len(views),
+                "temporary_view_files": temp_after[0],
+                "temporary_view_allocated_bytes": temp_after[1],
+                "write_bytes": io_after["write_bytes"] - io_before["write_bytes"],
+                "cancelled_write_bytes": io_after["cancelled_write_bytes"] - io_before["cancelled_write_bytes"],
+            },
+            {
+                "http_requests": 5,
+                "canonical_views": 1,
+                "temporary_view_files": temp_before[0],
+                "temporary_view_allocated_bytes": temp_before[1],
+                "write_bytes": 64 * 1024 * 1024,
+                "cancelled_write_bytes": 64 * 1024 * 1024,
+            },
+        )
+    finally:
+        if follower is not None:
+            stop_and_reap_daemons(follower)
+        if owner is not None:
+            stop_and_reap_daemons(owner)
+        stop_isolated_tmux_runtime(runtime)
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires fixture-owned Linux processes")
+def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, gate_http_port):
+    """One unchanged generation has one producer and bounded durable disk effects."""
+
+    fixture_root = Path(tempfile.mkdtemp(prefix="e3-"))
+    repo = fixture_root / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "changed.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", "changed.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
+    runtime = start_isolated_tmux_runtime(monkeypatch, fixture_root / "tmux", session_count=1, session_cwd=repo)
+    runtime_base = fixture_root / "runtime"
+    shared_state = fixture_root / "state"
+    owner_paths = build_paths(fixture_root / "owner", state_dir=shared_state)
+    follower_paths = build_paths(fixture_root / "follower", state_dir=shared_state)
+    fixture_tmp = fixture_root / "tmp"
+    fixture_tmp.mkdir(parents=True)
+    monkeypatch.setenv("TMPDIR", str(fixture_tmp))
+    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_base))
+    previous_tempdir = tempfile.tempdir
+    tempfile.tempdir = None
+
+    def process_io(pid: int) -> dict[str, int]:
+        values = {"write_bytes": 0, "cancelled_write_bytes": 0}
+        for line in Path(f"/proc/{pid}/io").read_text(encoding="utf-8").splitlines():
+            name, value = line.split(":", 1)
+            if name in values:
+                values[name] = int(value.strip())
+        return values
+
+    def process_tmpdir(pid: int) -> Path:
+        values = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        entry = next(value for value in values if value.startswith(b"TMPDIR="))
+        return Path(entry.removeprefix(b"TMPDIR=").decode("utf-8"))
+
+    def qualified_pids(status: dict[str, object]) -> tuple[int, ...]:
+        pids = (owner.process.pid, follower.process.pid, int(status["pid"]), *(int(pid) for pid in status["worker_pids"]))
+        assert len(pids) == len(set(pids)), pids
+        assert all(pid > 0 and process_state(pid) not in {"", "Z"} for pid in pids)
+        return pids
+
+    def temp_footprint() -> tuple[int, int]:
+        files = [path for path in fixture_root.rglob("yolomux-git-view-*") if path.is_file()]
+        return len(files), sum(path.stat().st_blocks * 512 for path in files)
+
+    def warm_jobd_lane(priority: str) -> None:
+        response = job_client.submit(
+            "json_compact", {"e3": "warm", "priority": priority}, priority=priority,
+            generation=1, coalesce_key=f"e3-physical-warm-{priority}", deadline_ms=5_000,
+        )
+        assert response["ok"] is True
+        deadline = time.monotonic() + 10.0
+        while True:
+            result = job_client.result(response["job"]["job_id"], timeout=1.0)
+            if result.get("job", {}).get("status") == "completed":
+                return
+            assert time.monotonic() < deadline, result
+            time.sleep(0.02)
+
+    owner = follower = observer = job_client = differ = finder = None
+    try:
+        effective_runtime = runtime_root(environ={"YOLOMUX_RUNTIME_DIR": str(runtime_base)})
+        job_client = jobd_module.JobClient(effective_runtime / "services" / jobd_module.JOBD_SOCKET_NAME)
+        # The scheduler lease establishes the exact broker before the boundary, so the worker
+        # process counters are comparable rather than born halfway through the measurement.
+        assert job_client.start_for_scheduler()
+        # Both session-files lanes have one stable worker before the physical boundary. The warm
+        # products are a fixture lifecycle cost, not part of the session-files counters below.
+        warm_jobd_lane("interactive")
+        warm_jobd_lane("freshness")
+        owner = start_isolated_dev_server(
+            "session-files-physical-owner", Path(__file__).resolve().parents[1], owner_paths, runtime,
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base)}, port=gate_http_port.release(),
+        )
+        follower = start_isolated_dev_server(
+            "session-files-physical-follower", Path(__file__).resolve().parents[1], follower_paths, runtime,
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base), "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port)},
+        )
+        status_before = job_client.runtime_status()
+        pids_before = qualified_pids(status_before)
+        assert Path(tempfile.gettempdir()).is_relative_to(fixture_root)
+        assert process_tmpdir(owner.process.pid).is_relative_to(fixture_root)
+        assert process_tmpdir(follower.process.pid).is_relative_to(fixture_root)
+        assert all(process_tmpdir(pid).is_relative_to(fixture_root) for pid in pids_before[2:])
+        cache_dir = host_partitioned_state_dir(shared_state) / "session-files-cache"
+        events_dir = host_partitioned_state_dir(shared_state) / "background-owner"
+        frozen_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        session = runtime.sessions[0]
+        # The measured boundary starts before the sole ordinary accepted request. Do not fabricate a
+        # disk-only expiry while this real server retains a valid memory entry: users cannot make
+        # that split state through the API.
+        request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current"
+        observer = SessionFilesDiskEventObserver(cache_dir, events_dir)
+        observer.clear()
+        io_before = {name: sum(process_io(pid)[name] for pid in pids_before) for name in ("write_bytes", "cancelled_write_bytes")}
+        git_before = temp_footprint()
+        direct_session_files_requests = [0]
+        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        direct_session_files_requests[0] += 1
+        connection.request("GET", request_path)
+        fresh_response = connection.getresponse()
+        fresh_receipt = json.loads(fresh_response.read().decode("utf-8"))
+        connection.close()
+        assert fresh_response.status == HTTPStatus.ACCEPTED
+        terminal_status, terminal = operation_terminal_response(owner, fresh_receipt["operation"]["status_url"], timeout=20)
+        assert terminal_status == HTTPStatus.OK and terminal["state"] == "ready"
+        views = sorted(path for path in cache_dir.glob("*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"})
+        assert len(views) == 1
+        view_id = views[0].stem
+
+        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        direct_session_files_requests[0] += 1
+        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&cache_only=1&cache_view={view_id}")
+        follower_response = connection.getresponse()
+        follower_payload = json.loads(follower_response.read().decode("utf-8"))
+        connection.close()
+        assert follower_response.status == HTTPStatus.OK and follower_payload["state"] == "ready"
+        for name, destination, panel, state_expression in (
+            ("differ", "differ", "#panel-__differ__", "fileExplorerSessionFilesState"),
+            ("finder", "finder", "#panel-__finder__", "fileExplorerFinderSessionFilesState"),
+        ):
+            surface = new_chrome_driver(profile_dir=fixture_root / name)
+            register_browser_new_document_script(
+                surface,
+                "window.__e3SessionFilesRequests = [];"
+                "window.__e3SessionFilesApplications = 0;"
+                "const originalFetch = window.fetch.bind(window);"
+                "const originalApply = setSessionFilesPayloadForDestination;"
+                "setSessionFilesPayloadForDestination = (...args) => {"
+                " window.__e3SessionFilesApplications += 1;"
+                " return originalApply(...args);"
+                "};"
+                "window.fetch = (...args) => {"
+                " const target = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);"
+                " if (target.pathname === '/api/session-files') window.__e3SessionFilesRequests.push(target.search);"
+                " return originalFetch(...args);"
+                "};",
+            )
+            surface.get(f"http://127.0.0.1:{follower.port}/?sessions=__{destination}__,{quote(session, safe='')}&layout=left&tabs=left:__{destination}__")
+            WebDriverWait(surface, 12).until(lambda driver, panel=panel: driver.execute_script(f"return Boolean(document.querySelector('{panel}'));"))
+            WebDriverWait(surface, 12).until(lambda driver, state_expression=state_expression: driver.execute_script(f"return {state_expression}?.payload?.loaded === true;"))
+            WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+            requests = surface.execute_script("return [...window.__e3SessionFilesRequests];")
+            initial_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24"
+            cache_read = f"{initial_read}&cache_only=1&cache_view={view_id}"
+            # The initial HTML may already contain the follower's coherent cache view.  In that
+            # case zero browser fetches is strictly better than an opaque revalidation; otherwise
+            # permit the initial read and its one completion-view read.
+            assert requests in ([], [initial_read], [initial_read, cache_read]), requests
+            if destination == "differ":
+                differ = surface
+            else:
+                finder = surface
+        for surface in (differ, finder):
+            surface.execute_script("window.__e3SessionFilesApplications = 0;")
+        for surface, state_expression in ((differ, "fileExplorerSessionFilesState"), (finder, "fileExplorerFinderSessionFilesState")):
+            before_requests = surface.execute_script("return [...window.__e3SessionFilesRequests];")
+            before_signature = surface.execute_script(f"return {state_expression}.signature;")
+            assert surface.execute_script(
+                "const prior = clientEventTransportState.source;"
+                "prior.onerror();"
+                "closeClientEventStream();"
+                "syncClientEventDemand({immediate: true});"
+                "return clientEventTransportState.source !== prior;"
+            )
+            WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+            assert surface.execute_script("return [...window.__e3SessionFilesRequests];") == before_requests
+            assert surface.execute_script(f"return {state_expression}.signature;") == before_signature
+            assert surface.execute_script("return window.__e3SessionFilesApplications;") == 0
+        status_after = job_client.runtime_status()
+        pids_after = qualified_pids(status_after)
+        assert set(pids_before).issubset(pids_after), "physical E3 gate refuses a worker replacement inside one generation"
+        assert len(pids_after) <= len(pids_before) + 1, "browser cache delivery may activate one pre-warmed jobd lane, not accumulate workers"
+        product_before = status_before["product_counters"].get("session_files_view", {})
+        product_after = status_after["product_counters"].get("session_files_view", {})
+        work_before = status_before["product_work_totals"].get("session_files_view", {})
+        work_after = status_after["product_work_totals"].get("session_files_view", {})
+        events = observer.snapshot()
+        io_after = {name: sum(process_io(pid)[name] for pid in pids_after) for name in ("write_bytes", "cancelled_write_bytes")}
+        observed = {
+            "direct_session_files_requests": direct_session_files_requests[0],
+            "browser_session_files_requests": sum(
+                len(surface.execute_script("return [...window.__e3SessionFilesRequests];"))
+                for surface in (differ, finder)
+            ),
+            "producers": int(product_after.get("completed", 0)) - int(product_before.get("completed", 0)),
+            "coalesced": int(product_after.get("coalesced", 0)) - int(product_before.get("coalesced", 0)),
+            "git_snapshots": int(work_after.get("git_snapshots", 0)) - int(work_before.get("git_snapshots", 0)),
+            "payload_bytes": int(work_after.get("result_bytes", 0)) - int(work_before.get("result_bytes", 0)),
+            "cache_payload_writes": events["payload_writes"],
+            "metadata_writes": events["metadata_writes"],
+            "event_writes": events["event_writes"],
+            "close_writes": events["close_writes"],
+            "renames": events["renames"],
+            "unlinks": events["unlinks"],
+            "temporary_view_files": temp_footprint()[0] - git_before[0],
+            "temporary_view_allocated_bytes": temp_footprint()[1] - git_before[1],
+            "write_bytes": io_after["write_bytes"] - io_before["write_bytes"],
+            "cancelled_write_bytes": io_after["cancelled_write_bytes"] - io_before["cancelled_write_bytes"],
+        }
+        ceilings = {
+            "direct_session_files_requests": 2,
+            # Each visible surface may perform its initial read and one opaque completion read.
+            # Reconnect replays the completion but must not repeat either read.
+            "browser_session_files_requests": 4,
+            "producers": 1,
+            "coalesced": 0,
+            "git_snapshots": 1,
+            "payload_bytes": 256 * 1024,
+            "cache_payload_writes": 4,
+            "metadata_writes": 4,
+            "event_writes": 4,
+            "close_writes": 16,
+            "renames": 8,
+            "unlinks": 8,
+            "temporary_view_files": 0,
+            "temporary_view_allocated_bytes": 0,
+            "write_bytes": 16 * 1024 * 1024,
+            "cancelled_write_bytes": 16 * 1024 * 1024,
+        }
+        assert_e3_causal_ceilings(observed, ceilings)
+        assert git(repo, "rev-parse", "HEAD").stdout.strip() == frozen_head
+        # This is a real repeated completion read, remeasured against the same frozen ceiling.
+        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        direct_session_files_requests[0] += 1
+        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&cache_only=1&cache_view={view_id}")
+        control_response = connection.getresponse()
+        control_payload = json.loads(control_response.read().decode("utf-8"))
+        connection.close()
+        assert control_response.status == HTTPStatus.OK and control_payload["state"] == "ready"
+        with pytest.raises(AssertionError, match="causal ceiling exceeded"):
+            assert_e3_causal_ceilings({**observed, "direct_session_files_requests": direct_session_files_requests[0]}, ceilings)
+    finally:
+        if finder is not None:
+            finder.quit()
+        if differ is not None:
+            differ.quit()
+        if observer is not None:
+            observer.close()
+        if job_client is not None:
+            job_client.stop_for_scheduler()
+        if follower is not None:
+            stop_and_reap_daemons(follower)
+        if owner is not None:
+            stop_and_reap_daemons(owner)
+        tempfile.tempdir = previous_tempdir
+        stop_isolated_tmux_runtime(runtime)
+        shutil.rmtree(fixture_root)
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires fixture-owned server processes")
+def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(monkeypatch, tmp_path, gate_http_port):
+    """A real Differ browser applies a completion with no repeated cache-read loop."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "changed.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", "changed.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1, session_cwd=repo)
+    shared_state = tmp_path / "shared" / "state"
+    shared_runtime = tmp_path / "shared" / "runtime"
+    shared_runtime.mkdir(parents=True)
+    owner_paths = build_paths(tmp_path / "owner", state_dir=shared_state)
+    follower_paths = build_paths(tmp_path / "follower", state_dir=shared_state)
+    owner = follower = browser = finder = None
+    try:
+        owner = start_isolated_dev_server(
+            "session-files-browser-owner", Path(__file__).resolve().parents[1], owner_paths, runtime,
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime)}, port=gate_http_port.release(),
+        )
+        follower = start_isolated_dev_server(
+            "session-files-browser-follower", Path(__file__).resolve().parents[1], follower_paths, runtime,
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime), "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port)},
+        )
+        session = runtime.sessions[0]
+        request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&force=1&fresh_git=1"
+        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection.request("GET", request_path)
+        receipt_response = connection.getresponse()
+        receipt = json.loads(receipt_response.read().decode("utf-8"))
+        connection.close()
+        assert receipt_response.status == HTTPStatus.ACCEPTED
+        terminal_status, terminal = operation_terminal_response(owner, receipt["operation"]["status_url"], timeout=20)
+        assert terminal_status == HTTPStatus.OK and terminal["state"] == "ready"
+        views = [path for path in shared_state.rglob("session-files-cache/*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}]
+        assert len(views) == 1
+        view_id = views[0].stem
+        browser = new_chrome_driver(profile_dir=tmp_path / "chrome-profile")
+        assert (tmp_path / "chrome-profile").is_relative_to(tmp_path)
+        browser.get(f"http://127.0.0.1:{follower.port}/?sessions=__differ__,{quote(session, safe='')}&layout=left&tabs=left:__differ__")
+        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__differ__'));"))
+        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return fileExplorerSessionFilesState?.payload?.loaded === true;"))
+        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+        browser_descriptor = browser.execute_script("return sessionFilesDescriptorForDestination('differ', sessionFilesRequestForDestination('differ'));" )
+        assert browser_descriptor == json.loads(views[0].read_text(encoding="utf-8"))["request_descriptor"]
+        finder = new_chrome_driver(profile_dir=tmp_path / "finder-profile")
+        finder.get(f"http://127.0.0.1:{follower.port}/?sessions=__finder__,{quote(session, safe='')}&layout=left&tabs=left:__finder__")
+        WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__finder__'));"))
+        WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return fileExplorerFinderSessionFilesState?.payload?.loaded === true;"))
+        WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+        finder_descriptor = finder.execute_script("return sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder'));" )
+        assert finder_descriptor == browser_descriptor
+        for surface in (browser, finder):
+            surface.execute_script(
+            "window.__e3SessionFilesRequests = [];"
+            "window.__e3SessionFilesApplications = 0;"
+            "const originalFetch = window.fetch.bind(window);"
+            "const originalApply = setSessionFilesPayloadForDestination;"
+            "setSessionFilesPayloadForDestination = (...args) => {"
+            " window.__e3SessionFilesApplications += 1;"
+            " return originalApply(...args);"
+            "};"
+            "window.fetch = (...args) => {"
+            " const target = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);"
+            " if (target.pathname === '/api/session-files') window.__e3SessionFilesRequests.push(target.search);"
+            " return originalFetch(...args);"
+            "};"
+            )
+        for cache_record in (views[0], views[0].with_name(f"{view_id}.manifest.json")):
+            record = json.loads(cache_record.read_text(encoding="utf-8"))
+            record["stored_at"] = 0.0
+            cache_record.write_text(json.dumps(record), encoding="utf-8")
+        # An expired durable view after an owner restart is a recoverable state.  Do not pair the
+        # expired record with a still-fresh owner-memory entry: that split state cannot happen to
+        # a user and used to leave this EventSource assertion waiting for an event that was never
+        # eligible to publish.
+        owner.restart()
+        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current")
+        stale_response = connection.getresponse()
+        assert stale_response.status == HTTPStatus.OK
+        stale_response.read()
+        connection.close()
+        def completion_is_published():
+            manifests = list(shared_state.rglob("background-owner/client-events.json"))
+            if len(manifests) != 1:
+                return False
+            events = json.loads(manifests[0].read_text(encoding="utf-8")).get("events", [])
+            return any(
+                event.get("type") == "background_refresh_done"
+                and event.get("payload", {}).get("role") == "session-files"
+                and event.get("payload", {}).get("cache_view_id") == view_id
+                for event in events
+            )
+        WebDriverWait(browser, 12).until(lambda _driver: completion_is_published())
+        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+        expected_cache_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}"
+        # This must be the follower's delivered EventSource completion, not merely a
+        # persisted event that a disconnected browser never handled.
+        WebDriverWait(browser, 12).until(
+            lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
+        )
+        WebDriverWait(finder, 12).until(
+            lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
+        )
+        requests = browser.execute_script("return [...window.__e3SessionFilesRequests];")
+        assert requests == [expected_cache_read]
+        assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+        assert browser.execute_script("return window.__e3SessionFilesApplications;") <= 1
+        assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
+        completion = next(
+            event["payload"]
+            for event in json.loads(next(shared_state.rglob("background-owner/client-events.json")).read_text(encoding="utf-8")).get("events", [])
+            if event.get("type") == "background_refresh_done"
+            and event.get("payload", {}).get("role") == "session-files"
+            and event.get("payload", {}).get("cache_view_id") == view_id
+        )
+        browser.execute_script("handleClientPushEventNowByType('background_refresh_done', arguments[0]);", completion)
+        finder.execute_script("handleClientPushEventNowByType('background_refresh_done', arguments[0]);", completion)
+        browser.execute_async_script("const done = arguments[0]; requestAnimationFrame(() => requestAnimationFrame(done));")
+        assert browser.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+        assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+        assert browser.execute_script("return window.__e3SessionFilesApplications;") <= 1
+        assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
+        assert browser.execute_script("return document.querySelector('#panel-__differ__')?.dataset.fileExplorerMode === 'diff';")
+        assert finder.execute_script("return fileExplorerFinderSessionFilesState?.payload?.loaded === true;")
+        for surface, state_expression in (
+            (browser, "fileExplorerSessionFilesState"),
+            (finder, "fileExplorerFinderSessionFilesState"),
+        ):
+            before_signature = surface.execute_script(f"return {state_expression}.signature;")
+            replaced = surface.execute_script(
+                "const prior = clientEventTransportState.source;"
+                "window.__e3ReplayedCompletions = 0;"
+                "prior.onerror();"
+                "closeClientEventStream();"
+                "syncClientEventDemand({immediate: true});"
+                "const replacement = clientEventTransportState.source;"
+                "return replacement !== prior;"
+            )
+            assert replaced
+            WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+            assert surface.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+            assert surface.execute_script(f"return {state_expression}.signature;") == before_signature
+            assert surface.execute_script("return window.__e3SessionFilesApplications;") <= 1
+    finally:
+        if finder is not None:
+            finder.quit()
+        if browser is not None:
+            browser.quit()
+        if follower is not None:
+            stop_and_reap_daemons(follower)
+        if owner is not None:
+            stop_and_reap_daemons(owner)
+        stop_isolated_tmux_runtime(runtime)
+
+
 def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir(); init_repo(repo)
@@ -281,14 +1041,19 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json", raising=False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     release_result, terminal_published, changed_terminal_published = threading_module.Event(), threading_module.Event(), threading_module.Event()
-    published, submissions, result_calls, durable_writes, result_path = [], [], [], [], ["done.py"]
+    published, submissions, submission_requesters, result_calls, durable_writes, result_path = [], [], [], [], [], ["done.py"]
     class ControlledJobClient:
+        def start_for_scheduler(self):
+            return None
         def stop_for_scheduler(self):
             return None
         def submit(self, *_args, **kwargs):
             submissions.append(kwargs)
+            payload = _args[1] if len(_args) > 1 and isinstance(_args[1], dict) else {}
+            source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+            submission_requesters.append(str(source.get("requester") or ""))
             count = len(submissions)
-            job_id = "job-session-files-ready" if count <= 2 else f"job-session-files-fresh-{count}"
+            job_id = "job-session-files-ready" if count <= 2 or kwargs["fresh_only"] is False else f"job-session-files-fresh-{count}"
             return {"ok": True, "job": {"job_id": job_id, "generation": 7, "status": "queued"}}
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 7}, b""
@@ -305,9 +1070,9 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
 
     monkeypatch.setattr(webapp, "shared_git_identity", producer_derived_git_identity)
     original_write = webapp.write_session_files_disk_cache_unlocked
-    def capture_durable_write(path, signature, payload, status, source_generation=""):
+    def capture_durable_write(path, signature, payload, status, source_generation="", request_descriptor=""):
         durable_writes.append((path, source_generation))
-        return original_write(path, signature, payload, status, source_generation)
+        return original_write(path, signature, payload, status, source_generation, request_descriptor)
 
     webapp.write_session_files_disk_cache_unlocked = capture_durable_write
     webapp.request_session_files_disk_cache_prune = lambda *_args, **_kwargs: None
@@ -329,11 +1094,11 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         canonical_refs = {"/repo/z": {"from": "HEAD~2", "to": "current"}}  # The HTTP boundary trims these before canonical publication.
         encoded_refs = quote(json.dumps(refs, separators=(",", ":")), safe="")
         request_path = f"/api/session-files?session=5&hours=7.5&from=HEAD~3&to=current&refs={encoded_refs}"
-        def request_session_files(path=request_path):
+        def request_session_files(path=request_path, expected_status=HTTPStatus.ACCEPTED):
             connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
             connection.request("GET", path); response = connection.getresponse()
             receipt = json.loads(response.read().decode("utf-8")); connection.close()
-            assert response.status == HTTPStatus.ACCEPTED
+            assert response.status == expected_status
             return receipt
         receipt, duplicate_receipt = request_session_files(), request_session_files()
         assert receipt["state"] == "queued"; assert receipt["request"]["id"].startswith("r-")
@@ -344,7 +1109,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert operation["progress"] == {"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"}
         assert duplicate_receipt["operation"]["id"] != operation["id"]; assert len(submissions) == 2
         assert submissions[0]["coalesce_key"] == submissions[1]["coalesce_key"]; assert submissions[0]["generation"] == submissions[1]["generation"]
-        assert submissions[0]["fresh_only"] is submissions[1]["fresh_only"] is True
+        assert submissions[0]["fresh_only"] is submissions[1]["fresh_only"] is False
         release_result.set(); assert terminal_published.wait(2.0), "accepted operations did not publish terminal results"
         terminals = {item["operation"]["id"]: item for item in published}
         assert set(terminals) == {operation["id"], duplicate_receipt["operation"]["id"]}
@@ -352,36 +1117,111 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert terminal["operation"]["id"] == operation["id"]; assert terminal["operation"]["cursor"]["seq"] == 1
         assert terminal["result"]["state"] == "ready"; assert terminal["result"]["data"]["files"] == [{"path": "done.py"}]
         assert [item["state"] for item in terminal["result"]["producer"]["chain"]] == ["completed"]
+        assert_terminal_transition(
+            contract_id="session-files-http-operation-completion",
+            pending_observed=receipt["state"] == "queued",
+            terminal_observed=terminal["result"]["state"] == "ready",
+            evidence={"operation": operation["id"], "terminal": terminal["operation"]["cursor"]},
+        )
         assert result_calls == ["job-session-files-ready"]
         canonical_key = webapp.session_files_cache_key("payload", {"5": info}, "5", 7.5, "HEAD~3", "current", canonical_refs)
-        path, _signature = webapp.session_files_disk_cache_path(canonical_key)
+        path, cache_view = webapp.session_files_disk_cache_path(canonical_key)
         canonical_source_generation = webapp.session_files_source_generation(canonical_key)
         assert durable_writes == [(path, canonical_source_generation)]
         record = json.loads(path.read_text(encoding="utf-8")); assert record["source_generation"] == canonical_source_generation
+        assert record["request_descriptor"] == webapp.session_files_request_descriptor("5", 7.5, "HEAD~3", "current", canonical_refs)
+        assert len(record["request_descriptor"]) == 64
+        assert str(repo) not in record["request_descriptor"]
+        # This route-level test owns the request/operation/product chain. Browser application
+        # belongs to the browser fixture below; keeping a fake cross-surface ledger here hid
+        # which boundary had actually been measured.
+        assert len(result_calls) == 1
         refresh_starts, original_start_refresh = [], webapp.start_session_files_cache_refresh
         webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (refresh_starts.append(cache_key) or original_start_refresh(cache_key, target, *args))
         snapshot, snapshot_status = webapp.session_files_payload_for_infos("5", {"5": info}, 7.5, "HEAD~3", "current", canonical_refs, requester="descriptor-snapshot")
         assert (snapshot_status, snapshot["files"], snapshot["cache"]["stale"]) == (HTTPStatus.OK, [{"path": "done.py"}], False)
         assert refresh_starts == []; assert webapp.session_files_service.wait_for_idle(0.1)
-        result_path[0] = "changed.py"; changed_receipt = request_session_files(f"{request_path}&force=1")
+        second_ordinary = request_session_files(expected_status=HTTPStatus.OK)
+        assert second_ordinary["request"]["id"] not in {receipt["request"]["id"], duplicate_receipt["request"]["id"]}
+        assert second_ordinary["data"]["files"] == [{"path": "done.py"}]
+        assert len(submissions) == 2
+        assert result_calls == ["job-session-files-ready"]
+        forced_without_fresh_git = request_session_files(f"{request_path}&force=1", expected_status=HTTPStatus.OK)
+        assert forced_without_fresh_git["data"]["files"] == [{"path": "done.py"}]
+        assert len(submissions) == 2
+        assert result_calls == ["job-session-files-ready"]
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", f"{request_path}&cache_only=1&cache_view={cache_view}"); cache_only_response = connection.getresponse()
+        cache_only_payload = json.loads(cache_only_response.read().decode("utf-8")); connection.close()
+        assert cache_only_response.status == HTTPStatus.OK
+        assert cache_only_payload["data"]["files"] == [{"path": "done.py"}]
+        assert len(submissions) == 2, f"a follower cache-only revalidation must not submit another producer: {submission_requesters}"
+        assert webapp.read_session_files_cache_view(cache_view, "5", 7.5, "other", "current", None) is None
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+        submissions_before_mismatch = len(submissions)
+        received_http_requests = []
+        cache_view_reads = []
+        original_http_payload = webapp.session_files_http_payload
+        original_cache_view_read = webapp._session_files_coordinator.read_session_files_cache_view
+        def capture_http_payload(*args, **kwargs):
+            received_http_requests.append((args, kwargs))
+            result = original_http_payload(*args, **kwargs)
+            received_http_requests[-1] = (*received_http_requests[-1], result)
+            return result
+        def capture_cache_view_read(*args, **kwargs):
+            result = original_cache_view_read(*args, **kwargs)
+            cache_view_reads.append((args, kwargs, result))
+            return result
+        webapp.session_files_http_payload = capture_http_payload
+        webapp._session_files_coordinator.read_session_files_cache_view = capture_cache_view_read
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", f"/api/session-files?session=5&hours=7.5&from=other&to=current&cache_only=1&cache_view={cache_view}"); mismatch_response = connection.getresponse()
+        mismatch_payload = json.loads(mismatch_response.read().decode("utf-8")); connection.close()
+        assert received_http_requests == [
+            (("5", 7.5), {"from_ref": "other", "to_ref": "current", "repo_refs": None, "force": False, "cache_only": True, "cache_view": cache_view}, ({"session": "5", "status": "pending", "retry_after_seconds": 1, "reason": "the requested session-files cache view is not ready"}, HTTPStatus.ACCEPTED))
+        ]
+        assert cache_view_reads == [( (webapp, cache_view, "5", 7.5, "other", "current", None), {}, None)]
+        assert mismatch_response.status == HTTPStatus.ACCEPTED
+        assert mismatch_payload["state"] == "queued"
+        assert mismatch_payload["status"] == "pending"
+        assert mismatch_payload["retry_after_seconds"] == 1
+        assert mismatch_payload["session"] == "5"
+        assert mismatch_payload["ok"] is True and mismatch_payload["terminal"] is False
+        assert mismatch_payload["request"]["id"].startswith("r-")
+        assert "api-session-files" not in submission_requesters[submissions_before_mismatch:], "a mismatched cache-only request must not submit session-files work"
+        submissions_before_changed = len(submissions)
+        result_path[0] = "changed.py"; changed_receipt = request_session_files(f"{request_path}&fresh_git=1")
         assert changed_receipt["state"] == "queued"
         assert changed_terminal_published.wait(2.0), "changed operation did not publish a terminal result"
         changed_terminal = published[-1]
         assert changed_terminal["operation"]["id"] == changed_receipt["operation"]["id"]; assert changed_terminal["result"]["data"]["files"] == [{"path": "changed.py"}]
-        assert submissions[2]["coalesce_key"] == submissions[0]["coalesce_key"]; assert submissions[2]["fresh_only"] is True
-        assert [item["job_id"] for item in changed_terminal["result"]["producer"]["chain"]] == ["job-session-files-fresh-3"]
+        changed_submissions = submissions[submissions_before_changed:]
+        fresh_submissions = [submission for submission in changed_submissions if submission["fresh_only"] is True]
+        assert len(fresh_submissions) == 1
+        assert fresh_submissions[0]["coalesce_key"] == submissions[0]["coalesce_key"]
+        assert [item["job_id"] for item in changed_terminal["result"]["producer"]["chain"]][0].startswith("job-session-files-fresh-")
         assert [item["state"] for item in changed_terminal["result"]["producer"]["chain"]] == ["completed"]
+        submissions_before_forced_fresh = len(submissions)
+        result_path[0] = "forced-fresh.py"
+        forced_fresh_receipt = request_session_files(f"{request_path}&force=1&fresh_git=1")
+        assert forced_fresh_receipt["state"] == "queued"
+        assert webapp.jobd_operation_service.wait_for_idle(5)
+        forced_fresh_terminal = published[-1]
+        assert forced_fresh_terminal["operation"]["id"] == forced_fresh_receipt["operation"]["id"]
+        assert forced_fresh_terminal["result"]["data"]["files"] == [{"path": "forced-fresh.py"}]
+        assert len(submissions) == submissions_before_forced_fresh + 1
+        assert submissions[-1]["fresh_only"] is True
         watch_record = webapp.client_watch_service.event_watcher_record
         watch_record.filesystem_healthy = True
         watch_record.filesystem_roots = (str(repo.resolve()),)
         result_path[0] = "watched.py"
-        watched_receipt = request_session_files(f"{request_path}&force=1")
+        watched_receipt = request_session_files(f"{request_path}&fresh_git=1")
         assert webapp.jobd_operation_service.wait_for_idle(5)
         watched_terminal = published[-1]
         assert watched_terminal["operation"]["id"] == watched_receipt["operation"]["id"]
         assert watched_terminal["result"]["data"]["files"] == [{"path": "watched.py"}]
-        assert submissions[3]["fresh_only"] is True
-        assert [item["job_id"] for item in watched_terminal["result"]["producer"]["chain"]] == ["job-session-files-fresh-4"]
+        assert submissions[-1]["fresh_only"] is True
+        assert [item["job_id"] for item in watched_terminal["result"]["producer"]["chain"]][0].startswith("job-session-files-fresh-")
         assert [item["state"] for item in watched_terminal["result"]["producer"]["chain"]] == ["completed"]
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         connection.request("GET", operation["status_url"]); status_response = connection.getresponse()
@@ -399,6 +1239,17 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert operation_state_path.is_file()
         persisted = QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation["id"])
         assert persisted == (terminal["result"], HTTPStatus.OK)
+        def unexpected_cache_only_work(*_args, **_kwargs):
+            raise AssertionError("a malformed cache view must not discover sessions or inspect Git")
+        webapp.refresh_sessions = unexpected_cache_only_work
+        webapp.shared_git_identity = unexpected_cache_only_work
+        submission_count = len(submissions)
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", "/api/session-files?session=5&cache_only=1&cache_view=not-a-cache-view"); malformed_response = connection.getresponse()
+        malformed_payload = json.loads(malformed_response.read().decode("utf-8")); connection.close()
+        assert malformed_response.status == HTTPStatus.ACCEPTED
+        assert malformed_payload["state"] == "queued" and malformed_payload["status"] == "pending"
+        assert len(submissions) == submission_count, "a malformed cache view must not submit jobd work"
     finally:
         release_result.set()
         if server is not None: stop_browser_server(server, thread)
@@ -466,6 +1317,10 @@ def test_session_files_completion_before_receipt_persistence_terminalizes_after_
         assert terminal_status == HTTPStatus.OK
         assert terminal["state"] == "ready"
         assert terminal["data"]["files"] == [{"path": "ready.py"}]
+        terminal_event = webapp.queued_delivery_ledger.operation_replay_event(operation_id)
+        assert terminal_event is not None
+        assert receipt["request"]["id"]
+        assert terminal_event["operation"]["cursor"]["seq"] == 1
         assert webapp.queued_delivery_ledger.open_operations() == []
         assert webapp.jobd_operation_service.wait_for_idle(5)
         assert webapp.jobd_operation_service.flights == {}
@@ -515,202 +1370,6 @@ def test_session_files_operation_completion_separates_replacement_intent(no_cont
         webapp.control_server.stop()
 
 
-def first_incomplete_forced_transition(*, ledger, operation_id, submissions, started) -> str:
-    """Name the earliest forced transition that did not complete.
-
-    The Event timing out is the LAST symptom and on its own says nothing about cause: the forced
-    job may never have been submitted, never started its product wait, or been queued behind the
-    ordinary canonical operation the target test deliberately holds open. Those are different
-    defects and the failure message has to separate them.
-
-    Module-level and parameterised so the target test and the unreadable-ledger regression exercise
-    THIS implementation rather than a copy: a copy can keep its own catch while the real one is
-    narrowed away, and the regression would still pass.
-    """
-
-    if submissions == 0:
-        return "submission: no replace=True job was submitted"
-    if not started:
-        return (
-            f"job start: {submissions} replace=True submission(s) recorded but no "
-            "forced product wait began, so the forced flight never got a producer"
-        )
-    if "forced-canonical" not in started:
-        return (
-            f"forced canonical wait: only {sorted(started)} started; the "
-            "canonical stage never ran"
-        )
-    try:
-        _result, status = ledger.operation_status(operation_id)
-    except (KeyError, LookupError, RuntimeError, OSError, ValueError, TypeError) as exc:
-        # NARROW on purpose. This read runs while Python is already building the failed
-        # bounded-wait assertion, so an exception here would REPLACE the original failure with an
-        # unrelated traceback and the real defect would never be reported. The cause is carried in
-        # the text instead of being swallowed or re-raised.
-        return f"ledger unreadable: {type(exc).__name__}: {exc}"
-    if status != HTTPStatus.OK:
-        return f"terminalization: forced product returned but the ledger still reports {status}"
-    return (
-        "terminalization: the ledger is OK but the newer payload never reached "
-        "terminalize_operation"
-    )
-
-
-def test_older_deferred_completion_cannot_replace_newer_forced_canonical_cache(no_control_socket, monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
-    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json", raising=False)
-    webapp = TmuxWebtermApp([])
-    canonical_key = ("payload", "canonical", (), (("/repo", "canonical"),))
-    ordinary_key = ("payload", "ordinary", (), (("/repo", "deferred-unwatched:ordinary"),))
-    forced_key = ("payload", "forced", (), (("/repo", "deferred-unwatched:forced"),))
-    older_payload = {"files": [{"path": "older.py"}], "repos": [], "errors": []}
-    newer_payload = {"files": [{"path": "newer.py"}], "repos": [], "errors": []}
-    ordinary_canonical_waiting = threading_module.Event()
-    release_ordinary_canonical = threading_module.Event()
-    forced_terminalized = threading_module.Event()
-    forced_product_started: set[str] = set()
-    submission_counts = {False: 0, True: 0}
-
-    def submit(*_args, replace=False, **_kwargs):
-        submission_counts[replace] += 1
-        stage = "initial" if submission_counts[replace] == 1 else "canonical"
-        mode = "forced" if replace else "ordinary"
-        job_id = f"{mode}-{stage}"
-        return {"ok": True, "job": {"job_id": job_id, "status": "queued", "generation": 1}}, job_id, 1
-
-    def wait_for_product(job_id, _deadline_at):
-        if job_id.startswith("forced-"):
-            forced_product_started.add(job_id)
-        if job_id == "ordinary-canonical":
-            ordinary_canonical_waiting.set()
-            assert release_ordinary_canonical.wait(timeout=5)
-        payload = newer_payload if job_id.startswith("forced-") else older_payload
-        return payload, HTTPStatus.OK
-
-    original_terminalize = webapp.terminalize_operation
-
-    def terminalize(operation_id, result, status):
-        event = original_terminalize(operation_id, result, status)
-        if result.get("data", {}).get("files") == newer_payload["files"]:
-            forced_terminalized.set()
-        return event
-
-    webapp.submit_session_files_job = submit
-    webapp.wait_for_session_files_operation_job = wait_for_product
-    webapp.session_files_cache_key = lambda *_args, **_kwargs: canonical_key
-    webapp.terminalize_operation = terminalize
-    try:
-        ordinary_receipt, ordinary_status = webapp.start_session_files_operation(
-            None,
-            {},
-            24.0,
-            None,
-            None,
-            None,
-            ordinary_key,
-            priority="freshness",
-            requester="test",
-        )
-        assert ordinary_status == HTTPStatus.ACCEPTED
-        assert ordinary_canonical_waiting.wait(timeout=1)
-
-        forced_receipt, forced_status = webapp.start_session_files_operation(
-            None,
-            {},
-            24.0,
-            None,
-            None,
-            None,
-            forced_key,
-            priority="interactive",
-            requester="test",
-            replace=True,
-        )
-        assert forced_status == HTTPStatus.ACCEPTED
-
-
-        # BOUNDED on purpose. The invariant is that a forced interactive canonical operation
-        # terminalizes WITHOUT waiting for the older ordinary canonical operation to be released,
-        # and `release_ordinary_canonical` is still unset here. An unbounded wait cannot observe
-        # that: if the forced flight were queued behind the ordinary one this would hang until the
-        # runner killed it, reporting a timeout rather than a failed invariant. The separate
-        # completion owners are `JobdOperationFlight.completion_key(job_id, replace)`.
-        assert forced_terminalized.wait(timeout=2), (
-            "forced canonical operation did not terminalize within 2s while the ordinary canonical "
-            f"operation was still held; first incomplete transition -> "
-            f"{first_incomplete_forced_transition(ledger=webapp.queued_delivery_ledger, operation_id=forced_receipt['operation']['id'], submissions=submission_counts[True], started=forced_product_started)}; "
-            f"ordinary_released={release_ordinary_canonical.is_set()} submissions={submission_counts} "
-            f"forced_started={sorted(forced_product_started)}"
-        )
-        forced_result, forced_terminal_status = webapp.queued_delivery_ledger.operation_status(
-            forced_receipt["operation"]["id"],
-        )
-        assert forced_terminal_status == HTTPStatus.OK
-        assert forced_result["data"]["files"] == newer_payload["files"]
-
-        release_ordinary_canonical.set()
-        assert webapp.jobd_operation_service.wait_for_idle(5)
-
-        ordinary_result, ordinary_terminal_status = webapp.queued_delivery_ledger.operation_status(
-            ordinary_receipt["operation"]["id"],
-        )
-        cached_payload, cached_status, fresh, _age_seconds = webapp.get_session_files_cache(
-            canonical_key,
-            max_age_seconds=app_module.SESSION_FILES_CACHE_SECONDS,
-            allow_stale=False,
-        )
-        assert ordinary_terminal_status == HTTPStatus.OK
-        assert ordinary_result["data"]["files"] == newer_payload["files"]
-        assert (cached_status, fresh) == (HTTPStatus.OK, True)
-        assert cached_payload["files"] == newer_payload["files"]
-        assert submission_counts == {False: 2, True: 2}
-    finally:
-        release_ordinary_canonical.set()
-        webapp.jobd_operation_service.wait_for_idle(5)
-        webapp.control_server.stop()
-
-
-def test_forced_wait_failure_survives_an_unreadable_ledger(monkeypatch):
-    """A failing diagnostic must not replace the failure it was called to explain.
-
-    `first_incomplete_forced_transition()` reads the ledger while Python is already constructing
-    the failed bounded-wait assertion. An exception raised there would surface instead of the
-    original assertion, so the real defect - forced terminalization missing its bound - would
-    never be reported. The narrow catch turns that into a named `ledger unreadable` outcome that
-    carries the cause.
-
-    This exercises the same shape without a live app: the helper is rebuilt here over a ledger
-    that raises, and the assertion it feeds must still be the bounded-wait one.
-    """
-
-    class ExplodingLedger:
-        def operation_status(self, _operation_id):
-            raise RuntimeError("ledger backend unavailable")
-
-    ledger = ExplodingLedger()
-
-    # THE REAL implementation, not a copy: narrowing or removing its catch must break this test.
-    reported = first_incomplete_forced_transition(
-        ledger=ledger,
-        operation_id="op-1",
-        submissions=2,
-        started={"forced-initial", "forced-canonical"},
-    )
-    assert reported == "ledger unreadable: RuntimeError: ledger backend unavailable"
-
-    # The bounded-wait assertion still owns the failure, with the ledger cause carried inside it.
-    never_set = threading_module.Event()
-    with pytest.raises(AssertionError) as raised:
-        assert never_set.wait(timeout=0.01), (
-            "forced canonical operation did not terminalize within 2s; "
-            f"first incomplete transition -> {reported}"
-        )
-    message = str(raised.value)
-    assert "did not terminalize" in message, "the original bounded-wait failure was replaced"
-    assert "ledger unreadable: RuntimeError: ledger backend unavailable" in message
-    assert "Traceback" not in message
-
-
 def test_forced_synchronous_session_files_replaces_a_fresh_cache(no_control_socket, monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = TmuxWebtermApp([])
@@ -730,9 +1389,10 @@ def test_forced_synchronous_session_files_replaces_a_fresh_cache(no_control_sock
         payload, status = webapp.session_files_payload_for_infos(
             None,
             {},
-            24.0,
-            force=True,
-            accepted_operation=False,
+                24.0,
+                force=True,
+                fresh_git=True,
+                accepted_operation=False,
         )
 
         assert status == HTTPStatus.OK
@@ -875,8 +1535,8 @@ def test_session_files_operation_publishes_under_immutable_producer_identity(cha
         release.set(); webapp.jobd_operation_service.wait_for_idle(5); webapp.control_server.stop()
 
 
-@pytest.mark.parametrize("failure_stage", ["submit", "result", "deadline"])
-def test_session_files_canonical_failure_attributes_terminal_producer(failure_stage, monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure_stage", ["result", "deadline"])
+def test_session_files_failure_attributes_one_terminal_producer(failure_stage, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -894,34 +1554,22 @@ def test_session_files_canonical_failure_attributes_terminal_producer(failure_st
     root_cause = {"exception": {"type": "FileNotFoundError", "message": "service socket is absent"}, "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}]}
 
     class FailingJobClient:
+        def start_for_scheduler(self):
+            return None
+
         def stop_for_scheduler(self):
             return None
 
         def submit(self, *_args, **kwargs):
             submissions.append(kwargs)
-            if len(submissions) == 2 and failure_stage == "submit":
-                return {"ok": False, "error": "canonical submit rejected", "status": "service_busy"}
-            job_id = "job-session-files-initial" if len(submissions) == 1 else "job-session-files-canonical-failed"
-            return {"ok": True, "job": {"job_id": job_id, "generation": 9, "status": "queued"}}
+            return {"ok": True, "job": {"job_id": "job-session-files-failed", "generation": 9, "status": "queued"}}
 
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 9}, b""
 
         def result(self, job_id, *, timeout):
             assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
-            if job_id == "job-session-files-initial":
-                return {
-                    "ok": True,
-                    "job": {
-                        "job_id": job_id,
-                        "status": "completed",
-                        "result": {
-                            "payload": {"files": [{"path": "provisional.py"}], "repos": [], "errors": []},
-                            "status": int(HTTPStatus.OK),
-                        },
-                    },
-                }
-            assert job_id == "job-session-files-canonical-failed"
+            assert job_id == "job-session-files-failed"
             if failure_stage == "deadline":
                 return {"ok": True, "job": {"job_id": job_id, "status": "queued"}}
             return {
@@ -965,17 +1613,15 @@ def test_session_files_canonical_failure_attributes_terminal_producer(failure_st
         expected_code = "deadline_expired" if failure_stage == "deadline" else "service_unavailable"
         assert terminal["status"] == expected_status
         assert result["error"]["code"] == expected_code
-        expected_operation = "jobd.canonical-result" if failure_stage == "deadline" else f"jobd.canonical-{failure_stage}"
+        expected_operation = "jobd.result"
         assert result["error"]["stack"][-1]["operation"] == expected_operation
         if failure_stage == "result":
             assert result["error"]["stack"][-1]["exception"] == root_cause["exception"]
             assert result["error"]["stack"][-1]["frames"] == root_cause["frames"]
-        expected_job_id = "" if failure_stage == "submit" else "job-session-files-canonical-failed"
-        assert [item["job_id"] for item in result["producer"]["chain"]] == ["job-session-files-initial", expected_job_id]
-        assert result["producer"]["chain"][0]["state"] == "completed"
-        expected_producer_code = "service_busy" if failure_stage == "submit" else expected_code
-        assert result["producer"]["chain"][1]["state"] == "failed"
-        assert result["producer"]["chain"][1]["code"] == expected_producer_code
+        assert len(submissions) == 1
+        assert [item["job_id"] for item in result["producer"]["chain"]] == ["job-session-files-failed"]
+        assert result["producer"]["chain"][0]["state"] == "failed"
+        assert result["producer"]["chain"][0]["code"] == expected_code
         operation_id = receipt["operation"]["id"]
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         connection.request("GET", f"/api/operations/{operation_id}")
@@ -1152,24 +1798,17 @@ def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_sta
         assert two_files["one.py"]["agents"] == []
         assert two_files["two.py"]["agents"] == ["claude"]
 
-        cache_key_before = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
         (repo / "untracked.py").write_text("new = True\n", encoding="utf-8")
-        cache_key_untracked = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
-        assert cache_key_untracked != cache_key_before
         webapp.shared_session_files_git_snapshot(repo, None, None)
         assert len(builds) == 2
         git(repo, "add", "one.py")
-        cache_key_index = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
-        assert cache_key_index != cache_key_untracked
         webapp.shared_session_files_git_snapshot(repo, None, None)
         assert len(builds) == 3
         git(repo, "add", "two.py", "untracked.py")
         git(repo, "commit", "-m", "next")
-        cache_key_head = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
-        assert cache_key_head != cache_key_index
         webapp.shared_session_files_git_snapshot(repo, None, None)
         assert len(builds) == 4
-        assert webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, "HEAD~1", "HEAD", None) != cache_key_head
+        assert webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, "HEAD~1", "HEAD", None) != webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
         webapp.shared_session_files_git_snapshot(repo, "HEAD~1", "HEAD")
         assert len(builds) == 5
 
@@ -4460,12 +5099,11 @@ def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(
         assert key_two != key_one
         assert identity_calls == 0
 
-        # Watcher unhealthy -> fall back to the git-spawn identity (a tuple, not the int backstop).
+        # The bounded TTL is the no-watcher backstop; key construction still never spawns Git.
         record.filesystem_healthy = False
         key_unhealthy = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
-        assert identity_calls == 1
-        (_repo_text, unhealthy_signature), = dict(key_unhealthy[-1]).items()
-        assert isinstance(unhealthy_signature, tuple)
+        assert key_unhealthy == key_two
+        assert identity_calls == 0
     finally:
         webapp.control_server.stop()
 
@@ -4514,13 +5152,6 @@ def test_session_files_view_coalesce_identity_is_stable_and_source_scoped(tmp_pa
         assert generation_a == generation_b
         coalesce_y, generation_y = webapp_a.session_files_view_coalesce_identity(key_gen_y)
         assert coalesce_y != coalesce_a
-        deferred_a = (*stable_key[:-1], (("repoX", "deferred-unwatched:request-a"),))
-        deferred_b = (*stable_key[:-1], (("repoX", "deferred-unwatched:request-b"),))
-        assert deferred_a != deferred_b
-        assert webapp_a.session_files_view_coalesce_identity(deferred_a) == webapp_a.session_files_view_coalesce_identity(deferred_b)
-        profile_a = webapp_a.session_files_jobd_source_profile(deferred_a, "api-session-files")
-        profile_b = webapp_a.session_files_jobd_source_profile(deferred_b, "api-session-files")
-        assert profile_a["repo_signature"] == profile_b["repo_signature"]
     finally:
         webapp_a.control_server.stop()
         webapp_b.control_server.stop()

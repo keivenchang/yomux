@@ -5,6 +5,14 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}"
 
+# A rootless daemon maps container root to the invoking host user, but cannot map this directory
+# service's high numeric UID into its subordinate-ID range. Build and run as container root there
+# so the mounted worktree still has the caller's host ownership.
+rootless_docker=0
+if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
+  rootless_docker=1
+fi
+
 usage() {
   echo "usage: $0 [--build] [--workdir <dir>] [-- <command>]" >&2
   exit "${1:-2}"
@@ -47,9 +55,11 @@ esac
 # new tag, making stale-image reuse impossible without duplicating the hash in shell.
 if [ "$do_build" = 1 ] || [ "${YOLOMUX_TEST_IMAGE_REBUILD:-0}" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE (this is cached after the first run)" >&2
-  docker build \
-    --build-arg "RUNNER_UID=$(id -u)" \
-    --build-arg "RUNNER_GID=$(id -g)" \
+  build_args=()
+  if [ "$rootless_docker" = 0 ]; then
+    build_args=(--build-arg "RUNNER_UID=$(id -u)" --build-arg "RUNNER_GID=$(id -g)")
+  fi
+  docker build "${build_args[@]+"${build_args[@]}"}" \
     -f "$REPO_ROOT/docker/Dockerfile.test" \
     -t "$IMAGE" \
     "$REPO_ROOT" >&2
@@ -123,6 +133,11 @@ if [ -n "${YOLOMUX_CHECK_RUN_TOKEN:-}" ]; then
   owner_label+=(--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN")
 fi
 
+run_user=()
+if [ "$rootless_docker" = 1 ]; then
+  run_user=(--user 0)
+fi
+
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
 # would hide image-owned ~/.local/bin. --init reaps tmux/chromium children; the enlarged
 # shared-memory segment prevents Chromium renderer crashes.
@@ -130,6 +145,7 @@ set +e
 docker run --rm --init \
   --shm-size=1g \
   "${owner_label[@]+"${owner_label[@]}"}" \
+  "${run_user[@]+"${run_user[@]}"}" \
   -v "$REPO_ROOT:/w" \
   "${git_mount[@]+"${git_mount[@]}"}" \
   "${agent_mounts[@]+"${agent_mounts[@]}"}" \

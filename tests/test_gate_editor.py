@@ -19,7 +19,7 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
-from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from tests.browser_helpers.browser_console import assert_only_expected_browser_http_error
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.browser_helpers.browser_layout import start_browser_server
@@ -28,7 +28,6 @@ from tests.browser_helpers.browser_layout import stop_browser_server
 from tests.browser_helpers.browser_layout import stop_isolated_browser_app
 from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from tests.gate_harness import retire_expected_fixture_typed_api_failure
 from tests.gate_harness import wait_for_browser_boot
 from tests.terminal_state_guard import assert_terminal_transition
 from yolomux_lib import filesystem
@@ -567,35 +566,22 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
         """
         const path = arguments[0];
         const done = arguments[arguments.length - 1];
-        const originalRegister = registerApiOperationReceipt;
-        let operationId = '';
-        let pendingObserved = false;
-        registerApiOperationReceipt = pending => {
-          const record = originalRegister(pending);
-          operationId = String(record?.id || '');
-          pendingObserved = Boolean(operationId && apiOperationState.pending.has(operationId));
-          return record;
-        };
         (async () => {
           try {
             await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
             await window.__yolomuxTestWaitFor(() => {
               const state = fileState.get(path);
-              return operationId && !apiOperationState.pending.has(operationId) && state?.kind === 'error';
-            }, {timeoutMs: 10000, description: `typed terminal missing-file result for ${path}`});
+              return state?.kind === 'error';
+            }, {timeoutMs: 10000, description: `typed direct missing-file result for ${path}`});
             const state = fileState.get(path);
             done({
               kind: state?.kind || '',
               missing: state?.externalMissing === true,
               status: state?.error?.status || 0,
-              operationId,
-              pendingObserved,
-              terminalObserved: Boolean(operationId && !apiOperationState.pending.has(operationId) && state?.kind === 'error'),
+              pendingOperations: apiOperationState.pending.size,
             });
           } catch (error) {
-            done({error: String(error?.stack || error), operationId, pendingObserved});
-          } finally {
-            registerApiOperationReceipt = originalRegister;
+            done({error: String(error?.stack || error)});
           }
         })();
         """,
@@ -603,12 +589,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
     )
     assert not missing.get("error"), missing
     assert missing["kind"] == "error" and missing["missing"] is True, missing
-    assert_terminal_transition(
-        contract_id="jobd-product-operation-completion",
-        pending_observed=missing["pendingObserved"],
-        terminal_observed=missing["terminalObserved"],
-        evidence=missing,
-    )
+    assert missing["pendingOperations"] == 0, missing
 
     target.write_text(expected, encoding="utf-8")
     reopened = gate_browser_runtime.browser.execute_async_script(
@@ -656,23 +637,24 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
     assert not reopened.get("error"), reopened
     assert reopened["kind"] == "text" and reopened["missing"] is False, reopened
     assert reopened["text"] == expected, reopened
-    expected_api_error = consume_only_expected_js_debug_api_error(
+    expected_browser_error = assert_only_expected_browser_http_error(
         gate_browser_runtime.browser,
         path="/api/fs/read",
         status=HTTPStatus.NOT_FOUND,
-        method="GET",
         query={"path": str(target)},
     )
-    retire_expected_fixture_typed_api_failure(
-        gate_browser_runtime.browser,
-        gate_browser_runtime.server,
-        expected_api_error,
-        method="GET",
-        path="/api/fs/read",
-        source="jobd-operation",
-        code="path_not_found",
-    )
-    assert reopened["errors"] == [expected_api_error] and reopened["rejections"] == [], reopened
+    assert str(expected_browser_error.get("source") or "") == "network", expected_browser_error
+    assert reopened["errors"] == [] and reopened["rejections"] == [], reopened
+    start = validate_server_log_ring_payload(gate_browser_runtime.server._fixture_server_log_boundary)
+    current = validate_server_log_ring_payload(SERVER_LOGS.payload())
+    transition = validate_server_log_ring_transition(start, current)
+    assert transition["droppedCount"] == 0, transition
+    assert [
+        (str(entry.get("level") or "").lower(), str(entry.get("source") or ""), str(entry.get("category") or ""), json.loads(str(entry["message"]))["code"])
+        for entry in transition["newLogs"]
+    ] == [(EXPECTED_OUTCOME_LOG_LEVEL, "api-response", "api", "path_not_found")], transition
+    gate_browser_runtime.server._fixture_server_log_boundary = current
+    gate_browser_runtime.browser._yolomux_server_log_boundary = current
     assert_browser_journey_error_free(gate_browser_runtime.browser)
 
 
@@ -815,3 +797,11 @@ def test_a8_editor_recovers_from_ten_atomic_inode_swaps_and_reports_real_delete(
     assert not missing.get("error"), missing
     assert missing["missing"] is True and missing["tabMissing"] is True and missing["missingBadge"] is True, missing
     assert missing["status"], missing
+    # The intentionally deleted file must yield exactly one observed 404: consume that exact
+    # browser-network receipt here so fixture retirement still rejects every other failure.
+    assert_only_expected_browser_http_error(
+        gate_browser_runtime.browser,
+        path="/api/fs/read",
+        status=HTTPStatus.NOT_FOUND,
+        query={"path": str(target)},
+    )

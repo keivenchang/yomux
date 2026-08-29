@@ -278,6 +278,14 @@ class TranscriptsPayloadCacheRecord:
     # a single flag, not a queue: repeated forced refreshes during one build cost one extra build.
     rebuild_requested: bool = False
     rebuild_publish: bool = False
+    # A deadline replacement fences a stale result, but it cannot stop the thread that is already
+    # materializing a Git view. Keep that worker with this single-flight owner until it finishes or
+    # fixture shutdown joins it; otherwise it becomes an unowned writer under the fixture root.
+    superseded_workers: set[object] = field(default_factory=set)
+    active_workers: set[object] = field(default_factory=set)
+    # Fixture shutdown fences new refreshes before it joins the in-flight worker.  A request that
+    # races teardown must not publish a new filesystem-writing worker after that join completes.
+    stopped: bool = False
 
     def release_worker(self) -> None:
         """Release the single-flight build guard and every intent scoped to that worker.
@@ -759,20 +767,6 @@ class SessionFilesProducerPersistenceError(RuntimeError):
         self.cause = cause
 
 
-def canonical_session_files_cache_key(cache_key: tuple[Any, ...], identities: dict[str, Any]) -> tuple[Any, ...] | None:
-    def freeze(value: Any) -> Any:
-        return tuple(freeze(item) for item in value) if isinstance(value, (list, tuple)) else value
-    signatures = []
-    for repo, signature in cache_key[-1]:
-        if isinstance(signature, str) and signature.startswith("deferred-unwatched:"):
-            replacement = freeze(identities.get(str(repo)))
-            if not isinstance(replacement, tuple):
-                return None
-            signature = replacement
-        signatures.append((repo, signature))
-    return (*cache_key[:-1], tuple(signatures))
-
-
 class SessionFilesOperationLifecycle:
     """Own accepted session-files producer flights from broker receipt to durable terminal result."""
 
@@ -830,7 +824,6 @@ class SessionFilesOperationLifecycle:
         priority: str,
         requester: str,
         *,
-        deferred: bool,
         cache_refresh_seconds: float,
         unavailable_type: type[Exception],
         exception_cause: Callable[[BaseException], dict[str, Any]],
@@ -841,25 +834,7 @@ class SessionFilesOperationLifecycle:
         try:
             completed_product = app.wait_for_session_files_operation_job(job_id, deadline_at)
             producer_payload, producer_status = completed_product
-            repository_identities = completed_product.repository_identities if isinstance(completed_product, SessionFilesOperationProduct) else {}
             cls.persist_transition(app, flight.finish_current_producer("completed"))
-            if deferred:
-                canonical_cache_key = canonical_session_files_cache_key(cache_key, repository_identities)
-                if canonical_cache_key is not None:
-                    cache_key = canonical_cache_key
-                else:
-                    cache_key = app.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
-                    failure_operation = "jobd.canonical-submit"
-                    response, coalesce_key, generation = app.submit_session_files_job(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester, replace=replace)
-                    canonical_job_id, producer_state = cls.accepted_job(response)
-                    if not canonical_job_id:
-                        producer_code = str(response.get("status") or "service_unavailable")
-                        cls.persist_transition(app, flight.append_producer("canonical", "", coalesce_key, generation, "failed", code=producer_code))
-                        raise unavailable_type(str(response.get("error") or "jobd canonical submit rejected"), response)
-                    cls.persist_transition(app, flight.append_producer("canonical", canonical_job_id, coalesce_key, generation, producer_state))
-                    failure_operation = "jobd.canonical-result"
-                    producer_payload, producer_status = app.wait_for_session_files_operation_job(canonical_job_id, deadline_at)
-                    cls.persist_transition(app, flight.finish_current_producer("completed"))
             payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(
                 cache_key,
                 lambda: (producer_payload, producer_status),

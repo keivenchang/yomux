@@ -46,6 +46,7 @@ async function fetchFilePathInfo(path, options = {}) {
       dedupe: options.fresh !== true,
       trigger: fileExplorerFsBatchTrigger(options),
       terminalOwner: options.terminalOwner,
+      immediate: options.immediate === true,
     }),
     {
       skipRequest: () => suppressBackgroundFilesystemFetch(options),
@@ -135,16 +136,18 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    // Directory listings already derive this marker from the pinned directory descriptor.  It is
-    // enough to offer the Git history tab now; the tab owns the slower Git history load.
+    // The listing's descriptor-bound .git probe is enough to offer this action now. The tab
+    // owns its potentially slow history request after it has painted its Loading state.
     if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
-    const disabledReason = readOnlyMode ? t('contextmenu.readOnlyUnavailable') : '';
+    const disabledReason = finderPathActionDisabledReason();
     const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
       item: gitDiffItemFor(fullPath),
       disabled,
       disabledReason,
+      // The context menu already refreshes this path's metadata. Opening the tab starts its
+      // own history request, so do not send a second fresh info request for the same click.
       action: () => openGitDiffTab(fullPath, {userInitiated: true}),
     }];
   }
@@ -167,7 +170,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     canonical: true,
     disabled,
     disabledReason: disabled ? disabledReason : '',
-    action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
+      action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
   });
   return [
     actionForMode('edit', 'contextmenu.editNewTab'),
@@ -220,7 +223,7 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
 }
 
 async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path, {user: true, immediate: true}).catch(error => {
     console.warn('fs info failed', path, error);
     return null;
   })));
@@ -1991,6 +1994,21 @@ function foldDuplicateEditorItemsForPath(path, keepItem = null) {
   return keeper;
 }
 
+function releaseFileEditorItem(path, item) {
+  const nextSlots = itemInLayout(item)
+    ? layoutWithoutItemFromSlots(item, layoutSlots, {preserveRemovedSlot: true})
+    : null;
+  removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
+  fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
+  tabLastActivatedAt.delete(item);
+  removePanelForItem(item);
+  if (!openFilePathHasOwner(path) && !fileStateFor(path)?.dirty) deleteFileState(path);
+  syncFileLayoutItems();
+  if (nextSlots) applyLayoutSlots(nextSlots, {focusSession: focusedPanelItem, prune: false});
+}
+
 async function focusExistingPhysicalFileEditor(requestedPath, existingPath, options = {}) {
   if (!requestedPath || !existingPath) return null;
   const item = primaryEditorItemForPath(existingPath, options.item || null);
@@ -2150,7 +2168,7 @@ async function refreshOpenFileGitMetadata(path, expectedState = null) {
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   try {
-    const payload = await fetchFileReadPayload(path, {includeGit: true});
+    const payload = await fetchFileGitMetadataPayload(path);
     const current = fileState.get(path);
     if (!current || current.kind !== 'text' || (expectedState && current !== expectedState)) return false;
     applyFileGitMetadata(current, payload);
@@ -2195,6 +2213,14 @@ async function fetchFileReadPayload(path, options = {}) {
   return fetchFilesystemOperationPayload(
     url,
     'read',
+    options,
+  );
+}
+
+function fetchFileGitMetadataPayload(path, options = {}) {
+  return fetchFilesystemOperationPayload(
+    `/api/fs/info?path=${encodeURIComponent(path)}&include_git=1`,
+    'info',
     options,
   );
 }
@@ -2269,7 +2295,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     loading: true,
   }, entry);
   const openPromise = (async () => {
-    const payload = await fetchFileReadPayload(fullPath);
+    const payload = await fetchFileReadPayload(fullPath, options.includeGit === true ? {includeGit: true} : {});
     if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
@@ -2286,9 +2312,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       dirty: false,
     }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
-    // Base content is the interactive path. Git status/history is useful decoration, but never
-    // delays the newly-created tab; discard its result if this state has since been replaced.
-    void refreshOpenFileGitMetadata(fullPath, state);
+    // Ordinary editors paint from one direct content read, then enrich through metadata only.
+    // Differ is an explicit Git action: it owns one queued Git-complete read so a missing working
+    // file can resolve through the committed side without a browser-visible direct 404.
+    if (options.includeGit !== true) void refreshOpenFileGitMetadata(fullPath, state);
     return item;
   })();
   // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
@@ -2324,6 +2351,9 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   const canonical = options.canonical === true;
   const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
   const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (openedItem && fileItemPath(openedItem) !== fullPath) {
+    for (const duplicateItem of fileEditorTabItemsForPath(fullPath)) releaseFileEditorItem(fullPath, duplicateItem);
+  }
   if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
   const openedPath = fileItemPath(openedItem) || fullPath;
   const state = fileEditorStateForItem(openedPath, openedItem);
@@ -2396,6 +2426,21 @@ function textFileStateFromReadPayload(payload) {
     content: payload.content,
     dirty: false,
   }, payload);
+}
+
+function preserveDeferredFileGitMetadata(state, previous, payload) {
+  if (payload?.git_enrichment?.reason !== 'deferred' || !previous || !state) return state;
+  state.gitRoot = previous.gitRoot || '';
+  state.gitTracked = previous.gitTracked === true;
+  state.gitHistory = Array.isArray(previous.gitHistory) ? previous.gitHistory : [];
+  state.gitHasHistory = previous.gitHasHistory === true;
+  // A direct reload deliberately skips Git work. Retain the last eligible diff while its refresh
+  // is in flight so rendering cannot reinterpret a Differ tab as an ordinary editor between the
+  // content read and the replacement diff payload.
+  for (const key of ['diff', 'diffOriginal', 'diffOriginalError', 'diffWorking', 'diffWorkingError', 'diffRepo', 'diffRelativePath', 'diffFromRef', 'diffToRef', 'diffWorkingMissing', 'untracked', 'diffLoaded', 'diffUnavailable', 'diffError']) {
+    if (Object.prototype.hasOwnProperty.call(previous, key)) state[key] = previous[key];
+  }
+  return state;
 }
 
 async function openFileStateFromDisk(path, entry = null) {
@@ -2602,7 +2647,7 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);
     if (panel) captureFileEditorPanelViewState(item, panel);
-    return {item, panel};
+    return {item, panel, mode: editorViewModeFor(path, item)};
   });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
@@ -2617,9 +2662,13 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
     loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
   clearFileAutosaveTimer(path);
-  setFileState(path, clearOpenFileExternalState(loaded.state));
+  setFileState(path, clearOpenFileExternalState(preserveDeferredFileGitMetadata(loaded.state, previous, loaded.state)));
   bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
+  // Disk replacement changes bytes, not the user's selected editor mode. Rendering the fresh state
+  // may briefly lack its asynchronous Git refresh, so restore every tab's mode after the replacement
+  // before that transient capability check can turn a Differ tab into Edit.
+  for (const {item, mode} of viewStates) setFileEditorViewMode(path, mode, item);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
     if (panel) restoreFileEditorPanelViewState(item, panel, {restoreFocused: true});
@@ -2633,7 +2682,16 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
   if (loaded.state?.kind && typeof updateFilePreviewPopout === 'function' && editorPreviewModeAvailable(path, loaded.state)) {
     updateFilePreviewPopout(path, loaded.state.content || '');
   }
-  if (previous?.diff !== undefined) refreshOpenFileDiff(path);
+  if (previous?.diff !== undefined) {
+    void refreshOpenFileDiff(path).then(diffReady => {
+      const current = fileState.get(path);
+      if (!diffReady || !current || current.kind !== 'text' || !fileStateCanRenderDiffView(path, current)) return;
+      for (const {item, mode} of viewStates) {
+        if (mode === 'diff') setFileEditorViewMode(path, 'diff', item);
+      }
+      renderOpenFilePath(path);
+    });
+  }
   return true;
 }
 
@@ -2644,6 +2702,10 @@ function fileEditorPathHasFocus(path) {
 }
 
 function openFileBackgroundReloadShouldDefer(path, state) {
+  // A watched replacement after an exact missing verdict is recovery, not an ordinary background
+  // overwrite.  Keep the missing tab visible only until the authoritative replacement event arrives;
+  // applying the clean-file debounce here stranded Differ for its full delay after an inode swap.
+  if (state?.externalMissing === true) return false;
   if (fileEditorPathHasFocus(path)) return true;
   const lastCleanAt = Number(state?.lastCleanAt || 0);
   return Number.isFinite(lastCleanAt)

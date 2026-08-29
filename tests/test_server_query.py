@@ -2072,14 +2072,22 @@ def test_handle_fs_fast_list_returns_one_level_without_jobd_or_git(monkeypatch, 
     assert all(entry["name"] != "nested.txt" for entry in payload["entries"])
 
 
-def test_handle_fs_list_preserves_legacy_jobd_request_without_repo_opt_out():
+def test_handle_fs_list_is_direct(monkeypatch):
     calls = []
+    writes = []
     handler = object.__new__(Handler)
     handler.submit_filesystem_operation = lambda *args: calls.append(args)
+    handler.write_json = lambda payload, status: writes.append((status, payload))
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "list_directory",
+        lambda path: {"path": path, "entries": []},
+    )
 
     Handler.handle_fs_list(handler, urlparse("/api/fs/list?path=%2Frepo"))
 
-    assert calls == [("GET /api/fs/list", "list", "/repo")]
+    assert calls == []
+    assert writes == [(HTTPStatus.OK, {"path": "/repo", "entries": []})]
 
 
 def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monkeypatch):
@@ -2100,13 +2108,37 @@ def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monke
     assert calls == [("GET /api/fs/read", "read", "/repo/slow.txt", {"include_git": True})]
 
 
-def test_handle_fs_git_history_and_commit_validate_and_submit_retained_reads():
+def test_handle_fast_git_routes_bypass_jobd(monkeypatch):
     calls = []
     writes = []
     handler = object.__new__(Handler)
     handler.submit_filesystem_operation = lambda *args: calls.append(args)
     handler.write_json = lambda payload, status: writes.append((status, payload))
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "git_history",
+        lambda path, *, limit, cursor=None: {
+            "path": path,
+            "commits": [],
+            "limit": limit,
+            "cursor": cursor,
+        },
+    )
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "git_commit",
+        lambda path, *, commit, head: {"path": path, "commit": commit, "head": head},
+    )
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "diff_file",
+        lambda path, *, from_ref, to_ref: {"path": path, "from": from_ref, "to": to_ref},
+    )
 
+    Handler.handle_fs_diff(
+        handler,
+        urlparse("/api/fs/diff?path=%2Frepo%2Fsrc&from=HEAD&to=current"),
+    )
     Handler.handle_fs_git_history(
         handler,
         urlparse("/api/fs/git-history?path=%2Frepo%2Fsrc&limit=12&cursor=opaque-cursor"),
@@ -2116,26 +2148,26 @@ def test_handle_fs_git_history_and_commit_validate_and_submit_retained_reads():
         urlparse(f"/api/fs/git-commit?path=%2Frepo%2Fsrc&commit={'a' * 40}&head={'b' * 40}"),
     )
 
-    assert calls == [
-        ("GET /api/fs/git-history", "git_history", "/repo/src", {"limit": 12, "cursor": "opaque-cursor"}),
-        ("GET /api/fs/git-commit", "git_commit", "/repo/src", {"commit": "a" * 40, "head": "b" * 40}),
+    assert calls == []
+    assert writes == [
+        (HTTPStatus.OK, {"path": "/repo/src", "from": "HEAD", "to": "current"}),
+        (HTTPStatus.OK, {"path": "/repo/src", "commits": [], "limit": 12, "cursor": "opaque-cursor"}),
+        (HTTPStatus.OK, {"path": "/repo/src", "commit": "a" * 40, "head": "b" * 40}),
     ]
-    assert writes == []
 
     for raw_limit in ("0", "-999"):
         Handler.handle_fs_git_history(
             handler,
             urlparse(f"/api/fs/git-history?path=%2Frepo&limit={raw_limit}"),
         )
-        assert calls[-1] == ("GET /api/fs/git-history", "git_history", "/repo", {"limit": 1, "cursor": ""})
+        assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 1, "cursor": None})
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=999"))
-    assert calls[-1] == ("GET /api/fs/git-history", "git_history", "/repo", {"limit": 40, "cursor": ""})
+    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 40, "cursor": None})
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=many"))
-    assert len(writes) == 1
-    assert writes[0][0] == HTTPStatus.BAD_REQUEST
-    assert len(calls) == 5
+    assert writes[-1][0] == HTTPStatus.BAD_REQUEST
+    assert len(calls) == 0
 
 
 def test_git_history_routes_are_registered_as_readonly_json():

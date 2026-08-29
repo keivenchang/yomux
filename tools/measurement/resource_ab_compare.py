@@ -1,6 +1,9 @@
-"""Compare a post-change statsd resource window against the pre-change baseline.
+"""Compare a post-change statsd resource window against the historical baseline.
 
-Owns `DOIT.p0.e3.statsd-resource-bounds.md` line 583: *"Run a post-change six-hour A/B under
+Preserves historical measurement tooling from the v0.7.22 P0 release decision. The former
+`DOIT.p0.e3.statsd-resource-bounds.md` scope was closed for release bookkeeping; post-release
+statsd follow-up work has separate active owners. This tool records the historical requirement:
+*"Run a post-change six-hour A/B under
 the same host and gate envelope. Compare block writes, statsd CPU, WAL growth, `VACUUM` writes,
 and UI sample freshness against the baseline."* The baseline it compares against is line 334,
 whose authoritative window is 2026-08-25 22:00:00 PT -> 2026-08-26 04:00:00 PT, epochs

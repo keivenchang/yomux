@@ -2,7 +2,6 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_console import assert_only_expected_browser_warning
-from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
 from urllib.parse import parse_qs, urlparse
@@ -1605,13 +1604,6 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
         })();
         """
     )
-    expected_api_error = consume_only_expected_js_debug_api_error(
-        browser,
-        path="/api/fs/read",
-        status=415,
-        method="GET",
-        query={"path": "/home/test/repo/renamed.bin"},
-    )
     assert "error" not in metrics, metrics
     assert metrics["stateKind"] == "media", metrics
     assert metrics["mediaKind"] == "image", metrics
@@ -1622,11 +1614,7 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
     raw_queries = [parse_qs(urlparse(request).query) for request in metrics["rawRequests"]]
     assert {"path": ["/home/test/repo/renamed.bin"], "v": ['["id:1:2","33",18]']} in raw_queries, metrics
     assert metrics["mode"] == "preview", metrics
-    assert len(metrics["errors"]) == 1, metrics
-    assert all(expected_api_error.get(key) == value for key, value in metrics["errors"][0].items()), {
-        "initial": metrics["errors"][0],
-        "retired": expected_api_error,
-    }
+    assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
 

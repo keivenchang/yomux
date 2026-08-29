@@ -205,6 +205,9 @@ JOBD_MAX_PRODUCTS = 256
 JOBD_MAX_SOURCE_DIAGNOSTICS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_SCHEDULER_POLL_SECONDS = 0.05
+# Shutdown must not enumerate executor children while the scheduler can still submit another
+# one. This bound covers a scheduler already across the lock-to-submit boundary.
+JOBD_SCHEDULER_SHUTDOWN_SECONDS = 2.0
 # How long past its deadline a RUNNING job may still be, before the broker terminalizes it without
 # its worker's answer.  A worker that honors its deadline stops by itself and owns the terminal
 # state, so this is a backstop for work that cannot stop -- an uninterruptible syscall on a wedged
@@ -2345,11 +2348,17 @@ class PersistentJobBroker:
             return claim_gated_idle_due(self, self.leases or self._has_active_work())
 
     def _on_shutdown(self) -> None:
+        """Stop the dispatcher before retiring the pools it is allowed to populate."""
+
         self.scheduler_event.set()
         if self.scheduler_readiness_thread is not None:
-            self.scheduler_readiness_thread.join(timeout=0.5)
+            self.scheduler_readiness_thread.join(timeout=JOBD_SCHEDULER_SHUTDOWN_SECONDS)
+            if self.scheduler_readiness_thread.is_alive():
+                raise RuntimeError("jobd scheduler readiness did not stop before executor retirement")
         if self.scheduler_thread is not None:
-            self.scheduler_thread.join(timeout=0.5)
+            self.scheduler_thread.join(timeout=JOBD_SCHEDULER_SHUTDOWN_SECONDS)
+            if self.scheduler_thread.is_alive():
+                raise RuntimeError("jobd scheduler did not stop before executor retirement")
         for lane in JOBD_LANE_PRIORITIES:
             self._shutdown_executor(lane=lane)
         self.product_store.shutdown()

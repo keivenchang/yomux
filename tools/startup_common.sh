@@ -104,10 +104,55 @@ yolomux_system_load_snapshot() {
 import math
 import os
 import platform
+import time
 
 detected_cpus = max(1, os.cpu_count() or 1)
 cpus = min(detected_cpus, 8) if platform.system() == "Darwin" else detected_cpus
 load1, load5, _load15 = os.getloadavg()
+
+
+def cpu_idle_fraction() -> float:
+    """Sample actual CPU idle time instead of treating blocked I/O tasks as CPU demand."""
+    if platform.system() != "Linux":
+        return 1.0
+
+    def sample() -> tuple[int, int]:
+        fields = open("/proc/stat", encoding="utf-8").readline().split()[1:]
+        values = [int(value) for value in fields]
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return total, idle
+
+    total_before, idle_before = sample()
+    time.sleep(0.25)
+    total_after, idle_after = sample()
+    total_delta = total_after - total_before
+    return (idle_after - idle_before) / total_delta if total_delta > 0 else 1.0
+
+
+def defender_d_state_tasks() -> int:
+    """Count Defender tasks that inflate Linux load while they are blocked in the kernel."""
+    if platform.system() != "Linux":
+        return 0
+    defender_names = {"sensecm", "senseimdscollector", "msmpeng", "mdatp"}
+    count = 0
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = open(f"/proc/{entry.name}/status", encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        fields = dict(line.split(":", 1) for line in status if ":" in line)
+        name = fields.get("Name", "").strip().lower()
+        state = fields.get("State", "").lstrip()[:1]
+        if name in defender_names and state == "D":
+            count += 1
+    return count
+
+
+idle_fraction = cpu_idle_fraction()
+defender_d_tasks = defender_d_state_tasks()
 try:
     requested_discount = float(os.environ.get("YOLOMUX_START_LOAD_DISCOUNT_CORES", "0"))
 except ValueError:
@@ -118,13 +163,49 @@ if not math.isfinite(requested_discount) or requested_discount < 0:
 discount = min(float(cpus), requested_discount)
 effective_load1 = max(0.0, load1 - discount)
 effective_load5 = max(0.0, load5 - discount)
-ok = effective_load1 <= cpus * 0.75 and effective_load5 <= cpus * 2.0
+# Microsoft Defender can leave tasks in uninterruptible I/O sleep. Linux counts those tasks in
+# load average even while the host has substantial CPU headroom, so they must not prevent a
+# developer-only YOLOmux restart. Keep a real CPU-saturation floor: this exemption is not a
+# blanket override for a machine that is actually busy.
+defender_load_ignored = defender_d_tasks > 0
+load_ok = defender_load_ignored or (effective_load1 <= cpus * 0.75 and effective_load5 <= cpus * 2.0)
+cpu_ok = idle_fraction >= 0.10
+ok = load_ok and cpu_ok
 print(
     f"load1={load1:.2f} effective={effective_load1:.2f}/{cpus * 0.75:.2f} "
     f"load5={load5:.2f} effective={effective_load5:.2f}/{cpus * 2.0:.2f} "
-    f"discount={discount:.2f} cpu_budget={cpus}"
+    f"discount={discount:.2f} cpu_idle={idle_fraction:.2%} defender_d_tasks={defender_d_tasks} "
+    f"defender_load_ignored={defender_load_ignored} cpu_budget={cpus}"
 )
 raise SystemExit(0 if ok else 1)
+PY
+}
+
+yolomux_report_inotify_capacity() {
+  local python_bin="$1"
+  local startup_repo_root
+  startup_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || return 2
+  "$python_bin" - "$startup_repo_root" <<'PY'
+import os
+import platform
+import sys
+
+if platform.system() != "Linux":
+    raise SystemExit(0)
+os.chdir(sys.argv[1])
+from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
+
+verdict = inotify_capacity_verdict()
+if verdict.admitted:
+    print(
+        "startup inotify capacity: admitted "
+        f"({verdict.free_instances} free instances)",
+        flush=True,
+    )
+    raise SystemExit(0)
+print("WARNING: startup inotify capacity is below the YOLOmux gate floor", flush=True)
+print(verdict.refusal_text(), flush=True)
+raise SystemExit(1)
 PY
 }
 
@@ -133,6 +214,9 @@ yolomux_wait_for_system_capacity() {
   local max_wait="${2:-${YOLOMUX_START_LOAD_WAIT_SECONDS:-300}}"
   local deadline=$((SECONDS + max_wait))
   local snapshot=""
+  # This is advisory for ordinary dev startup: production can use polling, while the heavy gate
+  # needs the full uid-wide watcher reservation and refuses to run below it.
+  yolomux_report_inotify_capacity "$python_bin" || true
   while [[ "$SECONDS" -lt "$deadline" ]]; do
     if snapshot="$(yolomux_system_load_snapshot "$python_bin")"; then
       printf 'ramp  capacity available: %s\n' "$snapshot"

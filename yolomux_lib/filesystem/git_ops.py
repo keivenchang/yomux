@@ -61,6 +61,7 @@ def _git_with_pinned_repo_process(
     git_common_directory: str | None = None,
     git_object_directory: str | None = None,
     git_object_descriptors: tuple[int, ...] = (),
+    git_object_store_descriptor: int | None = None,
     shallow_file_path: str | None = None,
     stdin_descriptor: int | None = None,
 ) -> subprocess.CompletedProcess[Any] | PinnedGitResult:
@@ -134,6 +135,10 @@ def _git_with_pinned_repo_process(
         process_env["GIT_NO_LAZY_FETCH"] = "1"
         process_env["GIT_OPTIONAL_LOCKS"] = "0"
         process_env["GIT_GRAFT_FILE"] = os.devnull
+        # A bounded read must never follow repository-controlled alternate object stores. The
+        # descriptor check below catches a persistent alternates file; this environment fence also
+        # closes the interval between the preflight and post-command checks.
+        process_env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = ""
         process_env["GIT_CONFIG_NOSYSTEM"] = "1"
         process_env["GIT_CONFIG_GLOBAL"] = os.devnull
         process_env["GIT_ATTR_NOSYSTEM"] = "1"
@@ -143,6 +148,8 @@ def _git_with_pinned_repo_process(
             process_env["GIT_OBJECT_DIRECTORY"] = git_object_directory
         if shallow_file_path is not None:
             process_env["GIT_SHALLOW_FILE"] = shallow_file_path
+    if git_object_store_descriptor is not None:
+        _ensure_no_git_alternate_objects_descriptor(git_object_store_descriptor, persistent=False)
     if use_fchdir_cwd:
         # `/dev/fd/<n>` on Darwin is `dup()` semantics: every reader shares ONE underlying file
         # offset (Linux's `/proc/self/fd/<n>` instead reopens fresh at 0 for each reader). Pack
@@ -268,6 +275,7 @@ def _git_with_pinned_repo(
     git_common_directory: str | None = None,
     git_object_directory: str | None = None,
     git_object_descriptors: tuple[int, ...] = (),
+    git_object_store_descriptor: int | None = None,
     shallow_data: bytes | None = None,
     stdin_descriptor: int | None = None,
 ) -> subprocess.CompletedProcess[Any] | PinnedGitResult:
@@ -282,6 +290,7 @@ def _git_with_pinned_repo(
         "git_common_directory": git_common_directory,
         "git_object_directory": git_object_directory,
         "git_object_descriptors": git_object_descriptors,
+        "git_object_store_descriptor": git_object_store_descriptor,
         "stdin_descriptor": stdin_descriptor,
     }
     if shallow_data is None:
@@ -925,6 +934,7 @@ _GIT_PACK_FILE_RE = re.compile(
     r"(?:pack-[0-9a-f]{40,64}\.(?:pack|idx|rev|bitmap|keep|promisor)|"
     r"multi-pack-index(?:-[0-9a-f]{40,64}\.bitmap)?)"
 )
+_GIT_OBJECT_FILE_RE = re.compile(r"[0-9a-f]{38,62}")
 _GIT_INCREMENTAL_MIDX_RE = re.compile(r"multi-pack-index-[0-9a-f]{40,64}\.midx")
 
 
@@ -1173,6 +1183,28 @@ class PinnedGitHistoryScope:
     index_lock_descriptor: int | None = None
 
 
+@dataclass(frozen=True)
+class BoundedGitReadScope:
+    path: Path
+    repo: Path
+    relative_path: str
+    scope_handle: paths.SafePathHandle
+    repo_handle: paths.SafePathHandle
+    git_marker_handle: paths.SafePathHandle
+    git_dir_handle: paths.SafePathHandle
+    git_common_dir_handle: paths.SafePathHandle
+    git_objects_handle: paths.SafePathHandle
+    git_directory: str
+    git_common_directory: str
+    git_object_directory: str | None
+    git_object_descriptors: tuple[int, ...]
+    deadline: float
+    shallow_snapshot: str
+    shallow_data: bytes
+    hosted_remote: dict[str, str] | None
+    read_namespace: tuple[tuple[str, tuple[int, int, int, int, int]], ...]
+
+
 def _history_error(message: str, *, key: str, status: int = 400, diagnostic: object = "") -> paths.FilesystemError:
     return paths.FilesystemError(message, status=status, message_key=key, diagnostic=diagnostic)
 
@@ -1365,10 +1397,10 @@ def _ensure_pinned_child_unchanged(
         )
 
 
-def _ensure_no_git_alternate_objects(objects_handle: paths.SafePathHandle) -> None:
+def _ensure_no_git_alternate_objects_descriptor(objects_descriptor: int, *, persistent: bool = True) -> None:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag()
     try:
-        info_descriptor = os.open("info", directory_flags, dir_fd=objects_handle.descriptor)
+        info_descriptor = os.open("info", directory_flags, dir_fd=objects_descriptor)
     except FileNotFoundError:
         return
     except OSError as error:
@@ -1392,11 +1424,235 @@ def _ensure_no_git_alternate_objects(objects_handle: paths.SafePathHandle) -> No
             ) from error
         raise _history_error(
             "Git alternate object databases are unsupported",
-            key="fs.error.gitAlternateObjects",
-            status=422,
+            key="fs.error.gitAlternateObjects" if persistent else "fs.error.gitRepositoryChanged",
+            status=422 if persistent else 409,
         )
     finally:
         os.close(info_descriptor)
+
+
+def _ensure_no_git_alternate_objects(objects_handle: paths.SafePathHandle) -> None:
+    _ensure_no_git_alternate_objects_descriptor(objects_handle.descriptor)
+
+
+def _git_read_namespace(
+    git_common_dir_handle: paths.SafePathHandle,
+    objects_handle: paths.SafePathHandle,
+    git_dir_handle: paths.SafePathHandle | None = None,
+    *,
+    deadline: float | None = None,
+) -> tuple[tuple[str, tuple[int, int, int, int, int]], ...]:
+    """Capture only the control and object paths needed by the current Git read."""
+
+    def check_deadline() -> None:
+        if deadline is not None:
+            _ensure_git_view_deadline(deadline)
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def regular_child(parent: int, name: str, label: str) -> tuple[str, tuple[int, int, int, int, int]]:
+        check_deadline()
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            if isinstance(error, FileNotFoundError):
+                raise error
+            raise _history_error(
+                "Git read namespace is unavailable or unsafe",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _history_error(
+                "Git read namespace contains an unsafe filesystem entry",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        return label, identity(metadata)
+
+    def read_fd(descriptor: int) -> str:
+        check_deadline()
+        try:
+            raw = os.pread(descriptor, GIT_CONTROL_POINTER_MAX_BYTES + 1, 0)
+            metadata = os.fstat(descriptor)
+        except OSError as error:
+            raise _history_error(
+                "Git reference is unavailable",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        if not stat.S_ISREG(metadata.st_mode) or len(raw) > GIT_CONTROL_POINTER_MAX_BYTES:
+            raise _history_error("Git reference is unsafe", key="fs.error.gitRepositoryChanged", status=409)
+        try:
+            value = raw.rstrip(b"\r\n").decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise _history_error("Git reference is malformed", key="fs.error.gitRepositoryChanged", status=409) from error
+        if not value or "\x00" in value or "\n" in value or "\r" in value:
+            raise _history_error("Git reference is malformed", key="fs.error.gitRepositoryChanged", status=409)
+        return value
+
+    entries: list[tuple[str, tuple[int, int, int, int, int]]] = []
+    git_dir_handle = git_dir_handle or git_common_dir_handle
+    head_record = _read_small_git_control_file(git_dir_handle.descriptor, "HEAD")
+    if head_record is None or not _valid_git_head_record(head_record):
+        raise _history_error("Git HEAD is unavailable or unsafe", key="fs.error.gitRepositoryChanged", status=409)
+    entries.append(regular_child(git_dir_handle.descriptor, "HEAD", "HEAD"))
+
+    if head_record.startswith("ref: "):
+        ref_name = head_record.removeprefix("ref: ")
+        current_fd = git_common_dir_handle.descriptor
+        opened: list[int] = []
+        try:
+            parts = ref_name.split("/")
+            for component in parts[:-1]:
+                check_deadline()
+                descriptor = os.open(
+                    component,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
+                    dir_fd=current_fd,
+                )
+                opened.append(descriptor)
+                current_fd = descriptor
+            try:
+                ref_entry = regular_child(current_fd, parts[-1], ref_name)
+            except FileNotFoundError:
+                try:
+                    packed_entry = regular_child(git_common_dir_handle.descriptor, "packed-refs", "packed-refs")
+                except FileNotFoundError:
+                    head_oid = ""
+                else:
+                    entries.append(packed_entry)
+                    head_oid = ""
+            else:
+                entries.append(ref_entry)
+                ref_descriptor = os.open(
+                    parts[-1],
+                    os.O_RDONLY | paths.nofollow_flag(),
+                    dir_fd=current_fd,
+                )
+                try:
+                    head_oid = read_fd(ref_descriptor)
+                finally:
+                    os.close(ref_descriptor)
+        except (OSError, IndexError) as error:
+            raise _history_error(
+                "Git HEAD reference is unavailable or unsafe",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+    else:
+        head_oid = head_record
+
+    ref_name = head_record.removeprefix("ref: ") if head_record.startswith("ref: ") else None
+    if ref_name is not None and head_oid and _GIT_OBJECT_ID_RE.fullmatch(head_oid) is None:
+        raise _history_error("Git HEAD reference is malformed", key="fs.error.gitRepositoryChanged", status=409)
+
+    if ref_name is not None:
+        ref_digest = head_oid
+        if ref_digest:
+            object_prefix, object_name = ref_digest[:2], ref_digest[2:]
+            try:
+                prefix_fd = os.open(
+                    object_prefix,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
+                    dir_fd=objects_handle.descriptor,
+                )
+            except FileNotFoundError:
+                prefix_fd = None
+            except OSError as error:
+                raise _history_error("Git head object directory is unsafe", key="fs.error.gitRepositoryChanged", status=409, diagnostic=error) from error
+            if prefix_fd is not None:
+                try:
+                    try:
+                        metadata = os.stat(object_name, dir_fd=prefix_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        metadata = None
+                    if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+                        raise _history_error("Git head object is unsafe", key="fs.error.gitRepositoryChanged", status=409)
+                    if metadata is not None:
+                        entries.append((f"objects/{object_prefix}/{object_name}", identity(metadata)))
+                finally:
+                    os.close(prefix_fd)
+
+    try:
+        pack_fd = os.open(
+            "pack",
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
+            dir_fd=objects_handle.descriptor,
+        )
+    except FileNotFoundError:
+        pack_fd = None
+    except OSError as error:
+        raise _history_error(
+            "Git pack directory is unsafe",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+    if pack_fd is not None:
+        try:
+            entries_seen = 0
+            for entry in os.scandir(pack_fd):
+                check_deadline()
+                entries_seen += 1
+                if entries_seen > GIT_VIEW_MAX_PACK_ENTRIES:
+                    raise _history_error(
+                        "Git pack metadata exceeds the snapshot limit",
+                        key="fs.error.gitHistoryTooLarge",
+                        status=413,
+                    )
+                metadata = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise _history_error("Git pack metadata is unsafe", key="fs.error.gitRepositoryChanged", status=409)
+                if _GIT_PACK_FILE_RE.fullmatch(entry.name) is not None:
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise _history_error("Git pack metadata is unsafe", key="fs.error.gitRepositoryChanged", status=409)
+                    entries.append((f"objects/pack/{entry.name}", identity(metadata)))
+        finally:
+            os.close(pack_fd)
+    return tuple(entries)
+
+
+def _ensure_git_read_namespace_unchanged(scope: BoundedGitReadScope) -> None:
+    if _git_read_namespace(
+        scope.git_common_dir_handle,
+        scope.git_objects_handle,
+        scope.git_dir_handle,
+        deadline=scope.deadline,
+    ) != scope.read_namespace:
+        raise _history_error(
+            "Git read namespace changed during history read",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+
+
+def _reject_direct_git_alternate_objects(scope: BoundedGitReadScope) -> None:
+    """Refuse an alternate that appeared while a direct Git command was running."""
+
+    try:
+        _ensure_no_git_alternate_objects(scope.git_objects_handle)
+    except paths.FilesystemError as error:
+        if error.message_key == "fs.error.gitAlternateObjects":
+            raise _history_error(
+                "Git alternate object databases appeared during history read",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            ) from error
+        raise
 
 
 def _traversable_descriptor_file(handle: paths.SafePathHandle) -> str:
@@ -2732,6 +2988,171 @@ def _git_shallow_snapshot(
 
 
 @contextlib.contextmanager
+def _pinned_bounded_git_read_control(
+    repo: Path,
+    repo_handle: paths.SafePathHandle,
+    *,
+    deadline: float,
+    operation: str,
+):
+    """Pin Git control files and directories without constructing an object snapshot."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        marker_stat = os.stat(".git", dir_fd=repo_handle.descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise _history_error(
+            "Git control path is unavailable",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+            diagnostic=error,
+        ) from error
+    marker_flags = directory_flags if stat.S_ISDIR(marker_stat.st_mode) else os.O_RDONLY if stat.S_ISREG(marker_stat.st_mode) else None
+    if marker_flags is None:
+        raise _history_error(
+            "Git control path is not a regular file or directory",
+            key="fs.error.gitRepositoryChanged",
+            status=409,
+        )
+    with contextlib.ExitStack() as stack:
+        marker_pointer_snapshot: bytes | None = None
+        common_file_handle: paths.SafePathHandle | None = None
+        common_pointer_snapshot: bytes | None = None
+        git_dir_requested_path: Path | None = None
+        common_dir_requested_path: Path | None = None
+        marker_handle = stack.enter_context(
+            paths.safe_child(
+                repo_handle.descriptor,
+                repo / ".git",
+                repo / ".git",
+                flags=marker_flags,
+                operation=operation,
+                observe_name=False,
+            )
+        )
+        if stat.S_ISDIR(marker_stat.st_mode):
+            git_dir_handle = marker_handle
+        else:
+            pointer, marker_pointer_snapshot = _read_git_control_pointer(marker_handle, prefix=b"gitdir: ")
+            git_dir_requested_path = _resolved_git_control_path(repo, pointer)
+            git_dir_handle = stack.enter_context(paths.safe_path(str(git_dir_requested_path), flags=directory_flags, operation=operation))
+        try:
+            common_stat = os.stat("commondir", dir_fd=git_dir_handle.descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            common_stat = None
+        if common_stat is None:
+            git_common_dir_handle = git_dir_handle
+        elif stat.S_ISREG(common_stat.st_mode):
+            common_file_path = git_dir_handle.resolved / "commondir"
+            common_file_handle = stack.enter_context(
+                paths.safe_child(
+                    git_dir_handle.descriptor,
+                    common_file_path,
+                    common_file_path,
+                    operation=operation,
+                    observe_name=False,
+                )
+            )
+            pointer, common_pointer_snapshot = _read_git_control_pointer(common_file_handle)
+            common_dir_requested_path = _resolved_git_control_path(git_dir_handle.resolved, pointer)
+            git_common_dir_handle = stack.enter_context(paths.safe_path(str(common_dir_requested_path), flags=directory_flags, operation=operation))
+        else:
+            raise _history_error(
+                "Git common directory pointer is malformed",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+            )
+        objects_path = git_common_dir_handle.resolved / "objects"
+        try:
+            objects_handle = stack.enter_context(
+                paths.safe_child(
+                    git_common_dir_handle.descriptor,
+                    objects_path,
+                    objects_path,
+                    flags=directory_flags,
+                    operation=operation,
+                    observe_name=False,
+                )
+            )
+        except (paths.FilesystemError, OSError) as error:
+            raise _history_error(
+                "Git object directory is unavailable or unsafe",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        _ensure_pinned_child_unchanged(git_common_dir_handle, "objects", objects_handle)
+        _ensure_no_git_alternate_objects(objects_handle)
+        config_path = git_common_dir_handle.resolved / "config"
+        try:
+            config_handle = stack.enter_context(
+                paths.safe_child(
+                    git_common_dir_handle.descriptor,
+                    config_path,
+                    config_path,
+                    operation=operation,
+                    observe_name=False,
+                )
+            )
+        except (paths.FilesystemError, OSError) as error:
+            raise _history_error(
+                "Git configuration is unavailable",
+                key="fs.error.gitRepositoryChanged",
+                status=409,
+                diagnostic=error,
+            ) from error
+        config_data = _read_bounded_git_config(config_handle)
+        _git_repository_format(config_data)
+        shallow_snapshot, shallow_data = _git_shallow_snapshot(
+            git_common_dir_handle,
+            deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+        )
+        read_namespace = _git_read_namespace(
+            git_common_dir_handle,
+            objects_handle,
+            git_dir_handle,
+            deadline=deadline,
+        )
+        try:
+            yield (
+                marker_handle,
+                git_dir_handle,
+                git_common_dir_handle,
+                objects_handle,
+                shallow_snapshot,
+                shallow_data,
+                _hosted_git_remote(config_data),
+                read_namespace,
+            )
+        finally:
+            _ensure_git_marker_unchanged(repo_handle, marker_handle)
+            _ensure_pinned_namespace_unchanged(marker_handle)
+            _ensure_pinned_namespace_unchanged(git_dir_handle)
+            _ensure_pinned_namespace_unchanged(git_common_dir_handle)
+            if common_file_handle is not None:
+                _ensure_pinned_namespace_unchanged(common_file_handle)
+            _ensure_pinned_child_unchanged(git_common_dir_handle, "objects", objects_handle)
+            _ensure_no_git_alternate_objects(objects_handle)
+            if _git_shallow_snapshot(
+                git_common_dir_handle,
+                deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
+            ) != (shallow_snapshot, shallow_data):
+                raise _history_error(
+                    "Git shallow boundary changed during history read",
+                    key="fs.error.gitRepositoryChanged",
+                    status=409,
+                )
+            _ensure_pinned_regular_file_unchanged(config_handle)
+            if git_dir_requested_path is not None:
+                _ensure_git_control_target_unchanged(git_dir_requested_path, git_dir_handle)
+            if common_dir_requested_path is not None:
+                _ensure_git_control_target_unchanged(common_dir_requested_path, git_common_dir_handle)
+            if marker_pointer_snapshot is not None:
+                _ensure_git_control_pointer_unchanged(marker_handle, marker_pointer_snapshot, prefix=b"gitdir: ")
+            if common_file_handle is not None and common_pointer_snapshot is not None:
+                _ensure_git_control_pointer_unchanged(common_file_handle, common_pointer_snapshot)
+
+
+@contextlib.contextmanager
 def _pinned_git_control(
     repo: Path,
     repo_handle: paths.SafePathHandle,
@@ -3062,7 +3483,7 @@ def _pinned_git_history_scope(raw_path: str, *, operation: str):
     deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        with paths.safe_path(raw_path, flags=directory_flags, operation=operation) as scope_handle:
+        with paths.safe_path(raw_path, operation=operation) as scope_handle:
             with pinned_git_scope_from_handle(
                 scope_handle,
                 target_path=scope_handle.resolved,
@@ -3600,6 +4021,153 @@ def _run_bounded_history_git(
     )
 
 
+def _run_direct_bounded_git(
+    scope: BoundedGitReadScope,
+    args: list[str],
+    *,
+    operation: str,
+    timeout: float,
+    max_output_bytes: int,
+    binary: bool = False,
+    allow_failure: bool = False,
+    pass_fds: tuple[int, ...] = (),
+    stdin_data: bytes | None = None,
+) -> PinnedGitResult:
+    _ensure_pinned_child_unchanged(scope.git_common_dir_handle, "objects", scope.git_objects_handle)
+    _reject_direct_git_alternate_objects(scope)
+    _ensure_git_read_namespace_unchanged(scope)
+    try:
+        with contextlib.ExitStack() as stack:
+            stdin_descriptor = None
+            if stdin_data is not None:
+                stdin_file = stack.enter_context(tempfile.TemporaryFile(prefix="yolomux-git-input-"))
+                stdin_file.write(stdin_data)
+                stdin_file.flush()
+                stdin_file.seek(0)
+                stdin_descriptor = stdin_file.fileno()
+            result = _git_with_pinned_repo(
+                scope.repo_handle,
+                args,
+                timeout=timeout,
+                binary=binary,
+                pass_fds=pass_fds,
+                max_output_bytes=max_output_bytes,
+                git_dir_handle=scope.git_dir_handle,
+                git_common_dir_handle=scope.git_common_dir_handle,
+                git_directory=scope.git_directory,
+                git_common_directory=scope.git_common_directory,
+                git_object_directory=scope.git_object_directory,
+                git_object_descriptors=scope.git_object_descriptors,
+                git_object_store_descriptor=scope.git_objects_handle.descriptor,
+                shallow_data=scope.shallow_data,
+                stdin_descriptor=stdin_descriptor,
+            )
+    except subprocess.TimeoutExpired as error:
+        raise _history_error(
+            "Git command timed out",
+            key=f"fs.error.{operation}Timeout",
+            status=504,
+            diagnostic=error,
+        ) from error
+    finally:
+        _ensure_pinned_child_unchanged(scope.git_common_dir_handle, "objects", scope.git_objects_handle)
+        _reject_direct_git_alternate_objects(scope)
+        _ensure_git_read_namespace_unchanged(scope)
+    if not isinstance(result, PinnedGitResult):
+        result = PinnedGitResult(
+            args=list(args),
+            returncode=result.returncode,
+            stdout=result.stdout if isinstance(result.stdout, bytes) else str(result.stdout or "").encode(),
+            stderr=result.stderr if isinstance(result.stderr, bytes) else str(result.stderr or "").encode(),
+        )
+    if result.returncode != 0 and not allow_failure and not _was_killed_for_output_cap(result):
+        _raise_history_git_failure(result, operation=operation)
+    return result
+
+
+@contextlib.contextmanager
+def _bounded_git_read_scope(
+    raw_path: str,
+    *,
+    operation: str,
+    target_path: Path | None = None,
+    source_handle: paths.SafePathHandle | paths.SafeParentHandle | None = None,
+):
+    """Pin a bounded Git read view without copying loose objects or pack files."""
+    deadline = time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        source_flags = directory_flags if operation == "git_history" else os.O_RDONLY
+        source_context = (
+            contextlib.nullcontext(source_handle)
+            if source_handle is not None
+            else paths.safe_path(raw_path, flags=source_flags, operation=operation)
+        )
+        with source_context as scope_handle:
+            _ensure_git_view_deadline(deadline)
+            repo = _pinned_repo_root(scope_handle, deadline=deadline, operation=operation)
+            if repo is None:
+                raise _history_error("path is not in a Git repository", key="fs.error.notGitRepo")
+            if operation == "git_history" and not stat.S_ISDIR(scope_handle.stat_result.st_mode):
+                raise _history_error(
+                    "Git history requires a directory",
+                    key="fs.error.gitHistoryDirectoryRequired",
+                )
+            try:
+                requested_target = target_path or scope_handle.resolved
+                relative_path = requested_target.relative_to(repo).as_posix()
+            except ValueError as error:
+                raise paths.FilesystemError.outside_repo(scope_handle.resolved) from error
+            with paths.safe_path(str(repo), flags=directory_flags, operation=operation) as repo_handle:
+                _ensure_git_view_deadline(deadline)
+                _validate_git_path_text(repo, requested_target, relative_path)
+                with _pinned_bounded_git_read_control(repo, repo_handle, deadline=deadline, operation=operation) as control:
+                    (
+                        marker_handle,
+                        git_dir_handle,
+                        git_common_dir_handle,
+                        objects_handle,
+                        shallow_snapshot,
+                        shallow_data,
+                        hosted_remote,
+                        read_namespace,
+                    ) = control
+                    try:
+                        yield BoundedGitReadScope(
+                            path=requested_target,
+                            repo=repo,
+                            relative_path="" if relative_path == "." else relative_path,
+                            scope_handle=scope_handle,
+                            repo_handle=repo_handle,
+                            git_marker_handle=marker_handle,
+                            git_dir_handle=git_dir_handle,
+                            git_common_dir_handle=git_common_dir_handle,
+                            git_objects_handle=objects_handle,
+                            # Git's own repository discovery needs pathname semantics for the
+                            # control directory. The descriptor pins and pre/post identity checks
+                            # keep this bounded read from accepting a repointed control namespace.
+                            git_directory=str(git_dir_handle.descriptor_path()),
+                            git_common_directory=str(git_common_dir_handle.descriptor_path()),
+                            git_object_directory=str(objects_handle.descriptor_path()),
+                            git_object_descriptors=(objects_handle.descriptor,),
+                            deadline=deadline,
+                            shallow_snapshot=shallow_snapshot,
+                            shallow_data=shallow_data,
+                            hosted_remote=hosted_remote,
+                            read_namespace=read_namespace,
+                        )
+                    finally:
+                        _ensure_pinned_namespace_unchanged(scope_handle)
+                        _ensure_pinned_namespace_unchanged(repo_handle)
+    except paths.FilesystemError as error:
+        if operation == "git_history" and error.message_key == "fs.error.notDirectory":
+            raise _history_error(
+                "Git history requires a directory",
+                key="fs.error.gitHistoryDirectoryRequired",
+            ) from error
+        raise
+
+
 def _decode_git_text(value: bytes) -> str:
     return value.decode("utf-8", errors="replace")
 
@@ -3713,62 +4281,122 @@ def _literal_scope_args(relative_path: str) -> list[str]:
     return ["--", f":(literal){relative_path}"] if relative_path else []
 
 
-def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
-    if raw and not output_truncated and not raw.endswith(b"\0"):
-        raise _history_error(
-            "malformed Git history terminator",
-            key="fs.error.gitHistoryFailed",
-            status=500,
-        )
-    tokens = raw.split(b"\0")
+def _parse_history_numstat(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
+    """Parse one bounded ``git log --numstat --shortstat`` result."""
+    if not raw:
+        return [], output_truncated, False
     commits: list[dict[str, Any]] = []
-    index = 0
     parse_truncated = output_truncated
     metadata_truncated = False
+    # With ``--format`` and ``-z``, Git puts the newline that frames the next format record
+    # before that record's NUL separator. Handle that boundary only after recognizing a complete
+    # shortstat token so a filename containing the same bytes remains opaque.
+    tokens = raw.split(b"\0")
+    if not tokens or tokens[0] != b"commit":
+        if output_truncated:
+            return [], True, False
+        raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
+    index = 0
     while index < len(tokens):
-        token = tokens[index]
-        # Git inserts a record separator before each later --format record even with -z.
-        # The explicit NUL keeps fields unambiguous; discard only that separator.
-        if token.startswith(b"\n"):
-            token = token[1:]
-        if token == b"":
+        if tokens[index] == b"":
             index += 1
             continue
-        if token == b"commit":
-            if index + 6 >= len(tokens):
-                if output_truncated:
-                    parse_truncated = True
-                    break
-                raise _history_error(
-                    "malformed Git history metadata",
-                    key="fs.error.gitHistoryFailed",
-                    status=500,
-                )
-            sha, short, parents, author, authored_at, subject = tokens[index + 1:index + 7]
-            authored_at_value = _parse_git_timestamp(authored_at, operation="gitHistory")
-            author_text, author_was_truncated = _bounded_utf8(author, GIT_HISTORY_MAX_TEXT_BYTES)
-            subject_text, subject_was_truncated = _bounded_utf8(subject, GIT_HISTORY_MAX_TEXT_BYTES)
-            metadata_truncated = metadata_truncated or author_was_truncated or subject_was_truncated
-            commits.append({
-                "sha": _decode_git_text(sha),
-                "short": _decode_git_text(short),
-                "parents": _decode_git_text(parents).split() if parents else [],
-                "subject": subject_text,
-                "author": author_text,
-                "authored_at": authored_at_value,
-                "summary_pending": True,
-            })
-            index += 7
-            continue
-        if output_truncated:
-            parse_truncated = True
+        if tokens[index] != b"commit":
+            if output_truncated:
+                parse_truncated = True
+                break
+            raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
+        if index + 6 >= len(tokens):
+            if output_truncated:
+                parse_truncated = True
+                break
+            raise _history_error("malformed Git history metadata", key="fs.error.gitHistoryFailed", status=500)
+        sha, short, parents, author, authored_at, subject = tokens[index + 1:index + 7]
+        index += 7
+        if index == len(tokens) and not output_truncated:
+            raise _history_error("malformed Git history terminator", key="fs.error.gitHistoryFailed", status=500)
+        authored_at_value = _parse_git_timestamp(authored_at, operation="gitHistory")
+        author_text, author_was_truncated = _bounded_utf8(author, GIT_HISTORY_MAX_TEXT_BYTES)
+        subject_text, subject_was_truncated = _bounded_utf8(subject, GIT_HISTORY_MAX_TEXT_BYTES)
+        metadata_truncated = metadata_truncated or author_was_truncated or subject_was_truncated
+        files = 0
+        added = 0
+        removed = 0
+        binary_files = 0
+        shortstat: tuple[int, int, int] | None = None
+        record_complete = True
+        while index < len(tokens) and tokens[index] != b"commit":
+            token = tokens[index]
+            if token.startswith(b"\n"):
+                token = token[1:]
+            index += 1
+            if not token:
+                continue
+            stat_fields = token.split(b"\t", 2)
+            if len(stat_fields) == 3 and (stat_fields[0].isdigit() or stat_fields[0] == b"-"):
+                if not stat_fields[2]:
+                    raise _history_error("malformed Git history path", key="fs.error.gitHistoryFailed", status=500)
+                files += 1
+                added_is_binary = stat_fields[0] == b"-"
+                removed_is_binary = stat_fields[1] == b"-"
+                if added_is_binary != removed_is_binary:
+                    raise _history_error("malformed Git history counts", key="fs.error.gitHistoryFailed", status=500)
+                if added_is_binary:
+                    binary_files += 1
+                else:
+                    try:
+                        row_added = int(stat_fields[0])
+                        row_removed = int(stat_fields[1])
+                    except ValueError as error:
+                        raise _history_error("malformed Git history counts", key="fs.error.gitHistoryFailed", status=500) from error
+                    if row_added < 0 or row_removed < 0:
+                        raise _history_error("malformed Git history counts", key="fs.error.gitHistoryFailed", status=500)
+                    added += row_added
+                    removed += row_removed
+                continue
+            next_commit = token.endswith(b"\ncommit")
+            shortstat_token = token[:-len(b"\ncommit")] if next_commit else token
+            shortstat_match = re.fullmatch(rb"\s*(\d+) files? changed(?:, \d+ insertions?\(\+\))?(?:, \d+ deletions?\(-\))?\s*", shortstat_token)
+            if shortstat_match:
+                file_count = int(shortstat_match.group(1))
+                insertions = re.search(rb", (\d+) insertions?\(\+\)", shortstat_token)
+                deletions = re.search(rb", (\d+) deletions?\(-\)", shortstat_token)
+                shortstat = (file_count, int(insertions.group(1)) if insertions else 0, int(deletions.group(1)) if deletions else 0)
+                if next_commit:
+                    tokens[index:index] = [b"commit"]
+            elif output_truncated:
+                parse_truncated = True
+                record_complete = False
+                break
+            else:
+                raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
+        if not record_complete:
             break
-        raise _history_error("malformed Git history output", key="fs.error.gitHistoryFailed", status=500)
+        if shortstat is not None and shortstat != (files, added, removed):
+            raise _history_error("Git history summary disagrees with numstat", key="fs.error.gitHistoryFailed", status=500)
+        commits.append({
+            "sha": _decode_git_text(sha),
+            "short": _decode_git_text(short),
+            "parents": _decode_git_text(parents).split() if parents else [],
+            "subject": subject_text,
+            "author": author_text,
+            "authored_at": authored_at_value,
+            "files": files,
+            "added": added,
+            "removed": removed,
+            "binary_files": binary_files,
+        })
     return commits, parse_truncated, metadata_truncated
 
 
-def _current_head(scope: PinnedGitHistoryScope, *, operation: str) -> str:
-    result = _run_bounded_history_git(
+def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
+    """Compatibility name for tests and callers of the metadata-only parser."""
+    return _parse_history_numstat(raw, output_truncated=output_truncated)
+
+
+def _current_head(scope: BoundedGitReadScope | PinnedGitHistoryScope, *, operation: str) -> str:
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_bounded_history_git
+    result = runner(
         scope,
         ["rev-parse", "--verify", "--quiet", "HEAD"],
         operation=operation,
@@ -3786,14 +4414,15 @@ def _current_head(scope: PinnedGitHistoryScope, *, operation: str) -> str:
 
 
 def _ensure_commit_exists(
-    scope: PinnedGitHistoryScope,
+    scope: BoundedGitReadScope | PinnedGitHistoryScope,
     commit_oid: str,
     *,
     operation: str = "gitCommit",
     missing_key: str = "fs.error.gitCommitUnknown",
     missing_status: int = 404,
 ) -> None:
-    result = _run_bounded_history_git(
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_bounded_history_git
+    result = runner(
         scope,
         ["rev-parse", "--verify", "--quiet", f"{commit_oid}^{{commit}}"],
         operation=operation,
@@ -3815,8 +4444,13 @@ def _ensure_commit_exists(
     _raise_history_git_failure(result, operation=operation)
 
 
-def _ensure_current_head_object(scope: PinnedGitHistoryScope, *, operation: str) -> None:
-    result = _run_bounded_history_git(
+def _ensure_current_head_object(
+    scope: BoundedGitReadScope | PinnedGitHistoryScope,
+    *,
+    operation: str,
+) -> None:
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_bounded_history_git
+    result = runner(
         scope,
         ["cat-file", "-e", "HEAD^{commit}"],
         operation=operation,
@@ -3830,7 +4464,7 @@ def _ensure_current_head_object(scope: PinnedGitHistoryScope, *, operation: str)
 
 
 def git_history(raw_path: str, limit: int | str | None = None, cursor: str | None = None) -> dict[str, Any]:
-    with _pinned_git_history_scope(raw_path, operation="git_history") as scope:
+    with _bounded_git_read_scope(raw_path, operation="git_history") as scope:
         current_head = _current_head(scope, operation="gitHistory")
         if not current_head:
             if cursor:
@@ -3856,7 +4490,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 missing_key="fs.error.gitHistoryStale",
                 missing_status=409,
             )
-            ancestry = _run_bounded_history_git(
+            ancestry = _run_direct_bounded_git(
                 scope,
                 ["merge-base", "--is-ancestor", frozen_head, current_head],
                 operation="gitHistory",
@@ -3882,24 +4516,25 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             "log",
             "--topo-order",
             "--root",
-            "--no-patch",
             "--diff-merges=first-parent",
             "--no-ext-diff",
             "--no-textconv",
-            # This is a metadata-only index. File names, rename/copy detection, and line counts
-            # belong to git_commit after an explicit commit disclosure.
+            "--no-renames",
+            "--numstat",
+            "--shortstat",
             "-z",
             f"--max-count={page_limit + 1}",
             f"--skip={offset}",
-            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s%x00",
+            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s",
             frozen_head,
             *_literal_scope_args(scope.relative_path),
         ]
-        result = _run_bounded_history_git(
+        result = _run_direct_bounded_git(
             scope,
             args,
             operation="gitHistory",
             timeout=10.0,
+            binary=True,
             max_output_bytes=GIT_HISTORY_MAX_OUTPUT_BYTES,
         )
         raw = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
@@ -4205,7 +4840,7 @@ def _validate_historical_path(repo: Path, relative_path: str) -> None:
 def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
     requested_commit = _validated_history_oid(commit, key="fs.error.gitCommitUnknown")
     frozen_head = _validated_history_oid(head, key="fs.error.gitHistoryStale")
-    with _pinned_git_history_scope(raw_path, operation="git_commit") as scope:
+    with _bounded_git_read_scope(raw_path, operation="git_commit") as scope:
         current_head = _current_head(scope, operation="gitCommit")
         if not current_head:
             raise _history_error("Git history snapshot is stale", key="fs.error.gitHistoryStale", status=409)
@@ -4218,7 +4853,7 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
             missing_status=409,
         )
         _ensure_commit_exists(scope, requested_commit)
-        metadata_result = _run_bounded_history_git(
+        metadata_result = _run_direct_bounded_git(
             scope,
             [
                 "show",
@@ -4228,6 +4863,7 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
             ],
             operation="gitCommit",
             timeout=5.0,
+            binary=True,
             max_output_bytes=GIT_COMMIT_MAX_MESSAGE_BYTES + GIT_COMMIT_METADATA_OVERHEAD_BYTES,
             allow_failure=True,
         )
@@ -4242,11 +4878,12 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
             (frozen_head, current_head, "fs.error.gitHistoryStale"),
             (requested_commit, frozen_head, "fs.error.gitCommitUnknown"),
         ):
-            relation = _run_bounded_history_git(
+            relation = _run_direct_bounded_git(
                 scope,
                 ["merge-base", "--is-ancestor", ancestor, descendant],
                 operation="gitCommit",
                 timeout=5.0,
+                binary=True,
                 max_output_bytes=512,
                 allow_failure=True,
             )
@@ -4261,18 +4898,20 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
                 )
         parents = metadata["parents"]
         from_ref = parents[0] if parents else _empty_tree_oid(requested_commit)
-        status_result = _run_bounded_history_git(
+        status_result = _run_direct_bounded_git(
             scope,
             _history_diff_args("name-status", parents[0] if parents else "", requested_commit, scope.relative_path),
             operation="gitCommit",
             timeout=10.0,
+            binary=True,
             max_output_bytes=GIT_COMMIT_MAX_OUTPUT_BYTES,
         )
-        numstat_result = _run_bounded_history_git(
+        numstat_result = _run_direct_bounded_git(
             scope,
             _history_diff_args("numstat", parents[0] if parents else "", requested_commit, scope.relative_path),
             operation="gitCommit",
             timeout=10.0,
+            binary=True,
             max_output_bytes=GIT_COMMIT_MAX_OUTPUT_BYTES,
         )
         status_raw = status_result.stdout if isinstance(status_result.stdout, bytes) else status_result.stdout.encode("utf-8")
@@ -4394,12 +5033,13 @@ def _diff_ref_resolution_error(error: Exception) -> bool:
 
 
 def _pinned_blob_text(
-    scope: PinnedGitHistoryScope,
+    scope: BoundedGitReadScope | PinnedGitHistoryScope,
     ref: str,
     rel_path: str,
     label: str,
 ) -> tuple[str, str]:
-    result = _run_pinned_git(
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_pinned_git
+    result = runner(
         scope,
         ["show", f"{ref}:{rel_path}"],
         operation="gitBlob",
@@ -4435,8 +5075,9 @@ def _pinned_working_text(handle: paths.SafePathHandle | None) -> tuple[str, str]
     return raw.decode("utf-8", errors="replace"), ""
 
 
-def _pinned_ref_exists(scope: PinnedGitHistoryScope, ref: str) -> bool:
-    return _run_pinned_git(
+def _pinned_ref_exists(scope: BoundedGitReadScope | PinnedGitHistoryScope, ref: str) -> bool:
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_pinned_git
+    return runner(
         scope,
         ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
         operation="gitRef",
@@ -4446,7 +5087,7 @@ def _pinned_ref_exists(scope: PinnedGitHistoryScope, ref: str) -> bool:
     ).returncode == 0
 
 
-def _ensure_pinned_ref_order(scope: PinnedGitHistoryScope, from_ref: str, to_ref: str) -> None:
+def _ensure_pinned_ref_order(scope: BoundedGitReadScope | PinnedGitHistoryScope, from_ref: str, to_ref: str) -> None:
     if to_ref == "current":
         if from_ref == "current" or not _pinned_ref_exists(scope, from_ref):
             key = "fs.error.refOrderCurrent" if from_ref == "current" else "common.unknownFromRef"
@@ -4457,7 +5098,8 @@ def _ensure_pinned_ref_order(scope: PinnedGitHistoryScope, from_ref: str, to_ref
     for ref, key in ((from_ref, "common.unknownFromRef"), (to_ref, "common.unknownToRef")):
         if not _pinned_ref_exists(scope, ref):
             raise paths.FilesystemError(f"unknown ref: {ref}", message_key=key, message_params={"ref": ref})
-    order = _run_pinned_git(
+    runner = _run_direct_bounded_git if isinstance(scope, BoundedGitReadScope) else _run_pinned_git
+    order = runner(
         scope,
         ["merge-base", "--is-ancestor", from_ref, to_ref],
         operation="gitRef",
@@ -4499,16 +5141,15 @@ def _diff_file_from_safe_path(
             message_key="fs.error.notGitRepo",
             message_params={"path": str(path)},
         )
-    with pinned_git_scope_from_handle(
-        repo_source,
-        target_path=path,
+    with _bounded_git_read_scope(
+        str(repo_source.resolved),
         operation=operation,
-        deadline=time.monotonic() + GIT_VIEW_BUILD_TIMEOUT_SECONDS,
-        include_index=True,
+        target_path=path,
+        source_handle=repo_source,
     ) as scope:
         repo = scope.repo
         rel_path = scope.relative_path
-        tracked = _run_pinned_git(
+        tracked = _run_direct_bounded_git(
             scope,
             ["ls-files", "--error-unmatch", "--", rel_path],
             operation="gitDiff",
@@ -4540,7 +5181,7 @@ def _diff_file_from_safe_path(
                 diff = _unified_file_diff(original, working, rel_path)
         else:
             untracked = False
-            result = _run_pinned_git(
+            result = _run_direct_bounded_git(
                 scope,
                 ["diff", diff_from, diff_to, "--", rel_path],
                 operation="gitDiff",

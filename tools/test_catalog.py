@@ -180,15 +180,6 @@ PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
     "tests/subsystems/stats_24h_http.py",
 )
 
-def focused_phase_target_args(phase: str) -> list[str]:
-    """Return catalog-owned focused targets, or the canonical phase files."""
-
-    if phase not in PYTEST_PHASE_FILES:
-        raise KeyError(phase)
-    spec = next(spec for spec in TEST_PHASE_SPECS if spec.name == phase)
-    return list(spec.focused_target_args or PYTEST_PHASE_FILES[phase])
-
-
 def pytest_files(phase: str) -> list[str]:
     """Return the derived pytest targets for one canonical phase."""
 

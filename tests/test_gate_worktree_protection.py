@@ -119,8 +119,9 @@ def test_in_container_caller_without_inherited_token_refuses_instead_of_crashing
     readonly_root = tmp_path / "readonly-git-common"
     readonly_root.mkdir()
     slot = readonly_root / "worktrees" / "some-worktree" / "yolomux" / "worktree-writer"
-    readonly_root.chmod(0o500)
     try:
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(worktree_writer, "_claim_slot_leaf", lambda _slot: (_ for _ in ()).throw(PermissionError("read-only bind mount")))
         with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as caught:
             worktree_writer.acquire_worktree_writer(
                 tmp_path / "worktree",
@@ -132,7 +133,7 @@ def test_in_container_caller_without_inherited_token_refuses_instead_of_crashing
             )
         assert not slot.exists()
     finally:
-        readonly_root.chmod(0o700)
+        monkeypatch.undo()
 
     assert caught.value.reason == worktree_writer.CONTAINER_REFUSAL_NO_TOKEN
     assert isinstance(caught.value.__cause__, PermissionError)
@@ -155,8 +156,9 @@ def test_in_container_caller_refuses_even_when_parent_directory_already_exists(
     # only the top ancestor and the OS permission check on `slot_parent` itself (still 0o755)
     # would let `slot.mkdir()` succeed, since Unix write permission is checked per-directory,
     # not inherited from an ancestor. Chmod the immediate parent to match the real scenario.
-    slot_parent.chmod(0o500)
     try:
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(worktree_writer, "_claim_slot_leaf", lambda _slot: (_ for _ in ()).throw(PermissionError("read-only bind mount")))
         with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as caught:
             worktree_writer.acquire_worktree_writer(
                 tmp_path / "worktree",
@@ -168,7 +170,7 @@ def test_in_container_caller_refuses_even_when_parent_directory_already_exists(
             )
         assert not slot.exists()
     finally:
-        slot_parent.chmod(0o700)
+        monkeypatch.undo()
 
     assert isinstance(caught.value.__cause__, PermissionError)
 
@@ -228,8 +230,9 @@ def test_in_container_refusal_separates_missing_authority_from_stale_authority(
     readonly_root = tmp_path / "readonly-git-common"
     readonly_root.mkdir()
     slot = readonly_root / "yolomux" / "worktree-writer"
-    readonly_root.chmod(0o500)
     try:
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(worktree_writer, "_claim_slot_leaf", lambda _slot: (_ for _ in ()).throw(PermissionError("read-only bind mount")))
         with pytest.raises(worktree_writer.WorktreeWriterContainerRefusal) as missing:
             worktree_writer.acquire_worktree_writer(
                 tmp_path / "worktree",
@@ -252,7 +255,7 @@ def test_in_container_refusal_separates_missing_authority_from_stale_authority(
                 },
             )
     finally:
-        readonly_root.chmod(0o700)
+        monkeypatch.undo()
 
     assert missing.value.reason == worktree_writer.CONTAINER_REFUSAL_NO_TOKEN
     assert stale.value.reason == worktree_writer.CONTAINER_REFUSAL_STALE_TOKEN

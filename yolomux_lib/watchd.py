@@ -930,8 +930,18 @@ class PersistentWatchService:
         signatures: dict[str, tuple[Any, ...]] = {}
         for path in sorted(directory_paths | explicit_paths):
             signatures[path] = self._scan_signature(path, directory_paths)
-        changed = sorted(path for path in signatures if previous.get(path) != signatures.get(path))
-        removed = sorted(set(previous) - set(signatures))
+        # A configuration expansion is an observation baseline, not a filesystem mutation.  In
+        # particular, opening Finder can add an already-unchanged repository root after Differ
+        # has published its completed view; treating that first scan as a change advances the
+        # repo generation and creates a second Git product without any user or filesystem event.
+        # Keep signatures for future comparisons, but only report paths that were already watched.
+        changed = sorted(
+            path for path in signatures
+            if path in previous and previous[path] != signatures[path]
+        )
+        # Removing a configured path also changes watch demand, not the filesystem.  It must not
+        # invalidate a still-valid repository view.
+        removed: list[str] = []
         changed_paths = changed + removed
         bumps = self._generation_bumps(
             configuration,

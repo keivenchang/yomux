@@ -4857,7 +4857,7 @@ def test_activity_summary_cold_session_files_schedules_refresh_without_waiting(m
         "refreshing_elsewhere": True,
     }
     assert len(refreshes) == 1
-    assert refreshes[0][1] == webapp.refresh_session_files_info_cache
+    assert refreshes[0][1] == webapp.refresh_session_files_cache
 
 
 def test_activity_summary_bytes_returns_typed_terminal_statusd_failure(monkeypatch, legacy_activity_summary_enabled):
@@ -5520,11 +5520,54 @@ def test_transcripts_payload_worker_guard_supersedes_a_stalled_worker():
     gen2 = webapp.begin_transcripts_payload_work(successor)
     assert gen2 > gen1
     assert record.worker is successor
+    assert record.superseded_workers == {stalled}
 
     # The stalled worker's late finish/commit cannot clobber the successor.
     assert webapp.finish_transcripts_payload_work(gen1, stalled) is False
     assert webapp.commit_transcripts_payload_cache({"x": 1}, gen1) is False
     assert record.worker is successor
+    assert record.superseded_workers == set()
+
+
+def test_stop_transcripts_payload_work_joins_every_admitted_worker():
+    """Teardown retains a replaced worker until the transcript owner joins it."""
+
+    webapp, record = transcripts_payload_guard_app()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_refresh() -> None:
+        entered.set()
+        assert release.wait(timeout=5)
+
+    worker = threading.Thread(target=blocked_refresh)
+    generation = webapp.begin_transcripts_payload_work(worker)
+    worker.start()
+    assert generation > 0
+    assert entered.wait(timeout=2)
+
+    replacement = object()
+    record.worker_started_at -= app_module.TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS + 1.0
+    replacement_generation = webapp.begin_transcripts_payload_work(replacement)
+    assert replacement_generation > generation
+    assert worker in record.active_workers
+    assert webapp.finish_transcripts_payload_work(replacement_generation, replacement) is True
+
+    def stop_work() -> None:
+        app_module.TmuxWebtermApp.stop_transcripts_payload_work(webapp)
+
+    stopped = threading.Thread(target=stop_work)
+    stopped.start()
+    assert stopped.is_alive(), "teardown did not wait for the admitted worker"
+    release.set()
+    stopped.join(timeout=5)
+    worker.join(timeout=5)
+
+    assert not stopped.is_alive()
+    assert not worker.is_alive()
+    assert record.stopped is True
+    assert record.active_workers == set()
+    assert record.worker is None
 
 
 def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(monkeypatch):
@@ -5687,8 +5730,9 @@ def transcripts_payload_work_state(webapp):
             "worker": record.worker,
             "worker_started_at": record.worker_started_at,
             "publish_requested": record.publish_requested,
-            "rebuild_requested": record.rebuild_requested,
-            "rebuild_publish": record.rebuild_publish,
+        "rebuild_requested": record.rebuild_requested,
+        "rebuild_publish": record.rebuild_publish,
+        "superseded_workers": record.superseded_workers,
             "payload": record.payload,
             "stored_at": record.stored_at,
         }
@@ -5751,6 +5795,7 @@ def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_
         "publish_requested": False,
         "rebuild_requested": False,
         "rebuild_publish": False,
+        "superseded_workers": set(),
         "payload": None,
         "stored_at": None,
     }
@@ -6276,9 +6321,9 @@ def test_two_app_session_files_callers_share_jobd_product_until_watcher_generati
         status_before = first.job_client.request({"action": "status"})
 
         for webapp in (first, second):
-            with webapp.session_files_service.cache_lock:
-                webapp.session_files_service.repo_dirty_generations[str(repo)] = 1
+            webapp.mark_repo_state_dirty([repo])
         changed_payload, changed_status = first.session_files_payload_for_infos("5", {"5": idle}, 24.0, force=True, requester="filesystem-event")
+        assert first.session_files_service.wait_for_idle(2.0)
         status_after = first.job_client.request({"action": "status"})
     finally:
         first.control_server.stop()
@@ -6287,14 +6332,18 @@ def test_two_app_session_files_callers_share_jobd_product_until_watcher_generati
         worker.join(timeout=2.0)
 
     assert first_status == second_status == changed_status == HTTPStatus.OK
-    assert first_payload == second_payload
+    # The first caller built the product and the second reused it. Cache diagnostics are local
+    # delivery facts (hit and age), not part of the shared session-files product.
+    assert {key: value for key, value in first_payload.items() if key != "cache"} == {
+        key: value for key, value in second_payload.items() if key != "cache"
+    }
     assert changed_payload["files"] == first_payload["files"]
-    # Status/Finder churn may rebuild the lightweight attribution product, but the shared Git
-    # snapshot must be reused until the watcher-authoritative repository generation changes.
-    assert status_before["product_counters"]["session_files_view"]["completed"] == 2
+    # Both callers share one completed product.  The watcher-authoritative generation change is
+    # the only event in this scenario that may create the next product.
+    assert status_before["product_counters"]["session_files_view"]["completed"] == 1
     assert status_before["product_work_totals"]["session_files_view"]["git_snapshots"] == 1
-    assert status_before["product_work_totals"]["session_files_view"]["git_snapshot_cache_hits"] == 1
-    assert status_after["product_counters"]["session_files_view"]["completed"] == 3
+    assert status_before["product_work_totals"]["session_files_view"]["git_snapshot_cache_hits"] == 0
+    assert status_after["product_counters"]["session_files_view"]["completed"] == 2
     assert status_after["product_work_totals"]["session_files_view"]["git_snapshots"] == 2
 
 
@@ -8411,6 +8460,105 @@ def test_metadata_warm_publish_and_start_are_atomic_under_fixture_teardown(monke
     assert teardown_error == [], f"teardown observed a published-but-unstarted worker: {teardown_error!r}"
     with fixture.metadata_warm_lock:
         assert fixture.metadata_warm_record.worker is None
+
+
+def test_transcripts_payload_refresh_start_is_atomic_with_fixture_teardown(monkeypatch):
+    """Fixture shutdown fences a roster refresh before it can start a late Git-view writer."""
+
+    class FixtureApp:
+        begin_transcripts_payload_work = app_module.TmuxWebtermApp.begin_transcripts_payload_work
+        finish_transcripts_payload_work = app_module.TmuxWebtermApp.finish_transcripts_payload_work
+        stop_transcripts_payload_work = app_module.TmuxWebtermApp.stop_transcripts_payload_work
+        start_queued_transcripts_payload_rebuild = app_module.TmuxWebtermApp.start_queued_transcripts_payload_rebuild
+        start_transcripts_payload_refresh = app_module.TmuxWebtermApp.start_transcripts_payload_refresh
+        refresh_transcripts_payload_cache = app_module.TmuxWebtermApp.refresh_transcripts_payload_cache
+
+        def __init__(self) -> None:
+            self.activity_transcript_service = SimpleNamespace(
+                tabber_cache_lock=threading.RLock(),
+                tabber_warmer_record=state_services.TabberActivityWarmerRecord(),
+                transcripts_payload_cache_lock=threading.RLock(),
+                transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
+            )
+
+        def build_transcripts_payload(self):
+            return {"sessions": {}}
+
+        def commit_transcripts_payload_cache(self, _payload, _generation):
+            return False
+
+        def stop_client_event_watcher(self):
+            pass
+
+        def stop_jobd_operation_service(self):
+            pass
+
+        def demote_background_owner(self):
+            pass
+
+        def stop_auto_approve_all(self):
+            pass
+
+    fixture = FixtureApp()
+    producer_at_start = threading.Event()
+    proceed = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(self):
+        if self.name == "transcripts-payload-refresh":
+            producer_at_start.set()
+            assert proceed.wait(10), "transcript payload worker was never released"
+        return original_start(self)
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", paused_start)
+    teardown_error: list[BaseException] = []
+    producer = threading.Thread(target=fixture.start_transcripts_payload_refresh, name="transcript-race-producer")
+
+    def run_teardown():
+        try:
+            stop_fixture_app_runtime(fixture, label="transcript payload publish/start race")
+        except BaseException as error:  # noqa: BLE001 - preserve teardown evidence for the assertion
+            teardown_error.append(error)
+
+    teardown = threading.Thread(target=run_teardown, name="transcript-race-teardown")
+    producer.start()
+    assert producer_at_start.wait(10), "producer never reached the pre-start pause"
+    teardown.start()
+    teardown.join(timeout=1)
+    proceed.set()
+    teardown.join(timeout=10)
+    producer.join(timeout=10)
+
+    assert teardown_error == [], f"teardown observed a late transcript writer: {teardown_error!r}"
+    with fixture.activity_transcript_service.transcripts_payload_cache_lock:
+        record = fixture.activity_transcript_service.transcripts_payload_cache_record
+        assert record.stopped is True
+        assert record.worker is None
+
+
+def test_client_watch_snapshot_does_not_start_after_transcript_teardown(monkeypatch):
+    """The snapshot publisher must honor the same teardown admission fence."""
+
+    webapp = app_module.TmuxWebtermApp([])
+    watcher = webapp._watch_bridge
+    record = watcher.state.event_watcher_record
+    started: list[object] = []
+
+    def unexpected_start(worker):
+        started.append(worker)
+        raise AssertionError("transcript snapshot worker started after teardown")
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", unexpected_start)
+    try:
+        app_module.TmuxWebtermApp.stop_transcripts_payload_work(webapp)
+        assert watcher.start_client_watch_snapshot_publish(webapp) is False
+        watcher.publish_client_watch_snapshot(webapp)
+    finally:
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+    assert started == []
+    assert record.snapshot_worker is None
 
 
 def test_tabber_warmer_publish_and_start_are_atomic_under_fixture_teardown(monkeypatch):

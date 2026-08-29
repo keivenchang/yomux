@@ -398,7 +398,10 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "/") or "/")
-        self.submit_filesystem_operation("GET /api/fs/list", "list", raw_path)
+        try:
+            self.write_json(filesystem.list_directory(raw_path), status=HTTPStatus.OK)
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_fs_search(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -416,7 +419,10 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
-        self.submit_filesystem_operation("GET /api/fs/index-status", "index_status", raw_root)
+        try:
+            self.write_json(filesystem.index_status(raw_root), status=HTTPStatus.OK)
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -445,14 +451,27 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_info(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path, {"include_git": query_bool(qs, "include_git")})
+        include_git = query_bool(qs, "include_git")
+        if include_git:
+            self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path, {"include_git": True})
+            return
+        try:
+            self.write_json(filesystem.path_info(raw_path, include_git=include_git), status=HTTPStatus.OK)
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         from_ref = query_one(qs, "from", None)
         to_ref = query_one(qs, "to", None)
-        self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
+        try:
+            self.write_json(
+                filesystem.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref),
+                status=HTTPStatus.OK,
+            )
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_fs_git_history(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -462,24 +481,26 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         cursor = str(query_one(qs, "cursor", "") or "")
-        self.submit_filesystem_operation(
-            "GET /api/fs/git-history",
-            "git_history",
-            raw_path,
-            {"limit": limit, "cursor": cursor},
-        )
+        try:
+            self.write_json(
+                filesystem.git_history(raw_path, limit=limit, cursor=cursor or None),
+                status=HTTPStatus.OK,
+            )
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_fs_git_commit(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         commit = str(query_one(qs, "commit", "") or "")
         head = str(query_one(qs, "head", "") or "")
-        self.submit_filesystem_operation(
-            "GET /api/fs/git-commit",
-            "git_commit",
-            raw_path,
-            {"commit": commit, "head": head},
-        )
+        try:
+            self.write_json(
+                filesystem.git_commit(raw_path, commit=commit, head=head),
+                status=HTTPStatus.OK,
+            )
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def handle_blame(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -862,7 +883,10 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         if not isinstance(raw_paths, list) or not raw_paths or len(raw_paths) > 8 or any(not isinstance(path, str) for path in raw_paths):
             self.write_json(error_payload("paths must contain 1 to 8 strings", message_key="request.error.jsonObject", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
             return
-        self.submit_filesystem_operation("POST /api/fs/resolve-file-candidates", "resolve_file_candidates", raw_paths[0], {"paths": raw_paths})
+        try:
+            self.write_json(filesystem.resolve_file_candidates(raw_paths), status=HTTPStatus.OK)
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
 
     def file_transfer_max_bytes(self) -> int:
         getter = getattr(self.server.app, "file_transfer_max_bytes", None)

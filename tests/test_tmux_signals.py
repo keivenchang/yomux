@@ -66,6 +66,7 @@ def test_non_filesystem_client_event_stream_does_not_start_watchd_until_a_descri
     fake_app.server_tmux_signal_event_poll_seconds = lambda: 30.0
     fake_app.client_event_watch_loop = lambda _record: release_worker.wait(2.0)
     fake_app.start_tmux_signal_event_watcher = lambda: None
+    fake_app.replay_shared_background_client_events = lambda: None
     def start_watchd(record):
         if watchd_running[0]:
             return False

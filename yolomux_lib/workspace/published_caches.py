@@ -26,6 +26,7 @@ OwnerGeneration = Callable[[], dict[str, Any]]
 class SessionFilesCachedPayload:
     payload: dict[str, Any]
     status: HTTPStatus
+    request_descriptor: str = ""
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class SessionFilesValidator:
             float(record.get("stored_at", 0.0))
         except (TypeError, ValueError):
             return None
-        return SessionFilesCachedPayload(payload, status)
+        return SessionFilesCachedPayload(payload, status, str(record.get("request_descriptor") or ""))
 
 
 class SessionFilesFreshness:
@@ -101,7 +102,7 @@ class RecordManifestOwner:
 class SessionFilesRecordManifest(RecordManifestOwner):
 
     def payload_signature(self, payload: SessionFilesCachedPayload) -> str:
-        return self._payload_signature(payload.payload)
+        return self._payload_signature({"payload": payload.payload, "request_descriptor": payload.request_descriptor})
 
     def payload_changed(
         self,
@@ -141,6 +142,7 @@ class SessionFilesRecordManifest(RecordManifestOwner):
             "stored_at": stored_at,
             "status": int(freshness_key.status),
             "payload_signature": payload_signature,
+            "request_descriptor": payload.request_descriptor,
             "payload": payload.payload,
         }
 
@@ -201,7 +203,10 @@ class SessionFilesPostWrite:
         self.record_phase(
             "durable-cache-write",
             0.0,
-            {"payload_and_manifest_bytes": int(payload_size), "index_bytes_rewritten": int(index_bytes)},
+            {
+                "payload_and_manifest_bytes": int(payload_size),
+                "index_bytes_rewritten": int(index_bytes),
+            },
         )
         self.request_prune("write")
 

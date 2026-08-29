@@ -776,6 +776,36 @@ def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monk
     assert refreshed.member_identities == ((43235, "proc:1238"), (43236, "proc:1239"))
 
 
+def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_path, monkeypatch):
+    """A stale leader row cannot hide a live same-generation worker from fixture retirement."""
+
+    generation_marker = "a" * 32
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+    )
+    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
+        leader_pid=43250,
+        process_group=43250,
+        session_id=43250,
+        generation_marker=generation_marker,
+        member_identities=((43250, "proc:leader"),),
+    )
+    leader = registry_mod.ProcessTableEntry(1, 43250, 0.0, "leader", 100, 43250, "proc:leader")
+    worker = registry_mod.ProcessTableEntry(43250, 43250, 0.0, "worker", 101, 43250, "proc:worker")
+    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {43250: leader, 43251: worker})
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: None if pid == 43250 else "proc:worker")
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda pid: None if pid == 43250 else generation_marker)
+
+    proof = registry.refresh_spawn_ownership_proof()
+
+    assert proof is not None
+    assert proof.group_exists is True
+    assert proof.owned_member_identities == ((43251, "proc:worker"),)
+    assert registry.spawn_ownership is not None
+    assert registry.spawn_ownership.member_identities == ((43251, "proc:worker"),)
+
+
 def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,

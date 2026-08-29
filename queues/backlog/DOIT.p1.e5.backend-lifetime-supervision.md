@@ -5,7 +5,7 @@
 - Authoritative queue: this file in `/home/keivenc/dev/yolomux.dev7771-unified`, branch `integration/v0.7.12-one-ai`, HEAD `2c1d0954ca9f6017e84189dc7db45b93f833fa62` when consolidated on 2026-08-23.
 - Worked source: `/home/keivenc/dev/yolomux.dev7773`, branch `fix/watchd-demand-quick-open-cpu`, HEAD `6dcfbf0d949fb7ec98f34e93fe8e28a08f92a9ec`, intentionally dirty and stopped at 0/14.
 - Corrective batch source: `/tmp/yop-p1-027-worktree`, local `main`, HEAD `2c1d0954ca9f6017e84189dc7db45b93f833fa62`, with the seven uncommitted files named in the stopped handoff below copied into the unified tree for verification.
-- Status: paused and unfinished under the active STATUS ledger; `DOIT.p0.e1.stability-recurring-gate-defects.md` is the sole focus. The old source queue is removed after this transfer; its worktree and dirty implementation evidence remain untouched.
+- Status: paused and unfinished post-release. The old source queue is removed after this transfer; its worktree and dirty implementation evidence remain untouched.
 
 Source provenance: Bugs 9, 9b, 9c, 9e and S4 from `EVIDENCE-ARCHIVE.md`, the launch-lifecycle rules from `REGRESSION-GATE.md`, `DOIT.p2.same-root-coordination-simplification.md`, and the rotating-daemon fixture evidence formerly retained in sibling worktrees.
 
@@ -16,6 +16,10 @@ Every backend and sidecar has one explicit lifetime owner, exits within a numeri
 ## Why These Tasks Are One Queue
 
 Backend retirement and same-root owner election use the same host/boot/process/generation identity, service records, locks, signals, unlink, reclaim, and adoption paths. Implementing them in separate queues would make two agents edit the same lifecycle owner and could leave private-root and caller-shared-root behavior inconsistent.
+
+## Scope Transfer
+
+- On 2026-08-27, the user transferred jobd executor-slot replacement, generation fencing, quarantine, and reaping from this queue to `DOIT.p0.e5.instant-file-open-and-bounded-jobd.md`. E5 exclusively owns `yolomux_lib/infra/jobd.py` and shared jobd retirement tests for that work; implementation is deferred until the user resumes E5. This queue retains all non-jobd backend lifetime, process-identity, same-root coordination, and local-service lifecycle work, and must not add a parallel jobd executor owner.
 
 ## Context
 

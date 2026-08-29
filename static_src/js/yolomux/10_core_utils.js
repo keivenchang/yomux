@@ -2740,7 +2740,7 @@ function applyFileGitMetadata(state, payload) {
   if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
   applyFileIdentityMetadata(state, payload);
   const gitHistory = normalizedFileGitHistory(payload.git_history);
-  state.gitRoot = payload.git_root ? normalizeDirectoryPath(payload.git_root) : '';
+  state.gitRoot = payload.git_root || payload.repo_root ? normalizeDirectoryPath(payload.git_root || payload.repo_root) : '';
   state.gitTracked = payload.git_tracked === true;
   state.gitHistory = gitHistory;
   state.gitHasHistory = payload.git_has_history === true && gitHistory.length > 1;

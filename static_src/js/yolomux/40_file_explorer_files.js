@@ -461,7 +461,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
   recordFileExplorerFsBatchTerminalOwner(item, options.terminalOwner);
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
-  scheduleFileExplorerFsBatchFlush();
+  if (options.immediate === true) void flushFileExplorerFsBatch();
+  else scheduleFileExplorerFsBatchFlush();
   return promise;
 }
 

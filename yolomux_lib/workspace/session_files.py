@@ -4387,6 +4387,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     exclusion_policy_source = "payload" if exclusion_policy is not None else "default"
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     raw_repository_states = payload.get("repository_states")
+    fresh_git = bool(payload.get("fresh_git"))
     repository_generations: dict[str, int] = {}
     if isinstance(raw_repository_states, list):
         for item in raw_repository_states:
@@ -4435,7 +4436,8 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
                             return built
                     if attempt == 1:
                         raise FilesystemError.changed_on_disk(_repo, diagnostic="repository changed while building the session-files snapshot")
-            snapshot, hit = cached_repository_snapshot(repo, repo_from, repo_to, repository_generations.get(canonical_repo), build_git_snapshot if canonical_repo in repository_generations else build_snapshot_with_identity)
+            generation = None if fresh_git else repository_generations.get(canonical_repo)
+            snapshot, hit = cached_repository_snapshot(repo, repo_from, repo_to, generation, build_git_snapshot if generation is not None else build_snapshot_with_identity)
             phase_samples.append(("git-snapshot", max(0.0, (time.perf_counter() - started) * 1000)))
             if hit:
                 git_snapshot_cache_hits += 1

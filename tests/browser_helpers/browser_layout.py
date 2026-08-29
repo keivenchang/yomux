@@ -375,7 +375,7 @@ def remove_browser_test_new_document_scripts(driver):
         driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
 
 
-def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
+def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profile_dir: Path | None = None):
     # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
     # the Linux lookup first, then use the canonical executable inside either
     # common macOS bundle so browser regressions do not silently skip there.
@@ -398,6 +398,9 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
     requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
     window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
     options.add_argument(f"--window-size={window_size_arg}")
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir}")
     driver = webdriver.Chrome(options=options)
     driver._yolomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
@@ -785,7 +788,14 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
     runtime = start_fixture_live_server(
         monkeypatch,
         app,
-        GateLiveServerOptions(tls_context=tls_context, label="isolated browser"),
+        GateLiveServerOptions(
+            tls_context=tls_context,
+            label="isolated browser",
+            # Browser fixtures also serve small HTTP-only app doubles.  Pin jobd only when the
+            # app actually owns that scheduler seam; otherwise the fixture has no producer to
+            # protect and must not manufacture a jobd dependency.
+            pin_jobd_scheduler=hasattr(app, "job_client"),
+        ),
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
     runtime.server._fixture_gate_live_server = runtime

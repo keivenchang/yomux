@@ -549,6 +549,7 @@ const fileExplorerSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
   abortController: null,
+  completionWaiter: null,
 };
 const fileExplorerFinderSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
@@ -556,6 +557,7 @@ const fileExplorerFinderSessionFilesState = {
   loading: false,
   guard: makeGenerationGuard(),
   abortController: null,
+  completionWaiter: null,
 };
 // One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
@@ -5247,7 +5249,7 @@ function applyFileGitMetadata(state, payload) {
   if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
   applyFileIdentityMetadata(state, payload);
   const gitHistory = normalizedFileGitHistory(payload.git_history);
-  state.gitRoot = payload.git_root ? normalizeDirectoryPath(payload.git_root) : '';
+  state.gitRoot = payload.git_root || payload.repo_root ? normalizeDirectoryPath(payload.git_root || payload.repo_root) : '';
   state.gitTracked = payload.git_tracked === true;
   state.gitHistory = gitHistory;
   state.gitHasHistory = payload.git_has_history === true && gitHistory.length > 1;
@@ -21011,7 +21013,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
   recordFileExplorerFsBatchTerminalOwner(item, options.terminalOwner);
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
-  scheduleFileExplorerFsBatchFlush();
+  if (options.immediate === true) void flushFileExplorerFsBatch();
+  else scheduleFileExplorerFsBatchFlush();
   return promise;
 }
 
@@ -26542,6 +26545,7 @@ async function fetchFilePathInfo(path, options = {}) {
       dedupe: options.fresh !== true,
       trigger: fileExplorerFsBatchTrigger(options),
       terminalOwner: options.terminalOwner,
+      immediate: options.immediate === true,
     }),
     {
       skipRequest: () => suppressBackgroundFilesystemFetch(options),
@@ -26631,16 +26635,18 @@ function finderOpenInNewTabActionsForContext(context = {}) {
   const menuState = context.menuState || {};
   if (selectedPaths.length !== 1) return [];
   if (entry.kind === 'dir') {
-    // Directory listings already derive this marker from the pinned directory descriptor.  It is
-    // enough to offer the Git history tab now; the tab owns the slower Git history load.
+    // The listing's descriptor-bound .git probe is enough to offer this action now. The tab
+    // owns its potentially slow history request after it has painted its Loading state.
     if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
-    const disabledReason = readOnlyMode ? t('contextmenu.readOnlyUnavailable') : '';
+    const disabledReason = finderPathActionDisabledReason();
     const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
       item: gitDiffItemFor(fullPath),
       disabled,
       disabledReason,
+      // The context menu already refreshes this path's metadata. Opening the tab starts its
+      // own history request, so do not send a second fresh info request for the same click.
       action: () => openGitDiffTab(fullPath, {userInitiated: true}),
     }];
   }
@@ -26663,7 +26669,7 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     canonical: true,
     disabled,
     disabledReason: disabled ? disabledReason : '',
-    action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
+      action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
   });
   return [
     actionForMode('edit', 'contextmenu.editNewTab'),
@@ -26716,7 +26722,7 @@ function renderFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, in
 }
 
 async function refreshFileTreeContextMenu(menu, row, fullPath, entry, selectedPaths, options = {}) {
-  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path, {user: true, immediate: true}).catch(error => {
     console.warn('fs info failed', path, error);
     return null;
   })));
@@ -28487,6 +28493,21 @@ function foldDuplicateEditorItemsForPath(path, keepItem = null) {
   return keeper;
 }
 
+function releaseFileEditorItem(path, item) {
+  const nextSlots = itemInLayout(item)
+    ? layoutWithoutItemFromSlots(item, layoutSlots, {preserveRemovedSlot: true})
+    : null;
+  removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
+  fileEditorViewState.delete(item);
+  fileEditorDiffExpandOverrides.delete(item);
+  tabLastActivatedAt.delete(item);
+  removePanelForItem(item);
+  if (!openFilePathHasOwner(path) && !fileStateFor(path)?.dirty) deleteFileState(path);
+  syncFileLayoutItems();
+  if (nextSlots) applyLayoutSlots(nextSlots, {focusSession: focusedPanelItem, prune: false});
+}
+
 async function focusExistingPhysicalFileEditor(requestedPath, existingPath, options = {}) {
   if (!requestedPath || !existingPath) return null;
   const item = primaryEditorItemForPath(existingPath, options.item || null);
@@ -28646,7 +28667,7 @@ async function refreshOpenFileGitMetadata(path, expectedState = null) {
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || (expectedState && state !== expectedState)) return false;
   try {
-    const payload = await fetchFileReadPayload(path, {includeGit: true});
+    const payload = await fetchFileGitMetadataPayload(path);
     const current = fileState.get(path);
     if (!current || current.kind !== 'text' || (expectedState && current !== expectedState)) return false;
     applyFileGitMetadata(current, payload);
@@ -28691,6 +28712,14 @@ async function fetchFileReadPayload(path, options = {}) {
   return fetchFilesystemOperationPayload(
     url,
     'read',
+    options,
+  );
+}
+
+function fetchFileGitMetadataPayload(path, options = {}) {
+  return fetchFilesystemOperationPayload(
+    `/api/fs/info?path=${encodeURIComponent(path)}&include_git=1`,
+    'info',
     options,
   );
 }
@@ -28765,7 +28794,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     loading: true,
   }, entry);
   const openPromise = (async () => {
-    const payload = await fetchFileReadPayload(fullPath);
+    const payload = await fetchFileReadPayload(fullPath, options.includeGit === true ? {includeGit: true} : {});
     if (!openFileLoadingStateStillCurrent(fullPath, loadingState)) return null;
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
@@ -28782,9 +28811,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       dirty: false,
     }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
-    // Base content is the interactive path. Git status/history is useful decoration, but never
-    // delays the newly-created tab; discard its result if this state has since been replaced.
-    void refreshOpenFileGitMetadata(fullPath, state);
+    // Ordinary editors paint from one direct content read, then enrich through metadata only.
+    // Differ is an explicit Git action: it owns one queued Git-complete read so a missing working
+    // file can resolve through the committed side without a browser-visible direct 404.
+    if (options.includeGit !== true) void refreshOpenFileGitMetadata(fullPath, state);
     return item;
   })();
   // renderLoadingEditor normally starts a loader for a restored tab. This open already owns the
@@ -28820,6 +28850,9 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   const canonical = options.canonical === true;
   const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
   const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (openedItem && fileItemPath(openedItem) !== fullPath) {
+    for (const duplicateItem of fileEditorTabItemsForPath(fullPath)) releaseFileEditorItem(fullPath, duplicateItem);
+  }
   if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
   const openedPath = fileItemPath(openedItem) || fullPath;
   const state = fileEditorStateForItem(openedPath, openedItem);
@@ -28892,6 +28925,21 @@ function textFileStateFromReadPayload(payload) {
     content: payload.content,
     dirty: false,
   }, payload);
+}
+
+function preserveDeferredFileGitMetadata(state, previous, payload) {
+  if (payload?.git_enrichment?.reason !== 'deferred' || !previous || !state) return state;
+  state.gitRoot = previous.gitRoot || '';
+  state.gitTracked = previous.gitTracked === true;
+  state.gitHistory = Array.isArray(previous.gitHistory) ? previous.gitHistory : [];
+  state.gitHasHistory = previous.gitHasHistory === true;
+  // A direct reload deliberately skips Git work. Retain the last eligible diff while its refresh
+  // is in flight so rendering cannot reinterpret a Differ tab as an ordinary editor between the
+  // content read and the replacement diff payload.
+  for (const key of ['diff', 'diffOriginal', 'diffOriginalError', 'diffWorking', 'diffWorkingError', 'diffRepo', 'diffRelativePath', 'diffFromRef', 'diffToRef', 'diffWorkingMissing', 'untracked', 'diffLoaded', 'diffUnavailable', 'diffError']) {
+    if (Object.prototype.hasOwnProperty.call(previous, key)) state[key] = previous[key];
+  }
+  return state;
 }
 
 async function openFileStateFromDisk(path, entry = null) {
@@ -29098,7 +29146,7 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);
     if (panel) captureFileEditorPanelViewState(item, panel);
-    return {item, panel};
+    return {item, panel, mode: editorViewModeFor(path, item)};
   });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
@@ -29113,9 +29161,13 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
     loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
   clearFileAutosaveTimer(path);
-  setFileState(path, clearOpenFileExternalState(loaded.state));
+  setFileState(path, clearOpenFileExternalState(preserveDeferredFileGitMetadata(loaded.state, previous, loaded.state)));
   bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
+  // Disk replacement changes bytes, not the user's selected editor mode. Rendering the fresh state
+  // may briefly lack its asynchronous Git refresh, so restore every tab's mode after the replacement
+  // before that transient capability check can turn a Differ tab into Edit.
+  for (const {item, mode} of viewStates) setFileEditorViewMode(path, mode, item);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
     if (panel) restoreFileEditorPanelViewState(item, panel, {restoreFocused: true});
@@ -29129,7 +29181,16 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
   if (loaded.state?.kind && typeof updateFilePreviewPopout === 'function' && editorPreviewModeAvailable(path, loaded.state)) {
     updateFilePreviewPopout(path, loaded.state.content || '');
   }
-  if (previous?.diff !== undefined) refreshOpenFileDiff(path);
+  if (previous?.diff !== undefined) {
+    void refreshOpenFileDiff(path).then(diffReady => {
+      const current = fileState.get(path);
+      if (!diffReady || !current || current.kind !== 'text' || !fileStateCanRenderDiffView(path, current)) return;
+      for (const {item, mode} of viewStates) {
+        if (mode === 'diff') setFileEditorViewMode(path, 'diff', item);
+      }
+      renderOpenFilePath(path);
+    });
+  }
   return true;
 }
 
@@ -29140,6 +29201,10 @@ function fileEditorPathHasFocus(path) {
 }
 
 function openFileBackgroundReloadShouldDefer(path, state) {
+  // A watched replacement after an exact missing verdict is recovery, not an ordinary background
+  // overwrite.  Keep the missing tab visible only until the authoritative replacement event arrives;
+  // applying the clean-file debounce here stranded Differ for its full delay after an inode swap.
+  if (state?.externalMissing === true) return false;
   if (fileEditorPathHasFocus(path)) return true;
   const lastCleanAt = Number(state?.lastCleanAt || 0);
   return Number.isFinite(lastCleanAt)
@@ -63915,23 +63980,23 @@ function gitDiffTextNode(className, text = '') {
 }
 
 function gitDiffCommitChangesNode(commit) {
-  if (commit?.summary_pending === true) {
-    const node = gitDiffTextNode('git-diff-commit-changes git-diff-commit-changes-pending', '…');
-    node.setAttribute('aria-label', t('common.loading'));
+  const files = Number.isSafeInteger(commit?.files) && commit.files >= 0 ? commit.files : null;
+  const added = Number.isSafeInteger(commit?.added) && commit.added >= 0 ? commit.added : null;
+  const removed = Number.isSafeInteger(commit?.removed) && commit.removed >= 0 ? commit.removed : null;
+  const binary = Number.isSafeInteger(commit?.binary_files) && commit.binary_files >= 0 ? commit.binary_files : null;
+  const node = gitDiffTextNode('git-diff-commit-changes');
+  if (files === null || added === null || removed === null || binary === null) {
+    node.setAttribute('aria-label', t('common.notAvailable'));
+    node.title = t('common.notAvailable');
     return node;
   }
-  const files = Math.max(0, Number(commit?.files) || 0);
-  const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
-  const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
-  const binary = Math.max(0, Number(commit?.binary_files) || 0);
-  const node = gitDiffTextNode('git-diff-commit-changes');
   node.append(
     document.createTextNode(`${files} ${t('common.files')} `),
     gitDiffTextNode('git-diff-commit-added', `+${added}`),
     document.createTextNode(' '),
     gitDiffTextNode('git-diff-commit-removed', `-${removed}`),
   );
-  if (binary) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
+  if (binary > 0) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
   node.setAttribute('aria-label', `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`);
   return node;
 }
@@ -64104,17 +64169,22 @@ function gitDiffHistoricalComparisonKind(detail) {
   return parents.length > 1 ? 'merge-first-parent' : 'parent';
 }
 
-async function openGitDiffHistoricalFile(detail, file, options = {}) {
+function openGitDiffHistoricalFile(detail, file, options = {}) {
   const item = gitDiffHistoricalFileItem(detail, file);
   const identity = historicalFileEditorIdentity(item);
   if (!identity) return null;
-  return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
+  const openOptions = {
     item,
     repo: detail.repo,
     returnToItem: options.returnToItem,
     historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
     userInitiated: options.userInitiated !== false,
-  });
+  };
+  // Install and select the exact historical tab before waiting for its bounded comparison read.
+  // The editor owns the loading/error state; return the tab identity now so a slow Git comparison
+  // cannot make a deliberate file click appear to do nothing.
+  void openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, openOptions);
+  return item;
 }
 
 function gitDiffDetailCollapsedDirectories(state, sha) {
@@ -64192,12 +64262,17 @@ function bindGitDiffFileTree(tree) {
   });
 }
 
-function gitDiffStatusNode(className, text, role = '', options = {}) {
+function gitDiffStatusNode(className, text, role = '') {
   const node = document.createElement('div');
   node.className = className;
-  if (options.movingEllipsis === true) node.innerHTML = textWithMovingEllipsisHtml(text, 'git-diff-loading-ellipsis');
-  else node.textContent = String(text || '');
+  node.textContent = String(text || '');
   if (role) node.setAttribute('role', role);
+  return node;
+}
+
+function gitDiffLoadingStatusNode(className = 'git-diff-state git-diff-state-loading') {
+  const node = gitDiffStatusNode(className, '', 'status');
+  node.innerHTML = textWithMovingEllipsisHtml(t('common.loading'), 'git-diff-loading-dots');
   return node;
 }
 
@@ -64328,7 +64403,7 @@ function renderGitDiffPanel(item, options = {}) {
   list.className = 'git-diff-commits';
   renderGitDiffCommitList(item, list, state);
   const nodes = [];
-  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
+  if (state.loading) nodes.push(gitDiffLoadingStatusNode());
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
   if (state.commits.length) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
@@ -64595,6 +64670,24 @@ function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
 function sessionFilesRequestKey(request = {}, sessionFallback = '') {
   const normalized = normalizedSessionFilesRequest(request, sessionFallback);
   return JSON.stringify(normalized);
+}
+
+function sessionFilesRequestDescriptor(request = {}, sessionFallback = '') {
+  const normalized = normalizedSessionFilesRequest(request, sessionFallback);
+  const repositoryRefs = Object.entries(normalized.repo_refs)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([repo, refs]) => [repo, String(refs.from || ''), String(refs.to || '')]);
+  return sha256HexOfString(JSON.stringify([
+    'session-files-request', normalized.session, normalized.hours,
+    normalized.from_ref, normalized.to_ref, repositoryRefs,
+  ]));
+}
+
+function sessionFilesDescriptorForDestination(destination, request) {
+  const descriptor = String(sessionFilesPayloadForDestination(destination)?.cache?.request_descriptor || '');
+  return /^[0-9a-f]{64}$/.test(descriptor)
+    ? descriptor
+    : sessionFilesRequestDescriptor(request, request.session);
 }
 
 function sessionFilesRequestMatchesDestination(request = {}, session = '', destination = 'differ') {
@@ -65229,7 +65322,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     state.diffPinnedToRef = '';
   }
   renderFileExplorerChangesPanels({force: true, view: 'differ'});
-  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true, freshGit: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
   return true;
 }
@@ -65303,6 +65396,7 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
     errors: Array.isArray(payload.errors) ? payload.errors : [],
     warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+    cache: payload.cache && typeof payload.cache === 'object' ? {...payload.cache} : {},
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
     refreshing_elsewhere: payload.refreshing_elsewhere === true,
@@ -65432,6 +65526,10 @@ function sessionFilesStateForDestination(destination = 'differ') {
 }
 
 const sessionFilesProducerDeadlineMs = 5000;
+// A redacted background completion is a cache-view hint, not a command to refresh every
+// visible surface. This bounded destination map owns replay acknowledgement and serialization
+// of genuinely newer completions; it replaces a separate unbounded acknowledgement cache.
+const sessionFilesCompletionRevalidations = new Map();
 
 function scheduleSessionFilesProducerDeadline(destination, payload) {
   if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return;
@@ -65578,7 +65676,10 @@ function renderSessionFilesDestination(destination, options = {}) {
 async function fetchSessionFiles(options = {}) {
   const destination = options.destination === 'finder' ? 'finder' : 'differ';
   const forceRefresh = options.force === true;
+  const freshGit = options.freshGit === true;
   const backgroundRefresh = options.background === true;
+  const cacheOnly = options.cacheOnly === true;
+  const cacheView = String(options.cacheView || '');
   const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
@@ -65601,6 +65702,9 @@ async function fetchSessionFiles(options = {}) {
   retireSessionFilesRequest(destination, 'session-files request replaced');
   const requestIsCurrent = state.guard.begin();
   const requestController = typeof AbortController === 'function' ? new AbortController() : null;
+  let releaseCompletionWaiter = null;
+  const completionWaiter = !backgroundRefresh ? new Promise(resolve => { releaseCompletionWaiter = resolve; }) : null;
+  if (completionWaiter) state.completionWaiter = completionWaiter;
   state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
@@ -65614,6 +65718,9 @@ async function fetchSessionFiles(options = {}) {
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
+    if (freshGit) params.set('fresh_git', '1');
+    if (cacheOnly) params.set('cache_only', '1');
+    if (cacheOnly && /^[0-9a-f]{64}$/.test(cacheView)) params.set('cache_view', cacheView);
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
@@ -65637,6 +65744,7 @@ async function fetchSessionFiles(options = {}) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
+    if (cacheOnly && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return true;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
@@ -65648,7 +65756,9 @@ async function fetchSessionFiles(options = {}) {
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
+    return true;
   } catch (err) {
+    if (cacheOnly && isApiPendingResponse(err)) return false;
     if (isApiPendingResponse(err)) {
       const nextPayload = {
         ...emptySessionFilesPayload(session, false, destination),
@@ -65682,6 +65792,10 @@ async function fetchSessionFiles(options = {}) {
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    if (state.completionWaiter === completionWaiter) {
+      state.completionWaiter = null;
+      releaseCompletionWaiter?.();
+    }
     if (current && (shouldRender || wasLoading) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       renderPaneTabStrips();
@@ -65706,9 +65820,77 @@ async function refreshVisibleSessionFilesSurfaces(options = {}) {
       session: request.session,
       silent: options.silent !== false,
       force: options.force === true,
+      cacheOnly: options.cacheOnly === true,
+      cacheView: options.cacheView,
     }));
   }
   await Promise.all(requests);
+}
+
+function sessionFilesCompletionIdentity(completion = {}) {
+  const cacheView = String(completion.cache_view_id || '');
+  const generation = String(completion.cache_key_hash || cacheView);
+  return cacheView && generation ? `${generation}\x1f${cacheView}` : '';
+}
+
+function sessionFilesCompletionCandidates(completion = {}) {
+  const completedSession = String(completion.session || '');
+  const requestDescriptor = String(completion.request_descriptor || '');
+  if (!/^[0-9a-f]{64}$/.test(requestDescriptor)) return [];
+  const destinations = [];
+  if (fileExplorerTreePaneIsVisible()) destinations.push('finder');
+  if (fileExplorerSessionFilesPaneIsVisible()) destinations.push('differ');
+  const seen = new Set();
+  return destinations.map(destination => ({destination, request: sessionFilesRequestForDestination(destination)}))
+    .filter(candidate => {
+      const requestKey = sessionFilesRequestKey(candidate.request, candidate.request.session);
+      if (!candidate.request.session || (completedSession && candidate.request.session !== completedSession) || requestDescriptor !== sessionFilesDescriptorForDestination(candidate.destination, candidate.request) || seen.has(requestKey)) return false;
+      seen.add(requestKey);
+      return true;
+    });
+}
+
+async function refreshSessionFilesCompletionSurfaces(completion = {}) {
+  const cacheView = String(completion.cache_view_id || '');
+  if (!/^[0-9a-f]{64}$/.test(cacheView)) return false;
+  const completionIdentity = sessionFilesCompletionIdentity(completion);
+  const attempts = [];
+  for (const candidate of sessionFilesCompletionCandidates(completion)) {
+    const stateKey = `${candidate.destination}\x1f${candidate.request.session}`;
+    const existing = sessionFilesCompletionRevalidations.get(stateKey);
+    if (existing?.identity === completionIdentity) {
+      attempts.push(existing.promise || Promise.resolve(existing.acknowledged));
+      continue;
+    }
+    const run = async () => {
+      // A completion cannot be acknowledged while an ordinary request owns this destination:
+      // that response may be older than the opaque view. Wait for it to settle, then read the
+      // completion's single cache view without aborting either transport.
+      const ordinaryRequest = sessionFilesStateForDestination(candidate.destination).completionWaiter;
+      if (ordinaryRequest) await ordinaryRequest;
+      const applied = await fetchSessionFiles({
+        destination: candidate.destination,
+        session: candidate.request.session,
+        silent: true,
+        cacheOnly: true,
+        cacheView,
+      });
+      const current = sessionFilesCompletionRevalidations.get(stateKey);
+      if (current?.identity !== completionIdentity) return false;
+      // Both a ready response and the bounded cache-only pending response consume this
+      // completion. Retrying the same opaque view on replay adds disk reads but cannot produce
+      // newer data; a later producer completion has its own identity and remains eligible.
+      current.acknowledged = true;
+      return true;
+    };
+    // A newer completion is serialized after the destination's finite older cache read. Starting
+    // both would abort the old response and turn normal EventSource ordering into a timing race.
+    const promise = (existing?.promise ? existing.promise.then(run, run) : run());
+    sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, acknowledged: false, promise});
+    attempts.push(promise);
+  }
+  const outcomes = await Promise.all(attempts);
+  return outcomes.some(Boolean);
 }
 
 function applySessionFilesPayloadToDestination(destination, payload, request, session) {
@@ -66685,6 +66867,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
     || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
+  let resolvedPath = path;
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -66703,6 +66886,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   const openOptions = {
     item,
     ownerSession,
+    includeGit: openDiffMode,
     viewMode: initialMode,
     forceNewTab: options.forceNewTab === true,
     userInitiated: options.userInitiated !== false,
@@ -66723,8 +66907,14 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }, openOptions);
   } else {
     const openedItem = await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
-    if (openedItem) item = openedItem;
-    const openedState = fileState.get(path);
+    if (openedItem) {
+      if (openedItem !== item) {
+        releaseFileEditorItem(path, item);
+      }
+      item = openedItem;
+      resolvedPath = fileItemPath(item) || path;
+    }
+    const openedState = fileState.get(resolvedPath);
     if (openedState?.externalMissing === true && !['A', '?'].includes(normalizedStatus)) {
       // A tracked Differ row can vanish after the listing snapshot. Keep the missing warning, but
       // retain a text surface so /api/fs/diff can recover the committed side from Git.
@@ -66734,24 +66924,24 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     }
   }
   if (!openDiffMode) {
-    renderOpenFilePath(path);
-    void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+    renderOpenFilePath(resolvedPath);
+    void refreshOpenFileDiff(resolvedPath, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
     return;
   }
-  const diffReady = await refreshOpenFileDiff(path, {
+  const diffReady = await refreshOpenFileDiff(resolvedPath, {
     silent: true,
     renderOnComplete: false,
     updateControlsOnComplete: false,
     ...payloadRepoRefs,
   });
-  const current = fileState.get(path);
-  if (diffReady && fileStateCanRenderDiffView(path, current) && current?.externalMissing !== true) {
-    setFileEditorViewMode(path, 'diff', item);
+  const current = fileState.get(resolvedPath);
+  if (diffReady && fileStateCanRenderDiffView(resolvedPath, current) && current?.externalMissing !== true) {
+    setFileEditorViewMode(resolvedPath, 'diff', item);
   } else {
-    setFileEditorViewMode(path, 'edit', item);
+    setFileEditorViewMode(resolvedPath, 'edit', item);
   }
-  renderOpenFilePath(path);
-  if (!diffReady || !fileStateCanRenderDiffView(path, current)) {
+  renderOpenFilePath(resolvedPath);
+  if (!diffReady || !fileStateCanRenderDiffView(resolvedPath, current)) {
     const reason = current?.diffError || t(current?.kind !== 'text' ? 'editor.notTextFile' : 'editor.noGitDiffHistory');
     const panel = panelNodes.get(item);
     if (panel) setFileEditorPanelStatus(panel, t('editor.diffUnavailable', {error: reason}), 'warn');
@@ -82903,10 +83093,11 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
-      const session = String(payload.session || '');
-      if (!session || session === fileExplorerSessionFilesTargetSession()) {
-        fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
-      }
+      // A local owner supplies the fresh data via session_files_ready. A follower
+      // receives only this redacted completion, so the shared destination owner reads the
+      // matching canonical cache once. It rejects wrong-session and replayed completions before
+      // issuing a request and never turns a cache-only miss into a producer request.
+      refreshSessionFilesCompletionSurfaces(payload).catch(error => console.warn('session-files cache revalidation failed', error));
     }
     if (payload.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(tabberItemId) && document.visibilityState !== 'hidden') {
       fetchTabberActivity().catch(error => console.warn('Tabber activity refresh failed', error));
@@ -82982,6 +83173,13 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     return;
   }
   if (type === 'session_files_ready') {
+    const receipt = typeof apiPendingResponseFromNestedEnvelope === 'function'
+      ? apiPendingResponseFromNestedEnvelope({status: payload.status, data: payload.data})
+      : null;
+    if (receipt && typeof registerApiOperationReceipt === 'function') {
+      registerApiOperationReceipt(receipt);
+      return;
+    }
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
       applySessionFilesPayloadFromPush(payload.data, payload.request || {});
     }

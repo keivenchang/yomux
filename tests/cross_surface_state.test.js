@@ -183,6 +183,7 @@ async function runCrossSurfaceStateSuite() {
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'https://yolomux.test');
       requests.push(parsed);
+      if (parsed.pathname === '/api/fs/batch') return Promise.resolve(jsonResponse({responses: [{id: 1, ok: true, status: 200, payload: {path, kind: 'file', repo_root: '/repo', git_tracked: true, git_history: [{ref: 'HEAD'}, {ref: 'old'}], git_has_history: true}}]}));
       if (parsed.pathname === '/api/fs/read') return Promise.resolve(jsonResponse({path, content: 'old\n', size: 4, mtime: 1, git_root: '/repo', git_tracked: true, git_history: [{ref: 'HEAD'}, {ref: 'old'}], git_has_history: true}));
       if (parsed.pathname === '/api/fs/diff') return Promise.resolve(jsonResponse({repo: '/repo', relative_path: 'app.js', from_ref: parsed.searchParams.get('from'), to_ref: parsed.searchParams.get('to'), diff: 'fresh', original: 'old\n', working: 'dirty\n'}));
       throw new Error(`unexpected request ${parsed.pathname}`);
@@ -754,8 +755,8 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(changedFilesSource.includes("if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);"), 'ordinary Differ row opens start collapsed without changing the global diff-expand preference');
     assert.ok(changedFilesSource.includes("const initialMode = openDiffMode ? 'diff' : 'edit';"), 'Differ rows start in Diff mode and fall back only after the diff payload proves unavailable');
     assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'changed-file rows set the editor mode explicitly');
-    assert.ok(/if \(!openDiffMode\) \{[\s\S]*?renderOpenFilePath\(path\);[\s\S]*?void refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false, \.\.\.payloadRepoRefs\}\);[\s\S]*?return;[\s\S]*?\}/.test(changedFilesSource), 'non-diffable rows prefetch diff data without the async repaint that can fight live scrolling');
-    assert.ok(/diffReady && fileStateCanRenderDiffView\(path, current\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)[\s\S]*setFileEditorViewMode\(path, 'edit', item\)[\s\S]*t\('editor\.diffUnavailable'/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode');
+    assert.ok(/if \(!openDiffMode\) \{[\s\S]*?renderOpenFilePath\(resolvedPath\);[\s\S]*?void refreshOpenFileDiff\(resolvedPath, \{silent: true, renderOnComplete: false, \.\.\.payloadRepoRefs\}\);[\s\S]*?return;[\s\S]*?\}/.test(changedFilesSource), 'non-diffable rows prefetch diff data through the converged editor identity without the async repaint that can fight live scrolling');
+    assert.ok(/diffReady && fileStateCanRenderDiffView\(resolvedPath, current\)[\s\S]*setFileEditorViewMode\(resolvedPath, 'diff', item\)[\s\S]*setFileEditorViewMode\(resolvedPath, 'edit', item\)[\s\S]*t\('editor\.diffUnavailable'/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode through the converged editor identity');
     const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
       {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'},
     ], {compact: true});

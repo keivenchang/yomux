@@ -539,10 +539,11 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
-      const session = String(payload.session || '');
-      if (!session || session === fileExplorerSessionFilesTargetSession()) {
-        fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
-      }
+      // A local owner supplies the fresh data via session_files_ready. A follower
+      // receives only this redacted completion, so the shared destination owner reads the
+      // matching canonical cache once. It rejects wrong-session and replayed completions before
+      // issuing a request and never turns a cache-only miss into a producer request.
+      refreshSessionFilesCompletionSurfaces(payload).catch(error => console.warn('session-files cache revalidation failed', error));
     }
     if (payload.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(tabberItemId) && document.visibilityState !== 'hidden') {
       fetchTabberActivity().catch(error => console.warn('Tabber activity refresh failed', error));
@@ -618,6 +619,13 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     return;
   }
   if (type === 'session_files_ready') {
+    const receipt = typeof apiPendingResponseFromNestedEnvelope === 'function'
+      ? apiPendingResponseFromNestedEnvelope({status: payload.status, data: payload.data})
+      : null;
+    if (receipt && typeof registerApiOperationReceipt === 'function') {
+      registerApiOperationReceipt(receipt);
+      return;
+    }
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
       applySessionFilesPayloadFromPush(payload.data, payload.request || {});
     }

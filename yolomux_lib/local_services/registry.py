@@ -3177,18 +3177,25 @@ class LocalServiceRegistry:
             or leader.session_id != ownership.session_id
             or process_spawn_generation(ownership.leader_pid) != ownership.generation_marker
         ):
-            leader_identity = leader.start_identity or process_start_identity(ownership.leader_pid)
+            # The table identity is only evidence at snapshot time.  This probe
+            # intentionally needs the live identity: a leader can exit after
+            # the snapshot while an inherited worker is still serving.
+            leader_identity = process_start_identity(ownership.leader_pid)
             leader_generation = process_spawn_generation(ownership.leader_pid)
             # A leader that no longer answers either live read has exited; the
             # snapshot simply predates its exit. That is an incomplete proof,
             # not a disproven one, and must not be reported as a foreign group.
             leader_vanished = not leader_identity and leader_generation is None
-            return SpawnOwnershipProof(
-                ownership,
-                group_exists,
-                (),
-                () if leader_vanished else ((ownership.leader_pid, leader_identity),),
-            )
+            if not leader_vanished:
+                return SpawnOwnershipProof(
+                    ownership,
+                    group_exists,
+                    (),
+                    ((ownership.leader_pid, leader_identity),),
+                )
+            # A spawned pool worker inherits the leader's process group. The leader can exit
+            # between the table snapshot and these live probes while a same-generation worker
+            # continues to mutate the fixture root, so continue through the member proof below.
         members = []
         disproven = []
         for pid, entry in table.items():

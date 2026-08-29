@@ -1,9 +1,9 @@
 """Measure how statsd append volume responds to the two independent levers: MERGING
 telemetry families into one transaction, and lengthening the COMMIT INTERVAL.
 
-Why this exists
+Why this historical measurement exists
 ---------------
-`queues/backlog/DOIT.p0.e3.statsd-resource-bounds.md` ranks "batch persistence across
+The former `queues/backlog/DOIT.p0.e3.statsd-resource-bounds.md` scope ranked "batch persistence across
 telemetry families into one transaction every 5-10 seconds" as its top structural saving
 and cites 79.8774% / 87.9971% append reductions as the decision evidence. Task
 YOLO-V0717-E3-EVIDENCE-02 established that no retained harness ever ran that experiment:
