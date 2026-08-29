@@ -17,7 +17,8 @@ NOT CERTIFIABLE and its raw evidence; it is never skipped into a green.
 
 Usage:
   python3 tools/check.py
-  python3 tools/check.py --serial
+   python3 tools/check.py --serial
+   python3 tools/check.py --serial-lanes
   python3 tools/check.py --lane pytest-boot
   python3 tools/check.py --certification-only
   python3 tools/check.py --no-tool-guard
@@ -109,7 +110,6 @@ from yolomux_lib.infra import worktree_writer
 from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
 from tools.test_catalog import NODE_LAYOUT_FILES
 from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner compatibility export
-from tools.test_catalog import focused_phase_target_args
 from tools.test_catalog import pytest_files
 from tools.test_plan import LANE_SPECS
 from tools.test_plan import CHECK_LANE_ENV
@@ -363,8 +363,6 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
         StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
         StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),
-        StepId.PYTEST_UNIT: Step("pytest unit", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "not gate_serial and not socket and not browser and not node_bridge", "-q"]),
-        StepId.PYTEST_SOCKET: Step("pytest socket", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "socket and not gate_serial and not browser", "-q"]),
         StepId.WHITESPACE: Step("git diff --check", ["git", "diff", "--check"]),
     }
 
@@ -1024,7 +1022,7 @@ def lane_output_report_fields(result: LaneResult | None) -> dict[str, object]:
     return fields
 
 
-def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None) -> dict[str, object]:
+def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None, serial_lanes: bool = False) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
     worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial, cpu_percent=cpu_percent), strict=True))
@@ -1032,7 +1030,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
         "schema": 5,
         "certification": certification,
         "interrupted": interrupted,
-        "mode": "serial" if serial else "parallel",
+        "mode": "serial" if serial else "serial-lanes" if serial_lanes else "parallel",
         "cpu_percent": None if serial else check_cpu_percent(cpu_percent),
         "wall_seconds": round(elapsed, 6),
         "pytest_workers": worker_counts,
@@ -1091,8 +1089,6 @@ LANE_LAUNCH_ORDER = (
     "pytest-browser",
     "pytest-e2e",
     "pytest",
-    "pytest-unit",
-    "pytest-socket",
     "pytest-boot",
     "node-layout",
     "static",
@@ -1719,7 +1715,9 @@ def main(argv: list[str] | None = None) -> int:
     available = lanes()
     lane_names = [lane.name for lane in available]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serial", action="store_true", help="run lanes one at a time instead of in parallel")
+    scheduling = parser.add_mutually_exclusive_group()
+    scheduling.add_argument("--serial", action="store_true", help="run lanes one at a time with one pytest worker per lane")
+    scheduling.add_argument("--serial-lanes", action="store_true", help="run lanes one at a time while preserving each lane's normal pytest worker policy")
     parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 50; env YOLOMUX_CHECK_CPU_PERCENT)")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
@@ -1813,13 +1811,12 @@ def main(argv: list[str] | None = None) -> int:
                     if lower_current_process_priority(active_records):
                         ports = sorted({str(record.get("port") or "?") for record in active_records})
                         print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-                mode = "serial"
-                if not args.serial:
-                    mode = "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
+                cross_lane_serial = args.serial or args.serial_lanes
+                mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
                 if selected:
                     print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
                     results = run_functional_lanes(
-                        selected, serial=args.serial, output_root=output_root
+                        selected, serial=cross_lane_serial, output_root=output_root
                     )
                 # Always, even when a lane already failed. A phase that only runs on an otherwise
                 # green gate cannot be trusted on a box where some lane is usually red: its own
@@ -1842,11 +1839,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         elapsed = time.monotonic() - started
         print("CHECK INTERRUPTED", file=sys.stderr, flush=True)
-        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True, cpu_percent=args.cpu_percent))
+        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, serial_lanes=args.serial_lanes, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True, cpu_percent=args.cpu_percent))
         print(f"Test runtime report: {report_path}", file=sys.stderr, flush=True)
         return 130
 
-    write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent, certification=certification))
+    write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, serial_lanes=args.serial_lanes, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent, certification=certification))
     print(f"Test runtime report: {report_path}", flush=True)
 
     failed = [result.label for result in results if not result.ok]

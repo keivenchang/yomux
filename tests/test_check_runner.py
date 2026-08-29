@@ -172,8 +172,8 @@ def test_default_check_lanes_keep_full_pytest_gate():
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e", "-q"]
-    assert "pytest-unit" not in default_names
-    assert "pytest-socket" not in default_names
+    assert "pytest-unit" not in {lane.name for lane in lanes}
+    assert "pytest-socket" not in {lane.name for lane in lanes}
 
 
 def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
@@ -198,29 +198,11 @@ def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
     assert launcher_excluded == excluded, "the launcher and the check catalog exclude different shards"
 
 
-def test_focused_pytest_lanes_keep_expected_filters():
+def test_focused_pytest_lanes_retain_only_nonduplicated_entry_points():
     check = load_check_module()
     lanes = {lane.name: lane for lane in check.lanes()}
-    assert lanes["pytest-unit"].steps[0].args == [
-        "python3",
-        "-m",
-        "pytest",
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-        "-m",
-        "not gate_serial and not socket and not browser and not node_bridge",
-        "-q",
-    ]
-    assert lanes["pytest-socket"].steps[0].args == [
-        "python3",
-        "-m",
-        "pytest",
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-        "-m",
-        "socket and not gate_serial and not browser",
-        "-q",
-    ]
+    assert "pytest-unit" not in lanes
+    assert "pytest-socket" not in lanes
     assert "pytest-browser-behavior" not in lanes
     assert lanes["pytest-boot"].steps[0].args == [
         "python3",
@@ -232,12 +214,6 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "-q",
     ]
     assert lanes["pytest-boot"].steps[0] is lanes["pytest-browser"].steps[0]
-
-    assert test_catalog.focused_phase_target_args("nonbrowser") == [
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-    ]
-
 
 def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
     check = load_check_module()
@@ -351,103 +327,6 @@ def test_lane_registry_references_are_typed_total_and_fail_closed(monkeypatch):
     monkeypatch.setattr(test_plan, "LANE_SPECS", drifted)
     with pytest.raises(ValueError, match="test phase drift in lane pytest"):
         test_plan.validate_lane_specs(catalog)
-
-
-@pytest.mark.parametrize(
-    "name, marker_expression",
-        (
-            ("unit", "not gate_serial and not socket and not browser and not node_bridge"),
-            ("socket", "socket and not gate_serial and not browser"),
-        ),
-)
-def test_focused_alias_collection_matches_phase_catalog_in_exact_order_and_markers(tmp_path, name, marker_expression):
-    check = load_check_module()
-    lane_args = next(lane for lane in check.lanes() if lane.name == f"pytest-{name}").steps[0].args
-    historical_args = [
-        "python3",
-        "-m",
-        "pytest",
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-        "-m",
-        marker_expression,
-        "-q",
-    ]
-    assert lane_args == historical_args
-    catalog_files = check.pytest_files("nonbrowser")
-    assert test_catalog.focused_phase_target_args("nonbrowser") == [
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-    ]
-    focused_owner_order = [
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in sorted((REPO_ROOT / "tests").rglob("test_*.py"))
-        if path != REPO_ROOT / "tests/test_browser_layout.py"
-        and "nonbrowser" in test_catalog.file_phases(path)
-    ]
-    assert focused_owner_order == catalog_files
-
-    test_root = tmp_path / "tests"
-    nested = test_root / "nested"
-    nested.mkdir(parents=True)
-    (nested / "test_owner.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.owner\n\n"
-        "def test_first(): pass\n\n"
-        "@pytest.mark.socket\n"
-        "def test_socket(): pass\n",
-        encoding="utf-8",
-    )
-    (test_root / "test_peer.py").write_text(
-        "import pytest\n\n"
-        "@pytest.mark.slow\n"
-        "def test_last(): pass\n",
-        encoding="utf-8",
-    )
-    (test_root / "test_browser_layout.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.browser\n\n"
-        "def test_browser_only(): pass\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "pytest.ini").write_text(
-        "[pytest]\nmarkers =\n    browser: browser\n    node_bridge: node bridge\n    owner: owner\n    slow: slow\n    socket: socket\n",
-        encoding="utf-8",
-    )
-    phase_files = discover_pytest_phase_files(test_root, repo_root=tmp_path)["nonbrowser"]
-
-    def collect(label, targets):
-        destination = tmp_path / f"{name}-{label}.json"
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            value for value in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if value
-        )
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--collect-only",
-                "-q",
-                "-p",
-                "tools.pytest_catalog_plugin",
-                f"--yolomux-catalog-output={destination}",
-                *targets,
-                "-m",
-                marker_expression,
-            ],
-            cwd=tmp_path,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        return json.loads(destination.read_text(encoding="utf-8"))
-
-    focused_rows = collect("focused", ("tests", "--ignore=tests/test_browser_layout.py"))
-    phase_rows = collect("phase", phase_files)
-    assert focused_rows == phase_rows
 
 
 def test_browser_capability_preflight_names_missing_dependency_browser_and_driver(monkeypatch, tmp_path):
@@ -969,6 +848,49 @@ def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path)
         "selected_lanes": ["demo"],
         "wall_seconds": 1.5,
     }
+
+
+def test_serial_lanes_report_preserves_normal_worker_policy():
+    check = load_check_module()
+    lane = check.Lane("demo", "demo lane", ())
+
+    payload = check.performance_report_payload(
+        selected=[lane],
+        results=[check.LaneResult("demo", "demo lane", True, 0.0, "")],
+        serial=False,
+        serial_lanes=True,
+        elapsed=0.0,
+        child_usage={"user_seconds": 0.0, "system_seconds": 0.0, "max_rss": 0, "max_rss_unit": "KiB"},
+    )
+
+    assert payload["mode"] == "serial-lanes"
+    assert payload["pytest_workers"] == dict(
+        zip(("nonbrowser", "browser", "e2e"), check.pytest_worker_counts(), strict=True)
+    )
+
+
+def test_serial_lanes_separates_lane_scheduling_from_pytest_workers(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "8,5,3")
+    normal = {lane.name: lane for lane in check.lanes()}
+    serial = {lane.name: lane for lane in check.lanes(serial=True)}
+
+    assert normal["pytest"].steps[0].args[normal["pytest"].steps[0].args.index("-n") + 1] == "8"
+    assert normal["pytest-browser"].steps[1].args[normal["pytest-browser"].steps[1].args.index("-n") + 1] == "5"
+    assert normal["pytest-e2e"].steps[0].args[normal["pytest-e2e"].steps[0].args.index("-n") + 1] == "3"
+    assert "-n" not in serial["pytest"].steps[0].args
+    assert "-n" not in serial["pytest-browser"].steps[1].args
+    assert "-n" not in serial["pytest-e2e"].steps[0].args
+
+
+def test_serial_and_serial_lanes_are_mutually_exclusive(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(sys, "argv", ["check.py"])
+
+    with pytest.raises(SystemExit) as error:
+        check.main(["--serial", "--serial-lanes"])
+
+    assert error.value.code == 2
 
 
 def test_performance_report_path_is_tmp_only(monkeypatch):

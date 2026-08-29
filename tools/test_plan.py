@@ -19,7 +19,6 @@ from typing import Collection, Final
 class TestPhaseSpec:
     name: str
     marker: str | None = None
-    focused_target_args: tuple[str, ...] = ()
 
 
 # Order is classification precedence. A test with several phase markers belongs
@@ -31,7 +30,7 @@ TEST_PHASE_SPECS: Final[tuple[TestPhaseSpec, ...]] = (
     TestPhaseSpec("golden", "visual_golden"),
     TestPhaseSpec("boot", "boot"),
     TestPhaseSpec("browser", "browser"),
-    TestPhaseSpec("nonbrowser", focused_target_args=("tests", "--ignore=tests/test_browser_layout.py")),
+    TestPhaseSpec("nonbrowser"),
 )
 TEST_PHASE_NAMES: Final[tuple[str, ...]] = tuple(spec.name for spec in TEST_PHASE_SPECS)
 PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = tuple(
@@ -107,8 +106,6 @@ class StepId(StrEnum):
     PYTEST_BROWSER = "pytest-browser"
     PYTEST_BROWSER_GOLDEN = "pytest-browser-golden"
     PYTEST_E2E = "pytest-e2e"
-    PYTEST_UNIT = "pytest-unit"
-    PYTEST_SOCKET = "pytest-socket"
     WHITESPACE = "whitespace"
 
 
@@ -127,8 +124,6 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
     StepId.PYTEST_BROWSER: ("browser",),
     StepId.PYTEST_BROWSER_GOLDEN: ("golden",),
     StepId.PYTEST_E2E: ("e2e",),
-    StepId.PYTEST_UNIT: ("nonbrowser",),
-    StepId.PYTEST_SOCKET: ("nonbrowser",),
     StepId.WHITESPACE: (),
 }
 
@@ -151,8 +146,6 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     ),
     LaneSpec("pytest-e2e", "pytest e2e", (StepId.PYTEST_E2E,), True, phases=("e2e",), worker_class="pytest-xdist"),
     LaneSpec("pytest-gate-serial", "pytest timing-sensitive serial", (StepId.PYTEST_GATE_SERIAL,), True, phases=("gate_serial",), worker_class="pytest-serial", run_last=True),
-    LaneSpec("pytest-unit", "pytest unit", (StepId.PYTEST_UNIT,), phases=("nonbrowser",), worker_class="pytest-serial"),
-    LaneSpec("pytest-socket", "pytest socket", (StepId.PYTEST_SOCKET,), phases=("nonbrowser",), worker_class="pytest-serial"),
     LaneSpec("whitespace", "git diff --check", (StepId.WHITESPACE,), True),
 )
 CHECK_LANE_ENV: Final[str] = "YOLOMUX_CHECK_LANE"

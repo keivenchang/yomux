@@ -248,20 +248,6 @@
     },
     {
       "focused_alias_of": null,
-      "name": "pytest-socket",
-      "step_ids": [
-        "pytest-socket"
-      ]
-    },
-    {
-      "focused_alias_of": null,
-      "name": "pytest-unit",
-      "step_ids": [
-        "pytest-unit"
-      ]
-    },
-    {
-      "focused_alias_of": null,
       "name": "static",
       "step_ids": [
         "static-build",
@@ -2060,7 +2046,7 @@
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 3335,
+    "tests/test_check_runner.py": 3257,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_event_broker_backlog_disambiguation.py": 955,
     "tests/test_client_events.py": 410,

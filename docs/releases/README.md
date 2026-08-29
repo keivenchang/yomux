@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.22 | `v0.7.22` | `v0.7.22^{commit}` | [v0.7.22-evidence.md](v0.7.22-evidence.md) | redundant focused test aliases retired; remaining P0 backlog closed by explicit release decision |
 | 0.7.21 | `v0.7.21` | `v0.7.21^{commit}` | [v0.7.21-evidence.md](v0.7.21-evidence.md) | bounded session-file completion ownership, worker teardown, and a rootless Docker gate runner for the NFS checkout |
 | 0.7.20 | `v0.7.20` | `v0.7.20^{commit}` | [v0.7.20-evidence.md](v0.7.20-evidence.md) | Finder context menus and repository Diff actions paint before deferred Git metadata arrives |
 | 0.7.19 | `v0.7.19` | `v0.7.19^{commit}` | [v0.7.19-evidence.md](v0.7.19-evidence.md) | instant file reopening retains its selected mode, and jobd replaces only a bounded failed or stuck worker slot |

@@ -4,11 +4,11 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-203 entries, 2026-06-02 to 2026-08-27.
+204 entries, 2026-06-02 to 2026-08-28.
 
 | month | entries |
 | --- | ---: |
-| [2026-08](2026-08/) | 46 |
+| [2026-08](2026-08/) | 47 |
 | [2026-07](2026-07/) | 55 |
 | [2026-06](2026-06/) | 102 |
 
@@ -16,6 +16,7 @@ This is a historical record, not the current architecture or API contract: a lat
 
 | date | completed work |
 | --- | --- |
+| 2026-08-28 | [v0.7.22 P0 release decision](2026-08/DONE.v0.7.22-p0-release-decision.md) |
 | 2026-08-27 | [E5 instant file open and bounded jobd](2026-08/DOIT.p0.e5.instant-file-open-and-bounded-jobd.md) |
 | 2026-08-23 | [Statsd ring-invalidation storm fix](2026-08/DONE.statsd-ring-invalidation-storm.md) |
 | 2026-08-23 | [v0.7.12 exact tmux target revalidation](2026-08/DONE.0-7-12-tmux-exact-session-target.md) |
