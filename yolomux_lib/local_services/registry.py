@@ -99,6 +99,7 @@ LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 # cooperative-stop backstop. Registry cannot import jobd without creating a cycle, so keep the
 # replacement-side bound explicit and leave one second for the broker to publish terminal state.
 LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS = 123.0
+LOCAL_SERVICE_BATCHD_NAMES = frozenset({"jobd", "batchd"})
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
@@ -149,7 +150,7 @@ def jobd_retirement_state(
     response_version = response.get("version")
     response_source_epoch = response.get("source_epoch")
     if (
-        service_name != "jobd"
+        service_name not in LOCAL_SERVICE_BATCHD_NAMES
         or response.get("ok") is not True
         or isinstance(response_pid, bool)
         or not isinstance(response_pid, int)
@@ -2566,7 +2567,7 @@ class LocalServiceRegistry:
             )
             if not legacy_identity_matches:
                 return False
-            if self.spec.name == "jobd":
+            if self.spec.name in LOCAL_SERVICE_BATCHD_NAMES:
                 legacy_retirement_state = jobd_retirement_state(
                     legacy_status,
                     service_name=self.spec.name,
@@ -2602,7 +2603,7 @@ class LocalServiceRegistry:
                 "retirement_handshake": True,
                 "expected_source_epoch": retained_source_epoch,
             }
-            if self.spec.name == "jobd"
+            if self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
             else None
         )
         if shutdown_protocol_version is None:
@@ -2634,7 +2635,7 @@ class LocalServiceRegistry:
         ):
             retirement_state = "stopped"
         if (
-            self.spec.name == "jobd"
+            self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
             and isinstance(shutdown_response.get("draining"), bool)
             and not retirement_state
         ):
@@ -2642,7 +2643,7 @@ class LocalServiceRegistry:
         if retirement_state == "draining":
             grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
         if (
-            self.spec.name == "jobd"
+            self.spec.name in LOCAL_SERVICE_BATCHD_NAMES
             and not retirement_state
             and shutdown_response.get("ok") is True
             and shutdown_response.get("shutdown") is True

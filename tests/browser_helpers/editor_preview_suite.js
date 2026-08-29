@@ -8235,7 +8235,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/list?path='), 'command-palette path listing preserves shared filesystem error descriptors');
-    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/search?root='), 'command-palette indexed search preserves shared filesystem error descriptors');
+    assert.ok(layoutSource.includes("'/api/batch/search'") && layoutSource.includes('apiFetchJson(`/api/fs/search?root='), 'command-palette search splits direct and batch filesystem paths');
 
     assert.deepStrictEqual(
       canonical(api.TAB_TYPES.filter(type => typeof type.relocalize === 'function').map(type => type.key)),

@@ -15468,7 +15468,8 @@ async function refreshFileQuickOpenCandidates(query = '') {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
+          const searchRoute = recursive ? '/api/batch/search' : '/api/fs/search';
+          const payload = await apiFetchJson(`${searchRoute}?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
@@ -15660,7 +15661,7 @@ async function fetchFileQuickOpenDeltaPage(deltaRoot) {
   const requestId = deltaRoot.requestId;
   const query = fileQuickOpenState.deltaQuery;
   const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
-  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+  const url = `/api/batch/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
     + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
     + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
   const payload = await apiFetchJson(url);
@@ -63763,6 +63764,10 @@ function gitDiffErrorSnapshot(error) {
   return userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: t('common.requestFailed')});
 }
 
+function gitDiffHistoryCursorIsInvalid(error) {
+  return String(error?.payload?.user_message?.key || '') === 'fs.error.gitHistoryCursor';
+}
+
 function gitDiffHistoryPayloadIsValid(payload) {
   return Boolean(payload && typeof payload === 'object'
     && typeof payload.path === 'string'
@@ -63869,6 +63874,14 @@ async function refreshGitDiffHistory(item, options = {}) {
     return true;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
+    if (!append && cursor && gitDiffHistoryCursorIsInvalid(error)) {
+      // A saved layout can outlive the server's cursor format. Drop that opaque cursor once and
+      // reload the current snapshot instead of leaving the restored Diff tab permanently failed.
+      state.snapshotCursor = '';
+      state.nextCursor = '';
+      state.error = null;
+      return refreshGitDiffHistory(item, {refresh: true});
+    }
     state.error = gitDiffErrorSnapshot(error);
     return false;
   } finally {

@@ -136,8 +136,8 @@ from .control import send_yolomux_control_request
 from .browser_diagnostic_receipts import JAVASCRIPT_MAX_SAFE_INTEGER
 from .diagnostic_redaction import redact_diagnostic_value
 from .search.search_indexer import SearchIndexerClient
-from .jobd import JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
-from .jobd import JobClient
+from .batchd import BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS
+from .batchd import BatchClient
 from .observability.pricing_catalog import PricingCatalog
 from .observability.pricing_catalog import PricingRefreshCoordinator
 from .observability.queued_delivery import QueuedDeliveryLedger
@@ -419,7 +419,7 @@ def remaining_jobd_rpc_timeout(deadline_at: float) -> float:
     """Return the bounded transport budget remaining before one operation deadline."""
 
     return min(
-        JOBD_PRODUCT_RPC_TIMEOUT_SECONDS,
+        BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS,
         max(0.0, deadline_at - time.time()),
     )
 
@@ -481,7 +481,7 @@ class JobdInteractionLease:
     no TTL refresh loop.
     """
 
-    def __init__(self, job_client: JobClient) -> None:
+    def __init__(self, job_client: BatchClient) -> None:
         self._job_client = job_client
         self._lock = threading.Lock()
         self._holders = 0
@@ -564,7 +564,7 @@ class ActivitySummaryStatusdUnavailable(RuntimeError):
 
 
 def wait_for_jobd_product(
-    job_client: JobClient,
+    job_client: BatchClient,
     coalesce_key: str,
     generation: int,
     wait_seconds: float,
@@ -7282,7 +7282,7 @@ class SystemStatusProjector:
         labels = {
             "indexd": "Quick Open index",
             "statsd": "YO!stats",
-            "jobd": "Filesystem jobs",
+            "jobd": "Background batches",
             "statusd": "Tmux status",
             # watchd had no entry, so the System row named it "watchd" -- the raw id -- while
             # every other service got a capability name. This label is what the System row and the
@@ -8082,7 +8082,7 @@ class TmuxWebtermApp:
         # observer. `None` until then, and the projection says `observer_unattached`
         # rather than publishing zeros. See `attach_backend_health_store`.
         self._system_status_projector = SystemStatusProjector(self)
-        self.job_client = JobClient()
+        self.job_client = BatchClient()
         # Pins the jobd broker up for the duration of an fs-batch/differ browser interaction so a
         # saturated gate cannot idle-shut the broker between two /api/fs/batch calls (W15 #4).
         self.jobd_fs_batch_lease = JobdInteractionLease(self.job_client)
@@ -9213,14 +9213,14 @@ class TmuxWebtermApp:
         )
 
     @classmethod
-    def jobd_operation_failure_result(
+    def batch_operation_failure_result(
         cls,
         request_id: str,
         failure: dict[str, Any],
         *,
         route: str,
         operation_id: str = "",
-        operation: str = "jobd.request",
+        operation: str = "batchd.request",
         code: str = "service_unavailable",
     ) -> dict[str, Any]:
         return cls.local_service_operation_failure_result(
@@ -9232,6 +9232,8 @@ class TmuxWebtermApp:
             operation=operation,
             code=code,
         )
+
+    jobd_operation_failure_result = batch_operation_failure_result
 
     @classmethod
     def session_files_failure_result(

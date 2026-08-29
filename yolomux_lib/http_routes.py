@@ -1168,6 +1168,11 @@ def get_fs_search(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_search(parsed)
 
 
+def get_batch_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_batch_search(parsed)
+
+
 def get_fs_index_status(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_fs_index_status(parsed)
@@ -1702,6 +1707,10 @@ FILESYSTEM_ROUTES = (
     Route("POST", "/api/fs/mkdir", "admin", post_fs_mkdir, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
 )
 
+BATCH_ROUTES = (
+    Route("GET", "/api/batch/search", "readonly", get_batch_search, protocol=RESPONSE_JSON, group="batch"),
+)
+
 TMUX_ROUTES = (
     Route("GET", "/api/tmux", "readonly", get_tmux, protocol=RESPONSE_JSON, group="tmux"),
     Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, protocol=RESPONSE_JSON, group="tmux"),
@@ -1723,6 +1732,7 @@ ROUTE_GROUPS = {
     "yoagent": YOAGENT_ROUTES,
     "chat": CHAT_ROUTES,
     "filesystem": FILESYSTEM_ROUTES,
+    "batch": BATCH_ROUTES,
     "tmux": TMUX_ROUTES,
 }
 ALL_ROUTES = tuple(route for routes in ROUTE_GROUPS.values() for route in routes)

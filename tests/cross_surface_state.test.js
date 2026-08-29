@@ -4519,7 +4519,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(!/scheduleFileQuickOpenIndexRetry/.test(source), 'the warming-timer full re-query owner is retired');
     // The incremental delta path and the single explicit repair helper both exist.
     assert.ok(/handleFileSearchProgressSignal/.test(source), 'the search_progress signal drives the incremental delta path');
-    assert.ok(/&cursor=\$\{encodeURIComponent\(deltaRoot\.cursor\)\}/.test(source), 'delta reads issue a cursor-scoped /api/fs/search request');
+    assert.ok(/&cursor=\$\{encodeURIComponent\(deltaRoot\.cursor\)\}/.test(source), 'delta reads issue a cursor-scoped /api/batch/search request');
     // Exactly one explicit full-snapshot repair helper survives.
     const repairDefs = (source.match(/function requeryOpenFileQuickOpenForIndexChange/g) || []).length;
     assert.equal(repairDefs, 1, 'exactly one explicit snapshot-repair helper remains');

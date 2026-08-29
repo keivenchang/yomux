@@ -616,6 +616,8 @@ def _search_files_from_safe_root(
     access_descriptor: int,
     inside_repo: bool = False,
     cursor: str | None = None,
+    direct_only: bool = False,
+    indexed_only: bool = False,
 ) -> dict[str, Any]:
     root = Path(raw_root)
     scan_root = access_root
@@ -639,7 +641,7 @@ def _search_files_from_safe_root(
     tokens = [token for token in str(query or "").split() if token]
     index_policy = _search_index_policy(root)
     skip_dirs = index_policy["skip_dirs"]
-    full_tree = bool(recursive) or inside_repo
+    full_tree = bool(recursive) or (inside_repo and not direct_only)
     if full_tree:
         # Accelerate full-tree quick-open with the persistent index: it covers the
         # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
@@ -862,6 +864,20 @@ def _search_files_from_safe_root(
                         **_progressive_payload_fields(root),
                         **freshness.payload_fields(),
                     }
+        if indexed_only and not index.ready:
+            freshness = _snapshot_freshness(index, root, index_policy)
+            return {
+                "root": str(root),
+                "root_realpath": str(root),
+                "query": str(query or ""),
+                "limit": max_results,
+                "truncated": False,
+                "files": [],
+                "index_state": "warming",
+                "index_coverage": "pending",
+                **_progressive_payload_fields(root),
+                **freshness.payload_fields(),
+            }
         if not tokens:
             # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
             # return the first N files. When the index is ready, serve a capped most-recent slice from it
@@ -970,6 +986,8 @@ def _search_files_from_safe_root(
                 ) as child:
                     entry_stat = child.stat_result
                     if stat.S_ISDIR(entry_stat.st_mode):
+                        if direct_only:
+                            continue
                         if not _directory_is_repo(child.descriptor):
                             continue
                         child_dirs, child_files, child_truncated = _search_full_tree(
@@ -1046,6 +1064,8 @@ def _search_files_from_authorized_handle(
     limit: int | str | None = 400,
     recursive: bool = False,
     cursor: str | None = None,
+    direct_only: bool = False,
+    indexed_only: bool = False,
 ) -> dict[str, Any]:
     inside_repo = git_ops._pinned_repo_root(handle, operation="search_files") is not None
     payload = _search_files_from_safe_root(
@@ -1057,6 +1077,8 @@ def _search_files_from_authorized_handle(
         access_descriptor=handle.descriptor,
         inside_repo=inside_repo,
         cursor=cursor,
+        direct_only=direct_only,
+        indexed_only=indexed_only,
     )
     if not cursor and isinstance(payload, dict) and "changes" not in payload and not payload.get("rebase_required"):
         # Step 4: the FIRST (snapshot) response carries the baseline cursor the client seeds its
@@ -1077,10 +1099,12 @@ def search_files(
     limit: int | str | None = 400,
     recursive: bool = False,
     cursor: str | None = None,
+    direct_only: bool = False,
+    indexed_only: bool = False,
 ) -> dict[str, Any]:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_root, flags=directory_flags, operation="search_files") as handle:
-        return _search_files_from_authorized_handle(handle, query, limit, recursive, cursor)
+        return _search_files_from_authorized_handle(handle, query, limit, recursive, cursor, direct_only, indexed_only)
 
 
 def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -> dict[str, Any]:

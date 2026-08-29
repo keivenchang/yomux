@@ -147,7 +147,7 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
         const waitFor = window.__yolomuxTestWaitFor;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
-          if (url.pathname === '/api/fs/search') {
+          if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
             const query = url.searchParams.get('query') || '';
             const files = query.includes('2026')
               ? [{name: '2026.md', path: yearPath, relative_path: 't5t/2026.md', size: 140250, mtime_ns: 2}]
@@ -221,7 +221,7 @@ def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tm
         let releaseCurrent = null;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
-          if (url.pathname !== '/api/fs/search') return originalFetch(input, options);
+          if (url.pathname !== '/api/fs/search' && url.pathname !== '/api/batch/search') return originalFetch(input, options);
           const query = url.searchParams.get('query') || '';
           if (query === 't5t.md') return new Promise(resolve => { releaseCurrent = resolve; });
           return new Response(JSON.stringify({
@@ -276,7 +276,7 @@ def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path)
         const waitFor = window.__yolomuxTestWaitFor;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
-          if (url.pathname === '/api/fs/search') {
+          if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
             return new Response(JSON.stringify({
               root: '/home/test/dynamo/notes',
               files: [{name: '2026.md', path, relative_path: 't5t/2026.md', size: 1, mtime_ns: 1}],

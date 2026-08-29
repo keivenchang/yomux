@@ -409,12 +409,44 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         recursive = query_bool(qs, "recursive")
-        # Streaming Quick Open (step 4): an opaque delta cursor turns this same route into a bounded,
-        # committed-journal delta read. It rides the existing filesystem-operation descriptor so the
-        # authenticated read path, safe-root containment, and exclusion policy are identical to a
-        # snapshot read. Absent/empty -> a first snapshot read that returns the baseline cursor.
+        if not recursive and not query_one(qs, "cursor", ""):
+            try:
+                self.write_json(
+                    filesystem.search_files(
+                        raw_root,
+                        query=query,
+                        limit=limit,
+                        recursive=False,
+                        direct_only=True,
+                    ),
+                    status=HTTPStatus.OK,
+                )
+            except filesystem.FilesystemError as error:
+                self.write_json(error.payload(), status=HTTPStatus(error.status))
+            return
+        # Recursive work and cursor deltas are batch work. They use the existing filesystem-operation
+        # descriptor so the authenticated read path, safe-root containment, and exclusion policy are
+        # identical to the other batch operations.
         cursor = str(query_one(qs, "cursor", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor})
+        self.submit_filesystem_operation(
+            "GET /api/batch/search",
+            "search",
+            raw_root,
+            {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor},
+        )
+
+    def handle_batch_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
+        query = str(query_one(qs, "query", "") or "")
+        limit = str(query_one(qs, "limit", "400") or "400")
+        cursor = str(query_one(qs, "cursor", "") or "")
+        self.submit_filesystem_operation(
+            "GET /api/batch/search",
+            "search",
+            raw_root,
+            {"query": query, "limit": limit, "recursive": True, "cursor": cursor, "indexed_only": True},
+        )
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

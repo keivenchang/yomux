@@ -22,7 +22,7 @@ flowchart TB
     subgraph services[Six independent local-service processes]
         indexd[indexd]
         statsd[statsd]
-        jobd[jobd]
+        batchd[batchd]
         statusd[statusd]
         watchd[watchd]
         approvald[approvald]
@@ -30,19 +30,19 @@ flowchart TB
 
     web <-->|Versioned Unix-socket RPC| indexd
     web <-->|Versioned Unix-socket RPC| statsd
-    web <-->|Versioned Unix-socket RPC| jobd
+    web <-->|Versioned Unix-socket RPC| batchd
     web <-->|Versioned Unix-socket RPC| statusd
     web <-->|Versioned Unix-socket RPC| watchd
     web <-->|Versioned Unix-socket RPC| approvald
     indexd <--> filesystem
-    jobd --> workers[Bounded spawn workers]
+    batchd --> workers[Bounded spawn workers]
     workers <--> filesystem
     statusd <--> tmux
     watchd --> filesystem
     approvald --> tmux
     indexd <--> runtime
     statsd <--> runtime
-    jobd <--> runtime
+    batchd <--> runtime
     statusd <--> runtime
     watchd <--> runtime
     approvald <--> runtime
@@ -64,7 +64,7 @@ Terminal bytes remain a direct browser-WebSocket-to-web-process-to-tmux path. Sh
 | --- | --- |
 | `indexd` | Quick Open indexes, per-root SQLite snapshots, manifests, tombstones, and the persisted breadth-first indexing frontier. |
 | `statsd` | Original metric observations and usage atoms, retention, derived in-memory layers, and encoded snapshot/delta products. |
-| `jobd` | Deferred or CPU-heavy typed work, bounded queues and spawn workers, coalescing, cancellation, and last-known-good materialized products. |
+| `batchd` | Deferred or CPU-heavy typed work, bounded queues and spawn workers, coalescing, cancellation, and last-known-good materialized products. |
 | `statusd` | Shared tmux session inventory, pane classification, immutable status generations, and encoded auto-approve status bytes. |
 | `watchd` | Shallow native filesystem watch descriptors, whole-configuration polling fallback after native-backend failure/unavailability, revisions, and changed-path evidence used by browser refresh and index invalidation. Per-root local/network mount partitioning is not implemented yet. |
 | `approvald` | Per-target auto-approval workers, target locks, lifecycle actions, and approved tmux input. |
@@ -80,7 +80,7 @@ Two rules are structural rather than per-row. First, a *future* event is never a
 | Process/caller | Lifetime owner | Root decision | Service record | Lock | Claim | Surviving supervisor | Shutdown/reap owner | Destructive dimensions bound |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `watchd` | `LocalServiceRegistry` (spawn/adopt) + `run_local_rpc_service`'s `ServiceLifetimeOwner` (retirement) | `caller-shared-root-retain` | `<socket>.service.json` written by `_publish_record` from a proven `status`, carrying `service`, `namespace`, `spawn_generation`, `supervisor`, `claim_id`, `root_sharing` | Service flock in `run_local_rpc_service` | `local-service:watchd` claim under `STATE_DIR/<host>/` published at spawn | `<socket>.lifetime.json`, republished on every transition | Self-bounded exit through `ServiceLifetimeOwner`; supervisor-side stop through `lifetime.terminate_authorized_process` | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + namespace + service kind + live spawn generation + claim |
-| `jobd` | Same, plus `PersistentJobBroker._idle_should_stop()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:jobd` | Same | Same, plus `LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS` while `jobd_retirement_state` reports `draining` | Same |
+| `batchd` | Same, plus `PersistentJobBroker._idle_should_stop()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:batchd` | Same | Same, plus `LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS` while the batch retirement state reports `draining` | Same |
 | `statusd` | Same, plus `PersistentStatusService.idle_due()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:statusd` | Same | Same | Same |
 | `approvald` | Same, plus the `idle_due` predicate in `ApprovalDaemon` | `caller-shared-root-retain` | Same owner | Service flock + per-target locks | `local-service:approvald` | Same | Same | Same |
 | `indexd` (`search_indexer.py`) | Same, plus its `idle_due` predicate | `caller-shared-root-retain` | Same owner | Service flock + per-root SQLite | `local-service:indexd` | Same | Same | Same |
@@ -156,14 +156,16 @@ The background owner is a role elected among web processes sharing one local `YO
 
 ## Filesystem boundaries
 
-`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path.
+`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path. Human-interactive bounded reads stay under `/api/fs/...` and return directly; recursive or input-sized work is submitted through `/api/batch/...` and may return an operation receipt.
 
 Git-backed filesystem consumers enter `git_ops.pinned_git_scope_from_handle()` from the already-authorized file, directory, or parent handle. The scope pins the repository marker, linked-worktree Git directory, common directory, and object directory; builds a bounded private view of config, HEAD, refs, packed refs, objects, and the index; passes only that view to `_run_pinned_git()`; and revalidates the live namespace when the consumer retires. Read metadata, path info, Finder repository enrichment, diff, and blame use this same scope. A tracked rename rewrites the old index entries to their new paths in the private index without reopening worktree content, performs the descriptor-relative filesystem rename, then publishes the private index through the pinned Git-directory descriptor and its owned `index.lock`. If the repository, object store, real index, or lock changes, the operation returns `fs.error.gitRepositoryChanged` and never runs against the replacement. Finder may defer optional repository badges when the bounded view exceeds its enrichment budget; the directory row remains usable.
 
 | Surface | Execution path | Current use |
 | --- | --- | --- |
 | `GET /api/fs/fast/list?path=...` | `FilesystemHttpAdapter` calls `filesystem.list_directory(..., include_repo_info=False)` in the web process and returns the snapshot directly. It does not call `jobd`. | Every Finder directory LIST, including the root and remembered descendants. A successful call is HTTP 200 and contains only that directory's direct entries and base metadata. |
-| `POST /api/fs/batch` | The web process submits a bounded typed batch to `jobd`; a cold product may return an operation receipt and complete through the shared client-event/operation path. | Deferred detailed work. Finder sends Git/repository `INFO` enrichment here after base rows exist and patches mounted rows when results arrive. |
+| `POST /api/fs/batch` | The web process submits a bounded typed batch to `batchd`; a cold product may return an operation receipt and complete through the shared client-event/operation path. | Deferred detailed work. Finder sends Git/repository `INFO` enrichment here after base rows exist and patches mounted rows when results arrive. |
+| `GET /api/fs/search` | The accepting web process performs a direct one-level search for interactive Quick Open path prefixes. | Immediate database-independent directory results. |
+| `GET /api/batch/search` | The web process submits recursive search and cursor-delta work to `batchd`; a cold product returns an operation receipt. | Slow recursive `find`-style discovery and indexed progress. |
 | `GET /api/fs/list` | The compatibility single-operation path submits `list` through the existing filesystem-product owner. | Existing callers outside Finder; it is not the Finder first-paint route. |
 
 ```mermaid
@@ -171,7 +173,7 @@ sequenceDiagram
     participant Browser as Finder in browser
     participant Web as Web process
     participant FS as Filesystem owner
-    participant Jobd as jobd and workers
+    participant Batchd as batchd and workers
 
     Browser->>Web: GET /api/fs/fast/list?path=root
     Web->>FS: list_directory(root, include_repo_info=false)
@@ -186,9 +188,9 @@ sequenceDiagram
         Web-->>Browser: HTTP 200
         Browser->>Browser: Paint each completed subtree
     and Enrich repository details after paint
-        Browser->>Web: POST /api/fs/batch with INFO items
-        Web->>Jobd: Submit bounded filesystem batch
-        Jobd-->>Web: Ready product or operation receipt
+         Browser->>Web: POST /api/fs/batch with INFO items
+         Web->>Batchd: Submit bounded filesystem batch
+         Batchd-->>Web: Ready product or operation receipt
         Web-->>Browser: INFO results now or after completion event
         Browser->>Browser: Patch mounted rows in place
     end

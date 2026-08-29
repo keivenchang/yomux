@@ -234,6 +234,32 @@ async function runLayoutAsyncSuite() {
     assert.ok(state.error, 'refresh failure is presented instead of silently clearing the list');
   });
 
+  await testAsync('Git history retries once without a stale saved cursor', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        const error = new Error('invalid Git history cursor');
+        error.status = 400;
+        error.payload = {user_message: {key: 'fs.error.gitHistoryCursor', params: {}, fallback: 'invalid Git history cursor'}};
+        return Promise.reject(error);
+      }
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40),
+        snapshot_cursor: 'fresh-cursor', commits: [], next_cursor: '', truncated: false,
+      }));
+    });
+    api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
+    assert.deepStrictEqual(requests, [
+      '/api/fs/git-history?path=%2Frepo&limit=40&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=40',
+    ]);
+    assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
+  });
+
   await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
@@ -2702,7 +2728,7 @@ async function runLayoutAsyncSuite() {
     const searches = [];
     api.setFetchForTest(url => {
       const target = String(url);
-      if (target.includes('/api/fs/search')) {
+      if (target.includes('/api/fs/search') || target.includes('/api/batch/search')) {
         searches.push(target);
         if (target.includes('cursor=')) {
           // The delta read: one committed match published since the baseline cursor.
@@ -2756,7 +2782,7 @@ async function runLayoutAsyncSuite() {
     const searches = [];
     api.setFetchForTest(url => {
       const target = String(url);
-      if (target.includes('/api/fs/search')) {
+      if (target.includes('/api/fs/search') || target.includes('/api/batch/search')) {
         searches.push(target);
         if (target.includes('cursor=')) return Promise.resolve(jsonResponse(deltaReply(target)));
         return Promise.resolve(jsonResponse({
@@ -2802,7 +2828,7 @@ async function runLayoutAsyncSuite() {
     let answerLongQuery = null;
     api.setFetchForTest(url => {
       const target = String(url);
-      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      if (!target.includes('/api/fs/search') && !target.includes('/api/batch/search')) return Promise.resolve(jsonResponse({state: 'building'}));
       // The longer query is accepted but never answered during this test: the queued 202 case.
       if (target.includes(encodeURIComponent('t5t.md'))) return new Promise(resolve => { answerLongQuery = resolve; });
       return Promise.resolve(jsonResponse({
@@ -2847,7 +2873,7 @@ async function runLayoutAsyncSuite() {
     let answerRefresh = null;
     api.setFetchForTest(url => {
       const target = String(url);
-      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      if (!target.includes('/api/fs/search') && !target.includes('/api/batch/search')) return Promise.resolve(jsonResponse({state: 'building'}));
       searchCount += 1;
       if (searchCount > 1) return new Promise(resolve => { answerRefresh = resolve; });
       return Promise.resolve(jsonResponse({

@@ -375,9 +375,11 @@ def search_files(
     limit: int | str | None = 400,
     recursive: bool = False,
     cursor: str | None = None,
+    direct_only: bool = False,
+    indexed_only: bool = False,
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor)
+    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor, direct_only=direct_only, indexed_only=indexed_only)
 
 
 @normalize_os_errors

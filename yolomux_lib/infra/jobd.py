@@ -119,6 +119,13 @@ from ..web import html_preview_document
 JOBD_PROTOCOL_VERSION = 26
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
+# `batchd` is the human-facing name for this broker. Keep the protocol and task
+# identities stable while the compatibility entry point is migrated.
+BATCHD_PROTOCOL_VERSION = JOBD_PROTOCOL_VERSION
+BATCHD_DEFAULT_IDLE_SECONDS = JOBD_DEFAULT_IDLE_SECONDS
+BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
+BATCHD_SERVICE_NAME = "batchd"
+LEGACY_JOBD_SERVICE_NAME = "jobd"
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
 # owner pins it up with a registry lease (`JobClient.start_for_scheduler`, called at
@@ -228,6 +235,7 @@ JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS = 2.0
 # lane would turn one wedged mount into an unbounded replacement storm.
 JOBD_MAX_QUARANTINED_PREDECESSORS = 2
 JOBD_SOCKET_NAME = "jobd.sock"
+BATCHD_SOCKET_NAME = "batchd.sock"
 JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
 JOBD_BROKER_ACTIONS = frozenset({
     "ping", "status", "profile", "submit", "result", "product", "produce", "cancel",
@@ -246,6 +254,14 @@ JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
 
 def default_socket_path() -> Path:
     return safe_socket_path(RUNTIME_DIR / "services" / JOBD_SOCKET_NAME, prefix="yolomux-jobd")
+
+
+def default_batchd_socket_path() -> Path:
+    return safe_socket_path(RUNTIME_DIR / "services" / BATCHD_SOCKET_NAME, prefix="yolomux-batchd")
+
+
+def batchd_artifact_root() -> Path:
+    return RUNTIME_DIR / "batchd-artifacts"
 
 
 def artifact_root() -> Path:
@@ -463,7 +479,13 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
         # Step 4: an opaque cursor selects delta mode; ``search_files`` serves committed journal
         # deltas since it (no traversal) instead of a snapshot. An absent/empty cursor is a snapshot.
         cursor = str(args.get("cursor") or "") or None
-        result = filesystem.search_files(path, str(args.get("query") or ""), args.get("limit", 400), recursive=args.get("recursive") is True, cursor=cursor)
+        search_args = {
+            "recursive": args.get("recursive") is True,
+            "cursor": cursor,
+        }
+        if args.get("indexed_only") is True:
+            search_args["indexed_only"] = True
+        result = filesystem.search_files(path, str(args.get("query") or ""), args.get("limit", 400), **search_args)
     elif operation == "index_status":
         result = filesystem.index_status(path)
     elif operation == "count":
@@ -1089,8 +1111,9 @@ class JobProductStore:
 class PersistentJobBroker:
     """One local broker with bounded spawn-only capacity for typed CPU jobs."""
 
-    def __init__(self, socket_path: Path, idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS, workers: int | None = None):
-        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-jobd")
+    def __init__(self, socket_path: Path, idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS, workers: int | None = None, *, service_name: str = "jobd"):
+        self.service_name = str(service_name)
+        self.socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{self.service_name}")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.stop_event = multiprocessing.get_context("spawn").Event()
         self.idle_seconds = max(1.0, float(idle_seconds))
@@ -2323,7 +2346,7 @@ class PersistentJobBroker:
         """Arm data-plane maintenance only after the listener completes one private accept."""
         def activate() -> None:
             try:
-                envelope = new_envelope("jobd", "ping", {"action": "ping", "protocol_version": JOBD_PROTOCOL_VERSION}, timeout_seconds=1.0)
+                envelope = new_envelope(self.service_name, "ping", {"action": "ping", "protocol_version": JOBD_PROTOCOL_VERSION}, timeout_seconds=1.0)
                 response, _binary = local_service_request(self.socket_path, envelope, timeout_seconds=1.0)
                 if response.get("ok") is not True:
                     raise RuntimeError("jobd listener readiness ping failed")
@@ -2367,7 +2390,7 @@ class PersistentJobBroker:
         return run_local_rpc_service(
             socket_path=self.socket_path,
             lock_path=self.lock_path,
-            service_name="jobd",
+            service_name=self.service_name,
             stop_event=self.stop_event,
             handle=self.handle,
             on_idle=self._idle_should_stop,
@@ -2387,14 +2410,25 @@ class PersistentJobBroker:
 class JobClient(LocalServiceClient):
     """Thin cross-port client for the shared stateless CPU broker."""
 
-    def __init__(self, socket_path: Path | None = None):
+    def __init__(
+        self,
+        socket_path: Path | None = None,
+        *,
+        service_name: str = LEGACY_JOBD_SERVICE_NAME,
+        module: str = "yolomux_lib.jobd",
+        default_socket: Path | None = None,
+        protocol_version: int = JOBD_PROTOCOL_VERSION,
+        idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS,
+    ):
+        requested_socket_path = Path(socket_path or default_socket or default_socket_path())
+        requested_service_dir = Path(socket_path).parent if socket_path is not None else RUNTIME_DIR / "services"
         super().__init__(
-            "jobd",
-            "yolomux_lib.jobd",
-            socket_path or default_socket_path(),
-            JOBD_PROTOCOL_VERSION,
-            idle_seconds=JOBD_DEFAULT_IDLE_SECONDS,
-            service_dir=Path(socket_path).parent if socket_path is not None else RUNTIME_DIR / "services",
+            service_name,
+            module,
+            requested_socket_path,
+            protocol_version,
+            idle_seconds=idle_seconds,
+            service_dir=requested_service_dir,
         )
         self._scheduler_lease_id = ""
         self._scheduler_lease_lock = threading.Lock()
@@ -2516,7 +2550,10 @@ class JobClient(LocalServiceClient):
         }, timeout=timeout)
 
     def runtime_status(self) -> dict[str, Any]:
-        """Build jobd's whole System/health row.
+        return self._runtime_status_for_service(self.service)
+
+    def _runtime_status_for_service(self, service_name: str) -> dict[str, Any]:
+        """Build this broker's whole System/health row.
 
         No ``demand_started`` here on purpose: the scheduler lease pins jobd up, so its absence
         while this process owns scheduling is a verified outage, not idleness. See
@@ -2533,7 +2570,7 @@ class JobClient(LocalServiceClient):
                     continue
                 if worker_pid > 0:
                     worker_pids.append(worker_pid)
-        return registry_runtime_row("jobd", self.registry, status, payload, resource_pids=worker_pids, include_version=False, fields_before_failure={
+        return registry_runtime_row(service_name, self.registry, status, payload, resource_pids=worker_pids, include_version=False, fields_before_failure={
             "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
             "active_task": str(payload.get("active_task") or ""),
             "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [],
@@ -2559,16 +2596,36 @@ class JobClient(LocalServiceClient):
         })
 
 
-def main(argv: list[str] | None = None) -> int:
+class BatchClient(JobClient):
+    """Canonical client for the human-facing background batch broker."""
+
+    def __init__(self, socket_path: Path | None = None):
+        requested_socket_path = Path(socket_path or default_batchd_socket_path())
+        super().__init__(
+            requested_socket_path,
+            service_name=BATCHD_SERVICE_NAME,
+            module="yolomux_lib.batchd",
+            default_socket=requested_socket_path,
+            protocol_version=BATCHD_PROTOCOL_VERSION,
+            idle_seconds=BATCHD_DEFAULT_IDLE_SECONDS,
+        )
+
+    def runtime_status(self) -> dict[str, Any]:
+        # The projection keeps the legacy id until its persisted inventory and browser schema are
+        # migrated together. The client/daemon identity is still batchd for new launches.
+        return self._runtime_status_for_service(LEGACY_JOBD_SERVICE_NAME)
+
+
+def main(argv: list[str] | None = None, *, service_name: str = "jobd") -> int:
     parser = argparse.ArgumentParser(description="YOLOmux bounded CPU job broker")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--socket", default=str(default_socket_path()))
+    parser.add_argument("--socket", default=str(default_batchd_socket_path() if service_name == "batchd" else default_socket_path()))
     parser.add_argument("--idle-seconds", type=float, default=JOBD_DEFAULT_IDLE_SECONDS)
     parser.add_argument("--workers", type=int, default=default_worker_count())
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
-    return PersistentJobBroker(Path(args.socket), idle_seconds=args.idle_seconds, workers=args.workers).run()
+    return PersistentJobBroker(Path(args.socket), idle_seconds=args.idle_seconds, workers=args.workers, service_name=service_name).run()
 
 
 if __name__ == "__main__":

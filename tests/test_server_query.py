@@ -1307,7 +1307,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert 'dispatch_http_route(self, "POST")' in post_body
     assert "if parsed.path" not in get_body
     assert "if parsed.path" not in post_body
-    assert set(http_routes.ROUTE_GROUPS) == {"core", "yoagent", "chat", "filesystem", "tmux"}
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "yoagent", "chat", "filesystem", "batch", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert http_routes.route_for_request("GET", "/api/stats-sample") is None
     assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
@@ -1469,7 +1469,6 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
-
     handler, calls, writes = route_handler("/api/fs/zip?path=/repo", readonly=True)
     handler.handle_fs_zip = lambda parsed: writes.append(("fs-zip", parsed.path))
 
