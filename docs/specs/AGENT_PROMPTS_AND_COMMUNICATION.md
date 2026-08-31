@@ -1,6 +1,6 @@
 # Agent Prompts And Communication Spec
 
-This file records the working knowledge YOLOmux uses to detect Claude and Codex state from terminal screens, transcripts, and structured approval channels. Treat the exact strings as versioned examples, not a permanent API. The durable contract is the state model, the visible-block boundaries, and the fallback order.
+This file records the working knowledge YOLOmux uses to detect Claude, Codex, and the currently supported visible OpenCode state from terminal screens, transcripts, and structured approval channels. Treat the exact strings as versioned examples, not a permanent API. The durable contract is the state model, the visible-block boundaries, and the fallback order.
 
 ## Purpose
 
@@ -11,6 +11,7 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 ## Implementation Owners
 
 - Visible Claude/Codex tmux pane control: `yolomux_lib/tmux/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
+- Visible OpenCode tmux pane observation: the same `agent_tui.py` and `prompt_detector.py` path, gated by a validated native `opencode` process identity. OpenCode is observation-only in this release: its existing TUI is not a YO!agent send target, and its permission UI is not an approval action.
 - Pure visible screen state classification: `yolomux_lib/approval/prompt_detector.py::agent_screen_state`.
 - Pure approval prompt classification: `yolomux_lib/approval/prompt_detector.py::approval_prompt_state`.
 - Claude AskUserQuestion text: `yolomux_lib/approval/prompt_detector.py::ask_user_question_prompt_text`.
@@ -20,8 +21,9 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 - App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`, routed through `agent_tui.classify_agent_pane`.
 - Claude/Codex structured stream normalization for YO!agent and text clients: `yolomux_lib/agent_comms/stream_events.py`. Current Claude CLI stream-json can emit Anthropic-style partials either directly or wrapped as `{"type":"stream_event","event":{...}}`; normalizers must unwrap those events, preserve outer `session_id` metadata, separate assistant-visible text from thinking/tool-call auxiliary rows, and dedupe snapshot tool-use echoes without dropping the later tool output.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
+- OpenCode evidence fixtures: `tests/fixtures/prompt_corpus/captures/*__opencode-1.18.25_20260828.yaml`, indexed by `tests/fixtures/prompt_corpus/captures/inventory.yaml` and `tests/fixtures/prompt_corpus/inventory.yaml`. These are three sanitized read-only captures: one completed/idle composer, one working meter, and one working tool row with extra indentation. No real OpenCode question or permission capture is currently available.
 
-When one tmux session contains multiple detected Claude/Codex panes, each tmux sub-window keeps its own agent kind, pane target, cwd/path, prompt state, and working/idle evidence. Session-level YO remains a stored user toggle, but status collection fans out to the live agent pane targets; UI surfaces such as the tmux sub-window bar, Tabber, popovers, and Recent Agents must render the per-sub-window rows instead of collapsing them into one session agent. A legacy scalar session status may still choose the selected/preferred agent pane first and then a deterministic fallback, but that scalar is only a summary and must not overwrite per-sub-window state/path/branch rows.
+When one tmux session contains multiple detected Claude, Codex, or OpenCode panes, each tmux sub-window keeps its own agent kind, pane target, cwd/path, prompt state, and working/idle evidence. Session-level YO remains a stored user toggle, but status collection fans out to the live agent pane targets; UI surfaces such as the tmux sub-window bar, Tabber, popovers, and Recent Agents must render the per-sub-window rows instead of collapsing them into one session agent. A legacy scalar session status may still choose the selected/preferred agent pane first and then a deterministic fallback, but that scalar is only a summary and must not overwrite per-sub-window state/path/branch rows. OpenCode rows are visible status identities only; they are excluded from structured YO!agent communication and normal prompt-send eligibility.
 
 ## State Model
 
@@ -32,6 +34,8 @@ When one tmux session contains multiple detected Claude/Codex panes, each tmux s
 | `needs-input` | The agent is waiting for a non-permission user decision, such as a multiple-choice question. | Only through the question-answer workflow; normal prompt sends must not paste over it. | Current visible question block or Claude AskUserQuestion UI. |
 | `approval` | Claude or Codex is waiting for a permission decision. | Yes, but use the approval action for the selected option; do not type arbitrary text unless rejecting with instructions. | Visible approval prompt block, optionally enriched by transcript/tool context. |
 | `blocked/error` | The agent cannot continue without external correction, a crash recovery action, or a stale session reset. | Usually no; route through session-specific recovery. | Explicit error text, repeated stale state, or app-level health checks. |
+
+OpenCode currently uses the shared `working` and `idle` state vocabulary only where the observed screen shape proves it. The promoted 1.18.25 captures prove `idle` for the bordered `Ask anything...` composer with a `Build` footer and `working` for the footer activity meter or current tool row. An observed or future `Permission required` block is a blocked, non-typeable state, not `approval`; it must not enter Claude/Codex approval parsing or YO auto-approval. No real OpenCode choice-question or free-form-question capture is registered, so `needs-input` remains an explicit evidence gap rather than a claimed supported capture. The OpenCode SQLite state reader can add bounded working/paused/idle evidence, but visible question and permission state takes precedence and the database reader never manufactures output tokens.
 
 ## Detector Principles
 
@@ -48,6 +52,10 @@ When one tmux session contains multiple detected Claude/Codex panes, each tmux s
 - A real shell prompt below a working row means the working row is stale.
 - A bare user prompt at the bottom must stop stale-question scanning. Example: an old `❯ Where are the DOIT files?` above a current `❯ ` prompt is not `needs-input`.
 - Tests should use raw copied panes with an expected state. When a new Claude/Codex version changes a glyph or footer, add the fixture before relaxing the detector.
+- OpenCode support is version-bounded to the observed `1.18.25` executable/TUI shape. Its native screen uses a left `┃` gutter, an extra-indented content column, a bordered multiline composer, a `Build` provider/model footer, and optional path/token/cost rows. `tmux capture-pane -J` remains the only soft-wrap reassembly path; the current promoted captures do not prove width-variant behavior for long URLs, links, paths, or unbroken values.
+- OpenCode's current default TUI has no attachable listener in the captured setup. The supported durable reader opens `~/.local/share/opencode/opencode.db` read-only and queries only bounded `session`, `message`, `part`, and state-only `session_input` fields required for identity, timestamps, model/provider, state, and token atoms. It does not read credential/account/session-share fields, WAL bytes directly, or mutate the database. Missing, locked, malformed, schema-incompatible, ambiguous, or identity-mismatched reads become typed unavailable results. Completed `step-finish` snapshots are the usage event owner; `message` rows provide identity/context and are never summed with the matching part.
+- The current YO!stats atom schema represents OpenCode input, cache-read, and output dimensions. OpenCode reasoning and cache-write values are observed by the reader but have no exact current atom role, so they are omitted from emitted atoms and marked as partial telemetry rather than relabeled or converted to zero. Model/provider attribution comes from stored machine fields, never visible prose. Cursor receipts and counter epochs prevent duplicate revised snapshots and fail closed on uncertain persistence.
+- OpenCode right-click behavior remains client-owned. The observed native menu provides `Copy`, `Copy without indent`, and `Copy tmux selection`; the browser preserves native selection/copy behavior for a validated OpenCode pane and keeps the existing YOLOmux terminal menu for Claude/Codex. Exact browser proof for split panes, startup metadata gaps, selected indented text, and long soft-wrapped values is still open.
 
 ## Claude Working Patterns
 

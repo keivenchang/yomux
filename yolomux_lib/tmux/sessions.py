@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shlex
+import shutil
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from ..common import AgentInfo
 from ..common import TmuxPaneInfo
 from ..common import ProcessInfo
 from ..common import SessionInfo
+from ..common import VISIBLE_AGENT_KINDS
 from ..cache import TtlCache
 from ..common import _CACHE_MISS
 from ..common import tail_file_lines
@@ -24,6 +26,7 @@ from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
 from ..server_logs import emit_server_log
+from ..infra.host_identity import process_start_identity
 
 
 # (st_dev, st_ino, st_mtime_ns, st_size) — see transcript_file_identity for why all four.
@@ -221,8 +224,23 @@ def list_processes() -> tuple[dict[int, ProcessInfo], str | None]:
         except ValueError:
             continue
         command = parts[2] if len(parts) == 3 else ""
-        processes[pid] = ProcessInfo(pid=pid, ppid=ppid, command=command)
+        executable = process_executable(pid) if command_basename(command) == "opencode" else None
+        processes[pid] = ProcessInfo(pid=pid, ppid=ppid, command=command, executable=executable)
     return processes, None
+
+
+def process_executable(pid: int) -> str | None:
+    """Read executable identity from the operating system, not from argv."""
+    if platform.system() == "Linux":
+        try:
+            return str(Path(f"/proc/{pid}/exe").resolve(strict=True))
+        except OSError:
+            return None
+    result = run_cmd(["ps", "-p", str(pid), "-o", "comm="], timeout=1.0)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 def child_index(processes: dict[int, ProcessInfo]) -> dict[int, list[ProcessInfo]]:
@@ -281,6 +299,39 @@ def command_option_value(command: str, long_name: str, short_name: str | None = 
     return None
 
 
+def agent_session_id_from_command(command: str) -> str | None:
+    value = command_option_value(command, "--session", "-s")
+    return value.strip("\"'") if isinstance(value, str) and value.strip("\"'") else None
+
+
+def process_started_at(pid: int) -> float | None:
+    """Return a process birth time only when the platform exposes an exact value."""
+    identity = process_start_identity(pid)
+    if not identity:
+        return None
+    prefix, separator, raw_value = identity.partition(":")
+    if not separator:
+        return None
+    try:
+        if prefix == "darwin":
+            value = int(raw_value) / 1_000_000
+        elif prefix == "proc":
+            btime = None
+            with Path("/proc/stat").open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("btime "):
+                        btime = int(line.split()[1])
+                        break
+            if btime is None:
+                return None
+            value = btime + int(raw_value) / float(os.sysconf("SC_CLK_TCK"))
+        else:
+            return None
+    except (OSError, OverflowError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def agent_model_from_command(command: str) -> str | None:
     value = command_option_value(command, "--model", "-m")
     return value.strip("\"'") if isinstance(value, str) and value.strip("\"'") else None
@@ -296,23 +347,39 @@ def agent_model_from_metadata(metadata: dict[str, Any]) -> str | None:
 
 def pane_process_label(pane: TmuxPaneInfo, candidates: list[ProcessInfo]) -> tuple[str, int]:
     for process in candidates:
-        label = process_display_label(process.command)
-        if label in AGENT_COMMANDS or (label.startswith("mock_") and label.endswith(".py")):
-            return label, process.pid
-    for process in candidates:
-        kind = classify_agent(process.command)
+        kind = classify_agent(process.command, process.executable)
         if kind:
             return kind, process.pid
+        label = process_display_label(process.command)
+        if (label in AGENT_COMMANDS and label != "opencode") or (label.startswith("mock_") and label.endswith(".py")):
+            return label, process.pid
     for process in candidates:
         if process.pid == pane.pid:
             return process_display_label(process.command) or pane.command, process.pid
     return pane.command, pane.pid
 
 
-def classify_agent(command: str) -> str | None:
+def classify_agent(command: str, executable: str | None = None) -> str | None:
+    tokens = command_tokens(command)
     label = process_display_label(command).lower()
-    if label in AGENT_COMMANDS:
+    if label in {"claude", "codex"}:
         return label
+    if label == "opencode":
+        # The display label is derived from argv and is not identity evidence: an interpreter,
+        # wrapper, or child tool can mention ``opencode`` in its arguments. list_processes supplies
+        # the operating-system executable separately for this native process.
+        if not tokens or Path(tokens[0]).name.lower() != "opencode" or not executable:
+            return None
+        executable_path = Path(executable).expanduser().resolve(strict=False)
+        if executable_path.name.lower() != "opencode" or not executable_path.is_file():
+            return None
+        installed_path = shutil.which("opencode")
+        if installed_path is None or executable_path != Path(installed_path).expanduser().resolve(strict=False):
+            return None
+        command_path = Path(tokens[0]).expanduser()
+        if command_path.is_absolute() and command_path.resolve(strict=False) != executable_path:
+            return None
+        return "opencode"
     # Pane descendants include every search, test, and shell command launched by the agent. Only
     # classify an actual mock entry point here; an argument or commit message that merely mentions
     # "claude" or "codex" must not become a second agent for the same pane.
@@ -1113,7 +1180,7 @@ def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo, *, 
 
 
 def selected_codex_process(processes: list[ProcessInfo]) -> ProcessInfo | None:
-    candidates = [process for process in processes if classify_agent(process.command) == "codex"]
+    candidates = [process for process in processes if classify_agent(process.command, process.executable) == "codex"]
     if not candidates:
         return None
     # The Node launcher and native Codex binary are one interactive client. Prefer the native
@@ -1134,7 +1201,7 @@ def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[Process
 
 
 def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo], *, enrich_paths: bool = True) -> AgentInfo | None:
-    kinds = [kind for process in processes if (kind := classify_agent(process.command)) in {"claude", "codex"}]
+    kinds = [kind for process in processes if (kind := classify_agent(process.command, process.executable)) in VISIBLE_AGENT_KINDS]
     if not kinds:
         return None
     # `processes` is breadth-first from the tmux pane PID. The first real agent is the interactive
@@ -1143,6 +1210,22 @@ def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessI
         if enrich_paths:
             return select_claude_agent(session, pane, processes)
         return select_claude_agent(session, pane, processes, enrich_paths=False)
+    if kinds[0] == "opencode":
+        process = next(process for process in processes if classify_agent(process.command, process.executable) == "opencode")
+        return AgentInfo(
+            session=session,
+            kind="opencode",
+            pid=process.pid,
+            pane_target=pane.target,
+            command=process.command,
+            cwd=(process_cwd(process.pid) or pane.current_path) if enrich_paths else pane.current_path,
+            status=None,
+            session_id=agent_session_id_from_command(process.command),
+            transcript=None,
+            error=None,
+            model=agent_model_from_command(process.command),
+            started_at=process_started_at(process.pid),
+        )
     if enrich_paths:
         return select_codex_agent(session, pane, processes)
     return select_codex_agent(session, pane, processes, enrich_paths=False)

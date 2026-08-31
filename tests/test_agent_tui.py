@@ -7,14 +7,18 @@ import pytest
 from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
+from yolomux_lib import tmux_utils
 from yolomux_lib.agent_tui import AgentTuiCapture
 from yolomux_lib.agent_tui import AgentTuiCursor
+from yolomux_lib.agent_tui import agent_client_version_slug
 from yolomux_lib.agent_tui import capture_agent_pane
 from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.agent_tui import clear_composer
 from yolomux_lib.agent_tui import cursor_state
 from yolomux_lib.agent_tui import read_composer_state
 from yolomux_lib.agent_tui import send_prompt
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import SessionInfo
 
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
@@ -43,6 +47,29 @@ def load_promoted_capture_cases():
 
 
 PROMOTED_CAPTURE_CASES = load_promoted_capture_cases()
+OPENCODE_CAPTURE_CASES = [case for case in PROMOTED_CAPTURE_CASES if case["inventory"]["agent"] == "opencode"]
+
+
+def opencode_roster() -> dict[str, SessionInfo]:
+    return {
+        "opencode": SessionInfo(
+            session="opencode",
+            panes=[],
+            selected_pane=None,
+            agents=[AgentInfo(
+                session="opencode",
+                kind="opencode",
+                pid=123,
+                pane_target="%opencode",
+                command="opencode",
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            )],
+        ),
+    }
 
 
 def completed(stdout="", stderr="", returncode=0):
@@ -76,6 +103,19 @@ def test_agent_tui_capture_yaml_files_include_client_version_and_date():
         assert version_slug in path.name
         assert capture_date.replace("-", "") in path.name
         assert final_component.startswith(capture_date.replace("-", "")), path
+
+
+@pytest.mark.parametrize(
+    ("agent", "version", "expected"),
+    [
+        ("claude", "2.1.226", "claude-code-2.1.226"),
+        ("codex", "0.141.0", "codex-cli-0.141.0"),
+        ("opencode", "1.18.25", "opencode-1.18.25"),
+        ("OpenCode", "opencode 1.18.25", "opencode-1.18.25"),
+    ],
+)
+def test_agent_client_version_slug_uses_one_version_component(agent, version, expected):
+    assert agent_client_version_slug(agent, version) == expected
 
 
 def test_synthetic_prompt_corpus_cases_are_in_synthetic_dir():
@@ -240,12 +280,299 @@ def test_classify_agent_pane_upgrades_idle_composer_draft_to_input_draft():
         capture_func=lambda _target, visible_only=False: visible,
         capture_styled_func=lambda _target, visible_only=False: "",
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-        screen_classifier=lambda _visible, _pane_target: {"key": "idle", "text": "", "negative_reason": "idle composer"},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "idle", "text": "", "negative_reason": "idle composer"},
     )
 
     assert state.screen["key"] == "input-draft"
     assert state.screen["detected_text"] == "Write tests for @filename"
     assert state.composer.key == "draft"
+
+
+def test_tmux_capture_owner_joins_wrapped_lines_for_all_capture_modes(monkeypatch):
+    calls = []
+
+    def fake_tmux_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return completed("capture")
+
+    monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
+
+    assert tmux_utils.tmux_capture_pane("%opencode", visible_only=True) == "capture"
+    assert tmux_utils.tmux_capture_pane("%opencode", visible_only=False) == "capture"
+    assert tmux_utils.tmux_capture_pane_styled("%opencode", visible_only=True) == "capture"
+    assert tmux_utils.tmux_capture_pane_styled("%opencode", visible_only=False) == "capture"
+
+    assert [args for args, _kwargs in calls] == [
+        ("capture-pane", "-t", "%opencode", "-p", "-J"),
+        ("capture-pane", "-t", "%opencode", "-p", "-J", "-S", "-80"),
+        ("capture-pane", "-e", "-t", "%opencode", "-p", "-J"),
+        ("capture-pane", "-e", "-t", "%opencode", "-p", "-J", "-S", "-80"),
+    ]
+
+
+def test_opencode_meter_only_capture_is_idle_without_current_turn_row():
+    visible = "\n".join([
+        "unrelated terminal output from an audit command",
+        "old OpenCode tool text from scrollback",
+        "     ctrl+x down view subagents",
+        "     Build · switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens",
+        "  ┃  Build · switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference · high",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                        606.2K  ctrl+p commands",
+    ])
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=opencode_roster(),
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "idle"
+    assert state.screen["activity_source"] == "opencode-meter-ambiguous"
+    assert state.reason_code == "idle"
+
+
+def test_opencode_explicit_session_footer_meter_is_working_without_native_override():
+    visible = "\n".join([
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference Hub",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    317.1K  ctrl+p commands",
+    ])
+    roster = {
+        "opencode": SessionInfo(
+            session="opencode", panes=[], selected_pane=None,
+            agents=[AgentInfo(
+                session="opencode", kind="opencode", pid=123, pane_target="%1",
+                command="opencode -s ses_fb51b242dffeU7jSyiesbuvk75", cwd="/repo",
+                status=None, session_id="ses_fb51b242dffeU7jSyiesbuvk75", transcript=None,
+                error=None,
+            )],
+        ),
+    }
+
+    state = classify_agent_pane(
+        {"pane_target": "%1", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=roster,
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "working"
+    assert state.reason_code == "busy"
+
+
+def test_opencode_old_meter_does_not_override_newer_idle_composer():
+    visible = "\n".join([
+        "old OpenCode output",
+        "   ⬝⬝■■■■■■  esc interrupt",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · model",
+        "  ctrl+p commands",
+    ])
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=opencode_roster(),
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "idle"
+    assert state.reason_code == "idle"
+
+
+@pytest.mark.parametrize("working_case_name", ["working_coordinator", "working_tool_wrap"])
+def test_opencode_stale_working_rows_above_newer_idle_composer_do_not_win(working_case_name):
+    working = next(case["data"] for case in OPENCODE_CAPTURE_CASES if case["data"]["case_name"] == working_case_name)
+    idle = next(case["data"] for case in OPENCODE_CAPTURE_CASES if case["data"]["case_name"] == "completed_output")
+    working_lines = working["raw_capture"].splitlines()
+    composer_start = next(index for index, line in enumerate(working_lines) if line.startswith("╭"))
+    composer_end = next(index for index in range(composer_start + 1, len(working_lines)) if working_lines[index].startswith("╰"))
+    build_index = next(index for index, line in enumerate(working_lines) if "Build" in line)
+    stale_working_rows = working_lines[composer_end + 1:build_index]
+    visible = "\n".join(stale_working_rows + idle["raw_capture"].splitlines())
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=opencode_roster(),
+        include_composer=True,
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "idle"
+    assert state.reason_code == "idle"
+
+
+@pytest.mark.parametrize("case", OPENCODE_CAPTURE_CASES, ids=lambda case: case["id"])
+def test_opencode_promoted_captures_use_shared_detector(case):
+    data = case["data"]
+    expected = data["expected_promoted"]
+    roster = opencode_roster()
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=roster,
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: data["raw_capture"],
+        capture_styled_func=lambda _target, visible_only=False: data["styled_capture"],
+        screen_classifier=lambda *_args: {"key": "wrong"},
+    )
+
+    assert state.screen["key"] == expected["screen_key"]
+    assert state.screen["agent"] == "opencode"
+
+
+def test_opencode_identity_is_required_before_screen_text_is_classified():
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · <model>",
+    ])
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: "",
+        screen_classifier=lambda *_args: {"key": "idle", "text": ""},
+    )
+
+    assert state.agent_kind == ""
+    assert state.screen["key"] == "idle"
+
+
+def test_opencode_identity_must_match_the_target_pane():
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · <model>",
+    ])
+    roster = SessionInfo(
+        session="opencode",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo(
+            session="opencode",
+            kind="opencode",
+            pid=123,
+            pane_target="%other-pane",
+            command="opencode",
+            cwd=None,
+            status=None,
+            session_id=None,
+            transcript=None,
+            error=None,
+        )],
+    )
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions={"opencode": roster},
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: "",
+    )
+
+    assert state.agent_kind == ""
+    assert state.screen["key"] == "idle"
+
+
+def test_opencode_send_preflight_remains_unsupported():
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · <model>",
+    ])
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions={},
+        include_composer=True,
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: "",
+    )
+
+    result = send_prompt(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        "do not send",
+        preflight_state=state,
+    )
+
+    assert result.ok is False
+    assert result.sent is False
+    assert result.reason_code == "unsupported-agent"
+
+
+def test_opencode_permission_state_is_blocked_and_not_a_question():
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ △ Permission required                                      │",
+        "│ # Shell command                                             │",
+        "│ $ true                                                      │",
+        "│ Allow once Allow always Reject                              │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=opencode_roster(),
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "blocked"
+    assert state.reason_code == "blocked"
+    assert state.attention_kind == "blocked"
+    assert state.screen.get("question_text") is None
+
+
+def test_opencode_question_state_is_shared_needs_input_attention():
+    question = "Which image should I inspect?"
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        f"│ {question}                                      │",
+        "│ 1. NASA                                                    │",
+        "│ 2. Lenna                                                   │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = classify_agent_pane(
+        {"pane_target": "%opencode", "agent_kind": "opencode"},
+        session="opencode",
+        discovered_sessions=opencode_roster(),
+        include_transcript_activity=False,
+        capture_func=lambda _target, visible_only=False: visible,
+        capture_styled_func=lambda _target, visible_only=False: visible,
+    )
+
+    assert state.screen["key"] == "needs-input"
+    assert state.screen["question_text"] == question
+    assert state.reason_code == "needs-input"
+    assert state.attention_kind == "question"
+    assert state.attention_label == "Question"
 
 
 def test_classify_agent_pane_keeps_working_state_over_composer_text():
@@ -267,7 +594,7 @@ def test_classify_agent_pane_keeps_working_state_over_composer_text():
         capture_func=lambda _target, visible_only=False: visible,
         capture_styled_func=lambda _target, visible_only=False: "",
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-        screen_classifier=lambda _visible, _pane_target: {"key": "working", "text": "agent is working"},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "working", "text": "agent is working"},
     )
 
     assert state.screen["key"] == "working"
@@ -286,7 +613,7 @@ def test_classify_agent_pane_handles_idle_ghost_disconnected_and_transcript_upgr
         capture_styled_func=lambda _target, visible_only=False: ghost_styled,
         cursor_func=lambda _target: AgentTuiCursor(x=1, y=2, character="›"),
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-        screen_classifier=lambda _visible, _pane_target: {"key": "idle", "text": ""},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "idle", "text": ""},
     )
     disconnected = classify_agent_pane(
         "%missing",
@@ -303,7 +630,7 @@ def test_classify_agent_pane_handles_idle_ghost_disconnected_and_transcript_upgr
         capture_func=lambda _target, visible_only=False: claude_composer("❯ "),
         capture_styled_func=lambda _target, visible_only=False: "",
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-        screen_classifier=lambda _visible, _pane_target: {"key": "idle", "text": ""},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "idle", "text": ""},
         transcript_classifier=lambda _info: {"key": "working", "text": "recent transcript tool use"},
     )
 
@@ -323,7 +650,7 @@ def test_classify_agent_pane_marks_questions_as_attention_not_approval():
         capture_func=lambda _target, visible_only=False: "Which backend should I use?\n❯ 1. vLLM\n  2. SGLang",
         capture_styled_func=lambda _target, visible_only=False: "",
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-        screen_classifier=lambda _visible, _pane_target: {"key": "needs-input", "text": "Which backend should I use?"},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "needs-input", "text": "Which backend should I use?"},
     )
 
     assert state.prompt["visible"] is False
@@ -357,7 +684,7 @@ def test_classify_agent_pane_returns_approval_action_fields():
             "question_text": "Do you want to proceed?",
             "options": [{"index": 1, "label": "Yes"}],
         },
-        screen_classifier=lambda _visible, _pane_target: {"key": "approval", "text": "Do you want to proceed?"},
+        screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "approval", "text": "Do you want to proceed?"},
     )
 
     assert state.agent_kind == "claude"
@@ -435,7 +762,7 @@ def test_promoted_agent_tui_capture_names_include_client_version_and_date(case):
     assert compact_date in path.name
     assert data["fixture_scenario"] in path.name
     assert stem.endswith(f"_{compact_date}")
-    assert re.fullmatch(r"[a-z0-9_]+__(claude-code|codex-cli)-\d+\.\d+\.\d+_\d{8}\.yaml", path.name)
+    assert re.fullmatch(r"[a-z0-9_]+__(claude-code|codex-cli|opencode)-\d+\.\d+\.\d+_\d{8}\.yaml", path.name)
     assert data["client_version"]
     assert data["capture_date"]
     if "source_staging_file" in inventory:
@@ -451,9 +778,30 @@ def test_promoted_agent_tui_captures_reclassify_to_expected_state(case):
     expected = data["expected_promoted"]
     cursor = cursor_from_capture(data)
 
+    discovered_sessions = None
+    if data["agent"] == "opencode":
+        discovered_sessions = {"promoted-fixture": SessionInfo(
+            session="promoted-fixture",
+            panes=[],
+            selected_pane=None,
+            agents=[AgentInfo(
+                session="promoted-fixture",
+                kind=data["agent"],
+                pid=123,
+                pane_target="%promoted-fixture",
+                command=data["agent"],
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            )],
+        )}
+
     state = classify_agent_pane(
         {"pane_target": "%promoted-fixture", "agent_kind": data["agent"]},
         session="promoted-fixture",
+        discovered_sessions=discovered_sessions,
         prompt_source="pane",
         include_composer=True,
         include_transcript_activity=False,
@@ -603,7 +951,7 @@ def test_send_prompt_preflight_refuses_non_agent_and_questions():
             capture_func=lambda _target, visible_only=False: "Which backend?\n❯ 1. vLLM\n  2. SGLang",
             capture_styled_func=lambda _target, visible_only=False: "",
             prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
-            screen_classifier=lambda _visible, _pane_target: {"key": "needs-input", "text": "Which backend?"},
+            screen_classifier=lambda _visible, _pane_target, _agent_kind: {"key": "needs-input", "text": "Which backend?"},
         ),
     )
 

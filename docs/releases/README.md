@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.26 | `v0.7.26` | `v0.7.26^{commit}` | [v0.7.26-evidence.md](v0.7.26-evidence.md) | OpenCode visible status, native terminal navigation, URL handling, and read-only usage statistics |
 | 0.7.25 | `v0.7.25` | `v0.7.25^{commit}` | [v0.7.25-evidence.md](v0.7.25-evidence.md) | batchd rename, interactive filesystem split, and streamed Quick Open search |
 | 0.7.24 | `v0.7.24` | `v0.7.24^{commit}` | [v0.7.24-evidence.md](v0.7.24-evidence.md) | fast bounded filesystem and Git reads bypass jobd |
 | 0.7.23 | `v0.7.23` | `v0.7.23^{commit}` | [v0.7.23-evidence.md](v0.7.23-evidence.md) | Finder Diff no longer starts a redundant fresh metadata request on click |

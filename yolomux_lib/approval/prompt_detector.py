@@ -20,6 +20,35 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _COMMON_VISUAL_WRAP_COLS = frozenset({78, 80, 100, 120, 126, 150, 200})
 _VISUAL_WRAP_CONTINUATION_RE = re.compile(r"^\s+|^[a-z0-9_./~:+#?)\]}-]", re.IGNORECASE)
 _BOX_OR_RULE_RE = re.compile(r"^[\s─━╌╍▔╭╮╰╯│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬\-]+$")
+_OPENCODE_COMPOSER_TOP_RE = re.compile(r"^\s*[╭┌][─━═]{3,}[╮┐]\s*$")
+_OPENCODE_COMPOSER_BOTTOM_RE = re.compile(r"^\s*[╰└][─━═]{3,}[╯┘]\s*$")
+_OPENCODE_BUILD_LINE_RE = re.compile(r"^\s*[│┃▣]\s*Build(?:\s|$)", re.IGNORECASE)
+_OPENCODE_IDLE_HINT_RE = re.compile(r"Ask anything|tab agents|ctrl\+p cmd(?:s|ands)?", re.IGNORECASE)
+_OPENCODE_TOOL_ROW_RE = re.compile(r"^\s*[│┃]?\s*(?:[⠋-⠿]|~)\s+\S", re.IGNORECASE)
+_OPENCODE_PERMISSION_RE = re.compile(r"\bPermission\s+required\b", re.IGNORECASE)
+_OPENCODE_FOOTER_BUILD_RE = re.compile(r"^\s*[│┃▣]?\s*Build\s*[·•]", re.IGNORECASE)
+_OPENCODE_FOOTER_BUILD_START_RE = re.compile(r"^\s*[│┃▣]?\s*(?:Build|Bui)(?:\s|[·•]|$)", re.IGNORECASE)
+_OPENCODE_RESPONSE_BUILD_RE = re.compile(r"^\s*▣\s+Build(?:\s|$)", re.IGNORECASE)
+_OPENCODE_FOOTER_SEPARATOR_RE = re.compile(r"^\s*[╹╰└][▀─━═]+", re.IGNORECASE)
+_OPENCODE_METER_ACTIVITY_RE = re.compile(
+    r"(?:[⬝■●◼]{2,}|⬝⬝\.{3,})\s+esc\s+interrupt(?:\s+.*)?$",
+    re.IGNORECASE,
+)
+_OPENCODE_CURRENT_TURN_ROW_RE = re.compile(
+    r"^\s*[│┃]?\s*(?:[⠋-⠿]|~)\s+(?:Thinking\b|(?:General\s+)?Task\b|Edit(?:ing)?\b)",
+    re.IGNORECASE,
+)
+_OPENCODE_CURRENT_TURN_METER_RE = re.compile(
+    r"^\s*[│┃]?\s*Build\b.*(?:[⬝■●◼]{2,}|⬝⬝\.{3,})\s+esc\s+interrupt(?:\s+.*)?$",
+    re.IGNORECASE,
+)
+_OPENCODE_TOOL_ACTIVITY_RE = re.compile(r"^\s*[│┃]\s*[⠋-⠿]\s+\S", re.IGNORECASE)
+_OPENCODE_SHELL_HEADER_RE = re.compile(r"^#\s+Shell\s+command\s*$", re.IGNORECASE)
+_OPENCODE_PERMISSION_OPTIONS_RE = re.compile(
+    r"\bAllow\s+once\b.*\bAllow\s+always\b.*\bReject\b", re.IGNORECASE,
+)
+_OPENCODE_PERMISSION_HEADER_RE = re.compile(r"^△\s+Permission\s+required\s*$", re.IGNORECASE)
+_OPENCODE_QUESTION_OPTION_RE = re.compile(r"^\s*(?:[│┃]?\s*(?:\d+[.)]|[○◉])\s+\S|[│┃]?\s*[-+]\s+\S)", re.IGNORECASE)
 
 
 def _visual_wrap_candidate_cols(lines: list[str]) -> set[int]:
@@ -74,12 +103,12 @@ def _join_visual_wraps(text: str) -> str:
     return "\n".join(joined)
 
 
-def normalize_capture_text(text: str) -> str:
+def normalize_capture_text(text: str, *, join_visual_wraps: bool = True) -> str:
     """Strip terminal control bytes before classifying captured pane text."""
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     normalized = _ANSI_ESCAPE_RE.sub("", normalized)
     normalized = _CONTROL_CHAR_RE.sub("", normalized)
-    return _join_visual_wraps(normalized)
+    return _join_visual_wraps(normalized) if join_visual_wraps else normalized
 
 
 def is_dangerous(cmd_line: str) -> bool:
@@ -1603,13 +1632,318 @@ def _choice_prompt_has_later_activity(lines: list[str], end_index: int) -> bool:
     return False
 
 
-def agent_screen_state(visible_text: str, pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
+def _opencode_idle_state(
+    reason: str = "idle OpenCode composer", *, evidence_line: str | None = None,
+    activity_source: str = "opencode-visible",
+) -> dict[str, object]:
+    return {
+        "key": "idle",
+        "text": "",
+        "negative_reason": reason,
+        "activity_source": activity_source,
+        "agent": "opencode",
+        "evidence_lines": [evidence_line or reason],
+    }
+
+
+def _opencode_blocked_state(line: str) -> dict[str, object]:
+    return {
+        "key": "blocked",
+        "text": line,
+        "negative_reason": line,
+        "activity_source": "opencode-visible",
+        "agent": "opencode",
+        "evidence_lines": [line],
+    }
+
+
+def _opencode_question_state(question: str, options: list[str]) -> dict[str, object]:
+    return {
+        "key": "needs-input",
+        "text": question,
+        "question_text": question,
+        "prompt_kind": "question",
+        "options": options,
+        "selected_option": 0,
+        "confidence": 0.9,
+        "activity_source": "opencode-visible",
+        "agent": "opencode",
+        "evidence_lines": [question, *options],
+    }
+
+
+def _opencode_footer_bounds(lines: list[str]) -> tuple[int, int, int] | None:
+    """Return the bounded composer and footer rows of the observed OpenCode layout."""
+    build_index = max((index for index, line in enumerate(lines) if _OPENCODE_BUILD_LINE_RE.match(line)), default=-1)
+    if build_index < 0:
+        return None
+    footer_start = max(0, build_index - 24)
+    composer_start = next(
+        (index for index in range(build_index - 1, footer_start - 1, -1) if _OPENCODE_COMPOSER_TOP_RE.match(lines[index])),
+        -1,
+    )
+    if composer_start < 0:
+        return None
+    composer_end = next(
+        (index for index in range(composer_start + 1, build_index) if _OPENCODE_COMPOSER_BOTTOM_RE.match(lines[index])),
+        -1,
+    )
+    if composer_end < 0:
+        return None
+    return composer_start, composer_end, build_index
+
+
+def _opencode_permission_card(lines: list[str], build_index: int) -> str:
+    """Return a current OpenCode permission card, including its unboxed layout."""
+    for permission_index, line in enumerate(lines):
+        normalized = line.strip().strip("│┃").strip()
+        if not _OPENCODE_PERMISSION_HEADER_RE.fullmatch(normalized):
+            continue
+        end = min(build_index, permission_index + 8) if build_index >= 0 else min(len(lines), permission_index + 8)
+        later_composer = any(
+            _OPENCODE_COMPOSER_TOP_RE.match(item)
+            for item in lines[permission_index + 1:end]
+        )
+        if later_composer:
+            continue
+        block = [item.strip().strip("│┃").strip() for item in lines[permission_index:end]]
+        if not any(_OPENCODE_SHELL_HEADER_RE.fullmatch(item) for item in block):
+            continue
+        if not any(item.startswith("$") and item[1:].strip() for item in block):
+            continue
+        options_index = next(
+            (index for index, item in enumerate(block) if _OPENCODE_PERMISSION_OPTIONS_RE.search(item)),
+            -1,
+        )
+        if options_index < 0:
+            continue
+        trailing = block[options_index + 1:]
+        if any(item and not _BOX_OR_RULE_RE.fullmatch(item) for item in trailing):
+            continue
+        return block[0]
+    return ""
+
+
+def _opencode_bounded_permission_line(lines: list[str], bounds: tuple[int, int, int] | None) -> str:
+    if bounds is None:
+        return ""
+    composer_start, composer_end, _build_index = bounds
+    for line in lines[composer_start + 1:composer_end]:
+        normalized = line.strip().strip("│┃").strip()
+        if _OPENCODE_PERMISSION_RE.fullmatch(normalized):
+            return normalized
+    return ""
+
+
+def _opencode_bounded_question(lines: list[str], bounds: tuple[int, int, int] | None) -> tuple[str, list[str]] | None:
+    if bounds is None:
+        return None
+    composer_start, composer_end, _build_index = bounds
+    block = [line.strip().strip("│┃").strip() for line in lines[composer_start + 1:composer_end]]
+    question = next(
+        (line for line in block if "?" in line and not _OPENCODE_IDLE_HINT_RE.search(line)),
+        "",
+    )
+    options = [line for line in block if _OPENCODE_QUESTION_OPTION_RE.match(line)]
+    if not question or len(options) < 2:
+        return None
+    return question, options
+
+
+def _opencode_working_state(line: str) -> dict[str, object]:
+    return {
+        "key": "working",
+        "text": "agent is working",
+        "negative_reason": "agent is working",
+        "activity_source": "opencode-visible",
+        "agent": "opencode",
+        "evidence_lines": [line.strip()],
+    }
+
+
+def _opencode_split_footer_bounds(lines: list[str]) -> tuple[int, int, int] | None:
+    """Return the newest complete Build/separator/meter footer."""
+    nonempty = [index for index, line in enumerate(lines) if line.strip()]
+    if not nonempty:
+        return None
+    meter_index = nonempty[-1]
+    meter = lines[meter_index]
+    if not _OPENCODE_METER_ACTIVITY_RE.search(meter):
+        return None
+    separator_index = next(
+        (
+            index for index in reversed(nonempty[:-1])
+            if _OPENCODE_FOOTER_SEPARATOR_RE.match(lines[index])
+        ),
+        -1,
+    )
+    if separator_index < 0:
+        return None
+    build_index = _opencode_footer_build_index(lines, separator_index)
+    if build_index < 0:
+        return None
+    return build_index, separator_index, meter_index
+
+
+def _opencode_footer_meter_line(lines: list[str]) -> str:
+    bounds = _opencode_split_footer_bounds(lines)
+    return lines[bounds[2]] if bounds is not None else ""
+
+
+def _opencode_footer_build_index(lines: list[str], separator_index: int) -> int:
+    """Find a Build footer whose provider/usage text may occupy separate rows."""
+    nonempty = [index for index in range(separator_index) if lines[index].strip()]
+    for start_position in range(max(0, len(nonempty) - 6), len(nonempty)):
+        start_index = nonempty[start_position]
+        if not _OPENCODE_FOOTER_BUILD_START_RE.match(lines[start_index]):
+            continue
+        if separator_index - start_index > 6:
+            continue
+        block = "".join(lines[index].strip() for index in nonempty[start_position:])
+        compact = re.sub(r"\s+", "", block).lower()
+        if "build" in compact or ("bui" in compact and "ld" in compact):
+            return start_index
+    return -1
+
+
+def _opencode_current_working_line(
+    lines: list[str], bounds: tuple[int, int, int] | None, *, explicit_session: bool = False,
+) -> str:
+    """Find activity in the current bounded footer or at the bottom of the pane."""
+    if bounds is not None:
+        _composer_start, composer_end, build_index = bounds
+        for index in range(build_index, composer_end, -1):
+            line = lines[index]
+            if _OPENCODE_TOOL_ROW_RE.match(line) or _OPENCODE_METER_ACTIVITY_RE.search(line):
+                return line
+        return ""
+
+    split_footer = _opencode_split_footer_bounds(lines)
+    if split_footer is not None:
+        build_index, _separator_index, meter_index = split_footer
+        response_build_index = max(
+            (
+                index for index in range(build_index)
+                if _OPENCODE_RESPONSE_BUILD_RE.match(lines[index])
+            ),
+            default=-1,
+        )
+        if response_build_index >= 0:
+            # The live response row anchors the current turn. Search only its
+            # preceding block, rather than treating old Thinking text anywhere
+            # in scrollback as current. The large blank region follows it.
+            for index in range(response_build_index - 16, response_build_index):
+                if index >= 0 and _OPENCODE_CURRENT_TURN_ROW_RE.match(lines[index]):
+                    return lines[index]
+        for index in range(build_index - 1, max(-1, build_index - 7), -1):
+            line = lines[index]
+            if _OPENCODE_CURRENT_TURN_ROW_RE.match(line):
+                return line
+        if explicit_session:
+            return lines[meter_index]
+
+    nonempty = [index for index, line in enumerate(lines) if line.strip()]
+    if not nonempty:
+        return ""
+    last_nonempty = nonempty[-1]
+    # The live TUI can leave only the meter and its usage hint visible after
+    # unrelated terminal text has filled the capture. The hint is footer
+    # chrome here, not idle evidence; bottom position makes the meter current.
+    last_line = lines[last_nonempty]
+    if _OPENCODE_CURRENT_TURN_METER_RE.search(last_line):
+        return last_line
+    if explicit_session:
+        footer_meter = _opencode_footer_meter_line(lines)
+        if footer_meter:
+            return footer_meter
+    latest_idle_hint = max(
+        (index for index, line in enumerate(lines) if _OPENCODE_IDLE_HINT_RE.search(line)),
+        default=-1,
+    )
+    for index in reversed(nonempty[-8:]):
+        if index <= latest_idle_hint:
+            break
+        line = lines[index]
+        if _OPENCODE_TOOL_ACTIVITY_RE.match(line):
+            trailing = [lines[item] for item in nonempty if item > index]
+            if all(
+                item.startswith(("  ", "\t")) and not item.lstrip().startswith(("│", "┃"))
+                for item in trailing
+            ):
+                return line
+    return ""
+
+
+def _opencode_visible_screen_state(
+    visible_text: str, *, agent_kind: str = "", opencode_session_id: str | None = None,
+) -> dict[str, object] | None:
+    """Classify only the observed OpenCode footer, never generic approval/question text."""
+    if str(agent_kind or "").strip().lower() != "opencode":
+        return None
+    lines = visible_text.splitlines()
+    bounds = _opencode_footer_bounds(lines)
+    working_line = _opencode_current_working_line(
+        lines, bounds, explicit_session=bool(str(opencode_session_id or "").strip()),
+    )
+    if working_line:
+        return _opencode_working_state(working_line)
+    build_index = bounds[2] if bounds is not None else max(
+        (index for index, line in enumerate(lines) if _OPENCODE_BUILD_LINE_RE.match(line)),
+        default=-1,
+    )
+    permission = _opencode_permission_card(lines, build_index)
+    if not permission:
+        permission = _opencode_bounded_permission_line(lines, bounds)
+    if permission:
+        return _opencode_blocked_state(permission)
+    question = _opencode_bounded_question(lines, bounds)
+    if question is not None:
+        return _opencode_question_state(*question)
+    if bounds is None:
+        # OpenCode has no generic approval fallback. An incomplete or unfamiliar capture is
+        # not evidence that the agent is blocked, and must not create a false attention badge.
+        last_nonempty = next((line for line in reversed(lines) if line.strip()), "")
+        if last_nonempty and _OPENCODE_METER_ACTIVITY_RE.search(last_nonempty):
+            return _opencode_idle_state(
+                "ambiguous OpenCode meter without a current-turn row",
+                evidence_line=last_nonempty.strip(),
+                activity_source="opencode-meter-ambiguous",
+            )
+        return _opencode_idle_state("unrecognized OpenCode screen shape")
+    composer_start, composer_end, build_index = bounds
+    prompt_lines = [line.strip().strip("│┃").strip() for line in lines[composer_start + 1:composer_end]]
+    idle_indices = [
+        index
+        for index in range(composer_start, len(lines))
+        if _OPENCODE_IDLE_HINT_RE.search(lines[index])
+    ]
+    idle_index = max(idle_indices, default=-1)
+    if idle_index >= 0:
+        return _opencode_idle_state(evidence_line=lines[idle_index].strip())
+    return _opencode_idle_state()
+
+
+def agent_screen_state(
+    visible_text: str,
+    pane_target: str | None = None,
+    now: float | None = None,
+    agent_kind: str | None = None,
+    opencode_session_id: str | None = None,
+) -> dict[str, object]:
     """Classify the visible terminal screen for YOLOmux UI badges.
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
+    if str(agent_kind or "").strip().lower() == "opencode":
+        opencode_state = _opencode_visible_screen_state(
+            normalize_capture_text(visible_text, join_visual_wraps=False),
+            agent_kind=agent_kind or "",
+            opencode_session_id=opencode_session_id,
+        )
+        if opencode_state is not None:
+            return opencode_state
     visible_text = normalize_capture_text(visible_text)
     observation_now = time.monotonic() if now is None else now
     counter = visible_agent_status_counter(visible_text)

@@ -32,6 +32,453 @@ def load_prompt_corpus():
     return inventory, cases
 
 
+def test_opencode_visible_states_do_not_enter_approval_detection():
+    for path in sorted((PROMPT_CORPUS_DIR / "captures").glob("*__opencode-1.18.25_20260828.yaml")):
+        data = PROMPT_CORPUS.load(path)
+        screen = prompt_detector.agent_screen_state(data["raw_capture"], pane_target="%opencode", agent_kind="opencode")
+        approval = prompt_detector.approval_prompt_state(data["raw_capture"])
+
+        assert screen["key"] == data["expected_promoted"]["screen_key"]
+        assert approval["visible"] is False
+        assert prompt_detector.detect_prompt(data["raw_capture"]) is None
+
+
+@pytest.mark.parametrize(
+    ("visible_text", "expected_key"),
+    [
+        ("unrelated audit output\n   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  606.2K  ctrl+p commands", "idle"),
+        ("old output\n┃  ⠦ General Task — task\n  ↳ Bash command", "working"),
+        ("old output\n┃  activity text", "idle"),
+    ],
+    ids=["meter-only", "tool-row-with-wrap", "unknown-shape"],
+)
+def test_opencode_bottom_activity_shape_is_bounded_and_identity_gated(visible_text, expected_key):
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%opencode", agent_kind="opencode")
+
+    assert state["key"] == expected_key
+    assert state["agent"] == "opencode"
+
+
+def test_opencode_meter_only_with_capture_padding_is_native_activity_ambiguity():
+    visible_text = "unrelated terminal output\n   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  301.3K  ctrl+p commands\n\n"
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["activity_source"] == "opencode-meter-ambiguous"
+    assert state["evidence_lines"] == ["⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  301.3K  ctrl+p commands"]
+
+
+def test_opencode_plain_thinking_row_and_split_footer_are_working():
+    visible_text = "\n".join([
+        "┃  what model are you",
+        "   ⠏ Thinking",
+        "   ▣ Build · Nemotron 3 Ultra Free",
+        *([""] * 24),
+        "  ┃  Build · Nemotron 3 Ultra Free OpenCode Zen",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ■■■⬝⬝⬝⬝⬝⬝  esc interrupt  tab agents  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%4", agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+    assert state["evidence_lines"] == ["⠏ Thinking"]
+
+
+@pytest.mark.parametrize("width", [80, 60, 40])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "switchyard/openai/gpt-5.6-luna",
+        "opencode/nemotron-3-ultra-free",
+        "provider/model-with-a-long-name",
+    ],
+)
+def test_opencode_narrow_physical_rows_join_split_build_and_meter(width, model):
+    """A narrow xterm can render Build as Bui/ld and put its meter on another row."""
+    physical_rows = [
+        "  Bui · " + model + " | $0.00",
+        "  ld in / $0.00 out per 1M tokens",
+        "  ╹" + "▀" * max(20, width - 8),
+        "   ■⬝⬝⬝⬝⬝⬝⬝ esc interrupt 444.3K ctrl+p commands",
+    ]
+
+    state = prompt_detector.agent_screen_state(
+        "\n".join(physical_rows),
+        pane_target=f"%narrow-{width}",
+        agent_kind="opencode",
+        opencode_session_id="ses-narrow",
+    )
+
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
+    assert state["evidence_lines"] == [physical_rows[-1].strip()]
+
+
+def test_opencode_supplied_small_width_shape_is_working_with_explicit_session():
+    visible_text = "\n".join([
+        "Bui · switchyard/openai/gpt-5.6-luna | $0.00",
+        "ld in / $0.00 out per 1M tokens",
+        "",
+        "╹" + "▀" * 72,
+        "■⬝⬝⬝⬝⬝⬝⬝ esc interrupt 444.3K ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target="%1",
+        agent_kind="opencode",
+        opencode_session_id="ses_fb51b242dffeU7jSyiesbuvk75",
+    )
+
+    assert state["key"] == "working"
+
+
+@pytest.mark.parametrize("width", [80, 60, 40])
+def test_opencode_narrow_generic_current_turn_row_is_working(width):
+    visible_text = "\n".join([
+        "  ⠏ Thinking",
+        "  Bui · provider/model | $0.00",
+        "  ld in / $0.00 out per 1M tokens",
+        "  ╹" + "▀" * max(20, width - 8),
+        "   ■⬝⬝⬝⬝⬝⬝⬝ esc interrupt 444.3K ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target=f"%generic-narrow-{width}",
+        agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+    assert state["evidence_lines"] == ["⠏ Thinking"]
+
+
+def test_opencode_narrow_edit_row_is_current_working_evidence():
+    visible_text = "\n".join([
+        "  ~ Editing files",
+        "  Bui · provider/model | $0.00",
+        "  ld in / $0.00 out per 1M tokens",
+        "  ╹" + "▀" * 32,
+        "   ■⬝⬝⬝⬝⬝⬝⬝ esc interrupt 444.3K ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target="%edit-narrow",
+        agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+    assert state["evidence_lines"] == ["~ Editing files"]
+
+
+def test_opencode_narrow_done_counter_without_interrupt_is_idle():
+    visible_text = "\n".join([
+        "  Final answer",
+        "  Bui · provider/model | $0.00",
+        "  ld in / $0.00 out per 1M tokens",
+        "  ╹" + "▀" * 52,
+        "   444.3K ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target="%done-narrow",
+        agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["activity_source"] == "opencode-visible"
+
+
+def test_opencode_completed_nemotron_screen_with_large_blank_gap_is_idle():
+    visible_text = "\n".join([
+        "  + Thought: 20.1s",
+        "  I'm powered by GPU's Nemotron 3 Ultra model (opencode/nemotron-3-ultra-free).",
+        "  ▣ Build · Nemotron 3 Ultra Free · 1m 23s",
+        *([""] * 24),
+        "  ┃ Build · Nemotron 3 Ultra Free OpenCode Zen",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   /home/keivenc ... 30.4K (3%) ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%4", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["agent"] == "opencode"
+
+
+def test_opencode_old_thinking_row_outside_split_footer_bound_is_idle():
+    visible_text = "\n".join([
+        "old output",
+        "   ⠏ Thinking",
+        "old output",
+        "old output",
+        "old output",
+        "old output",
+        "old output",
+        "old output",
+        "  ┃  Build · Nemotron 3 Ultra Free OpenCode Zen",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ■■■⬝⬝⬝⬝⬝⬝  esc interrupt  tab agents  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%4", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["activity_source"] == "opencode-meter-ambiguous"
+
+
+def test_opencode_old_thinking_row_beyond_current_response_block_is_idle():
+    visible_text = "\n".join([
+        "old output",
+        "   ⠏ Thinking",
+        *([""] * 16),
+        "     ▣ Build · Nemotron 3 Ultra Free",
+        *([""] * 24),
+        "  ┃ Build · Nemotron 3 Ultra Free OpenCode Zen",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ■■■⬝⬝⬝⬝⬝⬝  esc interrupt  tab agents  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%4", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["activity_source"] == "opencode-meter-ambiguous"
+
+
+def test_opencode_explicit_session_complete_footer_meter_is_working():
+    visible_text = "\n".join([
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference Hub",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    317.1K  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target="%1",
+        agent_kind="opencode",
+        opencode_session_id="ses_fb51b242dffeU7jSyiesbuvk75",
+    )
+
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
+
+
+def test_opencode_done_screen_is_idle_not_blocked():
+    visible_text = "\n".join([
+        "DONE",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default · 14.4s",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+    assert state["agent"] == "opencode"
+
+
+def test_opencode_normal_idle_footer_is_idle():
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default · 14.4s",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+
+
+def test_opencode_active_build_meter_is_working():
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "BUILD                       ⬝⬝■■■■■■  esc interrupt",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+
+
+def test_opencode_dotted_active_meter_is_working():
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  BUILD ... ⬝⬝... esc interrupt",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+
+
+def test_opencode_permission_card_is_blocked_without_question_semantics():
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ △ Permission required                                      │",
+        "│ # Shell command                                             │",
+        "│ $ true                                                      │",
+        "│ Allow once Allow always Reject                              │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "blocked"
+    assert state["text"] == "△ Permission required"
+    assert "question_text" not in state
+    assert "prompt_kind" not in state
+
+
+def test_opencode_bounded_question_is_needs_input_without_treating_idle_composer_as_attention():
+    question = "Which image should I inspect?"
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        f"│ {question}                                      │",
+        "│ 1. NASA                                                    │",
+        "│ 2. Lenna                                                   │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == question
+    assert state["options"] == ["1. NASA", "2. Lenna"]
+    assert prompt_detector.approval_prompt_state(visible_text)["visible"] is False
+
+
+def test_opencode_question_text_without_choices_stays_idle():
+    visible_text = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+
+
+def test_opencode_unboxed_permission_card_is_bounded_before_footer():
+    visible_text = "\n".join([
+        "△ Permission required",
+        "# Shell command",
+        "$ git status",
+        "Allow once Allow always Reject",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "blocked"
+    assert state["text"] == "△ Permission required"
+
+
+def test_opencode_old_permission_text_without_a_current_card_is_not_blocked():
+    visible_text = "\n".join([
+        "old output: △ Permission required",
+        "old output: # Shell command",
+        "old output: $ git status",
+        "old output: Allow once Allow always Reject",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+
+
+def test_opencode_old_exact_permission_card_above_newer_idle_composer_is_not_blocked():
+    visible_text = "\n".join([
+        "△ Permission required",
+        "# Shell command",
+        "$ git status",
+        "Allow once Allow always Reject",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "▣ Build · Model default · 14.4s",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+
+
+def test_opencode_meter_requires_newest_bottom_state():
+    stale_meter = "\n".join([
+        "unrelated audit output",
+        "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  606.2K  ctrl+p commands",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · model",
+        "  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(stale_meter, pane_target="%opencode", agent_kind="opencode")
+
+    assert state["key"] == "idle"
+
+
 PROMPT_CORPUS_INVENTORY, PROMPT_CORPUS_CASES = load_prompt_corpus()
 
 

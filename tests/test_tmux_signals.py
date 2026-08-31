@@ -17,6 +17,7 @@ from yolomux_lib import tmux_utils
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
+from yolomux_lib.tmux_signals import parse_pane_signal_row
 from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
 from yolomux_lib.tmux_signals import tmux_signal_hook_command
 from yolomux_lib.tmux_signals import tmux_control_attach_command
@@ -293,6 +294,16 @@ def test_parse_tmux_signal_snapshot_reports_bad_rows():
     assert payload["window_count"] == 0
     assert payload["pane_count"] == 0
     assert payload["errors"] == ["invalid tmux sub-window signal row", "invalid tmux pane signal row"]
+
+
+def test_parse_pane_signal_row_does_not_promote_an_arbitrary_opencode_command():
+    line = "alpha\t0\t@1\t0\t%1\t1\t/home/keivenc/project\topencode\t\t0\t\t\t\t1\t0\t\t0\t0\t1234\t120\t36\t4000\t120000"
+
+    pane = parse_pane_signal_row(line)
+
+    assert pane is not None
+    assert pane["current_command"] == "opencode"
+    assert pane["agent"] == ""
 
 
 def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):

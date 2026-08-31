@@ -2508,7 +2508,7 @@ async function runLayoutRestoreSuite() {
     const idleHtml = api.globalActivityStatusLineHtml();
     assert.ok(/topbar-activity-working[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--working/.test(idleHtml), 'status line shows explicit zero working count with a green ball');
     assert.ok(/topbar-activity-ask[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--attention/.test(idleHtml), 'status line shows explicit zero attention count with a red ball');
-    assert.ok(/topbar-activity-blocked[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--cooldown/.test(idleHtml), 'status line shows explicit zero blocked count with a yellow ball');
+    assert.ok(/topbar-activity-blocked[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--blocked/.test(idleHtml), 'status line shows explicit zero blocked count with a red blocked ball');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
     api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
@@ -2710,6 +2710,24 @@ async function runLayoutRestoreSuite() {
     const plainSignalCounts = plainSignalApi.globalActivityCounts();
     assert.equal(plainSignalCounts.total, 0, 'plain tmux signal windows do not inflate the AI activity total');
     assert.equal(plainSignalCounts.idle, 0, 'plain tmux signal windows do not show as idle AI agents');
+    const openCodeSignalApi = loadYolomux('', ['open']);
+    openCodeSignalApi.setDocumentTitleNowForTest(200000);
+    openCodeSignalApi.setTmuxSignalStateForTest({windows: [{
+      session: 'open', window_index: '0', activity_ts: 199,
+      panes: [{session: 'open', window_index: '0', current_command: 'opencode', dead: false}],
+    }]});
+    const unrosteredOpenCodeCounts = openCodeSignalApi.globalActivityCounts();
+    assert.equal(unrosteredOpenCodeCounts.total, 0, 'OpenCode command text alone is not an agent signal');
+    openCodeSignalApi.setAutoApproveStateForTest('open', {enabled: true, screen: {key: 'idle'}, agent_windows: [
+      {kind: 'opencode', pane_target: '%open', window_index: 0, state: 'working'},
+    ]});
+    openCodeSignalApi.setTmuxSignalStateForTest({windows: [{
+      session: 'open', window_index: '0', activity_ts: 199,
+      panes: [{session: 'open', window_index: '0', target: '%open', current_command: 'opencode', dead: false}],
+    }]});
+    const rosteredOpenCodeCounts = openCodeSignalApi.globalActivityCounts();
+    assert.equal(rosteredOpenCodeCounts.total, 1, 'authoritative OpenCode roster admits the signal pane as one agent');
+    assert.equal(rosteredOpenCodeCounts.running, 1, 'an authoritative OpenCode roster may admit matching signal activity');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes('ctx.fillStyle = faviconAccent.bg') && source.includes("getPropertyValue('--active-accent')") && source.includes("'#99d441'"), 'favicon fills the icon with the active-accent tile (theme/active-color driven, legacy lime as fallback) instead of a dark border');
     assert.ok(source.includes('ctx.fillStyle = faviconAccent.text') && source.includes("getPropertyValue('--active-accent-text')"), 'favicon Y uses the theme-aware contrast color (dark on light accents, light on dark accents like blue)');
@@ -2718,7 +2736,7 @@ async function runLayoutRestoreSuite() {
     const html = api.globalActivityStatusLineHtml();
     assert.ok(/topbar-activity-working active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--working/.test(html), 'status line shows running count with the shared green ball');
     assert.ok(/topbar-activity-ask active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--attention/.test(html), 'status line shows attention count with the shared red ball');
-    assert.ok(/topbar-activity-blocked active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--cooldown/.test(html), 'status line shows blocked count with the shared yellow ball');
+     assert.ok(/topbar-activity-blocked active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--blocked/.test(html), 'status line shows blocked count with the shared red blocked ball');
     assert.equal(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), false, 'topbar attention count stays static when continuous status pulsing is disabled');
     assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');

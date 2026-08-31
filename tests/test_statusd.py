@@ -1503,6 +1503,34 @@ def test_statusd_external_status_probe_never_refreshes_demand_but_a_real_lease_d
         worker.join(timeout=3.0)
 
 
+def test_statusd_collector_lease_refresh_wins_at_idle_expiry_boundary(tmp_path):
+    """A collector lease prevents the 60-second idle check from racing its refresh RPC."""
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock", idle_seconds=5.0)
+    worker = Thread(target=service.run, daemon=True)
+    worker.start()
+    client = StatusClient(service.socket_path)
+    try:
+        deadline = time.monotonic() + 2.0
+        while not service.socket_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service.socket_path.exists()
+
+        service.last_client_at = time.monotonic() - service.idle_seconds
+        lease = client.acquire_generation_lease()
+        assert lease["ok"] is True
+        assert service.idle_due() is False
+
+        service.last_client_at = time.monotonic() - service.idle_seconds
+        refreshed = client.acquire_generation_lease(str(lease["lease_id"]))
+        assert refreshed == {**lease, "version": statusd.STATUSD_PROTOCOL_VERSION}
+        assert service.idle_due() is False
+    finally:
+        if service.leases:
+            client.release_generation_lease(next(iter(service.leases)))
+        service.stop_event.set()
+        worker.join(timeout=3.0)
+
+
 def test_statusd_listener_exits_after_reaping_an_abandoned_lease(tmp_path):
     socket_path = tmp_path / "services" / "statusd.sock"
     service = statusd.PersistentStatusService(socket_path, idle_seconds=1.0)
@@ -1609,6 +1637,49 @@ def test_statusd_inventory_uses_lightweight_discovery_without_path_enrichment(mo
     assert meta["ok"] is True
     # The status/inventory path must never trigger heavy path enrichment.
     assert enrich_calls == [False]
+
+
+def test_statusd_inventory_carries_only_bounded_opencode_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(statusd, "list_tmux_session_names", lambda: (["alpha"], None))
+    pane = types.SimpleNamespace(target="%1", window="0", current_path="/repo", active=True)
+    opencode_agent = types.SimpleNamespace(
+        kind="opencode", pane_target="%1", session_id="ses-a", cwd="/repo",
+        transcript="/secret/transcript", model="private-model",
+    )
+    claude_agent = types.SimpleNamespace(
+        kind="claude", pane_target="%2", session_id="claude-a", cwd="/repo",
+        transcript="/secret/claude.jsonl",
+    )
+    info = types.SimpleNamespace(session="alpha", panes=[pane], agents=[opencode_agent, claude_agent])
+    monkeypatch.setattr(sessions_mod, "discover_sessions", lambda _names, enrich_paths=True: ({"alpha": info}, []))
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+
+    _meta, body = service.handle({
+        "action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION,
+    })
+    agents = json.loads(body)["sessions"]["alpha"]["agents"]
+
+    assert agents == [
+        {"kind": "opencode", "pane": "%1", "session_id": "ses-a", "cwd": "/repo"},
+        {"kind": "claude", "pane": "%2"},
+    ]
+
+
+def test_statusd_lightweight_opencode_identity_uses_pane_cwd_when_process_cwd_is_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(statusd, "list_tmux_session_names", lambda: (["alpha"], None))
+    pane = types.SimpleNamespace(target="%1", window="0", current_path="/pane/repo", active=True)
+    agent = types.SimpleNamespace(
+        kind="opencode", pane_target="%1", session_id="ses-a", cwd="", started_at=None,
+    )
+    info = types.SimpleNamespace(session="alpha", panes=[pane], agents=[agent])
+    monkeypatch.setattr(sessions_mod, "discover_sessions", lambda _names, enrich_paths=True: ({"alpha": info}, []))
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+
+    _meta, body = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+
+    assert json.loads(body)["sessions"]["alpha"]["agents"] == [
+        {"kind": "opencode", "pane": "%1", "session_id": "ses-a", "cwd": "/pane/repo"},
+    ]
 
 
 def test_statusd_inventory_falls_back_to_web_hint_when_tmux_enumeration_fails(monkeypatch, tmp_path):

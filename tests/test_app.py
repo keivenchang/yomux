@@ -322,6 +322,43 @@ def test_stats_agent_token_rows_re_enrich_after_the_memo_ttl_for_an_unchanged_ro
     assert len(discover_calls) == 2
 
 
+def test_stats_agent_token_rows_merges_discovered_opencode_identity_into_existing_roster_row(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    webapp.stats_agent_token_enriched_rows = lambda _signature: [{
+        "key": "s|3|%3|opencode",
+        "kind": "opencode",
+        "session": "s",
+        "window": "3",
+        "window_label": "3:opencode",
+        "transcript": "",
+        "agent_session_id": "session-from-discovery",
+        "cwd": "/repo/from-discovery",
+        "started_at": 123.5,
+    }]
+
+    rows = webapp.stats_agent_token_rows([{
+        "session": "s",
+        "window_index": 3,
+        "pane_target": "%3",
+        "kind": "opencode",
+        "transcript": "",
+    }])
+
+    assert rows == [{
+        "key": "s|3|%3|opencode",
+        "label": "s:opencode",
+        "transcript": "",
+        "kind": "opencode",
+        "session": "s",
+        "window": "3",
+        "window_label": "",
+        "agent_session_id": "session-from-discovery",
+        "cwd": "/repo/from-discovery",
+        "started_at": 123.5,
+    }]
+
+
 class _StepClock:
     def __init__(self):
         self.now = 1000.0
@@ -1171,6 +1208,81 @@ def test_service_load_keeps_one_second_collection_cadence_without_browser_demand
     assert webapp.stats_current_family_cadence_seconds("service_load") == 1
     assert webapp.stats_current_family_cadence_seconds("agent_status") == 60
     assert webapp.stats_current_token_cadence_seconds() == 60
+
+
+def test_recurring_status_collectors_hold_one_shared_statusd_lease_across_refresh(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["1"]
+    webapp.status_collector_lease_lock = threading.Lock()
+    webapp.status_collector_lease_id = ""
+    calls = []
+
+    class CollectorStatusClient:
+        def acquire_generation_lease(self, existing_lease_id=""):
+            calls.append(("lease", existing_lease_id))
+            return {"ok": True, "lease_id": "collector-lease"}
+
+        def release_generation_lease(self, lease_id):
+            calls.append(("release", lease_id))
+            return {"ok": True}
+
+        def snapshot(self, sessions, timeout=1.0):
+            calls.append(("snapshot", list(sessions)))
+            return {
+                "ok": True,
+                "protocol_version": 1,
+                "generation": 3,
+                "status": 200,
+            }, json.dumps({"sessions": {"1": {"agent_windows": []}}}).encode()
+
+    webapp.status_client = CollectorStatusClient()
+    webapp.stats_collection_state = SimpleNamespace(
+        agent_activity_lock=threading.RLock(), agent_activity_state={}
+    )
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_current_process_identity = lambda: ("web", "web", 1)
+    webapp.stats_agent_activity_kind_locked = lambda *_args: "idle"
+
+    collector_attempt = SimpleNamespace(
+        epoch_id="1:agent_status:1",
+        epoch_started_at=100,
+        scheduled_at=160,
+        cadence_seconds=60,
+        owner_generation=1,
+    )
+    facts = webapp.collect_current_stats_agent_status(collector_attempt)
+
+    assert facts.observations == ()
+    assert calls[:2] == [("lease", ""), ("snapshot", ["1"])]
+    assert webapp.status_collector_lease_id == "collector-lease"
+
+    webapp.stop_status_collector_lease()
+    assert calls[-1] == ("release", "collector-lease")
+
+
+def test_recurring_status_collector_preserves_typed_unavailable_on_lease_failure():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["1"]
+    webapp.status_collector_lease_lock = threading.Lock()
+    webapp.status_collector_lease_id = ""
+    webapp.status_client = SimpleNamespace(
+        acquire_generation_lease=lambda _existing="": {"ok": False, "status": "unavailable"},
+    )
+    collector_attempt = SimpleNamespace(
+        epoch_id="1:agent_tokens:1",
+        epoch_started_at=100,
+        scheduled_at=160,
+        cadence_seconds=60,
+        owner_generation=1,
+    )
+
+    facts = webapp.collect_current_stats_agent_tokens(collector_attempt)
+
+    assert facts.usage_atoms == ()
+    assert facts.coverage_epochs == ()
+    assert len(facts.unavailable_spans) == 1
+    assert facts.unavailable_spans[0].source_id == "statusd"
+    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
 def test_stats_history_sampler_parallel_state_is_retired():

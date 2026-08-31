@@ -35,7 +35,7 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
     assert processes[10] == ProcessInfo(pid=10, ppid=1, command="python3 yolomux.py")
 
 
-def test_classify_agent_requires_an_agent_entry_point():
+def test_classify_agent_requires_process_identity_for_opencode(monkeypatch, tmp_path):
     assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
     assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
     assert sessions.classify_agent("python3 tools/mockers/claude.py --mock") == "claude"
@@ -43,6 +43,50 @@ def test_classify_agent_requires_an_agent_entry_point():
     assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
     assert sessions.classify_agent("python3 -m pytest -k codex") is None
     assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
+    executable = tmp_path / "opencode"
+    executable.touch()
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: str(executable))
+    assert sessions.classify_agent("opencode --model openai/gpt-5") is None
+    assert sessions.classify_agent("opencode --model openai/gpt-5", str(executable)) == "opencode"
+    assert sessions.classify_agent("node /home/me/.opencode/bin/opencode", str(executable)) is None
+    assert sessions.classify_agent("bash -lc opencode", str(executable)) is None
+    assert sessions.classify_agent("python3 -c 'print(\"opencode\")'", str(executable)) is None
+    assert sessions.classify_agent("/tmp/other/opencode", str(executable)) is None
+
+
+def test_list_processes_records_native_opencode_executable(monkeypatch):
+    executable = "/home/me/.opencode/bin/opencode"
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: executable)
+    monkeypatch.setattr(sessions, "process_executable", lambda _pid: executable)
+    monkeypatch.setattr(
+        sessions,
+        "run_cmd",
+        lambda _args, timeout: subprocess.CompletedProcess(
+            ["ps"], 0, stdout="10 1 opencode --model openai/gpt-5\n", stderr=""
+        ),
+    )
+
+    processes, error = sessions.list_processes()
+
+    assert error is None
+    assert processes[10].executable == executable
+
+
+def test_select_pane_agent_preserves_breadth_first_native_opencode_owner(monkeypatch, tmp_path):
+    executable = tmp_path / "opencode"
+    executable.touch()
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: str(executable))
+    pane = _pane(100)
+    processes = [
+        ProcessInfo(pid=100, ppid=1, command="bash"),
+        ProcessInfo(pid=101, ppid=100, command="opencode", executable=str(executable)),
+        ProcessInfo(pid=102, ppid=101, command="python3 -c 'print(\"opencode\")'"),
+    ]
+
+    agent = sessions.select_pane_agent("1", pane, processes, enrich_paths=False)
+
+    assert agent is not None
+    assert (agent.kind, agent.pid, agent.cwd) == ("opencode", 101, pane.current_path)
 
 
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):

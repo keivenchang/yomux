@@ -5106,6 +5106,7 @@ function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
+  if (key === 'opencode') return 'OpenCode';
   return String(kind || '');
 }
 
@@ -7520,7 +7521,9 @@ function terminalLineLinks(lineText, y) {
 }
 
 function terminalBufferLineText(line) {
-  return line?.translateToString?.(true) || '';
+  // xterm versions/renderers can return a full-width string even with trimRight requested. Parsing must
+  // ignore those blank cells; terminalRowReachesRightEdge separately uses the physical row length.
+  return (line?.translateToString?.(true) || '').replace(/\s+$/, '');
 }
 
 // did `line` fill the terminal to its right edge? translateToString(true) trims trailing
@@ -7528,9 +7531,18 @@ function terminalBufferLineText(line) {
 // was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
 // hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
 // clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
-function terminalRowReachesRightEdge(line, cols) {
+function terminalRowReachesRightEdge(line, cols, trailingSlack = 1) {
   if (!Number.isFinite(cols) || cols <= 0) return false;
-  return terminalBufferLineText(line).length >= Math.max(1, cols - 1);
+  const physicalLength = Number(line?.length);
+  const rowLength = Number.isFinite(physicalLength) && physicalLength > 0
+    ? physicalLength
+    : terminalBufferLineText(line).length;
+  return rowLength >= Math.max(1, cols - Math.max(1, trailingSlack));
+}
+
+function terminalVisibleRowReachesRightEdge(line, cols, trailingSlack = 1) {
+  if (!Number.isFinite(cols) || cols <= 0) return false;
+  return terminalBufferLineText(line).length >= Math.max(1, cols - Math.max(1, trailingSlack));
 }
 
 // does the joined group text end mid-URL? True when the LAST url token reaches the very end of
@@ -7559,8 +7571,92 @@ function terminalRowHangingShape(buffer, index) {
   const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
   const text = raw.slice(match[1].length);
-  if (!text || terminalRowStartsNewUrlToken(text)) return null;
+  if (!text || /\s/.test(text) || terminalRowStartsNewUrlToken(text)) return null;
   return {indent: match[1].length, text};
+}
+
+function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
+  if (!match || !match[1] || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  const indent = match[1].length;
+  const text = raw.slice(indent);
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {indent, text};
+}
+
+function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const text = terminalBufferLineText(line);
+  if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {text};
+}
+
+function terminalUrlContinuationTextIsStrong(baseText, continuationText, requireSplitDelimiter = false) {
+  const base = String(baseText || '');
+  const continuation = String(continuationText || '');
+  if (!base || !terminalTailIsUnterminatedUrl(base)) return false;
+  if (!continuation || /\s/.test(continuation) || terminalRowStartsNewUrlToken(continuation)) return false;
+  if (!/^[A-Za-z0-9!$'()*+,;=:@/?%#[\]_.~-]+$/.test(continuation)) return false;
+  const delimiter = base.at(-1);
+  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (delimiter === '%') return /^[0-9A-Fa-f]/.test(continuation);
+  if (delimiter === '?' || delimiter === '&' || delimiter === '=') return /^[A-Za-z0-9]/.test(continuation);
+  return /^[A-Za-z0-9]/.test(continuation);
+}
+
+function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
+  if (!shape?.indent || index < 1) return false;
+  // OpenCode reprints its gutter on every hard-wrapped row. Validate the complete adjacent chain from
+  // its original URL row so a shorter middle row cannot make the forward sweep lose its context.
+  let baseIndex = index - 1;
+  while (baseIndex >= 0) {
+    const context = terminalRepeatedGutterUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) {
+      const candidate = terminalRowHangingShape(buffer, baseIndex);
+      if (!candidate || candidate.indent !== shape.indent) return false;
+      baseIndex -= 1;
+      continue;
+    }
+    if (context.indent !== shape.indent) return false;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalRowHangingShape(buffer, rowIndex);
+      if (!continuation || continuation.indent !== context.indent
+        || !terminalUrlContinuationTextIsStrong(joined, continuation.text, rowIndex === baseIndex + 1)) return false;
+      joined += continuation.text;
+    }
+    return true;
+  }
+  return false;
+}
+
+function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
+  if (index < 1) return false;
+  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+    const context = terminalZeroIndentUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) continue;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalBufferLineText(buffer.getLine(rowIndex));
+      if (!terminalUrlContinuationTextIsStrong(joined, continuation, rowIndex === baseIndex + 1)) {
+        joined = '';
+        break;
+      }
+      joined += continuation;
+    }
+    if (joined) return true;
+  }
+  return false;
+}
+
+function terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) {
+  if (!shape?.indent || index < 1) return false;
+  const previous = terminalBufferLineText(buffer.getLine(index - 1));
+  const previousIndent = (previous.match(/^\s*/) || [''])[0].length;
+  return previousIndent === shape.indent && /^(?:https?:\/\/|file:\/\/|www\.)/i.test(previous.slice(shape.indent));
 }
 
 // row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
@@ -7574,9 +7670,11 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (!shape) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
-  if (!terminalRowReachesRightEdge(prev, cols)) return false;
-  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))
-    || terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
+  if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
+  if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
+  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))) return true;
+  return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
 function terminalWrappedLineGroup(term, y) {
@@ -7593,6 +7691,7 @@ function terminalWrappedLineGroup(term, y) {
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
     if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -7602,6 +7701,8 @@ function terminalWrappedLineGroup(term, y) {
   let offset = 0;
   let joined = '';
   let index = start;
+  const repeatedGutterGroup = Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  const zeroIndentGroup = Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
   for (;;) {
     let text;
     let indent = 0;
@@ -7609,9 +7710,19 @@ function terminalWrappedLineGroup(term, y) {
       text = terminalBufferLineText(buffer.getLine(index));
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined) && terminalRowReachesRightEdge(buffer.getLine(index - 1), cols)) {
+    } else if (terminalTailIsUnterminatedUrl(joined)) {
       const shape = terminalRowHangingShape(buffer, index);
       if (!shape) break;
+      const repeatedContinuation = repeatedGutterGroup
+        && shape.indent > 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const zeroIndentContinuation = zeroIndentGroup
+        && shape.indent === 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const genericContinuation = !repeatedGutterGroup && !zeroIndentGroup
+        && !terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)
+        && terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
+      if (!repeatedContinuation && !zeroIndentContinuation && !genericContinuation) break;
       indent = shape.indent;
       text = shape.text;
     } else {
@@ -7640,7 +7751,23 @@ function terminalWrappedRange(group, startIndex, endIndex) {
   const start = terminalWrappedOffsetPosition(group, startIndex, false);
   const end = terminalWrappedOffsetPosition(group, endIndex, true);
   if (!start || !end) return null;
-  return {start, end};
+  const segments = group.rows
+    .map(row => {
+      const segmentStart = Math.max(startIndex, row.start);
+      const segmentEnd = Math.min(endIndex, row.end);
+      if (segmentEnd <= segmentStart) return null;
+      const indent = row.indent || 0;
+      return {
+        start: {x: indent + segmentStart - row.start + 1, y: row.y},
+        end: {x: indent + segmentEnd - row.start, y: row.y},
+      };
+    })
+    .filter(Boolean);
+  const range = {start, end};
+  // Keep the public logical range stable while giving hit testing the actual painted segment on each
+  // row. The segments are an implementation detail, so they must not change serialized range keys.
+  Object.defineProperty(range, 'segments', {value: segments, enumerable: false});
+  return range;
 }
 
 function terminalWrappedGroupTailMayContinue(term, group) {
@@ -7686,9 +7813,96 @@ function terminalReferenceXtermLink(reference) {
   };
 }
 
-async function terminalReferenceProviderLinks(session, term, y) {
+function terminalReferenceXtermLinkWithOptions(reference, options = {}) {
+  const link = terminalReferenceXtermLink(reference);
+  if (!link) return null;
+  link.decorations = {
+    underline: options.underline !== false,
+    pointerCursor: options.pointerCursor === true,
+  };
+  if (typeof options.hover === 'function') link.hover = options.hover;
+  if (typeof options.leave === 'function') link.leave = options.leave;
+  return link;
+}
+
+function terminalReferenceXtermLinks(reference, options = {}) {
+  if (!reference?.range) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  const physicalRanges = Number.isFinite(options.row)
+    ? ranges.filter(range => range.start?.y === options.row && range.end?.y === options.row)
+    : ranges;
+  return physicalRanges
+    .map(range => terminalReferenceXtermLinkWithOptions({...reference, range}, options))
+    .filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineSegments(term, reference) {
+  if (!reference?.range?.start || !reference.range.end) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  return ranges.map(range => {
+    const start = range.start || {};
+    const end = range.end || {};
+    const cells = Number(end.x) - Number(start.x) + 1;
+    return cells > 0 && start.y === end.y ? {x: start.x, y: start.y, cells} : null;
+  }).filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineLayer(container) {
+  if (!container) return null;
+  let layer = container.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'terminal-url-link-underlines';
+    layer.setAttribute('aria-hidden', 'true');
+    container.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearTerminalUrlReferenceUnderlines(container) {
+  const layer = container?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  layer?.replaceChildren?.();
+  return 0;
+}
+
+function renderTerminalUrlReferenceUnderlines(term, container, reference) {
+  const layer = terminalUrlReferenceUnderlineLayer(container);
+  if (!layer) return 0;
+  const cell = terminalCellDimensions(term, container);
+  const screen = terminalScreenElement(container);
+  const screenRect = screen?.getBoundingClientRect?.();
+  const containerRect = container?.getBoundingClientRect?.();
+  const cellWidth = Number(cell.width || 0);
+  const cellHeight = Number(cell.height || 0);
+  if (!screenRect || !containerRect || !(cellWidth > 0) || !(cellHeight > 0)) {
+    return clearTerminalUrlReferenceUnderlines(container);
+  }
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const leftOrigin = screenRect.left - containerRect.left;
+  const topOrigin = screenRect.top - containerRect.top;
+  const nodes = [];
+  for (const segment of terminalUrlReferenceUnderlineSegments(term, reference)) {
+    const screenRow = segment.y - viewportY;
+    if (screenRow < 1 || screenRow > Number(term?.rows || 0)) continue;
+    const line = document.createElement('div');
+    line.className = 'terminal-url-link-underline';
+    line.style.left = `${leftOrigin + ((segment.x - 1) * cellWidth)}px`;
+    line.style.top = `${topOrigin + (screenRow * cellHeight) - 2}px`;
+    line.style.width = `${segment.cells * cellWidth}px`;
+    nodes.push(line);
+  }
+  layer.replaceChildren(...nodes);
+  return nodes.length;
+}
+
+async function terminalReferenceProviderLinks(session, term, y, container = null) {
   const refs = terminalWrappedLineReferences(term, y);
-  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
+    row: y,
+    underline: false,
+    hover: () => renderTerminalUrlReferenceUnderlines(term, container, ref),
+    leave: () => clearTerminalUrlReferenceUnderlines(container),
+  }));
   const fileRefs = refs.filter(ref => ref.type === 'file');
   if (!fileRefs.length) return links;
   // This provider runs once for each visible terminal line. Its output is only a visual underline:
@@ -7696,8 +7910,7 @@ async function terminalReferenceProviderLinks(session, term, y) {
   // Do not turn terminal repaint into one batchd admission per token merely to decide whether to draw
   // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
   for (const ref of fileRefs) {
-    const link = terminalReferenceXtermLink(ref);
-    if (link) links.push(link);
+    links.push(...terminalReferenceXtermLinks(ref));
   }
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
@@ -8063,11 +8276,11 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 }
 
-function installTerminalLinkProvider(session, term) {
+function installTerminalLinkProvider(session, term, container) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
+      terminalReferenceProviderLinks(session, term, y, container).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -8161,6 +8374,13 @@ function terminalExtendTouchSelection(term, selection, container, clientX, clien
 
 function terminalRangeContainsPosition(range, position) {
   if (!range || !position) return false;
+  if (Array.isArray(range.segments)) {
+    return range.segments.some(segment => (
+      position.y === segment.start.y
+      && position.x >= segment.start.x
+      && position.x <= segment.end.x
+    ));
+  }
   const start = range.start || {};
   const end = range.end || {};
   if (position.y < start.y || position.y > end.y) return false;
@@ -9422,8 +9642,13 @@ function terminalKeyScrollIntent(event) {
     return null;
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  if (event.key === 'PageUp' || event.code === 'PageUp') return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
-  if (event.key === 'PageDown' || event.code === 'PageDown') return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  const key = String(event.key || '');
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  const pageUp = key === 'PageUp' || code === 'PageUp' || keyCode === 33;
+  const pageDown = key === 'PageDown' || code === 'PageDown' || keyCode === 34;
+  if (pageUp) return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  if (pageDown) return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
   return null;
 }
 
@@ -9460,6 +9685,10 @@ function installTerminalCopyShortcut(session, term, container = null) {
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
+    // OpenCode owns Ctrl+Alt+B/F as message navigation. Returning true here is important: the
+    // browser/global shortcut layers must not turn the documented native binding into terminal
+    // Meta input before xterm can deliver the original key event to OpenCode.
+    if (terminalOpenCodeNativeShortcut(session, container, event)) return true;
     return (handleTerminalScrollbackKeydown(session, term, container, event)
       || handleTerminalTmuxWindowShortcutKeydown(session, event)
       || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
@@ -9538,15 +9767,21 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  const preservesNativeContextMenu = () => terminalContextMenuPreservesNativeBehavior(session, container);
+  const terminalPointReference = event => terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
+  const nativeContextMenuForEvent = event => preservesNativeContextMenu() && !terminalPointReference(event);
   container.addEventListener('pointerdown', event => {
+    if (preservesNativeContextMenu() && !terminalPointReference(event)) return;
     if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
   }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
+    if (nativeContextMenuForEvent(event)) return;
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
     event.stopPropagation();
   }, {capture: true});
   container.addEventListener('contextmenu', event => {
+    if (nativeContextMenuForEvent(event)) return;
     event.preventDefault();
     event.stopPropagation();
     const touchSelection = touchContextMenuSyntheticEvents.has(event)
@@ -9555,7 +9790,7 @@ function installTerminalContextMenu(session, term, container) {
     // The touch-scroll owner observes this same bridged contextmenu after us, so its existing
     // state machine can claim the press and extend this selection without another gesture owner.
     if (touchSelection) event.yolomuxTerminalTouchSelection = touchSelection;
-    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, presetSelection: touchSelection?.text || rightClickSelection});
+    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, reference: terminalPointReference(event), presetSelection: touchSelection?.text || rightClickSelection});
     rightClickSelection = null;
   });
 }
@@ -12591,9 +12826,10 @@ const stateDefs = {
   'ready-review': {hasShort: true, priority: 5, attention: false},
   [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
   [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  unavailable: {hasShort: true, priority: 7, attention: false},
   done: {hasShort: false, priority: 8, attention: false},
 };
-const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput, STATE_KEY.blocked]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
 const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
@@ -12925,6 +13161,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, auto)
     : null;
+  const agentWindowRows = Array.isArray(agentWindowSummary?.agents) ? agentWindowSummary.agents : [];
+  const hasBlockedAgentWindow = agentWindowRows.some(agent => agentWindowStateKey(agent?.state) === STATE_KEY.blocked);
   const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
   const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
     ? agentWindowStatusToneForItem(agentWindowSummary?.item)
@@ -12980,6 +13218,19 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       attentionAgent: agent,
       attentionAgentItem: agentWindowSummary.item,
     });
+  }
+  if (agentWindowTone === 'blocked' || hasBlockedAgentWindow) {
+    const agent = agentWindowSummary.agent || agentWindowRows.find(item => agentWindowStateKey(item?.state) === STATE_KEY.blocked);
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || agent?.error || '').trim() || stateReason('agentErrorBlocker');
+    return stateValue(STATE_KEY.blocked, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: STATE_KEY.blocked,
+      blockedAgent: agent,
+      blockedAgentItem: agentWindowSummary.item,
+    });
+  }
+  if (agentWindowTone === 'unavailable') {
+    return stateValue('unavailable', t('common.notAvailable'), {agentWindowState: 'unavailable'});
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -13110,6 +13361,22 @@ function tmuxSignalWindows() {
 
 const tmuxSignalAgentCommands = new Set(['claude', 'codex']);
 
+function tmuxSignalAuthoritativeAgentKind(pane) {
+  const session = tmuxSignalPaneSession(pane);
+  const target = tmuxSignalPaneTarget(pane);
+  if (!session || !target) return '';
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
+    : autoApproveStates.get(session)?.agent_windows;
+  if (!Array.isArray(rows)) return '';
+  const matches = rows.filter(row => (
+    agentWindowKind(row?.kind) === 'opencode'
+      && String(row?.pane_target || row?.pane || '').trim() === target
+  ));
+  return matches.length === 1 ? 'opencode' : '';
+}
+
 function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
@@ -13145,7 +13412,7 @@ function tmuxSignalPaneCommand(pane) {
 }
 
 function tmuxSignalPaneIsAgent(pane) {
-  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
 }
 
 function tmuxSignalWindowAgentPanes(windowRecord) {
@@ -13305,9 +13572,11 @@ function tmuxSignalAgentStateForSession(session) {
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
   }
-  const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
+  const runningPane = livePanes.find(pane => (
+    tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || tmuxSignalAuthoritativeAgentKind(pane)
+  ) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
-    const command = tmuxSignalPaneCommand(runningPane);
+    const command = tmuxSignalPaneCommand(runningPane) || tmuxSignalAuthoritativeAgentKind(runningPane);
     const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
     return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
@@ -13506,8 +13775,8 @@ function globalActivityCounts() {
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
     if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
-    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === STATE_KEY.blocked) blocked += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = countedSignalWindows.size
@@ -13542,6 +13811,7 @@ function globalActivityCountsFromAgentWindows() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
+  let unavailable = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
@@ -13558,11 +13828,12 @@ function globalActivityCountsFromAgentWindows() {
       if (classification.activity === STATE_KEY.working) running += 1;
       else if (classification.activity === 'ask') ask += 1;
       else if (classification.activity === 'blocked') blocked += 1;
+      else if (classification.activity === 'unavailable') unavailable += 1;
     }
   }
   if (!total) return null;
   const attention = ask + blocked;
-  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
 
 function globalActivityStatusLineHtml() {
@@ -13571,7 +13842,8 @@ function globalActivityStatusLineHtml() {
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -13610,7 +13882,10 @@ function syncTopbarActivityPlacement() {
 }
 
 function topbarActivityVisibleCount(counts = {}) {
-  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+  return Math.max(0, Number(counts.running) || 0)
+    + Math.max(0, Number(counts.ask) || 0)
+    + Math.max(0, Number(counts.blocked) || 0)
+    + Math.max(0, Number(counts.unavailable) || 0);
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
@@ -13881,6 +14156,8 @@ function statusIndicatorToneClasses(tone, options = {}) {
   if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
   if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'blocked') return ['status-indicator--blocked', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'unavailable') return ['status-indicator--blocked'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
@@ -13888,7 +14165,7 @@ function statusIndicatorToneClasses(tone, options = {}) {
 }
 
 function statusIndicatorToneStyle(tone, options = {}) {
-  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'blocked', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorExtractOptions(classes) {
@@ -15358,11 +15635,9 @@ function ensureCommandPalette() {
     commandPaletteState.index = 0;
     // Retire the previous query before repainting or waiting through the debounce interval. The
     // requestId remains the correctness fence, while AbortController stops irrelevant network work.
-    const previousSearchQuery = fileQuickOpenState.activeSearchQuery;
-    const retainedCandidates = fileQuickOpenRetainedCandidates(fileQuickOpenState.candidates, previousSearchQuery);
     abortFileQuickOpenSearch();
-    fileQuickOpenState.candidates = retainedCandidates;
-    fileQuickOpenState.retainedSearchQuery = previousSearchQuery;
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.retainedSearchQuery = '';
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -19427,13 +19702,13 @@ function closeAppMenus(keepOpen = null) {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
+// Shared Claude/Codex/OpenCode tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
 
-const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
-const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'blocked', 'unavailable', 'cooldown']);
+const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'blocked', 'unavailable', 'cooldown', STATE_KEY.working]);
 const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
   'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
-  'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id',
+    'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id', 'cwd',
 ]);
 
 function agentWindowVisibleTone(value) {
@@ -19508,7 +19783,9 @@ function agentWindowPhysicalKey(agent, info = null) {
 }
 
 function agentWindowStateKey(state) {
-  return String(state || '').trim();
+  const key = String(state || '').trim();
+  if (key === 'paused') return STATE_KEY.blocked;
+  return key === 'blocked' ? STATE_KEY.blocked : key;
 }
 
 function agentWindowIsWorkingState(state) {
@@ -19528,34 +19805,41 @@ function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }
 
+function agentWindowIsUnavailableState(state) {
+  return agentWindowStateKey(state) === 'unavailable';
+}
+
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
   if (key === STATE_KEY.working) return STATE_KEY.working;
+  if (key === 'blocked') return 'blocked';
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
   if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
+  if (key === 'unavailable') return 'unavailable';
   return STATE_KEY.idle;
 }
 
 function agentWindowStateRank(state) {
-  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
+  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, blocked: 2, unavailable: 3, [STATE_KEY.idle]: 4}[agentWindowStateKey(state)] ?? 9;
 }
 
 function agentWindowActivityVisualRank(state) {
   const tone = agentWindowActivityTone(state);
-  if (tone === 'attention') return 0;
+  if (tone === 'attention' || tone === 'blocked') return 0;
   // A live worker wins over a completed worker. Otherwise a yellow child can make the session
   // look stopped while another child is still doing work.
   if (tone === STATE_KEY.working) return 1;
   if (tone === 'cooldown') return 2;
+  if (tone === 'unavailable') return 0;
   if (tone === 'active') return 3;
   return 9;
 }
 
 function agentWindowKind(value) {
   const key = String(value || '').trim().toLowerCase();
-  return key === 'claude' || key === 'codex' ? key : '';
+  return key === 'claude' || key === 'codex' || key === 'opencode' ? key : '';
 }
 
 function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
@@ -19755,10 +20039,21 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
   // metadata can identify a window and enrich its path/git details, but never provide a
   // color, transition, or acknowledgement when the canonical status is unavailable.
-  const source = stateRows.length
-    ? stateRows
-    : mergedAgentWindowMetadataRows(trustedActivityRows, infoRows, info);
-  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+  const metadataRows = mergedAgentWindowMetadataRows(
+    trustedActivityRows,
+    [...infoRows, ...agentWindowPayloadRows(info?.agents)],
+    info,
+  );
+  const source = stateRows.length ? stateRows : metadataRows;
+  const knownPhysicalKeys = new Set(stateRows.map(agent => agentWindowPhysicalKey(agent, info)).filter(Boolean));
+  const missingOpenCodeRows = stateRows.length
+    ? metadataRows.filter(agent => (
+      agentWindowKind(agent?.kind) === 'opencode'
+      && !knownPhysicalKeys.has(agentWindowPhysicalKey(agent, info))
+    ))
+    : [];
+  const fallbackSource = [...source, ...missingOpenCodeRows];
+  const fallback = fallbackSource.length ? fallbackSource : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
       state: '',
@@ -19775,6 +20070,19 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
+  for (const agent of agents) {
+    if (agentWindowKind(agent.kind) !== 'opencode') continue;
+    const canonical = stateRows.some(row => (
+      agentWindowKind(row?.kind) === 'opencode'
+      && agentWindowPhysicalKey(row, info) === agentWindowPhysicalKey(agent, info)
+    ));
+    if (!canonical) {
+      agent.state = 'unavailable';
+      agent.unavailable_reason = 'canonical OpenCode status unavailable';
+      agent.last_active_ts = 0;
+      agent.idle_since = null;
+    }
+  }
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
     if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
@@ -19786,10 +20094,10 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
   // so the window bar, parent tab, Tabber, and session working count all see the same row.
   const screenProxyIndex = screenWorking && !hasWorkingWindow
-    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const fallbackProxyIndex = screenWorking && !hasWorkingWindow && screenProxyIndex < 0
-    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const proxyIndex = screenProxyIndex >= 0 ? screenProxyIndex : fallbackProxyIndex;
   const effectiveAgents = proxyIndex >= 0
@@ -19826,7 +20134,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     visibleItems.push({agent, item, tone});
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
     if (tone === 'acknowledged') acknowledging = {agent, item};
-    if (['attention', 'cooldown'].includes(tone)) {
+    if (['attention', 'blocked', 'cooldown'].includes(tone)) {
       const acknowledgementRank = acknowledgement ? agentWindowStatusItemVisualRank(acknowledgement.item) : 99;
       const acknowledgementCurrent = acknowledgement ? agentWindowPayloadCurrent(acknowledgement.agent) === true : false;
       if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
@@ -20305,7 +20613,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const itemOptions = agentWindowActivityOptionsForStatus(agent, sessionKey, {scheduleRefresh: false});
   const item = agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
   if (item?.acknowledged === true) return null;
-  if (!['attention', 'cooldown'].includes(item?.state)) return null;
+  if (!['attention', 'blocked', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
   const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
@@ -20357,6 +20665,7 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
 function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
   const kind = agentWindowKind(agentKey);
   const stateKey = agentWindowStateKey(state);
+  if (stateKey === 'unavailable') return t('state.agentStatus', {agent: agentLabel(kind), status: t('common.notAvailable')});
   const status = stateKey === 'cooldown'
     ? t('state.cooldown')
     : stateKey === 'active'
@@ -20383,7 +20692,18 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     acknowledgementDurationMs: acknowledgementVisual.durationMs,
     acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
   } : {};
-  const acknowledgementVisualTone = ['attention', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  const acknowledgementVisualTone = ['attention', 'blocked', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  if (stateKey === 'unavailable') {
+    return {
+      state: 'unavailable',
+      icon: '?',
+      label: `${agentLabel(kind)} ${t('common.notAvailable')}`,
+      pulseActive: false,
+      transitionPulseActive: false,
+      acknowledged: false,
+      acknowledging: false,
+    };
+  }
   // Switching the clicked tmux window can immediately promote its screen capture to `working`.
   // Preserve the acknowledged red/yellow state during its promised gray interval instead of
   // replacing it with a green play before the user can see the acknowledgement.
@@ -20400,6 +20720,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     };
   }
   if (agentWindowIsAttentionState(stateKey)) {
+    const visualTone = stateKey === STATE_KEY.blocked ? 'blocked' : 'attention';
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     const recordedAcknowledgement = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
@@ -20409,7 +20730,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       clearAgentWindowStoppedRefresh(transitionKey);
       record.activity = {
         state: stateKey,
-        visualTone: 'attention',
+        visualTone,
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
@@ -20420,9 +20741,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
     return {
-      state: 'attention',
+      state: visualTone,
       icon: '●',
-      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
+      label: agentWindowActivityLabel(kind, stateKey, acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
@@ -20514,13 +20835,18 @@ function agentWindowStatusClassification(item) {
     : item?.acknowledged === true
     ? ''
     : agentWindowActivityTone(item?.state);
+  if (tone === 'unavailable') return Object.freeze({tone, activity: 'unavailable'});
   const visibleTone = tone === 'acknowledged' || agentWindowVisibleTone(tone) ? tone : '';
   const activity = visibleTone === STATE_KEY.working
     ? STATE_KEY.working
     : visibleTone === 'attention'
     ? 'ask'
+    : visibleTone === 'blocked'
+    ? 'blocked'
     : visibleTone === 'cooldown'
     ? 'blocked'
+    : visibleTone === 'unavailable'
+    ? 'unavailable'
     : 'idle';
   return Object.freeze({tone: visibleTone, activity});
 }
@@ -20532,6 +20858,7 @@ function agentWindowStatusToneForItem(item) {
 function agentWindowStatusItemVisualRank(item) {
   const tone = agentWindowStatusToneForItem(item);
   if (tone === 'acknowledged') return 8;
+  if (tone === 'unavailable') return 0;
   return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
@@ -20579,8 +20906,9 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   // Acknowledged is the temporary gray color/timing tone, not a new shape. Keep the original
   // play/stop/pause modifier so live feedback and the Preferences example use the same renderer.
+  const acknowledgementShapeTone = item.state === 'unavailable' ? 'blocked' : item.state;
   const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
-    ? `status-indicator--${item.state}`
+    ? `status-indicator--${acknowledgementShapeTone}`
     : '';
   const aggregateTones = Array.isArray(item.aggregateTones)
     ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
@@ -20608,6 +20936,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
+    tone === 'unavailable' ? 'status-indicator--blocked' : '',
     {pulse},
   );
   const label = String(options.label || '').trim();
@@ -23745,12 +24074,12 @@ function fileTreeChangedFile(path) {
 
 function sessionFileAgentKinds(item) {
   const raw = Array.isArray(item?.agents) ? item.agents : (item?.agent ? [item.agent] : []);
-  const order = {claude: 0, codex: 1};
+  const order = {claude: 0, codex: 1, opencode: 2};
   const seen = new Set();
   return raw
     .map(value => String(value || '').toLowerCase())
     .filter(value => value && !seen.has(value) && seen.add(value))
-    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+    .sort((a, b) => (order[a] ?? 3) - (order[b] ?? 3) || a.localeCompare(b));
 }
 
 function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
@@ -25797,7 +26126,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // ---------------------------------------------------------------------------
 // Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
 // tmux sessions (level 0) -> their tmux sub-windows (level 1, index:process, the current window marked) -> for
-// claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
+// visible agent windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
 // collapse state is a persisted COLLAPSED set (default expanded), window times come from one semantic
@@ -25874,7 +26203,7 @@ function tabberAgentRecency(agent) {
 // Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
 // visible date text, and parent session bubbling.
 function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
-  const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
+  const isAgent = row?.isAgent === true || ['claude', 'codex', 'opencode'].includes(String(row?.agentKey || '').toLowerCase());
   if (isAgent) {
     const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
     if (workingTs > 0) return workingTs;
@@ -25892,11 +26221,11 @@ function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
   if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
-  const state = String(agentStatus?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agentStatus?.state || STATE_KEY.idle);
   const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
-    return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
+    return {text: '', html: statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', 'tabber-agent-status', 'agent-status-attention')};
   }
   return {text, html: ''};
 }
@@ -26096,7 +26425,7 @@ function tabberOrderedSessions() {
 
 function tabberWindowIsAgent(name) {
   const key = tmuxWindowAgentKey(name);
-  return key === 'claude' || key === 'codex';
+  return typeof agentWindowKind === 'function' ? Boolean(agentWindowKind(key)) : key === 'claude' || key === 'codex' || key === 'opencode';
 }
 
 function tabberAgentSessions() {
@@ -26174,7 +26503,7 @@ function buildTabberTree() {
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
-      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
+      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex', 'opencode'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
@@ -26301,7 +26630,7 @@ function tabberWindowButtonHtml(data, label) {
   const visibleName = String(label || '').trim();
   if (!visibleName) return '';
   if (typeof tmuxWindowButtonHtml !== 'function') {
-    const iconHtml = ['claude', 'codex'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
+    const iconHtml = ['claude', 'codex', 'opencode'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
     return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
@@ -34374,7 +34703,8 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 }
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
-  const state = String(agent?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agent?.state || STATE_KEY.idle);
+  if (state === 'unavailable') return t('common.notAvailable');
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0
@@ -34388,7 +34718,9 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
-  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  if (agentWindowIsUnavailableState(agent?.state)) return statusIndicatorLabelHtml(text, 'blocked', className, 'agent-status-unavailable');
+  const state = agentWindowStateKey(agent?.state);
+  if (agentWindowIsAttentionState(state)) return statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', className, 'agent-status-attention');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -34437,13 +34769,13 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
-      state: String(agent?.state || STATE_KEY.idle),
+       state: agentWindowStateKey(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && agentWindowIndex(agent) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
-    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .filter(agent => ['claude', 'codex', 'opencode'].includes(agent.kind))
     .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
@@ -34454,7 +34786,8 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   const attention = agentWindowIsAttentionState(agent.state);
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
-  const classes = ['session-agent-row', `state-${agent.state}`];
+  const state = agentWindowStateKey(agent.state);
+  const classes = ['session-agent-row', `state-${state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
@@ -36574,7 +36907,86 @@ function sessionAgentKind(session) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
-  return kind === 'claude' || kind === 'codex' ? kind : '';
+  return kind === 'claude' || kind === 'codex' || kind === 'opencode' ? kind : '';
+}
+
+function terminalContextMenuPaneTargetForSession(session) {
+  const windows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
+  const activeWindows = windows.filter(window => window?.active === true);
+  if (activeWindows.length === 1) return terminalContextMenuPaneTargetForWindow(activeWindows[0]);
+  if (activeWindows.length > 1) return '';
+  // The first terminal bind can precede the initial tmux signal snapshot. Use only an
+  // unambiguous active metadata pane for that short bootstrap window; once live signals arrive,
+  // they remain authoritative and replace this provisional identity.
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const selectedTarget = String(info?.selected_pane?.target || info?.selected_pane?.pane_id || '').trim();
+  if (selectedTarget && panes.filter(pane => String(pane?.target || pane?.pane_id || '').trim() === selectedTarget).length === 1) {
+    return selectedTarget;
+  }
+  const activePanes = panes.filter(pane => pane?.window_active === true && pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForWindow(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  const activePanes = panes.filter(pane => pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForContainer(container) {
+  return String(container?.dataset?.terminalPaneTarget || '').trim();
+}
+
+function setTerminalContextMenuPaneTarget(container, paneTarget) {
+  if (!container?.dataset) return '';
+  const target = String(paneTarget || '').trim();
+  if (target) container.dataset.terminalPaneTarget = target;
+  else delete container.dataset.terminalPaneTarget;
+  return target;
+}
+
+function terminalContextMenuCapabilityForSession(session, options = {}) {
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const paneTarget = String(
+    typeof options.paneTarget === 'function' ? options.paneTarget() : options.paneTarget,
+  ).trim();
+  const matches = paneTarget && Array.isArray(info?.agents)
+    ? info.agents.filter(agent => String(agent?.pane_target || agent?.pane_id || '').trim() === paneTarget)
+    : [];
+  const clientKind = matches.length === 1 ? String(matches[0]?.kind || '').trim().toLowerCase() : '';
+  return Object.freeze({
+    paneTarget,
+    clientKind,
+    // Only a positively identified OpenCode pane owns native selection/copy behavior. Unknown
+    // identity must stay on the established YOLOmux path rather than accidentally bypassing it.
+    preserveNativeContextMenu: clientKind === 'opencode',
+  });
+}
+
+function terminalContextMenuPreservesNativeBehavior(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).preserveNativeContextMenu;
+}
+
+function terminalUsesAppWheel(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).clientKind === 'opencode';
+}
+
+function terminalOpenCodeNativeShortcut(session, container, event) {
+  if (!terminalUsesAppWheel(session, container) || event?.type !== 'keydown') return false;
+  if (event.ctrlKey !== true || event.altKey !== true || event.metaKey === true || event.shiftKey === true) return false;
+  const key = String(event.key || '').toLowerCase();
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  return code === 'KeyB' || code === 'KeyF'
+    || key === 'b' || key === 'f'
+    || keyCode === 66 || keyCode === 70;
 }
 
 function agentIcon(kind, options = {}) {
@@ -36588,6 +37000,9 @@ function agentIcon(kind, options = {}) {
   }
   if (kind === 'claude') {
     return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
+  }
+  if (kind === 'opencode') {
+    return `<span class="${esc(classes('opencode'))}"${labelAttr}>OC</span>`;
   }
   return '';
 }
@@ -36617,7 +37032,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'opencode' ? 'OpenCode' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -36972,7 +37387,7 @@ function panelFullPath(session, info) {
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
-  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
+  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex', 'opencode'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
@@ -38476,7 +38891,11 @@ function enableTerminalScroll(session, term, container) {
     const whole = Math.trunc(state.pendingLines);
     if (!whole) return false;
     state.pendingLines -= whole;
-    return routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+    return routeTerminalScrollLines(session, term, container, whole, {
+      source: 'touch',
+      clientX: state.lastX,
+      clientY: state.lastY,
+    });
   };
   const queueTouchLines = (state, signedLines) => {
     state.pendingLines += signedLines;
@@ -38509,6 +38928,7 @@ function enableTerminalScroll(session, term, container) {
       identifier: touch.identifier,
       startX: touch.clientX,
       startY: touch.clientY,
+      lastX: touch.clientX,
       lastY: touch.clientY,
       startAt: performanceNow(),
       claimed: false,
@@ -38554,6 +38974,7 @@ function enableTerminalScroll(session, term, container) {
     event.preventDefault();
     event.stopPropagation();
     const deltaY = touch.clientY - state.lastY;
+    state.lastX = touch.clientX;
     state.lastY = touch.clientY;
     const rowHeight = terminalCellDimensions(term, container).height;
     const signedLines = terminalTouchSignedRows(deltaY, rowHeight);
@@ -38647,11 +39068,22 @@ function enableTerminalScroll(session, term, container) {
 
 function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
   if (!signedLines) return false;
-  if (!options.forceTmuxScrollback && sessionPaneIsAlternateScreen(session)) {
+  if (!options.forceTmuxScrollback && options.source === 'page-key'
+    && terminalUsesAppWheel(session, container)) {
+    // OpenCode pages its internal message viewport with native PageUp/PageDown. Mouse reports
+    // work for a finger/desktop wheel, but replacing a page key with them can leave its footer
+    // moving or the message viewport unchanged. Keep this keyboard path on the normal data owner.
+    const data = signedLines < 0 ? '\x1b[5~' : '\x1b[6~';
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  const usesAppWheel = terminalUsesAppWheel(session, container);
+  if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {
     // Explicit tmux keys keep their native meaning in an alternate-screen TUI. Plain page keys
     // become wheel reports only for mouse-owning apps; other TUIs receive their native key event.
-    if (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term))) return false;
-    if (options.source !== 'touch' || terminalHasMouseTracking(term)) {
+    if (!usesAppWheel && (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term)))) return false;
+    const usesMouseReports = terminalHasMouseTracking(term) || usesAppWheel;
+    if (options.source !== 'touch' || usesMouseReports) {
       forwardAltScreenWheel(session, container, signedLines, options);
       return true;
     }
@@ -44154,7 +44586,7 @@ function tmuxWindowButtonHtml(options = {}) {
 
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
-  if (base === 'claude' || base === 'codex') return base;
+  if (base === 'claude' || base === 'codex' || base === 'opencode') return base;
   if (['bash', 'sh', 'zsh', 'fish', 'shell', '-bash', '-zsh'].includes(base)) return 'shell';
   if (['vim', 'nvim', 'vi', 'nano', 'emacs', 'hx', 'helix'].includes(base)) return 'editor';
   if (['python', 'python3', 'ipython', 'node', 'ruby', 'irb', 'bun', 'deno'].includes(base)) return 'repl';
@@ -46044,6 +46476,7 @@ function yoagentRecentAgentSortTs(agent, signal = yoagentRecentAgentSignal(agent
 
 function yoagentRecentAgentSignal(agent) {
   const target = String(agent?.pane_target || '').trim();
+  const agentKind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.agent_kind) : '';
   let pane = target ? tmuxSignalPaneForTarget(target) : null;
   if (!pane) {
     const session = String(agent?.session || '').trim();
@@ -46053,7 +46486,7 @@ function yoagentRecentAgentSignal(agent) {
       tmuxSignalPaneSession(candidate) === session
       && String(candidate?.window_index ?? '').trim() === windowText
       && (!paneText || String(candidate?.pane_index ?? '').trim() === paneText)
-      && tmuxSignalPaneIsAgent(candidate)
+      && (tmuxSignalPaneIsAgent(candidate) || agentKind === 'opencode')
     )) || null;
   }
   const windowRecord = pane ? tmuxSignalWindowForPane(pane) : tmuxSignalWindowForSessionIndex(agent?.session, agent?.window);
@@ -51620,7 +52053,7 @@ function bindPreferencesPanel(panel) {
     const full = String(value || '').trim();
     if (!full) return '';
     const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
     }
     return full;
@@ -80086,6 +80519,10 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
   const info = transcriptMetadataState.payload.sessions?.[session];
+  setTerminalContextMenuPaneTarget(
+    document.getElementById(terminalDomId(session)),
+    terminalContextMenuPaneTargetForWindow(windowRecord),
+  );
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -80948,6 +81385,7 @@ function bindTerminalContainerForSession(session, term, container) {
   normalizeAppOwnedControls(container);
   installTerminalMobileAccessoryResizeSync();
   installTerminalMobileAccessorySurfaceSync();
+  setTerminalContextMenuPaneTarget(container, terminalContextMenuPaneTargetForSession(session));
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -81051,7 +81489,7 @@ function startTerminal(session) {
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   applyTerminalContainerTheme(container, displayTheme);
-  installTerminalLinkProvider(session, term);
+  installTerminalLinkProvider(session, term, container);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -84229,6 +84667,10 @@ function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key 
 
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
+  const focusedTerminalItem = focusedTerminal ? terminals.get(focusedTerminal) : null;
+  // OpenCode documents Ctrl+Alt+B/F as native message navigation. The exact-pane check prevents
+  // an unknown or ambiguous terminal from changing the shortcut behavior of other clients.
+  if (terminalOpenCodeNativeShortcut(focusedTerminal, focusedTerminalItem?.container, event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;

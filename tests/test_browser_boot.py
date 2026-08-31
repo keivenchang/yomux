@@ -4,6 +4,7 @@
 import json
 import shlex
 import subprocess
+import time
 from urllib.parse import urlencode
 
 import pytest
@@ -1226,5 +1227,138 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         assert after["connected"] is True and after["viewport"] > glyphs["viewport"], {"before": glyphs, "after": after}
         assert after["screenRect"] and after["screenRect"]["width"] > 0 and after["screenRect"]["height"] > 0, after
     finally:
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
+
+
+def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_page(browser, monkeypatch, tmp_path):
+    """The OpenCode touch route must move xterm's local buffer, not an outer scrollport."""
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
+    session = runtime.sessions[0]
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+
+    def touch_point(x, y):
+        return {"x": x, "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}
+
+    try:
+        browser.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+        )
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+        )
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{xterm_only_search(session)}")
+        assert_live_runtime_boot_healthy(browser, "real-xterm-opencode-touch-scroll", timeout=12)
+        WebDriverWait(browser, 12).until(
+            lambda driver: driver.execute_script(
+                "return Boolean(document.querySelector(`#term-${arguments[0]} .xterm`) && terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN);",
+                session,
+            )
+        )
+        metrics = browser.execute_script(
+            """
+            const item = terminals.get(arguments[0]);
+            const container = document.querySelector(`#term-${arguments[0]}`);
+            const term = item.term;
+            const screen = container.querySelector('.xterm-screen');
+            const viewport = container.querySelector('.xterm-viewport');
+            const paneTarget = container.dataset.terminalPaneTarget || `%${arguments[0]}`;
+            container.dataset.terminalPaneTarget = paneTarget;
+            term.write(`\\x1b[?1000l\\x1b[?1002l\\x1b[?1003l${Array.from({length: 180}, (_, index) => `opencode-history-${index.toString().padStart(3, '0')}\\r\\n`).join('')}`, () => {
+              term.scrollToBottom();
+              window.__openCodeScrollReady = true;
+            });
+            const outer = [document.documentElement, document.body, container, container.closest('.panel'), container.closest('.dv-view')].filter(Boolean);
+            const snapshot = label => ({
+              label,
+              outer: outer.map(node => ({className: String(node.className), scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight})),
+              viewportScrollTop: viewport.scrollTop,
+              viewportY: term.buffer.active.viewportY,
+              baseY: term.buffer.active.baseY,
+              historyLength: term.buffer.active.length,
+            });
+            return {item: arguments[0], target: paneTarget, snapshot: snapshot('written'), outer, screenClass: screen?.className || '', viewportTouchAction: getComputedStyle(viewport).touchAction, scrollableTouchAction: getComputedStyle(container.querySelector('.xterm-scrollable-element')).touchAction};
+            """,
+            session,
+        )
+        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return window.__openCodeScrollReady === true"))
+        metrics = browser.execute_script(
+            """
+            const item = terminals.get(arguments[0]);
+            const container = document.querySelector(`#term-${arguments[0]}`);
+            const term = item.term;
+            const viewport = container.querySelector('.xterm-viewport');
+            const screen = container.querySelector('.xterm-screen');
+            const paneTarget = container.dataset.terminalPaneTarget || `%${arguments[0]}`;
+            container.dataset.terminalPaneTarget = paneTarget;
+            const info = transcriptMetadataState.payload.sessions[arguments[0]];
+            info.agents = [{kind: 'opencode', pane_target: paneTarget}];
+            if (!paneTarget) throw new Error('terminal pane identity was not available');
+            const frames = [];
+            item.socket.send = value => {
+              try { frames.push(JSON.parse(value)); } catch (_error) { frames.push({raw: String(value)}); }
+            };
+            tmuxSignalState = {windows: [{key: `${arguments[0]}:0`, session: arguments[0], window_index: '0', active: true, panes: [{target: paneTarget, pane_id: paneTarget, active: true, alternate_on: false}]}]};
+            applyTmuxSignalsPayload({data: tmuxSignalState});
+            const outer = [document.documentElement, document.body, container, container.closest('.panel'), container.closest('.dv-view')].filter(Boolean);
+            const snapshot = label => ({label, outer: outer.map(node => ({className: String(node.className), scrollTop: node.scrollTop})), viewportScrollTop: viewport.scrollTop, viewportY: term.buffer.active.viewportY, baseY: term.buffer.active.baseY, historyLength: term.buffer.active.length});
+            term.scrollToBottom();
+            const beforeWheel = snapshot('before-wheel');
+            frames.length = 0;
+            const wheel = new WheelEvent('wheel', {deltaY: -100, wheelDeltaY: -120, bubbles: true, cancelable: true, clientX: screen.getBoundingClientRect().left + 12, clientY: screen.getBoundingClientRect().top + 12});
+            screen.dispatchEvent(wheel);
+            const afterWheel = snapshot('after-wheel');
+            const wheelFrames = frames.slice();
+            term.scrollToBottom();
+            window.__openCodeTouchPrevented = [];
+            container.addEventListener('touchmove', event => window.__openCodeTouchPrevented.push(event.defaultPrevented), {capture: true, passive: false});
+            const rect = screen.getBoundingClientRect();
+            window.__openCodeTouchPoint = {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            return {beforeWheel, afterWheel, wheelDefaultPrevented: wheel.defaultPrevented, wheelFrames, target: paneTarget, rowHeight: terminalCellDimensions(term, container).height, touchAction: {
+              terminal: getComputedStyle(container).touchAction,
+              xterm: getComputedStyle(container.querySelector('.xterm')).touchAction,
+              viewport: getComputedStyle(viewport).touchAction,
+              scrollable: getComputedStyle(container.querySelector('.xterm-scrollable-element')).touchAction,
+              screen: getComputedStyle(screen).touchAction,
+              rows: getComputedStyle(container.querySelector('.xterm-rows')).touchAction,
+            }};
+            """,
+            session,
+        )
+        point = browser.execute_script("return window.__openCodeTouchPoint")
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [touch_point(point["x"], point["y"])]})
+        for y in (point["y"] + metrics["rowHeight"],):
+            browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [touch_point(point["x"], y)]})
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        time.sleep(0.5)
+        touch = browser.execute_script(
+            """
+            const item = terminals.get(arguments[0]);
+            const container = document.querySelector(`#term-${arguments[0]}`);
+            const term = item.term;
+            const outer = [document.documentElement, document.body, container, container.closest('.panel'), container.closest('.dv-view')].filter(Boolean);
+            const viewport = container.querySelector('.xterm-viewport');
+            const current = {outer: outer.map(node => ({className: String(node.className), scrollTop: node.scrollTop})), viewportScrollTop: viewport.scrollTop, viewportY: term.buffer.active.viewportY, baseY: term.buffer.active.baseY, historyLength: term.buffer.active.length};
+            return {current, prevented: window.__openCodeTouchPrevented || [], trace: jsDebugEvents.filter(event => event.type === 'terminal_mobile_input_trace').slice(-8)};
+            """,
+            session,
+        )
+        assert metrics["target"], metrics
+        assert metrics["wheelDefaultPrevented"] is True, metrics
+        assert metrics["wheelFrames"] and all(frame.get("type") == "input" for frame in metrics["wheelFrames"]), metrics
+        assert touch["current"]["viewportY"] == metrics["beforeWheel"]["viewportY"], touch
+        assert touch["current"]["viewportScrollTop"] == metrics["beforeWheel"]["viewportScrollTop"], touch
+        assert touch["trace"] == [], touch
+        assert [item["scrollTop"] for item in touch["current"]["outer"]] == [item["scrollTop"] for item in metrics["beforeWheel"]["outer"]], touch
+        assert touch["prevented"] and all(touch["prevented"]), touch
+        assert metrics["touchAction"] == {key: "none" for key in metrics["touchAction"]}, metrics
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
         stop_browser_server(server, thread, browser=browser)
         stop_isolated_browser_app(runtime)

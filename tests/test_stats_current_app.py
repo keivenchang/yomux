@@ -5,6 +5,7 @@
 import ast
 import inspect
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +13,14 @@ from types import SimpleNamespace
 import pytest
 
 from yolomux_lib import app as app_module, http_routes, local_service_projection, session_files, settings as settings_module
+from yolomux_lib.common import AgentInfo
 from yolomux_lib.stats_current import materializer as materializer_module
 from yolomux_lib.stats_current import collectors as collectors_module
 from yolomux_lib.stats_current import pricing as pricing_module
 from yolomux_lib.stats_current import runtime as runtime_module
 from yolomux_lib.stats_current import storage as storage_module
 from yolomux_lib.stats_current import usage as usage_module
+from yolomux_lib.stats_current import opencode as opencode_module
 from yolomux_lib.stats_current.transcripts import ScannedUsageAtom, StatsCurrentTranscriptUsageScanner, TranscriptUsageScanResult
 
 
@@ -72,6 +75,85 @@ def test_agent_status_adapter_carries_the_authoritative_statusd_snapshot_revisio
         "session_states": {"1": "run"},
         "snapshot_revision": 17,
     }
+
+
+def test_agent_status_adapter_records_statusd_failure_as_unavailable():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["1"]
+    webapp.status_snapshot_payload = lambda: None
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+    assert facts.observations == ()
+    assert len(facts.unavailable_spans) == 1
+    assert facts.unavailable_spans[0].source_id == "statusd"
+    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
+
+
+def test_agent_status_adapter_records_statusd_failure_as_unavailable(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["1"]
+    webapp.status_snapshot_payload = lambda: None
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+    assert facts.observations == ()
+    assert len(facts.unavailable_spans) == 1
+    assert facts.unavailable_spans[0].source_id == "statusd"
+    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
+
+
+def test_agent_status_collector_waits_out_its_initial_statusd_refresh(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["opencode"]
+    payload = {
+        "agent_window_snapshot_revision": 9,
+        "sessions": {
+            "opencode": {
+                "agent_windows": [{
+                    "window_index": 1,
+                    "pane_target": "%1",
+                    "kind": "opencode",
+                    "state": "working",
+                }],
+            },
+        },
+    }
+    reads = iter((None, payload))
+    monkeypatch.setattr(webapp, "start_status_collector_lease", lambda: True)
+    webapp.status_snapshot_payload = lambda: next(reads)
+    waits = []
+    webapp.status_client = SimpleNamespace(
+        wait_generation=lambda after_generation, timeout: waits.append((after_generation, timeout)) or {
+            "ok": True,
+            "changed": True,
+            "generation": 9,
+        },
+    )
+    webapp.stats_collection_state = SimpleNamespace(
+        agent_activity_lock=threading.RLock(), agent_activity_state={}
+    )
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda *_args: "run"
+    webapp.stats_current_process_identity = lambda: ("web", "web", 1)
+
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 60))
+
+    assert waits == [(0, 1.0)]
+    assert facts.observations[0].payload["states"] == {"opencode|1|%1|opencode": "run"}
+
+
+def test_agent_status_collector_keeps_typed_unavailable_when_refresh_never_completes(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["opencode"]
+    monkeypatch.setattr(webapp, "start_status_collector_lease", lambda: True)
+    webapp.status_snapshot_payload = lambda: None
+    webapp.status_client = SimpleNamespace(
+        wait_generation=lambda _after_generation, timeout: {
+            "ok": True, "changed": False, "generation": 0,
+        },
+    )
+
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 60))
+
+    assert facts.observations == ()
+    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
 def test_agent_status_adapter_rolls_deduplicated_windows_into_one_session_state():
@@ -144,6 +226,485 @@ def test_agent_status_adapter_expires_a_finished_window_transition_at_the_config
     assert running["states"] == {"1|0|%0|codex": "run"}
     assert during_glow["states"] == {"1|0|%0|codex": "transition"}
     assert after_glow["states"] == {"1|0|%0|codex": "idle"}
+
+
+def test_status_roster_cache_fences_generic_result_before_agent_status_collector(monkeypatch):
+    visible = "\n".join([
+        "┃  what model are you",
+        "   ⠏ Thinking",
+        "   ▣ Build · Nemotron 3 Ultra Free",
+        "  ...",
+        "  ┃  Build · Nemotron 3 Ultra Free OpenCode Zen",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ■■■⬝⬝⬝⬝⬝⬝  esc interrupt  tab agents  ctrl+p commands",
+    ])
+    pane = app_module.common.TmuxPaneInfo(
+        session="opencode", window="1", window_name="opencode", pane="0",
+        pane_id="%1", target="%1", current_path="/repo", command="opencode",
+        active=True, window_active=True, title="opencode", pid=123,
+    )
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%1",
+        command="opencode", cwd="/repo", status=None, session_id=None,
+        transcript=None, error=None,
+    )
+    info = app_module.SessionInfo("opencode", [pane], pane, [agent])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["opencode"]
+    webapp.status_pane_classification_cache = {
+        "%1": {
+            "source_signature": "live-pane-v1",
+            "prompt": {"visible": False},
+            "screen": {"key": "idle", "text": ""},
+        },
+    }
+    webapp.auto_approve_capture_target = lambda _session, discovered_sessions=None: "%1"
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "approval_prompt_state", lambda _text, *_args: {"visible": False})
+
+    classifications, capture_count = webapp.status_roster_pane_classifications(
+        {"opencode": info}, {"opencode"},
+        pane_source_signatures={"%1": "live-pane-v1"}, capture_targets=set(),
+    )
+
+    assert capture_count == 1
+    assert classifications["%1"]["screen"]["key"] == "working"
+    assert webapp.status_pane_classification_cache["%1"]["agent_kind"] == "opencode"
+
+    webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
+    shared_state = classifications["%1"]["screen"]["key"]
+    webapp.status_snapshot_payload_for_collector = lambda: {
+        "agent_window_snapshot_revision": 4,
+        "sessions": {"opencode": {"agent_windows": [{
+            "window_index": 1, "pane_target": "%1", "kind": "opencode", "state": shared_state,
+        }]}},
+    }
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda _row, _key, _at, _seconds: "run"
+    webapp.stats_current_process_identity = lambda: ("web-7220", "web", 7220)
+
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+
+    assert facts.observations[0].payload == {
+        "states": {"opencode|1|%1|opencode": "run"},
+        "session_states": {"opencode": "run"},
+        "snapshot_revision": 4,
+    }
+
+
+def test_status_roster_passes_validated_opencode_identity_to_shared_classifier(monkeypatch):
+    visible = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ <redacted-composer>                                        │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  ⬝⬝■■■■■■  esc interrupt                                  │",
+        "┃  Build · <model>",
+        "╹<separator>",
+        " <usage>  ctrl+p commands",
+    ])
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%1",
+        command="opencode", cwd="/repo", status=None, session_id=None,
+        transcript=None, error=None,
+    )
+    info = app_module.SessionInfo("opencode", [], None, [agent])
+    received = []
+
+    def fake_classify(_target, **kwargs):
+        classifier = kwargs["screen_classifier"]
+        received.append(classifier(visible, "%1", "opencode"))
+        return SimpleNamespace(
+            reason_code="busy",
+            prompt={"visible": False},
+            screen=received[-1],
+        )
+
+    monkeypatch.setattr(app_module, "classify_agent_pane", fake_classify)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+
+    result = webapp.roster_pane_classification(
+        "opencode", "%1", discovered_sessions={"opencode": info},
+    )
+
+    assert received[0]["key"] == "working"
+    assert received[0]["agent"] == "opencode"
+    assert result["screen"]["key"] == "working"
+
+
+def test_status_roster_applies_native_activity_after_meter_only_classification(monkeypatch):
+    visible = "old output\n   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  301.3K  ctrl+p commands\n"
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%1",
+        command="opencode -s ses-a", cwd="/repo", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    info = app_module.SessionInfo("opencode", [], None, [agent])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda _target, visible_only=True: "")
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses-a", "/repo", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "working",
+            2.0,
+            ("running-tool",),
+        ),
+    )
+
+    result = webapp.roster_pane_classification(
+        "opencode", "%1", discovered_sessions={"opencode": info},
+    )
+
+    assert result["screen"]["key"] == "working"
+    assert result["screen"]["activity_source"] == "opencode-native-state"
+
+
+def test_generic_app_screen_classifier_accepts_agent_kind():
+    screen = app_module.TmuxWebtermApp.agent_pane_screen_classification(
+        "┃  ⬝⬝■■■■■■  esc interrupt", "%1", "opencode",
+    )
+
+    assert screen["key"] == "idle"
+
+
+def test_done_screen_maps_to_idle_not_blocked():
+    assert app_module.TmuxWebtermApp.agent_window_state_from_screen({"key": "done"}) == "idle"
+
+
+def test_opencode_visible_permission_is_blocked_and_composer_question_is_idle(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    permission = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ △ Permission required                                      │",
+        "│ # Shell command                                             │",
+        "│ $ true                                                      │",
+        "│ Allow once Allow always Reject                              │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · <model>",
+    ])
+    question = "\n".join([
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Which backend should I use?                                │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  Build · <model>",
+    ])
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: permission)
+    assert webapp.agent_window_screen_state(agent)["key"] == "blocked"
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: question)
+    assert webapp.agent_window_screen_state(agent)["key"] == "idle"
+
+
+def test_opencode_cached_screen_state_is_consumed_without_database_override():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    result = webapp.agent_window_screen_state(
+        agent,
+        preclassified_by_target={"%opencode": {"screen": {"key": "idle", "text": ""}}},
+    )
+
+    assert result["key"] == "idle"
+
+
+def test_opencode_idle_screen_does_not_read_native_state(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    calls = []
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_state", lambda **kwargs: calls.append(kwargs))
+
+    result = webapp.opencode_screen_state_with_native_activity(
+        agent, {"key": "idle", "text": "", "activity_source": "opencode-visible"},
+    )
+
+    assert result["key"] == "idle"
+    assert calls == []
+
+
+def test_opencode_cached_ambiguous_meter_can_use_native_state(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "working",
+            2.0,
+            ("recent-assistant",),
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "tmux_capture_pane",
+        lambda _target, visible_only=True: "meter-only",
+    )
+
+    result = webapp.agent_window_screen_state(
+        agent,
+        preclassified_by_target={"%opencode": {
+            "screen": {
+                "key": "idle",
+                "text": "",
+                "activity_source": "opencode-meter-ambiguous",
+                "agent": "opencode",
+            },
+        }},
+    )
+
+    assert result["key"] == "working"
+
+
+def test_opencode_meter_ambiguity_uses_native_state_only_with_session_id(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    screen = {
+        "key": "idle",
+        "text": "",
+        "activity_source": "opencode-meter-ambiguous",
+        "agent": "opencode",
+    }
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "working",
+            2.0,
+            ("recent-assistant",),
+        ),
+    )
+
+    result = webapp.opencode_screen_state_with_native_activity(agent, screen)
+
+    assert result["key"] == "working"
+    assert result["activity_source"] == "opencode-native-state"
+
+
+def test_prompt_and_screen_status_applies_native_activity_after_shared_classification(monkeypatch):
+    visible = "meter-only\n   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  301.3K  ctrl+p commands\n"
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode -s ses-a", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    info = app_module.SessionInfo("opencode", [], None, [agent])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.auto_approve_capture_target = lambda _session, discovered_sessions=None: "%opencode"
+    webapp.auto_approve_prompt_source = lambda: "pane"
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda _target, visible_only=True: "")
+    monkeypatch.setattr(
+        app_module,
+        "classify_agent_pane",
+        lambda _target, **kwargs: SimpleNamespace(
+            prompt={"visible": False},
+            screen=kwargs["screen_classifier"](visible, "%opencode", "opencode"),
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "working",
+            2.0,
+            ("recent-assistant",),
+        ),
+    )
+    monkeypatch.setattr(webapp, "auto_approve_session_has_pending_prompt", lambda _session: False)
+    monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
+
+    _prompt, screen = webapp.prompt_and_screen_status("opencode", discovered_sessions={"opencode": info})
+
+    assert screen["key"] == "working"
+    assert screen["activity_source"] == "opencode-native-state"
+
+
+def test_explicit_opencode_footer_meter_reaches_agent_window_state_without_db_activity(monkeypatch):
+    visible = "\n".join([
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference Hub",
+        "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    317.1K  ctrl+p commands",
+    ])
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%1",
+        command="opencode -s ses_fb51b242dffeU7jSyiesbuvk75", cwd="/repo/a", status=None,
+        session_id="ses_fb51b242dffeU7jSyiesbuvk75", transcript=None, error=None, started_at=1.0,
+    )
+    info = app_module.SessionInfo("opencode", [], None, [agent])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda _target, visible_only=True: "")
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses_fb51b242dffeU7jSyiesbuvk75", "/repo/a", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "idle", 2.0, (),
+        ),
+    )
+
+    result = webapp.agent_window_screen_state(agent)
+
+    assert result["key"] == "working"
+    assert result["activity_source"] == "opencode-visible"
+
+
+@pytest.mark.parametrize(
+    "native_result",
+    [
+        pytest.param(
+            lambda module: module.OpenCodeStateSuccess(
+                module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+                "idle",
+                2.0,
+                (),
+            ),
+            id="native-idle",
+        ),
+        pytest.param(
+            lambda module: module.OpenCodeStateUnavailable("database-unavailable"),
+            id="native-unavailable",
+        ),
+        pytest.param(
+            lambda module: module.OpenCodeStateUnavailable("multiple-eligible-sessions"),
+            id="native-ambiguous",
+        ),
+    ],
+)
+def test_opencode_meter_ambiguity_stays_fail_closed_without_native_working_state(monkeypatch, native_result):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%opencode",
+        command="opencode", cwd="/repo/a", status=None, session_id="ses-a",
+        transcript=None, error=None, started_at=1.0,
+    )
+    screen = {
+        "key": "idle",
+        "text": "",
+        "activity_source": "opencode-meter-ambiguous",
+        "agent": "opencode",
+    }
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: native_result(app_module.stats_current_opencode),
+    )
+
+    result = webapp.opencode_screen_state_with_native_activity(agent, screen)
+
+    assert result == screen
+
+
+def test_statusd_meter_capture_reaches_agent_status_collector_as_run(monkeypatch, tmp_path):
+    visible = "\n".join([
+        "old command output",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ <redacted-composer>                                        │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃  ⬝⬝■■■■■■  esc interrupt                                  │",
+        "┃  Build · <model>",
+        " <usage>  ctrl+p commands",
+    ])
+    pane = app_module.common.TmuxPaneInfo(
+        session="opencode", window="1", window_name="build", pane="0",
+        pane_id="%1", target="%1", current_path="/repo", command="opencode",
+        active=True, window_active=True, title="opencode", pid=123,
+    )
+    agent = AgentInfo(
+        session="opencode", kind="opencode", pid=123, pane_target="%1",
+        command="opencode", cwd="/repo", status=None, session_id=None,
+        transcript=None, error=None,
+    )
+    info = app_module.SessionInfo("opencode", [pane], pane, [agent])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.tmux_ai_status_path = tmp_path / "tmux-AI-status.json"
+    webapp.stats_collection_state = SimpleNamespace(
+        agent_activity_lock=threading.RLock(), agent_activity_state={}
+    )
+    webapp.agent_window_transition_lock = threading.RLock()
+    webapp.agent_window_transition_state = {}
+    webapp.shared_agent_window_attention_instances_snapshot = lambda: {}
+    webapp.activity_snapshot_with_recency = lambda _snapshot=None: {}
+    webapp.agent_window_path_records = lambda *_args, **_kwargs: {}
+    webapp.agent_window_working_stopped_ts = lambda *_args, **_kwargs: 0.0
+    webapp.attention_acknowledged = lambda _key: False
+    webapp.attention_acknowledged_at = lambda _key: 0.0
+    webapp.notification_transition_seconds = lambda: 30.0
+    monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(app_module, "tmux_capture_pane_styled", lambda _target, visible_only=True: visible)
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_state",
+        lambda **_kwargs: app_module.stats_current_opencode.OpenCodeStateSuccess(
+            app_module.stats_current_opencode.OpenCodeSession(
+                "ses-a", "/repo", "model", "provider", "build", 1.0, 2.0,
+            ),
+            "idle",
+            2.0,
+            (),
+        ),
+    )
+
+    rows = webapp.agent_window_status_payloads(
+        "opencode", info=info, discovered_sessions={"opencode": info}, include_path_metadata=False,
+    )
+
+    assert rows[0]["state"] == "working"
+    assert rows[0]["kind"] == "opencode"
+
+    webapp.sessions = ["opencode"]
+    webapp.status_snapshot_payload_for_collector = lambda: {
+        "agent_window_snapshot_revision": 8,
+        "sessions": {"opencode": {"agent_windows": rows}},
+    }
+    webapp.start_status_collector_lease = lambda: True
+    webapp.stats_collection_state = SimpleNamespace(
+        agent_activity_lock=threading.RLock(), agent_activity_state={}
+    )
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda *_args: "run"
+    webapp.stats_current_process_identity = lambda: ("web-7220", "web", 7220)
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+
+    assert facts.observations[0].payload == {
+        "states": {"opencode|1|%1|opencode": "run"},
+        "session_states": {"opencode": "run"},
+        "snapshot_revision": 8,
+    }
 
 
 def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
@@ -277,6 +838,788 @@ def test_token_adapter_uses_incremental_structured_atoms_and_keeps_dimensions(tm
     appended = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
     assert len(appended.usage_atoms) == 1
     assert appended.usage_atoms[0].payload["quantity"] == 8
+
+
+def test_token_adapter_routes_opencode_components_through_the_current_atom_receipt(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model-a", "provider-a", "build", 1.0, 2.0),
+        (
+            opencode_module.OpenCodeUsageComponent(
+                "opencode:ses-a:part-a:input", "ses-a", "msg-a", "part-a", 1.6,
+                "input", 100, "provider-a", "model-a", "message.providerID+message.modelID", "ses-a", True,
+            ),
+            opencode_module.OpenCodeUsageComponent(
+                "opencode:ses-a:part-a:cache_read", "ses-a", "msg-a", "part-a", 1.6,
+                "cache_read", 10, "provider-a", "model-a", "message.providerID+message.modelID", "ses-a", True,
+            ),
+            opencode_module.OpenCodeUsageComponent(
+                "opencode:ses-a:part-a:output", "ses-a", "msg-a", "part-a", 1.6,
+                "output", 20, "provider-a", "model-a", "message.providerID+message.modelID", "ses-a", True,
+            ),
+            opencode_module.OpenCodeUsageComponent(
+                "opencode:ses-a:part-a:cache_write", "ses-a", "msg-a", "part-a", 1.6,
+                "cache_write", 7, "provider-a", "model-a", "message.providerID+message.modelID", "ses-a",
+                True,
+            ),
+            opencode_module.OpenCodeUsageComponent(
+                "opencode:ses-a:part-a:reasoning", "ses-a", "msg-a", "part-a", 1.6,
+                "reasoning", 3, "provider-a", "model-a", "message.providerID+message.modelID", "ses-a",
+                True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "default"}}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert [(atom.direction, atom.cache_role, atom.payload["quantity"]) for atom in facts.usage_atoms] == [
+        ("input", "none", 100.0), ("input", "read", 10.0), ("output", "none", 20.0),
+    ]
+    assert {atom.payload["provider"] for atom in facts.usage_atoms} == {"provider-a"}
+    assert {atom.payload["model"] for atom in facts.usage_atoms} == {"model-a"}
+    assert {atom.payload["agent_id"] for atom in facts.usage_atoms} == {"yo7772|0|opencode"}
+    assert facts.receipt is not None
+    assert all(atom.payload["telemetry_complete"] is False for atom in facts.usage_atoms)
+    assert facts.unavailable_spans == ()
+
+
+def test_token_adapter_passes_safe_opencode_started_at_to_the_reader(monkeypatch):
+    calls = []
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (),
+    )
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_usage",
+        lambda **kwargs: calls.append(kwargs) or result,
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a",
+        "cwd": "/repo/a", "started_at": 1.5,
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert calls == [{
+        "session_id": "ses-a", "directory": "/repo/a", "started_at": 1.5, "now": 110,
+    }]
+
+
+def test_token_adapter_fences_opencode_cursor_to_the_stats_database(monkeypatch, tmp_path):
+    database = tmp_path / "stats-v8.sqlite3"
+    database.write_bytes(b"new stats database")
+    cursor_path = tmp_path / "opencode-cursors.json"
+    cursor = opencode_module.OpenCodeCursorStore(cursor_path)
+    assert cursor.reset_for_database(database) is None
+    cursor.prepare({"session:ses-a:output": 20}, event_revisions={"old-event": "old-revision"})
+    cursor.commit()
+    replacement = tmp_path / "stats-v8.sqlite3.new"
+    replacement.write_bytes(b"replacement stats database")
+    replacement.replace(database)
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    webapp.stats_opencode_cursors = cursor
+    webapp.stats_current_client = SimpleNamespace(database_path=database)
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.unavailable_spans == ()
+    state = cursor.state()
+    assert isinstance(state, opencode_module.OpenCodeCursorState)
+    assert state.values == {}
+
+
+def test_token_adapter_allows_cwd_only_opencode_selection(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (),
+    )
+    calls = []
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_usage",
+        lambda **kwargs: calls.append(kwargs) or result,
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|%1|opencode", "kind": "opencode", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert calls == [{
+        "session_id": None, "directory": "/repo/a", "started_at": None, "now": 110,
+    }]
+    assert facts.unavailable_spans == ()
+
+
+def test_token_adapter_does_not_commit_cursor_when_prepare_fails(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (opencode_module.OpenCodeUsageComponent(
+            "event", "ses-a", "msg", "part", 1.6, "output", 20,
+            "provider", "model", "fixture", "ses-a",
+        ),),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    prepare_calls = []
+
+    def fail_prepare(self, *args, **kwargs):
+        prepare_calls.append((args, kwargs))
+        raise OSError("cursor-state-raced")
+
+    monkeypatch.setattr(opencode_module.OpenCodeCursorStore, "prepare", fail_prepare)
+    cursor_commits = []
+    monkeypatch.setattr(
+        opencode_module.OpenCodeCursorStore,
+        "commit",
+        lambda _self: cursor_commits.append("commit"),
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|%1|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    webapp.stats_opencode_cursors = opencode_module.OpenCodeCursorStore()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    assert prepare_calls
+    assert facts.usage_atoms == ()
+    assert facts.unavailable_spans[0].reason == "opencode-cursor-state-raced"
+
+    assert facts.receipt is not None
+    facts.receipt.commit()
+    assert cursor_commits == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        opencode_module.OpenCodeUnavailable("database-unavailable"),
+        opencode_module.OpenCodeUnavailable("database-locked"),
+        opencode_module.OpenCodeUnavailable("database-malformed"),
+        opencode_module.OpenCodeSchemaMismatch("missing-table:session"),
+        opencode_module.OpenCodeAmbiguousSession("multiple-eligible-sessions", ("a", "b")),
+    ],
+)
+def test_token_adapter_records_each_opencode_source_failure_as_unavailable_span(monkeypatch, result):
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [
+        {"key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a"},
+    ]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.usage_atoms == ()
+    assert facts.coverage_epochs
+    assert len(facts.unavailable_spans) == 1
+    span = facts.unavailable_spans[0]
+    assert span.source_id == opencode_module.source_id_for_session("ses-a")
+    assert span.reason == f"opencode-{result.reason}"
+
+
+def test_token_adapter_preserves_valid_agents_when_one_opencode_source_fails(monkeypatch):
+    valid = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-ok", "/repo/ok", "model", "provider", "build", 1.0, 2.0),
+        (opencode_module.OpenCodeUsageComponent(
+            "event", "ses-ok", "msg", "part", 1.6, "output", 20,
+            "provider", "model", "fixture", "ses-ok",
+        ),),
+    )
+    results = iter((opencode_module.OpenCodeUnavailable("database-locked"), valid))
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: next(results))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [
+        {"key": "yo7772|0|opencode-a", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a"},
+        {"key": "yo7772|1|opencode-b", "kind": "opencode", "agent_session_id": "ses-ok", "cwd": "/repo/ok"},
+    ]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert [atom.payload["quantity"] for atom in facts.usage_atoms] == [20.0]
+    assert len(facts.unavailable_spans) == 1
+
+
+def test_token_adapter_keeps_multiple_opencode_panes_and_models_separate(monkeypatch):
+    results = {
+        "ses-a": opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model-a", "provider-a", "build", 1.0, 2.0),
+            (opencode_module.OpenCodeUsageComponent(
+                "event-a", "ses-a", "msg-a", "part-a", 11.0, "output", 20,
+                "provider-a", "model-a", "fixture", "ses-a",
+            ),),
+        ),
+        "ses-b": opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-b", "/repo/b", "model-b", "provider-b", "build", 1.0, 2.0),
+            (opencode_module.OpenCodeUsageComponent(
+                "event-b", "ses-b", "msg-b", "part-b", 11.0, "output", 30,
+                "provider-b", "model-b", "fixture", "ses-b",
+            ),),
+        ),
+    }
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_usage",
+        lambda **kwargs: results[kwargs["session_id"]],
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7220"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7220"}]
+    webapp.stats_agent_token_rows = lambda _rows: [
+        {"key": "yo7220|0|%1|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a"},
+        {"key": "yo7220|1|%2|opencode", "kind": "opencode", "agent_session_id": "ses-b", "cwd": "/repo/b"},
+    ]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7220", "web", 7220)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert [(atom.payload["agent_id"], atom.payload["model"], atom.payload["quantity"])
+            for atom in facts.usage_atoms] == [
+        ("yo7220|0|%1|opencode", "model-a", 20.0),
+        ("yo7220|1|%2|opencode", "model-b", 30.0),
+    ]
+
+
+def test_token_adapter_fails_closed_when_two_panes_claim_one_opencode_session(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-shared", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (opencode_module.OpenCodeUsageComponent(
+            "event", "ses-shared", "msg", "part", 1.6, "output", 20,
+            "provider", "model", "fixture", "ses-shared",
+        ),),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7220"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7220"}]
+    webapp.stats_agent_token_rows = lambda _rows: [
+        {"key": "yo7220|0|%1|opencode", "kind": "opencode", "agent_session_id": "ses-shared", "cwd": "/repo/a"},
+        {"key": "yo7220|1|%2|opencode", "kind": "opencode", "agent_session_id": "ses-shared", "cwd": "/repo/a"},
+    ]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7220", "web", 7220)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.usage_atoms == ()
+    assert len(facts.unavailable_spans) == 2
+    assert {span.reason for span in facts.unavailable_spans} == {"opencode-session-claimed-by-multiple-agents"}
+
+
+def test_opencode_revised_cumulative_snapshot_materializes_once(tmp_path, monkeypatch):
+    results = iter([
+        opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+            (opencode_module.OpenCodeUsageComponent(
+                "revision-1", "ses-a", "msg", "part", 1.6, "output", 1,
+                "provider", "model", "fixture", "ses-a",
+            ),),
+        ),
+        opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+            (opencode_module.OpenCodeUsageComponent(
+                "revision-2", "ses-a", "msg", "part", 1.7, "output", 2,
+                "provider", "model", "fixture", "ses-a",
+            ),),
+        ),
+    ])
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: next(results))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    store = storage_module.Store.open(tmp_path / storage_module.DATABASE_FILENAME)
+
+    try:
+        first = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+        first.receipt.commit()
+        second = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+        second.receipt.commit()
+        store.append_batch(usage_atoms=first.usage_atoms + second.usage_atoms)
+        generation = materializer_module.build_generation(
+            store.read_snapshot(), source_generation=1, cache_generation=1,
+            generated_at=20, observed_until=20,
+        )
+        bucket = next(
+            item for item in generation.layer(10).buckets
+            if any(series.name == "usage_tokens" for series in item.series)
+        )
+        assert next(item for item in bucket.series if item.name == "usage_tokens").value == 2
+        assert [item.payload["quantity"] for item in first.usage_atoms] == [1.0]
+        assert [item.payload["quantity"] for item in second.usage_atoms] == [1.0]
+    finally:
+        store.close()
+
+
+def test_opencode_historical_first_scan_baselines_real_db_then_materializes_new_step_delta(
+    tmp_path, monkeypatch,
+):
+    database = tmp_path / "opencode.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY, directory TEXT NOT NULL, agent TEXT, model TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, cost REAL NOT NULL DEFAULT 0,
+                tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+                tokens_cache_read INTEGER, tokens_cache_write INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ses-a", "/repo/a", "build",
+                json.dumps({"id": "model-a", "providerID": "provider-a"}),
+                1_000, 2_000, 0.0, 100, 20, 3, 10, 7,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (
+                "msg-a", "ses-a", 1_500, 1_500,
+                json.dumps({
+                    "role": "assistant", "modelID": "model-a", "providerID": "provider-a",
+                    "time": {"created": 1_500, "completed": 1_700},
+                }),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "step-a", "msg-a", "ses-a", 1_600, 1_600,
+                json.dumps({
+                    "type": "step-finish", "tokens": {
+                        "input": 100, "output": 20, "reasoning": 3,
+                        "cache": {"read": 10, "write": 7},
+                    },
+                }),
+            ),
+        )
+
+    reader = opencode_module.read_usage
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_usage",
+        lambda **kwargs: reader(
+            database=kwargs.pop("database", database), **kwargs,
+        ),
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a",
+        "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    first = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    assert [(atom.observed_at, atom.payload["quantity"]) for atom in first.usage_atoms] == [
+        (1.6, 100.0), (1.6, 10.0), (1.6, 20.0),
+    ]
+    first.receipt.commit()
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (
+                "msg-b", "ses-a", 2_500, 2_500,
+                json.dumps({
+                    "role": "assistant", "modelID": "model-a", "providerID": "provider-a",
+                    "time": {"created": 2_500, "completed": 2_700},
+                }),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "step-b", "msg-b", "ses-a", 2_600, 2_600,
+                json.dumps({
+                    "type": "step-finish", "tokens": {
+                        "input": 50, "output": 10, "reasoning": 1,
+                        "cache": {"read": 5, "write": 2},
+                    },
+                }),
+            ),
+        )
+        connection.execute(
+            "UPDATE session SET time_updated = ?, tokens_input = ?, tokens_output = ?, "
+            "tokens_reasoning = ?, tokens_cache_read = ?, tokens_cache_write = ? WHERE id = ?",
+            (3_000, 150, 30, 4, 15, 9, "ses-a"),
+        )
+
+    second = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    assert [
+        (atom.direction, atom.observed_at, atom.payload["quantity"])
+        for atom in second.usage_atoms
+    ] == [("input", 2.6, 50.0), ("input", 2.6, 5.0), ("output", 2.6, 10.0)]
+
+    store = storage_module.Store.open(tmp_path / storage_module.DATABASE_FILENAME)
+    try:
+        store.append_batch(usage_atoms=second.usage_atoms)
+        generation = materializer_module.build_generation(
+            store.read_snapshot(), source_generation=1, cache_generation=1,
+            generated_at=20, observed_until=20,
+        )
+        bucket = next(
+            item for item in generation.layer(10).buckets
+            if any(series.name == "usage_tokens" for series in item.series)
+        )
+        values = {item.name: item.value for item in bucket.series}
+    finally:
+        store.close()
+
+    assert values["agent_tokens_per_minute:yo7772|0|opencode"] == 60
+    assert values["model_tokens_per_minute:output:model-a"] == 60
+    assert values["model_tokens_per_minute:input:model-a"] == 300
+    assert values["model_tokens_per_minute:cache_read:model-a"] == 30
+
+
+def test_opencode_coverage_starts_a_new_epoch_after_collector_restart(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+        (),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    first = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    restarted = attempt("agent_tokens", 10)
+    restarted.epoch_id = "2:agent_tokens:1"
+    restarted.epoch_started_at = 200
+    restarted.scheduled_at = 210
+    second = webapp.collect_current_stats_agent_tokens(restarted)
+
+    first_epoch = next(item for item in first.coverage_epochs if item.source_id.startswith("opencode-session:"))
+    second_epoch = next(item for item in second.coverage_epochs if item.source_id.startswith("opencode-session:"))
+    assert second_epoch.epoch_id != first_epoch.epoch_id
+    assert second_epoch.started_at == 200
+
+
+def test_opencode_backfill_keeps_old_steps_in_distinct_rate_buckets_and_replays_safely(
+    tmp_path, monkeypatch,
+):
+    database = tmp_path / "opencode.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY, directory TEXT NOT NULL, agent TEXT, model TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, cost REAL NOT NULL DEFAULT 0,
+                tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+                tokens_cache_read INTEGER, tokens_cache_write INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ses-backfill", "/repo/backfill", "build",
+                json.dumps({"id": "model-real", "providerID": "provider-real"}),
+                1_000, 3_000, 0.0, 30, 12, 0, 6, None,
+            ),
+        )
+        for index, (message_id, part_id, timestamp, input_tokens, output_tokens, cache_read) in enumerate((
+            ("msg-old", "step-old", 15_000, 20, 7, 4),
+            ("msg-new", "step-new", 25_000, 10, 5, 2),
+        )):
+            connection.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                (
+                    message_id, "ses-backfill", timestamp - 100, timestamp - 100,
+                    json.dumps({
+                        "role": "assistant", "modelID": "model-real", "providerID": "provider-real",
+                        "time": {"created": timestamp - 100, "completed": timestamp},
+                    }),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    part_id, message_id, "ses-backfill", timestamp, timestamp,
+                    json.dumps({
+                        "type": "step-finish", "tokens": {
+                            "total": input_tokens + output_tokens + cache_read,
+                            "input": input_tokens, "output": output_tokens,
+                            "cache": {"read": cache_read},
+                        },
+                    }),
+                ),
+            )
+
+    reader = opencode_module.read_usage
+    monkeypatch.setattr(
+        app_module.stats_current_opencode,
+        "read_usage",
+        lambda **kwargs: reader(database=database, **kwargs),
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-backfill",
+        "cwd": "/repo/backfill",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    store = storage_module.Store.open(tmp_path / storage_module.DATABASE_FILENAME)
+
+    try:
+        first = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+        first.receipt.commit()
+        repeated = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+        repeated.receipt.commit()
+        assert repeated.usage_atoms == ()
+
+        store.append_batch(usage_atoms=first.usage_atoms)
+        generation = materializer_module.build_generation(
+            store.read_snapshot(), source_generation=1, cache_generation=1,
+            generated_at=40, observed_until=40,
+        )
+        output_by_bucket = {}
+        agent_output_by_bucket = {}
+        for bucket in generation.layer(10).buckets:
+            series = {item.name: item.value for item in bucket.series}
+            if "model_tokens_per_minute:output:model-real" in series:
+                output_by_bucket[bucket.start] = series["model_tokens_per_minute:output:model-real"]
+            if "agent_tokens_per_minute:yo7772|0|opencode" in series:
+                agent_output_by_bucket[bucket.start] = series["agent_tokens_per_minute:yo7772|0|opencode"]
+        assert output_by_bucket[10] == 42
+        assert output_by_bucket[20] == 30
+        assert agent_output_by_bucket[10] == 42
+        assert agent_output_by_bucket[20] == 30
+
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                (
+                    "msg-later", "ses-backfill", 35_000, 35_000,
+                    json.dumps({
+                        "role": "assistant", "modelID": "model-real", "providerID": "provider-real",
+                        "time": {"created": 35_000, "completed": 35_500},
+                    }),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "step-later", "msg-later", "ses-backfill", 35_500, 35_500,
+                    json.dumps({
+                        "type": "step-finish", "tokens": {
+                            "total": 4, "input": 3, "output": 1, "cache": {"read": 0},
+                        },
+                    }),
+                ),
+            )
+            connection.execute(
+                "UPDATE session SET time_updated = ?, tokens_input = ?, tokens_output = ?, "
+                "tokens_cache_read = ? WHERE id = ?",
+                (4_000, 33, 13, 6, "ses-backfill"),
+            )
+        appended = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+        assert [(atom.observed_at, atom.payload["quantity"]) for atom in appended.usage_atoms] == [
+            (35.5, 3.0), (35.5, 1.0),
+        ]
+        appended.receipt.commit()
+        assert webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10)).usage_atoms == ()
+    finally:
+        store.close()
+
+
+def test_opencode_counter_reset_starts_a_new_epoch_and_resumes_future_deltas(monkeypatch):
+    def result(value):
+        return opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
+            (opencode_module.OpenCodeUsageComponent(
+                "same-part", "ses-a", "msg", "part", 1.6, "output", value,
+                "provider", "model", "fixture", "ses-a",
+            ),),
+        )
+
+    results = iter((result(10), result(5), result(6)))
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: next(results))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+
+    first = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    first.receipt.commit()
+    reset = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    reset.receipt.commit()
+    resumed = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert [atom.payload["quantity"] for atom in first.usage_atoms] == [10.0]
+    assert reset.usage_atoms == ()
+    assert [atom.payload["quantity"] for atom in resumed.usage_atoms] == [1.0]
+    assert resumed.usage_atoms[0].event_id != first.usage_atoms[0].event_id
+
+
+def test_opencode_cursor_and_materialized_rates_survive_new_collector_instance(tmp_path, monkeypatch):
+    cursor_path = tmp_path / "opencode-cursors.json"
+    results = iter((
+        opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model-a", "provider-a", "build", 1.0, 2.0),
+            (
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-1", "ses-a", "msg", "part", 11.0, "input", 3,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-1", "ses-a", "msg", "part", 11.0, "cache_read", 4,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-1", "ses-a", "msg", "part", 11.0, "output", 5,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+            ),
+        ),
+        opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model-a", "provider-a", "build", 1.0, 2.0),
+            (
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-2", "ses-a", "msg", "part", 11.0, "input", 8,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-2", "ses-a", "msg", "part", 11.0, "cache_read", 10,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+                opencode_module.OpenCodeUsageComponent(
+                    "snapshot-2", "ses-a", "msg", "part", 11.0, "output", 9,
+                    "provider-a", "model-a", "fixture", "ses-a",
+                ),
+            ),
+        ),
+    ))
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: next(results))
+
+    def make_app():
+        webapp = object.__new__(app_module.TmuxWebtermApp)
+        webapp.sessions = ["yo7772"]
+        webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+        webapp.stats_agent_token_rows = lambda _rows: [{
+            "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+        }]
+        webapp.settings_payload = lambda: {"settings": {}}
+        webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+        webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+        webapp.stats_opencode_cursors = opencode_module.OpenCodeCursorStore(cursor_path)
+        return webapp
+
+    first = make_app().collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    first.receipt.commit()
+    second = make_app().collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    second.receipt.commit()
+
+    store = storage_module.Store.open(tmp_path / storage_module.DATABASE_FILENAME)
+    try:
+        store.append_batch(usage_atoms=first.usage_atoms + second.usage_atoms)
+        generation = materializer_module.build_generation(
+            store.read_snapshot(), source_generation=1, cache_generation=1,
+            generated_at=30, observed_until=30,
+        )
+        bucket = next(item for item in generation.layer(10).buckets if item.start == 10)
+        values = {item.name: item.value for item in bucket.series}
+    finally:
+        store.close()
+
+    assert [atom.payload["quantity"] for atom in first.usage_atoms] == [3.0, 4.0, 5.0]
+    assert [atom.payload["quantity"] for atom in second.usage_atoms] == [5.0, 6.0, 4.0]
+    assert values["agent_tokens_per_minute:yo7772|0|opencode"] == 54
+    assert values["model_tokens_per_minute:output:model-a"] == 54
+    assert values["model_tokens_per_minute:input:model-a"] == 48
+    assert values["model_tokens_per_minute:cache_read:model-a"] == 60
 
 
 def test_token_adapter_publishes_emitted_rejected_reason_counters(monkeypatch):
@@ -832,6 +2175,8 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
 
     assert facts.observations == ()
     assert facts.coverage_epochs == ()
+    assert len(facts.unavailable_spans) == 1
+    assert facts.unavailable_spans[0].reason == "status-roster-unavailable"
     assert facts.usage_atoms == ()
     assert facts.usage_tombstones == ()
     assert facts.receipt is None

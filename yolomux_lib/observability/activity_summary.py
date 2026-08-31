@@ -11,10 +11,12 @@ from datetime import timezone
 from pathlib import Path
 import re
 from typing import Any
+from typing import Mapping
 from urllib.parse import quote
 
 from ..common import AgentInfo
 from ..common import SessionInfo
+from ..common import VISIBLE_AGENT_KINDS
 from ..common import is_generated_upload_name
 from ..common import tail_file_lines
 from ..common import truncate_text
@@ -280,7 +282,7 @@ AGENT_WINDOW_OWNED_FIELDS = (
     "attention_key", "attention_acknowledged", "attention_acknowledged_at",
     "cooldown_attention_key", "cooldown_acknowledged", "cooldown_acknowledged_at",
 )
-AGENT_WINDOW_STATE_RANK = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
+AGENT_WINDOW_STATE_RANK = {"working": 0, "approval": 1, "blocked": 2, "needs-input": 2, "unavailable": 3, "idle": 4}
 
 
 def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapshot_revision: int = 0) -> list[dict[str, Any]]:
@@ -293,7 +295,9 @@ def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapsho
     """
     rows: list[dict[str, Any]] = []
     for gathered in gathered_agents:
-        state = gathered["state"]
+        state = str(gathered["state"] or "unavailable")
+        if state == "paused":
+            state = "blocked"
         elapsed = gathered["elapsed"]
         last_active_ts = gathered["last_active_ts"]
         working_stopped_ts = gathered["working_stopped_ts"]
@@ -320,6 +324,7 @@ def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapsho
             "transcript": gathered["transcript"],
             "transcript_id": gathered["transcript_id"],
             "agent_session_id": gathered["agent_session_id"],
+            **({"started_at": gathered["started_at"]} if gathered.get("started_at") is not None else {}),
             "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
             "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
             "last_active_ts": last_active_ts,
@@ -363,6 +368,7 @@ def build_recent_agents_payload(
     session_files_by_session: dict[str, dict[str, Any]] | None = None,
     recent_paths_by_session: dict[str, list[list[dict[str, Any]]]] | None = None,
     transcript_views_by_path: dict[str, dict[str, Any]] | None = None,
+    agent_states_by_identity: Mapping[tuple[str, str, str], Mapping[str, Any]] | None = None,
     locale: str = "en",
 ) -> list[dict[str, Any]]:
     current = now or datetime.now(timezone.utc)
@@ -371,12 +377,22 @@ def build_recent_agents_payload(
     for session, info in sessions.items():
         for agent_index, agent in enumerate(info.agents):
             kind = str(agent.kind or "").lower()
-            if kind not in {"claude", "codex"}:
+            if kind not in VISIBLE_AGENT_KINDS:
                 continue
             window, window_index, pane = agent_window_for_summary(info, agent)
             view = (transcript_views_by_path or {}).get(str(agent.transcript or ""))
             last_activity = transcript_last_activity(agent, locale, transcript_view=view)
             activity_state = dict(view.get("activity_state") or {"key": "idle", "text": ""}) if view is not None else (transcript_activity_state(agent.transcript, kind) if agent.transcript else {"key": "idle", "text": ""})
+            supplied_state = (agent_states_by_identity or {}).get((str(session), str(agent.pane_target or ""), kind))
+            if isinstance(supplied_state, Mapping):
+                state_key = str(supplied_state.get("key") or "").strip().lower()
+                if state_key == "paused":
+                    state_key = "blocked"
+                if state_key in {"working", "blocked", "needs-input", "unavailable", "idle"}:
+                    activity_state = {
+                        "key": state_key,
+                        "text": str(supplied_state.get("text") or "").strip(),
+                    }
             running = activity_state.get("key") == "working"
             last_used_ts = last_activity.get("timestamp")
             if not isinstance(last_used_ts, (int, float)):
@@ -456,6 +472,13 @@ def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> d
             continue
         info = session_info_from_json(info_data)
         gathered_agents = raw.get("gathered_agents")
+        agent_states_by_identity = {
+            (str(session), str(item.get("pane_target") or ""), str(item.get("kind") or "").lower()): {
+                "key": str(item.get("state") or "idle"),
+                "text": str(item.get("screen_text") or ""),
+            }
+            for item in gathered_agents if isinstance(item, dict)
+        } if isinstance(gathered_agents, list) else {}
         recent_paths_by_agent = raw.get("recent_paths_by_agent") if isinstance(raw.get("recent_paths_by_agent"), list) else None
         transcript_views_by_path = raw.get("transcript_views_by_path") if isinstance(raw.get("transcript_views_by_path"), dict) else {}
         session_rows[str(session)] = {
@@ -464,6 +487,7 @@ def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> d
                 [session],
                 recent_paths_by_session={session: recent_paths_by_agent} if recent_paths_by_agent is not None else None,
                 transcript_views_by_path=transcript_views_by_path,
+                agent_states_by_identity=agent_states_by_identity,
                 locale=locale,
             ),
             "agent_windows": assemble_agent_window_rows(gathered_agents if isinstance(gathered_agents, list) else [], snapshot_revision=snapshot_revision),
@@ -576,6 +600,7 @@ def agent_label(agent_name: str, locale: str = "en") -> str:
     return {
         "codex": "Codex",
         "claude": "Claude",
+        "opencode": "OpenCode",
         "term": server_string(locale, "shortcuts.section.terminal"),
         "terminal": server_string(locale, "shortcuts.section.terminal"),
     }.get(agent_name.lower(), agent_name or server_string(locale, "state.noAgent"))
@@ -769,10 +794,17 @@ def build_session_activity_summary(
     files_payload: dict[str, Any],
     locale: str = "en",
     transcript_view: dict[str, Any] | None = None,
+    agent_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = agent_for_summary(info)
     items = recent_transcript_items(agent, transcript_view=transcript_view)
     activity_state = dict(transcript_view.get("activity_state") or {"key": "idle", "text": ""}) if transcript_view is not None else session_transcript_activity_state(info)
+    if isinstance(agent_state, Mapping):
+        state_key = str(agent_state.get("key") or "").strip().lower()
+        if state_key == "paused":
+            state_key = "blocked"
+        if state_key in {"working", "blocked", "needs-input", "unavailable", "idle"}:
+            activity_state = {"key": state_key, "text": str(agent_state.get("text") or "").strip()}
     last_activity = transcript_last_activity(agent, locale, transcript_view=transcript_view)
     git = work_summary.get("git") if isinstance(work_summary.get("git"), dict) else {}
     pr = work_summary.get("pull_request") if isinstance(work_summary.get("pull_request"), dict) else None

@@ -36,6 +36,7 @@ DEFAULT_IDLE_SUGGESTION_TEXTS = {
 CLIENT_FILENAME_BASES = {
     "claude": "claude-code",
     "codex": "codex-cli",
+    "opencode": "opencode",
     "generic": "generic-agent",
     "unknown": "generic-agent",
 }
@@ -44,7 +45,7 @@ CaptureFunc = Callable[..., str | None]
 ClearFunc = Callable[..., subprocess.CompletedProcess[str]]
 PasteFunc = Callable[..., subprocess.CompletedProcess[str]]
 PromptClassifier = Callable[[str, str, str | None, str], dict[str, Any]]
-ScreenClassifier = Callable[[str, str | None], dict[str, Any]]
+ScreenClassifier = Callable[[str, str | None, str], dict[str, Any]]
 
 
 def strip_ansi_sgr(text: str) -> str:
@@ -61,6 +62,8 @@ def agent_client_version_slug(agent: str, version: str = "") -> str:
             agent_key = "claude"
         elif version_key.startswith("codex-cli"):
             agent_key = "codex"
+        elif version_key.startswith("opencode"):
+            agent_key = "opencode"
         elif version_key.startswith("generic-agent"):
             agent_key = "generic"
     base = CLIENT_FILENAME_BASES.get(agent_key, version_key or "unknown")
@@ -97,8 +100,10 @@ def visible_prompt_classifier(_prompt_target: str, visible_text: str, pane_text:
     return approval_prompt_state(visible_text, pane_text)
 
 
-def default_screen_classifier(visible_text: str, pane_target: str | None = None) -> dict[str, Any]:
-    return dict(agent_screen_state(visible_text, pane_target=pane_target))
+def default_screen_classifier(
+    visible_text: str, pane_target: str | None = None, agent_kind: str | None = None,
+) -> dict[str, Any]:
+    return dict(agent_screen_state(visible_text, pane_target=pane_target, agent_kind=agent_kind))
 
 
 @dataclass(frozen=True)
@@ -481,6 +486,8 @@ def _attention_for_state(prompt_state: dict[str, Any], screen_state: dict[str, A
         return "question", "Question"
     if screen_state.get("key") == "working":
         return "working", "Working"
+    if screen_state.get("key") == "blocked":
+        return "blocked", "Blocked"
     return "", ""
 
 
@@ -562,6 +569,22 @@ def classify_agent_pane(
 ) -> AgentPaneState:
     tui_target = AgentTuiTarget.from_value(target)
     prompt_target = session or tui_target.session or tui_target.target
+    validated_agent_kind = tui_target.agent_kind
+    validated_opencode_session_id = ""
+    if discovered_sessions is not None:
+        info = discovered_sessions.get(prompt_target)
+        if isinstance(info, SessionInfo):
+            matched_agent = next(
+                (agent for agent in info.agents if str(agent.pane_target or "").strip() == tui_target.target),
+                None,
+            )
+            validated_agent_kind = str(matched_agent.kind or "").strip().lower() if matched_agent is not None else ""
+            if validated_agent_kind == "opencode":
+                validated_opencode_session_id = str(matched_agent.session_id or "").strip()
+        elif tui_target.agent_kind == "opencode":
+            validated_agent_kind = ""
+    if validated_agent_kind == "opencode" and discovered_sessions is None:
+        validated_agent_kind = ""
     capture_cursor = include_composer if include_cursor is None else include_cursor
     try:
         capture = capture_agent_pane(
@@ -584,16 +607,29 @@ def classify_agent_pane(
                 composer=AgentComposerState(key="unknown"),
                 cursor=capture.cursor,
                 capture=capture,
-                agent_kind=tui_target.agent_kind,
+                agent_kind=validated_agent_kind,
                 display=_display_fields(prompt, screen, "", ""),
                 approval=_approval_fields(prompt),
                 reason_code="disconnected",
             )
-        prompt_state = prompt_classifier(prompt_target, capture.visible_text, None, prompt_source)
+        prompt_state = (
+            normalized_prompt_state()
+            if validated_agent_kind == "opencode"
+            else prompt_classifier(prompt_target, capture.visible_text, None, prompt_source)
+        )
         if capture_full_for_bash and prompt_state.get("visible") and prompt_state.get("type") == "bash":
             pane_text = capture_func(tui_target.target, visible_only=False) or capture.visible_text
             prompt_state = prompt_classifier(prompt_target, capture.visible_text, pane_text, prompt_source)
-        screen_state = screen_classifier(capture.visible_text, tui_target.target)
+        screen_state = (
+            dict(agent_screen_state(
+                capture.visible_text,
+                pane_target=tui_target.target,
+                agent_kind=validated_agent_kind,
+                opencode_session_id=validated_opencode_session_id,
+            ))
+            if validated_agent_kind == "opencode"
+            else screen_classifier(capture.visible_text, tui_target.target, validated_agent_kind)
+        )
         composer = read_composer_state(capture) if include_composer else AgentComposerState(key="unknown")
         if include_composer and screen_state.get("key") == "idle" and composer.key == "draft":
             screen_state = {
@@ -610,7 +646,11 @@ def classify_agent_pane(
             if transcript_state.get("key") != "idle":
                 screen_state = dict(transcript_state)
         attention_kind, attention_label = _attention_for_state(prompt_state, screen_state)
-        agent_kind = _agent_kind_for_state(tui_target, prompt_state, screen_state)
+        agent_kind = _agent_kind_for_state(
+            AgentTuiTarget(tui_target.target, tui_target.session, validated_agent_kind),
+            prompt_state,
+            screen_state,
+        )
         normalized_prompt = normalized_prompt_state(prompt_state)
         return AgentPaneState(
             target=tui_target.target,
@@ -637,7 +677,7 @@ def classify_agent_pane(
             composer=AgentComposerState(key="unknown"),
             cursor=AgentTuiCursor(error=str(exc)),
             capture=AgentTuiCapture(target=tui_target.target, error=str(exc)),
-            agent_kind=tui_target.agent_kind,
+            agent_kind=validated_agent_kind,
             display=_display_fields(prompt, screen, "", ""),
             approval=_approval_fields(prompt),
             reason_code="error",
@@ -775,7 +815,9 @@ def send_prompt(
         )
         agent_kind = _agent_kind_for_state(tui_target, state.prompt, state.screen)
         if agent_kind not in {"claude", "codex"}:
-            return AgentTuiSendResult(ok=False, sent=False, reason_code="not-agent", error="target pane does not have a detected Claude or Codex agent")
+            reason_code = "unsupported-agent" if agent_kind == "opencode" else "not-agent"
+            error = "target pane does not support the YOLOmux prompt transport" if agent_kind == "opencode" else "target pane does not have a detected Claude or Codex agent"
+            return AgentTuiSendResult(ok=False, sent=False, reason_code=reason_code, error=error)
         reason = _reason_code(state.prompt, state.screen)
         if reason in {"approval", "needs-input", "busy", "disconnected", "error"}:
             messages = {

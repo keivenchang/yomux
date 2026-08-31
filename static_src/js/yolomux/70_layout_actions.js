@@ -1367,7 +1367,86 @@ function sessionAgentKind(session) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
-  return kind === 'claude' || kind === 'codex' ? kind : '';
+  return kind === 'claude' || kind === 'codex' || kind === 'opencode' ? kind : '';
+}
+
+function terminalContextMenuPaneTargetForSession(session) {
+  const windows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
+  const activeWindows = windows.filter(window => window?.active === true);
+  if (activeWindows.length === 1) return terminalContextMenuPaneTargetForWindow(activeWindows[0]);
+  if (activeWindows.length > 1) return '';
+  // The first terminal bind can precede the initial tmux signal snapshot. Use only an
+  // unambiguous active metadata pane for that short bootstrap window; once live signals arrive,
+  // they remain authoritative and replace this provisional identity.
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const selectedTarget = String(info?.selected_pane?.target || info?.selected_pane?.pane_id || '').trim();
+  if (selectedTarget && panes.filter(pane => String(pane?.target || pane?.pane_id || '').trim() === selectedTarget).length === 1) {
+    return selectedTarget;
+  }
+  const activePanes = panes.filter(pane => pane?.window_active === true && pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForWindow(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  const activePanes = panes.filter(pane => pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForContainer(container) {
+  return String(container?.dataset?.terminalPaneTarget || '').trim();
+}
+
+function setTerminalContextMenuPaneTarget(container, paneTarget) {
+  if (!container?.dataset) return '';
+  const target = String(paneTarget || '').trim();
+  if (target) container.dataset.terminalPaneTarget = target;
+  else delete container.dataset.terminalPaneTarget;
+  return target;
+}
+
+function terminalContextMenuCapabilityForSession(session, options = {}) {
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const paneTarget = String(
+    typeof options.paneTarget === 'function' ? options.paneTarget() : options.paneTarget,
+  ).trim();
+  const matches = paneTarget && Array.isArray(info?.agents)
+    ? info.agents.filter(agent => String(agent?.pane_target || agent?.pane_id || '').trim() === paneTarget)
+    : [];
+  const clientKind = matches.length === 1 ? String(matches[0]?.kind || '').trim().toLowerCase() : '';
+  return Object.freeze({
+    paneTarget,
+    clientKind,
+    // Only a positively identified OpenCode pane owns native selection/copy behavior. Unknown
+    // identity must stay on the established YOLOmux path rather than accidentally bypassing it.
+    preserveNativeContextMenu: clientKind === 'opencode',
+  });
+}
+
+function terminalContextMenuPreservesNativeBehavior(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).preserveNativeContextMenu;
+}
+
+function terminalUsesAppWheel(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).clientKind === 'opencode';
+}
+
+function terminalOpenCodeNativeShortcut(session, container, event) {
+  if (!terminalUsesAppWheel(session, container) || event?.type !== 'keydown') return false;
+  if (event.ctrlKey !== true || event.altKey !== true || event.metaKey === true || event.shiftKey === true) return false;
+  const key = String(event.key || '').toLowerCase();
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  return code === 'KeyB' || code === 'KeyF'
+    || key === 'b' || key === 'f'
+    || keyCode === 66 || keyCode === 70;
 }
 
 function agentIcon(kind, options = {}) {
@@ -1381,6 +1460,9 @@ function agentIcon(kind, options = {}) {
   }
   if (kind === 'claude') {
     return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
+  }
+  if (kind === 'opencode') {
+    return `<span class="${esc(classes('opencode'))}"${labelAttr}>OC</span>`;
   }
   return '';
 }
@@ -1410,7 +1492,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'opencode' ? 'OpenCode' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -1765,7 +1847,7 @@ function panelFullPath(session, info) {
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
-  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
+  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex', 'opencode'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
@@ -3269,7 +3351,11 @@ function enableTerminalScroll(session, term, container) {
     const whole = Math.trunc(state.pendingLines);
     if (!whole) return false;
     state.pendingLines -= whole;
-    return routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+    return routeTerminalScrollLines(session, term, container, whole, {
+      source: 'touch',
+      clientX: state.lastX,
+      clientY: state.lastY,
+    });
   };
   const queueTouchLines = (state, signedLines) => {
     state.pendingLines += signedLines;
@@ -3302,6 +3388,7 @@ function enableTerminalScroll(session, term, container) {
       identifier: touch.identifier,
       startX: touch.clientX,
       startY: touch.clientY,
+      lastX: touch.clientX,
       lastY: touch.clientY,
       startAt: performanceNow(),
       claimed: false,
@@ -3347,6 +3434,7 @@ function enableTerminalScroll(session, term, container) {
     event.preventDefault();
     event.stopPropagation();
     const deltaY = touch.clientY - state.lastY;
+    state.lastX = touch.clientX;
     state.lastY = touch.clientY;
     const rowHeight = terminalCellDimensions(term, container).height;
     const signedLines = terminalTouchSignedRows(deltaY, rowHeight);
@@ -3440,11 +3528,22 @@ function enableTerminalScroll(session, term, container) {
 
 function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
   if (!signedLines) return false;
-  if (!options.forceTmuxScrollback && sessionPaneIsAlternateScreen(session)) {
+  if (!options.forceTmuxScrollback && options.source === 'page-key'
+    && terminalUsesAppWheel(session, container)) {
+    // OpenCode pages its internal message viewport with native PageUp/PageDown. Mouse reports
+    // work for a finger/desktop wheel, but replacing a page key with them can leave its footer
+    // moving or the message viewport unchanged. Keep this keyboard path on the normal data owner.
+    const data = signedLines < 0 ? '\x1b[5~' : '\x1b[6~';
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  const usesAppWheel = terminalUsesAppWheel(session, container);
+  if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {
     // Explicit tmux keys keep their native meaning in an alternate-screen TUI. Plain page keys
     // become wheel reports only for mouse-owning apps; other TUIs receive their native key event.
-    if (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term))) return false;
-    if (options.source !== 'touch' || terminalHasMouseTracking(term)) {
+    if (!usesAppWheel && (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term)))) return false;
+    const usesMouseReports = terminalHasMouseTracking(term) || usesAppWheel;
+    if (options.source !== 'touch' || usesMouseReports) {
       forwardAltScreenWheel(session, container, signedLines, options);
       return true;
     }

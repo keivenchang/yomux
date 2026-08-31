@@ -3276,7 +3276,15 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
   --agent-status-ball-fill: var(--bad);
   --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
+.status-indicator--blocked {
+  color: var(--danger-text);
+  --agent-status-ball-fill: var(--bad);
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
+}
 .status-indicator--dot.status-indicator--attention {
+  color: var(--bad);
+}
+.status-indicator--dot.status-indicator--blocked {
   color: var(--bad);
 }
 .status-indicator--dot.status-indicator--cooldown {
@@ -3380,6 +3388,9 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .agent-window-activity--attention {
   --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
+.agent-window-activity--blocked {
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
+}
 .agent-window-activity--cooldown {
   --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
@@ -3388,7 +3399,9 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
    across dock tabs, Tabber parent rows, Tabber child rows, popovers, and Info Bar buttons. */
 .agent-window-activity--working .agent-window-status-dot,
 .agent-window-activity--attention .agent-window-status-dot,
-.agent-window-activity--cooldown .agent-window-status-dot {
+ .agent-window-activity--blocked .agent-window-status-dot,
+ .agent-window-activity--unavailable .agent-window-status-dot,
+ .agent-window-activity--cooldown .agent-window-status-dot {
   font-size: var(--agent-status-ball-size);
   line-height: 1;
 }
@@ -8626,6 +8639,11 @@ body.layout-resizing {
   scrollbar-width: auto;
   scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
 }
+/* Terminal scrolling is translated by the shared touch owner into app/tmux line events. Prevent
+   mobile browsers from committing the gesture to the document before that owner can claim it. */
+:where(.terminal, .terminal .xterm, .terminal .xterm-viewport, .terminal .xterm-scrollable-element, .terminal .xterm-screen, .terminal .xterm-rows) {
+  touch-action: none;
+}
 :where(
   .preferences-scroll,
   .terminal .xterm-viewport,
@@ -9837,6 +9855,10 @@ body.app-topbar-touch-compact .pane-tab-close {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
   color: transparent !important;
 }
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked {
+  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  color: transparent !important;
+}
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
   color: transparent !important;
@@ -9875,6 +9897,16 @@ body.app-topbar-touch-compact .pane-tab-close {
   block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
   background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked::before {
+  box-sizing: border-box;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
+  background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--acknowledged::before {
+  background: var(--muted);
 }
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before,
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
@@ -10565,6 +10597,20 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .terminal-file-link-underline--hover {
   border-bottom-color: var(--terminal-file-link-underline-hover);
   border-bottom-width: 1px;
+}
+.terminal-url-link-underlines {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  overflow: hidden;
+  pointer-events: none;
+  color: currentColor;
+}
+.terminal-url-link-underline {
+  position: absolute;
+  height: 0;
+  border-bottom: 1px solid currentColor;
+  pointer-events: none;
 }
 .terminal .xterm-rows span[style*="text-decoration: underline"],
 .terminal .xterm-rows span[style*="text-decoration-line: underline"] {

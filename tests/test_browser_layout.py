@@ -6685,6 +6685,84 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
 
     browser.execute_script(
         """
+        const container = document.getElementById('term-1');
+        const screen = container.querySelector('.xterm');
+        const xtermScreen = container.querySelector('.xterm-screen') || screen;
+        const term = terminals.get('1').term;
+        term.modes = {mouseTrackingMode: 'none'};
+        container.dataset.terminalPaneTarget = '';
+        transcriptMetadataState.payload.sessions['1'] = {
+          agents: [{kind: 'opencode', pane_target: '%opencode'}],
+          panes: [{target: '%opencode', pane_id: '%opencode', window: '0', pane: '0', window_active: true, active: true}],
+          selected_pane: {target: '%opencode', pane_id: '%opencode', window: '0', pane: '0'},
+        };
+        const openCodeSignal = {ok: true, sessions: {'1': {}}, windows: [{
+          key: '1:0', session: '1', window_index: '0', active: true,
+          panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%opencode', pane_id: '%opencode', current_command: 'opencode', active: true, alternate_on: false, pid: 1234, dead: false}],
+        }]};
+        applyTmuxSignalsPayload({data: openCodeSignal});
+        window.__openCodeTouchWheel = [];
+        window.__openCodeTouchPrevented = [];
+        container.addEventListener('touchmove', event => window.__openCodeTouchPrevented.push(event.defaultPrevented), {capture: true, passive: false});
+        xtermScreen.addEventListener('wheel', event => {
+          if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) window.__openCodeTouchWheel.push({
+            deltaY: event.deltaY,
+            deltaMode: event.deltaMode,
+            target: event.target.className,
+            clientX: event.clientX,
+            clientY: event.clientY,
+          });
+        });
+        window.__terminalTouchSocket.sent.length = 0;
+        """
+    )
+    dispatch_gesture(1, 24, steps=3)
+    open_code = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const wheels = window.__openCodeTouchWheel || [];
+            const prevented = window.__openCodeTouchPrevented || [];
+            const frames = window.__terminalTouchSocket.sent.map(value => {
+              try { return JSON.parse(value); } catch (_error) { return null; }
+            }).filter(value => value?.type === 'input' || value?.type === 'tmux-scroll');
+            return wheels.length ? {wheels, prevented, frames, target: document.querySelector('#term-1')?.dataset?.terminalPaneTarget || ''} : false;
+            """
+        )
+    )
+    assert len(open_code["wheels"]) == 1 and open_code["wheels"][0]["deltaY"] == -1 and open_code["wheels"][0]["deltaMode"] == 1, open_code
+    assert open_code["wheels"][0]["target"] == "xterm", open_code
+    assert geometry["y"] < open_code["wheels"][0]["clientY"] <= geometry["y"] + 24, open_code
+    assert open_code["frames"] == [], open_code
+    assert open_code["target"] == "%opencode" and open_code["prevented"] and all(open_code["prevented"]), open_code
+    touch_surface = browser.execute_script(
+        """
+        const container = document.querySelector('#term-1');
+        const nodes = [container, container.querySelector('.xterm'), container.querySelector('.xterm-viewport'), container.querySelector('.xterm-scrollable-element'), container.querySelector('.xterm-screen'), container.querySelector('.xterm-rows')].filter(Boolean);
+        return nodes.map(node => getComputedStyle(node).touchAction);
+        """
+    )
+    assert touch_surface and all(value == "none" for value in touch_surface), touch_surface
+
+    exact_target = browser.execute_script(
+        """
+        const container = document.getElementById('term-1');
+        transcriptMetadataState.payload.sessions['1'].agents = [
+          {kind: 'opencode', pane_target: '%other'},
+          {kind: 'opencode', pane_target: '%opencode'},
+        ];
+        container.dataset.terminalPaneTarget = '%missing';
+        const ambiguous = terminalUsesAppWheel('1', container);
+        container.dataset.terminalPaneTarget = '%opencode';
+        const exact = terminalUsesAppWheel('1', container);
+        delete container.dataset.terminalPaneTarget;
+        const bootstrap = terminalContextMenuPaneTargetForSession('1');
+        return {ambiguous, exact, bootstrap};
+        """
+    )
+    assert exact_target == {"ambiguous": False, "exact": True, "bootstrap": "%opencode"}, exact_target
+
+    browser.execute_script(
+        """
         window.__terminalTouchRelevantCount = () => window.__terminalTouchSocket.sent.map(value => {
           try { return JSON.parse(value); } catch (_error) { return null; }
         }).filter(value => value?.type === 'input' || value?.type === 'tmux-scroll').length;
@@ -6828,7 +6906,7 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
         const screen = document.querySelector('#term-1 .xterm');
         const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
         const pageLines = terminalScrollPageLines(terminals.get('1').term);
-        const signalState = alternateOn => ({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%11', pane_id: '%11', current_command: alternateOn ? 'less' : 'claude', active: true, alternate_on: alternateOn, pid: 1234, dead: false}]}]});
+        const signalState = (alternateOn, command = alternateOn ? 'less' : 'claude', target = '%11') => ({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target, pane_id: target, current_command: command, active: true, alternate_on: alternateOn, pid: 1234, dead: false}]}]});
         const dispatch = (key, shiftKey = false) => {
           const event = new KeyboardEvent('keydown', {key, code: key, shiftKey, bubbles: true, cancelable: true});
           return {accepted: screen.dispatchEvent(event), defaultPrevented: event.defaultPrevented};
@@ -6840,8 +6918,25 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
           const alternatePlain = dispatch('PageUp');
           const alternateShift = dispatch('PageDown', true);
           setTimeout(() => {
-            const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } }).filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
-            done({pageLines, normal, alternatePlain, alternateShift, frames, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            tmuxSignalState = signalState(false, 'opencode', '%opencode');
+            transcriptMetadataState.payload.sessions['1'] = {agents: [{kind: 'opencode', pane_target: '%opencode'}], panes: [{target: '%opencode', pane_id: '%opencode', window: '0', pane: '0', window_active: true, active: true}], selected_pane: {target: '%opencode', pane_id: '%opencode', window: '0', pane: '0'}};
+            applyTmuxSignalsPayload({data: tmuxSignalState});
+            const openCodeContainer = document.querySelector('#term-1');
+            const openCodeScreen = openCodeContainer.querySelector('.xterm');
+            const openCodeWheels = [];
+            openCodeScreen.addEventListener('wheel', event => openCodeWheels.push({deltaY: event.deltaY, deltaMode: event.deltaMode}));
+            terminals.get('1').term.modes = {mouseTrackingMode: 'none'};
+            const openCodePage = dispatch('PageUp');
+            const openCodePageWheelCount = openCodeWheels.length;
+            const openCodeShift = dispatch('PageDown', true);
+            openCodeWheels.length = 0;
+            const openCodeWheelEvent = new WheelEvent('wheel', {deltaY: -100, wheelDeltaY: -120, bubbles: true, cancelable: true});
+            openCodeScreen.dispatchEvent(openCodeWheelEvent);
+            setTimeout(() => {
+              const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } }).filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
+              const relevantFinal = frames.length;
+              done({pageLines, normal, alternatePlain, alternateShift, openCodePage, openCodePageWheelCount, openCodeShift, openCodeShiftFrameCount: Math.max(0, relevantFinal - 2), openCodeWheels, openCodeWheelPrevented: openCodeWheelEvent.defaultPrevented, frames, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            }, 60);
           }, 60);
         }, 60);
         """
@@ -6849,10 +6944,20 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
     assert metrics["normal"] == {"accepted": False, "defaultPrevented": True}, metrics
     assert metrics["alternatePlain"] == {"accepted": True, "defaultPrevented": False}, metrics
     assert metrics["alternateShift"] == {"accepted": False, "defaultPrevented": True}, metrics
-    assert metrics["frames"] == [
+    assert metrics["frames"][:2] == [
         {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
     ], metrics
+    assert metrics["frames"][2:] == [
+        {"type": "input", "data": "\x1b[5~"},
+        {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
+    ], metrics
+    assert metrics["openCodePage"] == {"accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["openCodeShift"] == {"accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["openCodePageWheelCount"] == 0, metrics
+    assert metrics["openCodeShiftFrameCount"] == 2, metrics
+    assert metrics["openCodeWheels"] == [{"deltaY": -1, "deltaMode": 1}] * 3, metrics
+    assert metrics["openCodeWheelPrevented"] is True, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -11931,6 +12036,67 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
     assert metrics["after"] == 0, metrics
 
 
+def test_terminal_url_hover_underlines_cover_each_physical_row(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renderTerminalUrlReferenceUnderlines === 'function'"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const container = document.createElement('div');
+        container.className = 'terminal';
+        container.style.cssText = 'position:relative;width:550px;height:60px;color:rgb(103, 232, 249)';
+        const rows = document.createElement('div');
+        rows.className = 'xterm-rows';
+        rows.style.cssText = 'position:absolute;inset:0;width:550px;height:60px';
+        container.appendChild(rows);
+        document.body.appendChild(container);
+        const parts = ['https://huggingface.co/datasets/huggingface/', 'documentation-images/resolve/main/p-blog/candy.', 'JPG'];
+        const gutter = 5;
+        const term = {
+          cols: 55,
+          rows: 3,
+          buffer: {active: {viewportY: 0}},
+          _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+        };
+        const reference = {
+          text: parts.join(''),
+          range: {
+            start: {x: gutter + 1, y: 1},
+            end: {x: gutter + parts[2].length, y: 3},
+            segments: parts.map((part, index) => ({
+              start: {x: gutter + 1, y: index + 1},
+              end: {x: gutter + part.length, y: index + 1},
+            })),
+          },
+        };
+        const count = renderTerminalUrlReferenceUnderlines(term, container, reference);
+        const layer = container.querySelector(':scope > .terminal-url-link-underlines');
+        const nodes = Array.from(layer.children).map(node => {
+          const style = getComputedStyle(node);
+          return {
+            left: node.getBoundingClientRect().left - rows.getBoundingClientRect().left,
+            top: node.getBoundingClientRect().top - rows.getBoundingClientRect().top,
+            width: node.getBoundingClientRect().width,
+            borderBottomWidth: style.borderBottomWidth,
+          };
+        });
+        const pointerEvents = getComputedStyle(layer).pointerEvents;
+        container.remove();
+        return {count, nodes, pointerEvents};
+        """
+    )
+    assert metrics["count"] == 3, metrics
+    assert metrics["nodes"] == [
+        {"left": 50, "top": 18, "width": 440, "borderBottomWidth": "1px"},
+        {"left": 50, "top": 38, "width": 470, "borderBottomWidth": "1px"},
+        {"left": 50, "top": 58, "width": 30, "borderBottomWidth": "1px"},
+    ], metrics
+    assert metrics["pointerEvents"] == "none", metrics
+
+
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
@@ -13108,7 +13274,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelectorAll('.preferences-status-pulse-browser-fixture .agent-window-status-dot').length === 9"
+            "return document.querySelectorAll('.preferences-status-pulse-browser-fixture .agent-window-status-dot').length === 15"
         )
     )
     metrics = browser.execute_script(
@@ -13165,7 +13331,7 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
     expected_names = {"tab": "agent-status-opacity-pulse", "subwindow": "agent-status-opacity-pulse", "acknowledgement": "agent-status-acknowledgement-fade"}
     for group, expected_name in expected_names.items():
         markers = groups[group]["markers"]
-        assert [marker["state"] for marker in markers] == ["working", "attention", "cooldown"], metrics
+        assert [marker["state"] for marker in markers] == ["working", "attention", "blocked", "unavailable", "cooldown"], metrics
         assert all(marker["animationName"] == expected_name for marker in markers), metrics
         assert all(marker["duration"] == "2s" and marker["delay"] == metrics["rootDelay"] for marker in markers), metrics
         assert all(marker["timingFunction"].startswith("steps(16") and marker["iterations"] == "infinite" for marker in markers), metrics
@@ -13178,7 +13344,8 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
         assert marker["background"] == marker["expectedBackground"] and marker["borderRadius"] == "50%", metrics
     for marker in groups["subwindow"]["markers"]:
         shape = marker["after"] if marker["state"] == "working" else marker["before"]
-        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"], metrics
+        if not (shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"]):
+            raise AssertionError(f"subwindow marker failed: {marker}")
     for marker in groups["acknowledgement"]["markers"]:
         shape = marker["after"] if marker["state"] == "working" else marker["before"]
         assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedAcknowledgementBackground"], metrics

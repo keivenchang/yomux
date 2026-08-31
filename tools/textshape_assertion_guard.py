@@ -88,6 +88,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_stats_current_materializer.py:test_materializer_source_has_no_synthetic_cost_series_or_metadata_codec": "Synthetic cost and metadata codec paths were intentionally retired.",
     "tests/test_stats_current_service.py:test_server_wire_builders_do_not_revalidate_each_preencoded_private_variant": "Wire builders must preserve the one validation boundary for private variants.",
     "tests/test_stats_current_service.py:test_system_status_exposes_current_pipeline_health_without_private_values": "Status source must not expose private values while reporting pipeline health.",
+    "tests/test_stats_current_opencode.py:test_reader_queries_are_explicit_and_credential_free": "The private OpenCode reader must keep credential fields out of its source and enumerate its SQLite columns explicitly; these are source-level privacy and schema-drift contracts, while the reader's success and unavailable outcomes are covered by the behavioral fixture tests in this module.",
     "tests/test_system_status_snapshot.py:test_the_serving_process_owns_the_producer_lifecycle": "The snapshot producer must have exactly one lifecycle owner, and 'exactly one' is a count over the serving process's source that no runtime assertion can make: a second start call in a second place still yields a running producer, so a behavioural test cannot see it. The producer's observable start/stop behaviour is proven separately; this assertion protects only the single-owner wiring.",
     "tests/test_text_client_common_metadata.py:test_text_clients_use_shared_agent_comms_primitives": "Text clients must import the shared communication primitives rather than fork them.",
     "tests/test_uploads.py:test_upload_request_limit_comes_from_live_settings": "The upload route must use the live settings limit rather than a duplicate literal.",
@@ -113,7 +114,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "4c747dcf6ae0339cffc98202eec27897498ed4e40c3402d40c80cbc365e39706"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "d12bccb7bf63014f6d2ac619ab5ad3752f979c4cb173641fa0c24d513e83e9eb"
 
 
 @dataclass(frozen=True, slots=True)

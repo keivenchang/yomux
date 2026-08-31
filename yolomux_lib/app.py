@@ -100,6 +100,7 @@ from .observability.activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
 from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
+from .common import VISIBLE_AGENT_KINDS
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_EVENT_TAIL_LINES
@@ -150,6 +151,7 @@ from .stats_current import families as stats_current_families
 from .stats_current.http import StatsHttpForwarder
 from .stats_current.runtime import StatsCurrentRuntime
 from .stats_current import storage as stats_current_storage
+from .stats_current import opencode as stats_current_opencode
 from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
@@ -897,7 +899,7 @@ def stats_current_usage_health(
 TMUX_AI_STATUS_VERSION = 1
 STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
 _stats_host_fallback_warning_emitted = False
-STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
+STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted", "blocked"})
 STATS_AGENT_RUN_STATES = frozenset({"working"})
 STATS_AGENT_TRANSITION_STATES = frozenset({"cooldown", "transition"})
 STATS_AGENT_SESSION_STATE_PRIORITY = {"ask": 0, "run": 1, "transition": 2, "idle": 3}
@@ -6367,6 +6369,7 @@ class ActivityCache:
         ordered_summaries: list[dict[str, Any]] = []
         session_files_by_session: dict[str, SessionFilesPayload] = {}
         transcript_views_by_path: dict[str, dict[str, Any]] = {}
+        agent_states_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
         session_info: dict[str, Any] = {}
         started = time.perf_counter()
         recent_events_by_session = app.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
@@ -6405,6 +6408,18 @@ class ActivityCache:
                 if view_status == HTTPStatus.OK:
                     transcript_view = view_payload
                     transcript_views_by_path[str(primary_agent.transcript)] = view_payload
+            primary_agent_state = None
+            for agent in info.agents:
+                kind = str(agent.kind or "").strip().lower()
+                if kind not in VISIBLE_AGENT_KINDS:
+                    continue
+                screen = app.agent_window_screen_state(agent)
+                agent_states_by_identity[(str(session), str(agent.pane_target or ""), kind)] = {
+                    "key": str(screen.get("key") or "unavailable"),
+                    "text": str(screen.get("text") or ""),
+                }
+                if agent is primary_agent or primary_agent is None:
+                    primary_agent_state = agent_states_by_identity[(str(session), str(agent.pane_target or ""), kind)]
             add_phase_timing(timings, "transcripts_ms", started)
             started = time.perf_counter()
             signature = activity_signature(info, work, files_payload)
@@ -6415,9 +6430,9 @@ class ActivityCache:
                 summary = dict(cached["summary"])
             else:
                 if transcript_view is None:
-                    summary = build_session_activity_summary(info, work, files_payload, locale=locale)
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, agent_state=primary_agent_state)
                 else:
-                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view)
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view, agent_state=primary_agent_state)
                 with service.activity_summary_lock:
                     service.activity_summary_cache[cache_key] = {"signature": signature, "summary": dict(summary)}
             app.yoagent_controller.attach_yoagent_session_summary(session, summary)
@@ -6448,7 +6463,7 @@ class ActivityCache:
                 "running": summary_worker.running,
             }
         started = time.perf_counter()
-        agents = app.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path)
+        agents = app.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path, agent_states_by_identity=agent_states_by_identity)
         add_phase_timing(timings, "agents_ms", started)
         started = time.perf_counter()
         global_summary = build_global_activity_summary(ordered_summaries, errors, locale=locale)
@@ -8084,7 +8099,12 @@ class TmuxWebtermApp:
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
         self.stats_collection_state = StatsCollectionState()
+        self.status_collector_lease_lock = threading.Lock()
+        self.status_collector_lease_id = ""
         self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+        self.stats_opencode_cursors = stats_current_opencode.OpenCodeCursorStore(
+            stats_current_opencode.OpenCodeCursorStore.default_path()
+        )
         # M8: the live retained-health store, attached by whoever started this port's
         # observer. `None` until then, and the projection says `observer_unattached`
         # rather than publishing zeros. See `attach_backend_health_store`.
@@ -8305,6 +8325,59 @@ class TmuxWebtermApp:
         payload = self.status_snapshot_payload()
         return self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
 
+    def start_status_collector_lease(self) -> bool:
+        """Hold one statusd lease for this elected process's recurring status collectors."""
+        if not getattr(self, "sessions", ()):
+            return True
+        status_client = self.__dict__.get("status_client")
+        lease_lock = self.__dict__.get("status_collector_lease_lock")
+        if status_client is None or lease_lock is None or not hasattr(status_client, "acquire_generation_lease"):
+            return True
+        with lease_lock:
+            response = status_client.acquire_generation_lease(self.status_collector_lease_id)
+            lease_id = response.get("lease_id") if response.get("ok") is True else None
+            if not isinstance(lease_id, str) or not lease_id:
+                return False
+            self.status_collector_lease_id = lease_id
+            return True
+
+    def stop_status_collector_lease(self) -> None:
+        """Release the recurring collector's statusd lease when its owner stops."""
+        status_client = self.__dict__.get("status_client")
+        lease_lock = self.__dict__.get("status_collector_lease_lock")
+        if status_client is None or lease_lock is None or not hasattr(status_client, "release_generation_lease"):
+            return
+        with lease_lock:
+            lease_id = self.status_collector_lease_id
+            self.status_collector_lease_id = ""
+        if lease_id:
+            release_local_service_lease_eventually(status_client.release_generation_lease, lease_id)
+
+    def status_snapshot_payload_for_collector(self) -> AutoApproveStatusPayload | None:
+        """Claim statusd demand before a recurring collector reads its snapshot."""
+        if not self.start_status_collector_lease():
+            return None
+        payload = self.status_snapshot_payload()
+        if payload is not None:
+            return payload
+        status_client = self.__dict__.get("status_client")
+        wait_generation = getattr(status_client, "wait_generation", None)
+        if not callable(wait_generation):
+            return None
+        after_generation = 0
+        for _attempt in range(2):
+            generation = wait_generation(after_generation, timeout=1.0)
+            if generation.get("ok") is not True or generation.get("changed") is not True:
+                return None
+            next_generation = int(generation.get("generation") or 0)
+            if next_generation <= after_generation:
+                return None
+            payload = self.status_snapshot_payload()
+            if payload is not None:
+                return payload
+            after_generation = next_generation
+        return None
+
     def status_snapshot_payload(self) -> AutoApproveStatusPayload | None:
         """Decode statusd's completed public snapshot for non-HTTP consumers only."""
 
@@ -8325,6 +8398,10 @@ class TmuxWebtermApp:
         # consumers split the payload, rather than inventing a second revision clock.
         payload["agent_window_snapshot_revision"] = max(0, int(response.get("generation") or 0))
         return payload
+
+    def status_snapshot_available(self) -> bool:
+        """Keep roster absence distinguishable from an empty roster for collectors."""
+        return self.status_snapshot_payload() is not None
 
     @staticmethod
     def agent_window_snapshot_rows_by_target(payload: AutoApproveStatusPayload) -> tuple[int, dict[tuple[str, str, str, str], dict[str, Any]]]:
@@ -8360,12 +8437,12 @@ class TmuxWebtermApp:
         result: list[dict[str, Any]] = []
         for row in roster_rows:
             kind = str(row.get("kind") or "").lower()
-            if kind not in {"claude", "codex"}:
+            if kind not in VISIBLE_AGENT_KINDS:
                 continue
             window = TmuxWebtermApp.agent_window_index_key(row.get("window_index") if row.get("window_index") is not None else row.get("window"))
             window_name = str(row.get("window_name") or kind)
             window_label = str(row.get("window_label") or f"{window}:{window_name}")
-            state = str(row.get("state") or "idle")
+            state = str(row.get("state") or "unavailable")
             result.append({"session": session, "window": window, "window_index": int(window) if window.isdigit() else None, "window_name": window_name, "window_label": window_label, "pane": str(row.get("pane") or ""), "pane_target": str(row.get("pane_target") or ""), "agent_kind": kind, "agent_model": "", "cwd": "", "transcript": "", "recent_paths": [], "last_used_ts": 0.0, "last_used_text": "", "last_used_source": "statusd-roster", "last_used_reason": "statusd fallback", "running": state == "working", "state": state, "state_text": "", "sort_ts": float(row.get("observed_ts") or 0.0), "label": server_string(locale, "summary.recentAgentLabel", session=session, window=window_label)})
         return result
 
@@ -8471,9 +8548,9 @@ class TmuxWebtermApp:
             seen_keys.add(key)
             transcript = str(row.get("transcript") or "").strip()
             kind = str(row.get("kind") or "").strip().lower()
-            if not transcript and not include_missing:
+            if not transcript and kind != "opencode" and not include_missing:
                 continue
-            token_rows.append({
+            token_row = {
                 "key": key,
                 "label": self.stats_agent_token_label(row),
                 "transcript": transcript,
@@ -8481,19 +8558,44 @@ class TmuxWebtermApp:
                 "session": str(row.get("session") or "").strip(),
                 "window": str(row.get("window_index") if isinstance(row.get("window_index"), int) else row.get("window") or "").strip(),
                 "window_label": str(row.get("window_label") or row.get("label") or row.get("window") or "").strip(),
-            })
+            }
+            if kind == "opencode" and (row.get("agent_session_id") or row.get("session_id")):
+                token_row["agent_session_id"] = str(
+                    row.get("agent_session_id") or row.get("session_id") or ""
+                ).strip()
+            if kind == "opencode" and (row.get("cwd") or row.get("path")):
+                token_row["cwd"] = str(row.get("cwd") or row.get("path") or "").strip()
+            if kind == "opencode" and isinstance(row.get("started_at"), (int, float)) and not isinstance(row.get("started_at"), bool) and math.isfinite(float(row["started_at"])) and row["started_at"] > 0:
+                token_row["started_at"] = float(row["started_at"])
+            token_rows.append(token_row)
         # statusd deliberately discovers only cheap topology/status fields, so its public rows
         # cannot carry transcript paths. Token collection runs on its independent cadence and is
         # the sole consumer that needs enriched paths; keep that work out of UI status refreshes.
         if rows and not include_missing:
+            transcriptless_rows = [
+                row for row in rows
+                if str(row.get("kind") or "").strip().lower() in VISIBLE_AGENT_KINDS
+            ]
             unresolved_keys = sorted({
                 self.stats_agent_token_key(row, index)
-                for index, row in enumerate(rows)
+                for index, row in enumerate(transcriptless_rows)
                 if not str(row.get("transcript") or "").strip()
             })
             if unresolved_keys:
                 discovered_token_rows = self.stats_agent_token_enriched_rows("\n".join(unresolved_keys))
-                existing_keys = {str(row["key"]) for row in token_rows}
+                discovered_by_key = {str(row["key"]): row for row in discovered_token_rows}
+                existing_keys = set()
+                for token_row in token_rows:
+                    key = str(token_row["key"])
+                    existing_keys.add(key)
+                    discovered = discovered_by_key.get(key)
+                    if discovered is None:
+                        continue
+                    # Statusd owns the visible row. Discovery only fills fields omitted by its
+                    # lightweight payload; it must not create a second agent roster entry.
+                    for field in ("transcript", "agent_session_id", "cwd", "started_at"):
+                        if token_row.get(field) in (None, "") and discovered.get(field) not in (None, ""):
+                            token_row[field] = discovered[field]
                 token_rows.extend(
                     row for row in discovered_token_rows
                     if str(row["key"]) not in existing_keys
@@ -8528,13 +8630,17 @@ class TmuxWebtermApp:
         cached = memo.get_or_miss(unresolved_signature)
         if cached is not CACHE_MISS:
             return cached
-        discovered_sessions, _errors = discover_sessions(self.sessions)
         discovered_rows: list[dict[str, Any]] = []
+        # This is the existing enrichment discovery owner. Keep Claude/Codex and OpenCode in one
+        # roster and one key-space; OpenCode contributes identity metadata even though it has no
+        # transcript path. The statusd snapshot remains the primary input and this is only the
+        # established fallback when its optional fields are absent.
+        discovered_sessions, _errors = discover_sessions(self.sessions)
         for session, info in discovered_sessions.items():
             for agent in info.agents:
                 kind = str(agent.kind or "").strip().lower()
                 transcript = str(agent.transcript or "").strip()
-                if kind not in {"claude", "codex"} or not transcript:
+                if kind not in VISIBLE_AGENT_KINDS or (kind != "opencode" and not transcript):
                     continue
                 window, _pane = session_files.agent_window_for_info(info, agent)
                 try:
@@ -8547,9 +8653,19 @@ class TmuxWebtermApp:
                     "window_index": window_index,
                     "window_label": f"{window}:{kind}" if window else kind,
                     "kind": kind,
+                    **(
+                        {"pane_target": str(agent.pane_target or "")}
+                        if kind == "opencode" else {}
+                    ),
                     "transcript": transcript,
+                    "agent_session_id": str(agent.session_id or "").strip(),
+                    "cwd": str(agent.cwd or "").strip(),
+                    **({"started_at": float(agent.started_at)} if agent.started_at is not None and agent.started_at > 0 else {}),
                 })
-        discovered_token_rows = self.stats_agent_token_rows(discovered_rows) if discovered_rows else []
+        # Do not re-enter the enrichment path for a discovered OpenCode row without a transcript.
+        # The row is still useful for its explicit identity/cwd, and include_missing keeps this
+        # fallback on the same shared token-row construction path without recursive roster builds.
+        discovered_token_rows = self.stats_agent_token_rows(discovered_rows, include_missing=True) if discovered_rows else []
         memo.set(unresolved_signature, discovered_token_rows)
         return discovered_token_rows
 
@@ -8624,7 +8740,34 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        status_payload = self.status_snapshot_payload()
+        status_payload = self.status_snapshot_payload_for_collector()
+        configured_sessions = tuple(str(session).strip() for session in getattr(self, "sessions", ()) if str(session).strip())
+        if configured_sessions and status_payload is None:
+            return stats_current_collectors.collector_unavailable(
+                family="agent_status",
+                source_id="statusd",
+                epoch_id=attempt.epoch_id,
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason="statusd-unavailable",
+            )
+        if configured_sessions and (
+            not isinstance(status_payload, dict)
+            or not isinstance(status_payload.get("sessions"), dict)
+            or any(session not in status_payload["sessions"] for session in configured_sessions)
+        ):
+            return stats_current_collectors.collector_unavailable(
+                family="agent_status",
+                source_id="statusd",
+                epoch_id=attempt.epoch_id,
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason="statusd-roster-incomplete",
+            )
         rows = self.stats_agent_window_rows_from_auto_approve_payload(status_payload) if status_payload is not None else []
         snapshot_revision = max(0, int(status_payload.get("agent_window_snapshot_revision") or 0)) if status_payload is not None else 0
         states: dict[str, str] = {}
@@ -8744,15 +8887,312 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
+        if not self.start_status_collector_lease():
+            return stats_current_collectors.collector_unavailable(
+                family="agent_tokens",
+                source_id="statusd",
+                epoch_id=attempt.epoch_id,
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason="statusd-unavailable",
+            )
         rows = self.stats_agent_window_rows()
-        if self.sessions and not rows:
+        sessions = getattr(self, "sessions", ())
+        if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly
             # unavailable; emitting no facts preserves that unknown interval
             # without treating it as measured zero token usage.
+            status_payload = self.status_snapshot_payload() if hasattr(self, "status_client") else None
+            if status_payload is None:
+                return stats_current_collectors.collector_unavailable(
+                    family="agent_tokens",
+                    source_id="statusd",
+                    epoch_id=attempt.epoch_id,
+                    epoch_started_at=attempt.epoch_started_at,
+                    observed_at=attempt.scheduled_at,
+                    cadence_seconds=attempt.cadence_seconds,
+                    owner_generation=attempt.owner_generation,
+                    reason="status-roster-unavailable",
+                )
             return stats_current_collectors.CollectorFacts()
         atoms = []
         tombstones = []
-        scan = self.stats_current_transcript_usage.scan(self.stats_agent_token_rows(rows))
+        unavailable_spans = []
+        token_rows = self.stats_agent_token_rows(rows)
+        scan = self.stats_current_transcript_usage.scan(token_rows)
+        opencode_atoms: list[tuple[str, session_files.TranscriptUsageAtom]] = []
+        opencode_coverage: list[stats_current_storage.CoverageEpoch] = []
+        opencode_cursors = self.__dict__.get("stats_opencode_cursors")
+        if not isinstance(opencode_cursors, stats_current_opencode.OpenCodeCursorStore):
+            opencode_cursors = stats_current_opencode.OpenCodeCursorStore()
+            self.__dict__["stats_opencode_cursors"] = opencode_cursors
+        stats_client = self.__dict__.get("stats_current_client")
+        stats_database = getattr(stats_client, "database_path", None)
+        if isinstance(stats_database, Path):
+            cursor_fence = opencode_cursors.reset_for_database(stats_database)
+            if cursor_fence is not None:
+                return stats_current_collectors.collector_unavailable(
+                    family="agent_tokens",
+                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
+                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state-fence",
+                    epoch_started_at=attempt.epoch_started_at,
+                    observed_at=attempt.scheduled_at,
+                    cadence_seconds=attempt.cadence_seconds,
+                    owner_generation=attempt.owner_generation,
+                    reason=f"opencode-{cursor_fence.reason}",
+                )
+        cursor_state = opencode_cursors.state()
+        cursor_values = cursor_state.values if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState) else {}
+        cursor_epochs = (
+            cursor_state.epochs
+            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
+            and cursor_state.epochs is not None else {}
+        )
+        cursor_sequences = (
+            cursor_state.sequences
+            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
+            and cursor_state.sequences is not None else {}
+        )
+        cursor_presence = (
+            cursor_state.presence
+            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
+            and cursor_state.presence is not None else {}
+        )
+        cursor_event_revisions = (
+            cursor_state.event_revisions
+            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
+            and cursor_state.event_revisions is not None else {}
+        )
+        cursor_unavailable = cursor_state if isinstance(cursor_state, stats_current_opencode.OpenCodeUnavailable) else None
+        proposed_cursor_values = dict(cursor_values)
+        proposed_cursor_epochs = dict(cursor_epochs)
+        proposed_cursor_sequences = dict(cursor_sequences)
+        proposed_cursor_presence = dict(cursor_presence)
+        proposed_cursor_event_revisions = dict(cursor_event_revisions)
+        transcript_atoms_accepted = 0
+        opencode_results: dict[str, stats_current_opencode.OpenCodeReadResult] = {}
+        opencode_claims: dict[str, set[str]] = {}
+        for row_index, row in enumerate(token_rows):
+            if str(row.get("kind") or "").lower() != "opencode":
+                continue
+            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
+            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
+            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
+            started_at = row.get("started_at")
+            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
+                started_at = None
+            result = stats_current_opencode.read_usage(
+                session_id=session_id,
+                directory=directory,
+                started_at=started_at,
+                now=attempt.scheduled_at,
+            )
+            opencode_results[token_key] = result
+            if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
+                opencode_claims.setdefault(result.session.session_id, set()).add(token_key)
+        conflicting_opencode_keys = {
+            token_key
+            for claimants in opencode_claims.values()
+            if len(claimants) > 1
+            for token_key in claimants
+        }
+        for row_index, row in enumerate(token_rows):
+            if str(row.get("kind") or "").lower() != "opencode":
+                continue
+            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
+            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
+            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
+            started_at = row.get("started_at")
+            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
+                started_at = None
+            source_id = stats_current_opencode.source_id_for_selector(
+                session_id=session_id, directory=directory, agent_key=token_key,
+            )
+            if cursor_unavailable is not None:
+                unavailable_spans.extend(
+                    stats_current_collectors.collector_unavailable(
+                        family="agent_tokens",
+                        source_id=source_id,
+                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
+                        epoch_started_at=attempt.epoch_started_at,
+                        observed_at=attempt.scheduled_at,
+                        cadence_seconds=attempt.cadence_seconds,
+                        owner_generation=attempt.owner_generation,
+                        reason=f"opencode-{cursor_unavailable.reason}",
+                    ).unavailable_spans
+                )
+                continue
+            result = opencode_results[token_key]
+            if not isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
+                unavailable_source = source_id
+                unavailable_spans.extend(
+                    stats_current_collectors.collector_unavailable(
+                        family="agent_tokens",
+                        source_id=unavailable_source,
+                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
+                        epoch_started_at=attempt.epoch_started_at,
+                        observed_at=attempt.scheduled_at,
+                        cadence_seconds=attempt.cadence_seconds,
+                        owner_generation=attempt.owner_generation,
+                        reason=f"opencode-{result.reason}",
+                    ).unavailable_spans
+                )
+                continue
+            if token_key in conflicting_opencode_keys:
+                unavailable_spans.extend(
+                    stats_current_collectors.collector_unavailable(
+                        family="agent_tokens",
+                        source_id=source_id,
+                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
+                        epoch_started_at=attempt.epoch_started_at,
+                        observed_at=attempt.scheduled_at,
+                        cadence_seconds=attempt.cadence_seconds,
+                        owner_generation=attempt.owner_generation,
+                        reason="opencode-session-claimed-by-multiple-agents",
+                    ).unavailable_spans
+                )
+                continue
+            source_id = stats_current_opencode.source_id_for_session(result.session.session_id)
+            # OpenCode reports reasoning and cache-write counters, but the current atom contract
+            # has no exact representation for either dimension. Keep input/cache-read/output
+            # atoms and mark them partial instead of shading the whole source as unavailable.
+            opencode_omits_dimensions = any(
+                component.dimension not in stats_current_opencode._ATOM_DIMENSIONS
+                for component in result.components
+            )
+            # Each step-finish part is already a completed-step quantity. Do not subtract the
+            # session's cumulative counters, which turns historical work into a latest-bucket burst.
+            # Value-only cursors from the previous implementation are retained for reset recovery,
+            # but cannot identify historical parts and therefore do not suppress this backfill.
+            opencode_coverage.append(stats_current_storage.CoverageEpoch(
+                "agent_tokens", source_id,
+                f"{attempt.epoch_id}:opencode:{result.session.session_id}",
+                attempt.epoch_started_at, attempt.scheduled_at + attempt.cadence_seconds,
+                attempt.cadence_seconds, attempt.owner_generation,
+            ))
+            for component in result.components:
+                if component.dimension not in stats_current_opencode._ATOM_DIMENSIONS:
+                    continue
+                cursor_key = stats_current_opencode.cursor_key(
+                    component.session_id, component.dimension,
+                )
+                if not component.source_revision:
+                    # Fixtures and pre-revision adapters may still provide cumulative snapshots.
+                    # Keep that compatibility path isolated from the real per-part reader.
+                    previous = proposed_cursor_values.get(cursor_key)
+                    if previous is not None and component.tokens < previous:
+                        proposed_cursor_epochs[cursor_key] = proposed_cursor_epochs.get(cursor_key, 0) + 1
+                        proposed_cursor_sequences[cursor_key] = 0
+                        proposed_cursor_values[cursor_key] = component.tokens
+                        continue
+                    quantity = component.tokens - previous if previous is not None else component.tokens
+                    proposed_cursor_values[cursor_key] = component.tokens
+                    if quantity <= 0:
+                        continue
+                    proposed_cursor_sequences[cursor_key] = proposed_cursor_sequences.get(cursor_key, 0) + 1
+                    event_id = stats_current_opencode.delta_event_id(
+                        component.session_id, component.dimension,
+                        proposed_cursor_epochs.get(cursor_key, 0),
+                        proposed_cursor_sequences[cursor_key],
+                    )
+                else:
+                    quantity = component.tokens
+                    event_id = component.event_id
+                if quantity <= 0:
+                    continue
+                if component.source_revision:
+                    previous_revision = proposed_cursor_event_revisions.get(event_id)
+                    if previous_revision == component.source_revision:
+                        continue
+                    if previous_revision is not None and previous_revision != component.source_revision:
+                        unavailable_spans.extend(
+                            stats_current_collectors.collector_unavailable(
+                                family="agent_tokens", source_id=source_id,
+                                epoch_id=f"{attempt.epoch_id}:opencode:revision",
+                                epoch_started_at=attempt.epoch_started_at,
+                                observed_at=attempt.scheduled_at,
+                                cadence_seconds=attempt.cadence_seconds,
+                                owner_generation=attempt.owner_generation,
+                                reason="opencode-source-revision-changed",
+                            ).unavailable_spans
+                        )
+                        continue
+                    proposed_cursor_event_revisions[event_id] = component.source_revision
+                if component.dimension == "input":
+                    direction, cache_role = "input", "none"
+                elif component.dimension == "cache_read":
+                    direction, cache_role = "input", "read"
+                elif component.dimension == "output":
+                    direction, cache_role = "output", "none"
+                else:
+                    # The current atom contract has no exact role for OpenCode's cache-write
+                    # lifetime or reasoning counter. Do not relabel either as billable input/output.
+                    continue
+                opencode_atoms.append((
+                    token_key,
+                    session_files.TranscriptUsageAtom(
+                        source=f"opencode:{component.session_id}",
+                        timestamp=component.observed_at,
+                        event_id=event_id,
+                        provider=component.provider,
+                        model=component.model,
+                        model_evidence=component.model_evidence,
+                        effort="unknown",
+                        direction=direction,
+                        modality="text",
+                        cache_role=cache_role,
+                        unit="tokens",
+                        quantity=float(quantity),
+                        root_thread_id=component.session_id,
+                        agent_thread_id=component.session_id,
+                        endpoint="opencode",
+                        # OpenCode also reports cache-write and reasoning counters. They have no
+                        # exact current atom representation, so supported atoms remain usable but
+                        # explicitly partial rather than claiming complete telemetry.
+                        telemetry_complete=(
+                            component.telemetry_complete and not opencode_omits_dimensions
+                        ),
+                    ),
+                ))
+        cursor_prepared = False
+        try:
+            if (
+                proposed_cursor_values != cursor_values
+                or proposed_cursor_epochs != cursor_epochs
+                or proposed_cursor_sequences != cursor_sequences
+                or proposed_cursor_presence != cursor_presence
+                or proposed_cursor_event_revisions != cursor_event_revisions
+            ):
+                opencode_cursors.prepare(
+                    proposed_cursor_values,
+                    proposed_cursor_epochs,
+                    proposed_cursor_sequences,
+                    expected_values=cursor_values,
+                    expected_epochs=cursor_epochs,
+                    expected_sequences=cursor_sequences,
+                    presence=proposed_cursor_presence,
+                    expected_presence=cursor_presence,
+                    event_revisions=proposed_cursor_event_revisions,
+                    expected_event_revisions=cursor_event_revisions,
+                )
+                cursor_prepared = True
+        except (OSError, ValueError) as error:
+            unavailable_spans.extend(
+                stats_current_collectors.collector_unavailable(
+                    family="agent_tokens",
+                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
+                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state",
+                    epoch_started_at=attempt.epoch_started_at,
+                    observed_at=attempt.scheduled_at,
+                    cadence_seconds=attempt.cadence_seconds,
+                    owner_generation=attempt.owner_generation,
+                    reason=f"opencode-{str(error)[:120] or 'cursor-state-unavailable'}",
+                ).unavailable_spans
+            )
+            opencode_atoms = []
+            opencode_coverage = []
         current_settings = self.settings_payload().get("settings", {})
         rejection_reasons: dict[str, int] = {}
         for item in scan.items:
@@ -8769,15 +9209,34 @@ class TmuxWebtermApp:
                 )
             try:
                 atoms.append(stats_current_usage.usage_atom_from_source(fields))
+                transcript_atoms_accepted += 1
             except stats_current_usage.UsageValidationError as error:
                 reason = str(error)[:160] or "usage_validation_error"
                 rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 continue
+        for tmux_key, atom in opencode_atoms:
+            fields = dict(vars(atom))
+            fields["tmux_key"] = tmux_key
+            fields["agent_kind"] = "opencode"
+            fields["agent_id"] = tmux_key
+            if fields.get("pricing_profile", "default") == "default":
+                fields["pricing_profile"] = configured_usage_pricing_profile(
+                    current_settings,
+                    provider=str(fields.get("provider") or ""),
+                    execution_source="opencode",
+                    endpoint=str(fields.get("endpoint") or ""),
+                    observed_at=atom.timestamp,
+                )
+            try:
+                atoms.append(stats_current_usage.usage_atom_from_source(fields))
+            except stats_current_usage.UsageValidationError as error:
+                reason = str(error)[:160] or "usage_validation_error"
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
         if "stats_current_client" in self.__dict__ and isinstance(self.stats_current_client, StatsCurrentClient):
             self.stats_current_client.set_usage_atom_backfill_status(
                 self.stats_current_transcript_usage.usage_atom_backfill_status_for_scan(
                     scan,
-                    atoms_accepted=len(atoms),
+                    atoms_accepted=transcript_atoms_accepted,
                     rejection_reasons=rejection_reasons,
                 )
             )
@@ -8788,19 +9247,52 @@ class TmuxWebtermApp:
                 )
             )
         process_id, _label, _port = self.stats_current_process_identity()
+        cursor_changed = (
+            proposed_cursor_values != cursor_values
+            or proposed_cursor_epochs != cursor_epochs
+            or proposed_cursor_sequences != cursor_sequences
+            or proposed_cursor_presence != cursor_presence
+            or proposed_cursor_event_revisions != cursor_event_revisions
+        )
+        transcript_committed = False
+        cursor_committed = not cursor_prepared
+
+        def commit_receipt() -> None:
+            nonlocal transcript_committed, cursor_committed
+            if not transcript_committed:
+                self.stats_current_transcript_usage.commit(scan.receipt_id)
+                transcript_committed = True
+            if cursor_prepared and not cursor_committed:
+                opencode_cursors.commit()
+                cursor_committed = True
+
+        def rollback_receipt() -> None:
+            if not transcript_committed:
+                try:
+                    self.stats_current_transcript_usage.rollback(scan.receipt_id)
+                finally:
+                    if cursor_prepared and not cursor_committed:
+                        opencode_cursors.rollback()
+            elif cursor_prepared and not cursor_committed:
+                # The transcript receipt is already durable. Discarding the pending cursor is
+                # safe because the next deterministic atom reuses its event ID and statsd dedupes it.
+                opencode_cursors.rollback()
+        receipt = stats_current_collectors.CollectorReceipt(
+            commit_receipt,
+            rollback_receipt,
+        )
         return stats_current_collectors.usage_scan_success(
             atoms,
             tombstones,
-            stats_current_collectors.CollectorReceipt(
-                lambda: self.stats_current_transcript_usage.commit(scan.receipt_id),
-                lambda: self.stats_current_transcript_usage.rollback(scan.receipt_id),
-            ),
+            receipt,
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
             observed_at=attempt.scheduled_at,
             cadence_seconds=attempt.cadence_seconds,
             owner_generation=attempt.owner_generation,
             source_id=process_id,
+            unavailable_spans=unavailable_spans,
+            additional_coverage=opencode_coverage,
             budget_exhausted_follow_up=scan.budget_exhausted,
         )
 
@@ -8908,6 +9400,7 @@ class TmuxWebtermApp:
         self.job_client.start_for_scheduler()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
         self.pricing_refresh_coordinator.start_periodic()
+        self.start_status_collector_lease()
         self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
         # Startup must bind before any repository snapshot work.  The old warm-cache probe
@@ -9425,6 +9918,7 @@ class TmuxWebtermApp:
     def demote_background_owner(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
+        self.stop_status_collector_lease()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).stop()
         self.job_client.stop_for_scheduler()
         with self.metadata_warm_lock:
@@ -9604,6 +10098,8 @@ class TmuxWebtermApp:
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
         membership_changed = set(roster) != set(self.sessions)
         self.sessions = roster
+        if not roster:
+            self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
             # Record the transition only after installing the roster. A build that started before
             # this instant cannot have observed the new membership, so the existing single-flight
@@ -16298,6 +16794,8 @@ class TmuxWebtermApp:
                 continue
             if str(agent.get("session") or "") != session or agent.get("dead") is True:
                 continue
+            if str(agent.get("agent") or "").lower() not in {"claude", "codex"}:
+                continue
             add_target(agent.get("target") or agent.get("pane_id"))
         return targets
 
@@ -16504,11 +17002,62 @@ class TmuxWebtermApp:
             screen_classifier=self.agent_pane_screen_classification,
             discover_sessions_func=discover_sessions,
         )
-        return normalized_prompt_state(state.prompt), dict(state.screen)
+        screen = dict(state.screen)
+        session_info = discovered_sessions.get(session) if discovered_sessions is not None else None
+        pane_agent = next(
+            (
+                agent for agent in (session_info.agents if session_info is not None else ())
+                if str(agent.pane_target or "") == target
+            ),
+            None,
+        )
+        if pane_agent is not None:
+            screen = self.opencode_screen_state_with_native_activity(pane_agent, screen)
+        return normalized_prompt_state(state.prompt), screen
 
     @staticmethod
-    def agent_pane_screen_classification(visible_text: str, pane_target: str | None) -> dict[str, Any]:
-        return dict(agent_screen_state(visible_text, pane_target=pane_target))
+    def agent_pane_screen_classification(
+        visible_text: str,
+        pane_target: str | None,
+        agent_kind: str | None = None,
+        opencode_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return dict(agent_screen_state(
+            visible_text,
+            pane_target=pane_target,
+            agent_kind=agent_kind,
+            opencode_session_id=opencode_session_id,
+        ))
+
+    @staticmethod
+    def opencode_screen_state_with_native_activity(
+        agent: AgentInfo, screen: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Use OpenCode's native state only to resolve a visible meter-only ambiguity."""
+        if (
+            str(agent.kind or "").strip().lower() != "opencode"
+            or screen.get("activity_source") != "opencode-meter-ambiguous"
+            or not str(agent.session_id or "").strip()
+        ):
+            return screen
+        native = stats_current_opencode.read_state(
+            session_id=str(agent.session_id).strip(),
+            directory=str(agent.cwd or "").strip() or None,
+            started_at=agent.started_at,
+            now=time.time(),
+        )
+        if not isinstance(native, stats_current_opencode.OpenCodeStateSuccess):
+            return screen
+        if native.state != "working":
+            return screen
+        return {
+            "key": "working",
+            "text": "agent is working",
+            "negative_reason": "agent is working",
+            "activity_source": "opencode-native-state",
+            "agent": "opencode",
+            "evidence_lines": list(native.evidence) or [str(screen.get("evidence_lines") or "meter")],
+        }
 
     def roster_pane_classification(
         self,
@@ -16527,6 +17076,25 @@ class TmuxWebtermApp:
                 return approval_prompt_state(visible_text)
             return approval_prompt_state(visible_text, pane_text)
 
+        session_info = discovered_sessions.get(session)
+        pane_agent = next(
+            (
+                agent for agent in (session_info.agents if session_info is not None else ())
+                if str(agent.pane_target or "") == target
+            ),
+            None,
+        )
+
+        def roster_screen_classifier(
+            visible_text: str, pane_target: str | None, _agent_kind: str = "",
+        ) -> dict[str, Any]:
+            return self.agent_pane_screen_classification(
+                visible_text,
+                pane_target,
+                pane_agent.kind if pane_agent is not None else None,
+                pane_agent.session_id if pane_agent is not None else None,
+            )
+
         state = classify_agent_pane(
             target,
             session=session,
@@ -16538,7 +17106,11 @@ class TmuxWebtermApp:
             capture_func=tmux_capture_pane,
             capture_styled_func=tmux_capture_pane_styled,
             prompt_classifier=roster_prompt_classifier,
-            screen_classifier=self.agent_pane_screen_classification,
+            screen_classifier=roster_screen_classifier,
+        )
+        screen = (
+            self.opencode_screen_state_with_native_activity(pane_agent, dict(state.screen))
+            if pane_agent is not None else dict(state.screen)
         )
         if state.reason_code in {"disconnected", "error"}:
             return {
@@ -16547,7 +17119,7 @@ class TmuxWebtermApp:
             }
         return {
             "prompt": normalized_prompt_state(state.prompt),
-            "screen": dict(state.screen),
+            "screen": screen,
         }
 
     def agent_window_screen_state(
@@ -16556,16 +17128,25 @@ class TmuxWebtermApp:
         preclassified_by_target: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         target = str(agent.pane_target or "")
+        screen: dict[str, Any] | None = None
         if target and preclassified_by_target and target in preclassified_by_target:
             preclassified = preclassified_by_target[target]
-            screen = preclassified.get("screen") if isinstance(preclassified, dict) else None
-            return dict(screen if isinstance(screen, dict) else preclassified)
-        if not target:
+            candidate = preclassified.get("screen") if isinstance(preclassified, dict) else None
+            screen = dict(candidate if isinstance(candidate, dict) else preclassified)
+        if screen is None and not target:
             return {"key": "idle", "text": ""}
-        visible_text = tmux_capture_pane(target, visible_only=True)
-        if visible_text is None:
-            return {"key": "idle", "text": "failed to capture pane"}
-        return dict(agent_screen_state(visible_text, pane_target=target))
+        if screen is None:
+            visible_text = tmux_capture_pane(target, visible_only=True)
+            if visible_text is None:
+                return {"key": "idle", "text": "failed to capture pane"}
+            screen = dict(agent_screen_state(
+                visible_text,
+                pane_target=target,
+                agent_kind=agent.kind,
+                opencode_session_id=agent.session_id,
+            ))
+        screen = self.opencode_screen_state_with_native_activity(agent, screen)
+        return screen
 
     @staticmethod
     def agent_window_state_from_screen(screen: dict[str, Any]) -> str:
@@ -16576,6 +17157,8 @@ class TmuxWebtermApp:
             return "approval"
         if key == "needs-input":
             return "needs-input"
+        if key == "paused":
+            return "blocked"
         if key == "blocked":
             return "blocked"
         return "idle"
@@ -16744,7 +17327,7 @@ class TmuxWebtermApp:
         for session, info in discovered_sessions.items():
             for agent in info.agents:
                 kind = str(agent.kind or "").lower()
-                if kind not in {"claude", "codex"} or not agent.pane_target:
+                if kind not in VISIBLE_AGENT_KINDS or not agent.pane_target:
                     continue
                 window, _pane = session_files.agent_window_for_info(info, agent)
                 live.add("\x1f".join((session, window, str(agent.pane_target), kind)))
@@ -17351,7 +17934,7 @@ class TmuxWebtermApp:
                     continue
                 window = self.agent_window_index_key(raw_window.get("window_index") if raw_window.get("window_index") is not None else raw_window.get("window"))
                 kind = str(raw_window.get("kind") or "").strip().lower()
-                if not window or kind not in {"claude", "codex"}:
+                if not window or kind not in VISIBLE_AGENT_KINDS:
                     continue
                 key = (window, kind)
                 item = records.setdefault(key, {"paths_by_root": {}})
@@ -17420,7 +18003,21 @@ class TmuxWebtermApp:
             include_path_metadata=include_path_metadata,
             owned_rows_by_target=owned_rows_by_target,
         )
-        return assemble_agent_window_rows(gathered_agents, snapshot_revision=snapshot_revision)
+        rows = assemble_agent_window_rows(gathered_agents, snapshot_revision=snapshot_revision)
+        gathered_by_identity = {
+            (str(item.get("pane_target") or ""), str(item.get("kind") or "").lower()): item
+            for item in gathered_agents
+        }
+        for row in rows:
+            gathered = gathered_by_identity.get(
+                (str(row.get("pane_target") or ""), str(row.get("kind") or "").lower())
+            )
+            if gathered is not None and str(row.get("kind") or "").lower() == "opencode":
+                row["cwd"] = str(gathered.get("cwd") or "")
+            elif str(row.get("kind") or "").lower() != "opencode":
+                for field in ("transcript", "transcript_id", "agent_session_id", "cwd"):
+                    row.pop(field, None)
+        return rows
 
     def agent_window_gathered_agents(
         self,
@@ -17458,10 +18055,19 @@ class TmuxWebtermApp:
         fallback_git_cache: dict[str, dict[str, Any] | None] = {}
         for agent_index, agent in enumerate(info.agents):
             kind = str(agent.kind or "").lower()
-            if kind not in {"claude", "codex"}:
+            if kind not in VISIBLE_AGENT_KINDS:
                 continue
             window, pane = session_files.agent_window_for_info(info, agent)
             screen = self.agent_window_screen_state(agent, preclassified_by_target=preclassified_by_target)
+            owned_row = (owned_rows_by_target or {}).get((session, self.agent_window_index_key(window), str(agent.pane_target or ""), kind))
+            if kind == "opencode" and owned_rows_by_target is not None and owned_row is None:
+                screen = {
+                    "key": "unavailable",
+                    "text": "canonical OpenCode status unavailable",
+                    "negative_reason": "canonical OpenCode status unavailable",
+                    "activity_source": "statusd-unavailable",
+                    "agent": "opencode",
+                }
             state = self.agent_window_state_from_screen(screen)
             elapsed = self.float_value(screen.get("display_elapsed_seconds"), self.float_value(screen.get("status_elapsed_seconds"), -1.0))
             last_active_ts = self.agent_window_last_active_ts(activity, session, window)
@@ -17520,9 +18126,11 @@ class TmuxWebtermApp:
                 "path_entries": path_entries,
                 "fallback_path": fallback_path,
                 "git": copy.deepcopy(path_record.get("git")) if isinstance(path_record, dict) and isinstance(path_record.get("git"), dict) else None,
-                "transcript": str(agent.transcript or ""),
-                "transcript_id": self.agent_transcript_id(agent),
+                 "transcript": str(agent.transcript or ""),
+                 "transcript_id": self.agent_transcript_id(agent),
                 "agent_session_id": str(agent.session_id or ""),
+                "cwd": str(agent.cwd or ""),
+                **({"started_at": float(agent.started_at)} if agent.started_at is not None and agent.started_at > 0 else {}),
                 "elapsed": elapsed,
                 "last_active_ts": last_active_ts,
                 "working_stopped_ts": working_stopped_ts,
@@ -17536,7 +18144,7 @@ class TmuxWebtermApp:
                 "cooldown_attention_key": cooldown_attention_key,
                 "cooldown_acknowledged": self.attention_acknowledged(cooldown_attention_key) if cooldown_attention_key else None,
                 "cooldown_acknowledged_at": self.attention_acknowledged_at(cooldown_attention_key) if cooldown_attention_key else None,
-                "owned": (owned_rows_by_target or {}).get((session, self.agent_window_index_key(window), str(agent.pane_target or ""), kind)),
+                "owned": owned_row,
             })
         return gathered_agents
 
@@ -17659,12 +18267,22 @@ class TmuxWebtermApp:
         classifications: dict[str, dict[str, Any]] = {}
         capture_count = 0
         for target, session in targets.items():
+            info = discovered_sessions.get(session)
+            pane_agent = next(
+                (
+                    agent for agent in info.agents
+                    if str(agent.pane_target or "") == target
+                ),
+                None,
+            ) if info is not None else None
+            agent_kind = str(pane_agent.kind or "").strip().lower() if pane_agent is not None else ""
             source_signature = pane_source_signatures.get(target) if pane_source_signatures is not None else None
             cached = self.status_pane_classification_cache.get(target)
             cache_matches = (
                 source_signature is not None
                 and isinstance(cached, dict)
                 and cached.get("source_signature") == source_signature
+                and cached.get("agent_kind") == agent_kind
                 and isinstance(cached.get("screen"), dict)
             )
             must_capture = (
@@ -17684,6 +18302,7 @@ class TmuxWebtermApp:
                 if source_signature is not None:
                     cached = {
                         "source_signature": source_signature,
+                        "agent_kind": agent_kind,
                         "prompt": dict(classification["prompt"]),
                         "screen": dict(classification["screen"]),
                     }
@@ -17820,6 +18439,7 @@ class TmuxWebtermApp:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
         self.stop_batchd_operation_service()
+        self.stop_status_collector_lease()
         self.job_client.stop_for_scheduler()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
         port = int(self.background_owner.port or 0)

@@ -621,6 +621,9 @@ def parse_pane_signal_row(line: str) -> dict[str, Any] | None:
         "current_path": raw["pane_current_path"],
         "current_command": command,
         "title": raw["pane_title"],
+        # pane_current_command is only a label. OpenCode is deliberately omitted here because
+        # process identity is owned by session discovery; an arbitrary pane running a command
+        # named ``opencode`` must not become an agent from this signal-only snapshot.
         "agent": command if command in AGENT_COMMANDS else "",
         "dead": bool_value(raw["pane_dead"]),
         "dead_status": int_or_none(raw["pane_dead_status"]),

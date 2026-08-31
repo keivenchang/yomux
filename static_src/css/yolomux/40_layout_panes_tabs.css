@@ -646,6 +646,11 @@ body.layout-resizing {
   scrollbar-width: auto;
   scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
 }
+/* Terminal scrolling is translated by the shared touch owner into app/tmux line events. Prevent
+   mobile browsers from committing the gesture to the document before that owner can claim it. */
+:where(.terminal, .terminal .xterm, .terminal .xterm-viewport, .terminal .xterm-scrollable-element, .terminal .xterm-screen, .terminal .xterm-rows) {
+  touch-action: none;
+}
 :where(
   .preferences-scroll,
   .terminal .xterm-viewport,
@@ -1857,6 +1862,10 @@ body.app-topbar-touch-compact .pane-tab-close {
   --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
   color: transparent !important;
 }
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked {
+  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  color: transparent !important;
+}
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown {
   --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
   color: transparent !important;
@@ -1895,6 +1904,16 @@ body.app-topbar-touch-compact .pane-tab-close {
   block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
   border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
   background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked::before {
+  box-sizing: border-box;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
+  background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--acknowledged::before {
+  background: var(--muted);
 }
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before,
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {

@@ -1524,8 +1524,24 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         def prompt_classifier(prompt_target: str, visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:
             return self.deps.hybrid_approval_prompt_state(prompt_target, visible_text, pane_text, prompt_source=prompt_source)
 
-        def screen_classifier(visible_text: str, pane_target: str | None) -> dict[str, Any]:
-            return dict(self.deps.agent_screen_state(visible_text, pane_target=pane_target))
+        info = infos.get(session)
+        pane_agent = next(
+            (
+                item for item in (info.agents if info is not None else [])
+                if str(item.pane_target or "") == target_pane
+            ),
+            None,
+        )
+
+        def screen_classifier(
+            visible_text: str, pane_target: str | None, _agent_kind: str = "",
+        ) -> dict[str, Any]:
+            return dict(self.deps.agent_screen_state(
+                visible_text,
+                pane_target=pane_target,
+                agent_kind=pane_agent.kind if pane_agent is not None else None,
+                opencode_session_id=pane_agent.session_id if pane_agent is not None else None,
+            ))
 
         state = classify_agent_pane(
             target_pane,

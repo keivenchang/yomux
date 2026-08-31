@@ -39,7 +39,7 @@ def promoted_capture_cases():
     inventory_path = PROMPT_CORPUS_DIR / "captures" / "inventory.yaml"
     return PROMPT_CORPUS.cases(
         inventory_path,
-        include=lambda _item, data: "expected_promoted" in data,
+        include=lambda item, data: "expected_promoted" in data and item.get("agent") in {"claude", "codex"},
     )
 
 

@@ -885,6 +885,7 @@ function yoagentRecentAgentSortTs(agent, signal = yoagentRecentAgentSignal(agent
 
 function yoagentRecentAgentSignal(agent) {
   const target = String(agent?.pane_target || '').trim();
+  const agentKind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.agent_kind) : '';
   let pane = target ? tmuxSignalPaneForTarget(target) : null;
   if (!pane) {
     const session = String(agent?.session || '').trim();
@@ -894,7 +895,7 @@ function yoagentRecentAgentSignal(agent) {
       tmuxSignalPaneSession(candidate) === session
       && String(candidate?.window_index ?? '').trim() === windowText
       && (!paneText || String(candidate?.pane_index ?? '').trim() === paneText)
-      && tmuxSignalPaneIsAgent(candidate)
+      && (tmuxSignalPaneIsAgent(candidate) || agentKind === 'opencode')
     )) || null;
   }
   const windowRecord = pane ? tmuxSignalWindowForPane(pane) : tmuxSignalWindowForSessionIndex(agent?.session, agent?.window);

@@ -107,6 +107,26 @@ def usage_record(cache_role: str = "none") -> dict[str, object]:
     }
 
 
+def opencode_usage_record(*, event_id: str = "opencode:step:output", observed_at: float = 99_991.0) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "direction": "output",
+        "modality": "text",
+        "cache_role": "none",
+        "unit": "tokens",
+        "observed_at": observed_at,
+        "payload": {
+            "quantity": 20,
+            "provider": "inferencehub",
+            "model": "switchyard/openai/gpt-5.6-luna",
+            "agent_id": "yo7220|1|%1|opencode",
+            "execution_source": "opencode",
+            "thread_id": "ses-live",
+            "telemetry_complete": False,
+        },
+    }
+
+
 def append_request(
     *,
     observations: list[dict[str, object]] | None = None,
@@ -1125,6 +1145,44 @@ def test_current_browser_batch_ack_materializes_shared_all_client_series(tmp_pat
         "browser_bandwidth_bytes_per_second", "browser_disconnected_ms",
     }
     assert browser_series("different-browser") == browser_series(raw_client)
+
+
+def test_opencode_usage_reaches_statsd_snapshot_with_current_event_timestamp(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
+    )
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as store:
+        service.writer = store
+        accepted, _binary = service.handle_with_binary(
+            append_request(usage_atoms=[opencode_usage_record(observed_at=99_991.0)])
+        )
+        assert accepted["ok"] is True
+        assert accepted["counts"]["usage_atoms_accepted"] == 1
+        snapshot = store.read_snapshot()
+        generation = materializer.build_generation(
+            snapshot,
+            source_generation=accepted["source_generation"],
+            cache_generation=1,
+            generated_at=100_000.0,
+            observed_until=100_000.0,
+        )
+    service.writer = None
+    assert service._publish(generation, service._encode_generation(generation)) is True
+
+    metadata, binary = service.handle_with_binary(snapshot_request())
+    wire = protocol.validate_snapshot(json.loads(binary))
+    series = {
+        name: item
+        for bucket in wire["buckets"]
+        for name, item in bucket["series"].items()
+    }
+
+    assert metadata["ok"] is True
+    assert series["agent_tokens_per_minute:yo7220|1|%1|opencode"]["value"] == 1200
+    assert series["model_tokens_per_minute:output:switchyard/openai/gpt-5.6-luna"]["value"] == 1200
 
 
 def test_shared_browser_delta_and_cache_have_no_per_client_keys(tmp_path):

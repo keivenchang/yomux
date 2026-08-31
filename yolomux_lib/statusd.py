@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import threading
@@ -64,6 +65,7 @@ STATUSD_SESSION_ACTIVE_AGE_SECONDS = 5 * 60.0
 STATUSD_SESSION_RECENT_AGE_SECONDS = 60 * 60.0
 STATUSD_SESSION_COLD_AGE_SECONDS = 24 * 60 * 60.0
 STATUSD_SESSION_MAX_JITTER_SECONDS = 5.0
+STATUSD_OPENCODE_FIELD_MAX_BYTES = 256
 
 STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
     "ping": "_handle_ping", "status": "_handle_status", "profile": "_handle_status",
@@ -395,8 +397,50 @@ class PersistentStatusService(LocalRpcServiceState):
             {"target": str(pane.target or ""), "window": str(pane.window or ""), "cwd": str(pane.current_path or ""), "active": bool(getattr(pane, "active", False))}
             for pane in getattr(info, "panes", [])
         ]
+        def bounded_opencode_field(value: object) -> str:
+            if not isinstance(value, str):
+                return ""
+            normalized = value.strip()
+            if len(normalized.encode("utf-8")) > STATUSD_OPENCODE_FIELD_MAX_BYTES or any(
+                ord(character) < 32 or ord(character) == 127 for character in normalized
+            ):
+                return ""
+            return normalized
+
+        def bounded_opencode_started_at(value: object) -> float | None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            normalized = float(value)
+            return normalized if math.isfinite(normalized) and normalized > 0 else None
+
+        pane_cwds = {
+            str(pane.target or ""): str(pane.current_path or "")
+            for pane in getattr(info, "panes", [])
+            if str(pane.target or "")
+        }
+
         agents = [
-            {"kind": str(agent.kind or ""), "pane": str(getattr(agent, "pane_target", "") or "")}
+            {
+                "kind": str(agent.kind or "").lower(),
+                "pane": str(getattr(agent, "pane_target", "") or ""),
+                **(
+                    {
+                        "session_id": bounded_opencode_field(getattr(agent, "session_id", "")),
+                        "cwd": bounded_opencode_field(
+                            getattr(agent, "cwd", "") or pane_cwds.get(
+                                str(getattr(agent, "pane_target", "") or ""), ""
+                            )
+                        ),
+                        **(
+                            {"started_at": bounded_opencode_started_at(getattr(agent, "started_at", None))}
+                            if bounded_opencode_started_at(getattr(agent, "started_at", None)) is not None
+                            else {}
+                        ),
+                    }
+                    if str(agent.kind or "").lower() == "opencode"
+                    else {}
+                ),
+            }
             for agent in getattr(info, "agents", [])
         ]
         material = json.dumps({"panes": panes, "agents": agents}, sort_keys=True, separators=(",", ":"))

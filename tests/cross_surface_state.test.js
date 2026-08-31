@@ -2528,7 +2528,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="tab"') < pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"'), 'Preferences shows colored aggregate Tab balls to the left of colored play/pause/stop glyphs');
     assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"') < pulseExampleHtml.indexOf('data-status-pulse-example="acknowledgement"'), 'Preferences shows fading gray play/pause/stop glyphs after the colored glyphs');
     for (const group of ['tab', 'subwindow', 'acknowledgement']) {
-      assert.equal((pulseExampleHtml.match(new RegExp(`data-status-pulse-example-group="${group}"`, 'g')) || []).length, 3, `Preferences ${group} example has working/play, cooldown/pause, and attention/stop states`);
+      assert.equal((pulseExampleHtml.match(new RegExp(`data-status-pulse-example-group="${group}"`, 'g')) || []).length, 5, `Preferences ${group} example has working/play, attention/stop, blocked/stop, unavailable/attention, and cooldown/pause states`);
     }
     const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="yolo"');
     const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);

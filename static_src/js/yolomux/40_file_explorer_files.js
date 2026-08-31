@@ -2864,12 +2864,12 @@ function fileTreeChangedFile(path) {
 
 function sessionFileAgentKinds(item) {
   const raw = Array.isArray(item?.agents) ? item.agents : (item?.agent ? [item.agent] : []);
-  const order = {claude: 0, codex: 1};
+  const order = {claude: 0, codex: 1, opencode: 2};
   const seen = new Set();
   return raw
     .map(value => String(value || '').toLowerCase())
     .filter(value => value && !seen.has(value) && seen.add(value))
-    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+    .sort((a, b) => (order[a] ?? 3) - (order[b] ?? 3) || a.localeCompare(b));
 }
 
 function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
@@ -4916,7 +4916,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // ---------------------------------------------------------------------------
 // Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
 // tmux sessions (level 0) -> their tmux sub-windows (level 1, index:process, the current window marked) -> for
-// claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
+// visible agent windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
 // collapse state is a persisted COLLAPSED set (default expanded), window times come from one semantic
@@ -4993,7 +4993,7 @@ function tabberAgentRecency(agent) {
 // Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
 // visible date text, and parent session bubbling.
 function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
-  const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
+  const isAgent = row?.isAgent === true || ['claude', 'codex', 'opencode'].includes(String(row?.agentKey || '').toLowerCase());
   if (isAgent) {
     const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
     if (workingTs > 0) return workingTs;
@@ -5011,11 +5011,11 @@ function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
   if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
-  const state = String(agentStatus?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agentStatus?.state || STATE_KEY.idle);
   const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
-    return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
+    return {text: '', html: statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', 'tabber-agent-status', 'agent-status-attention')};
   }
   return {text, html: ''};
 }
@@ -5215,7 +5215,7 @@ function tabberOrderedSessions() {
 
 function tabberWindowIsAgent(name) {
   const key = tmuxWindowAgentKey(name);
-  return key === 'claude' || key === 'codex';
+  return typeof agentWindowKind === 'function' ? Boolean(agentWindowKind(key)) : key === 'claude' || key === 'codex' || key === 'opencode';
 }
 
 function tabberAgentSessions() {
@@ -5293,7 +5293,7 @@ function buildTabberTree() {
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
-      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
+      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex', 'opencode'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
@@ -5420,7 +5420,7 @@ function tabberWindowButtonHtml(data, label) {
   const visibleName = String(label || '').trim();
   if (!visibleName) return '';
   if (typeof tmuxWindowButtonHtml !== 'function') {
-    const iconHtml = ['claude', 'codex'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
+    const iconHtml = ['claude', 'codex', 'opencode'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
     return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;

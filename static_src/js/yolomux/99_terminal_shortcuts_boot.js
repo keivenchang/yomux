@@ -235,6 +235,10 @@ function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key 
 
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
+  const focusedTerminalItem = focusedTerminal ? terminals.get(focusedTerminal) : null;
+  // OpenCode documents Ctrl+Alt+B/F as native message navigation. The exact-pane check prevents
+  // an unknown or ambiguous terminal from changing the shortcut behavior of other clients.
+  if (terminalOpenCodeNativeShortcut(focusedTerminal, focusedTerminalItem?.container, event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;

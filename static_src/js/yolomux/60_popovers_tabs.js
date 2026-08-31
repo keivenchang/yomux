@@ -1153,7 +1153,8 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 }
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
-  const state = String(agent?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agent?.state || STATE_KEY.idle);
+  if (state === 'unavailable') return t('common.notAvailable');
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0
@@ -1167,7 +1168,9 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
-  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  if (agentWindowIsUnavailableState(agent?.state)) return statusIndicatorLabelHtml(text, 'blocked', className, 'agent-status-unavailable');
+  const state = agentWindowStateKey(agent?.state);
+  if (agentWindowIsAttentionState(state)) return statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', className, 'agent-status-attention');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -1216,13 +1219,13 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
-      state: String(agent?.state || STATE_KEY.idle),
+       state: agentWindowStateKey(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && agentWindowIndex(agent) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
-    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .filter(agent => ['claude', 'codex', 'opencode'].includes(agent.kind))
     .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
@@ -1233,7 +1236,8 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   const attention = agentWindowIsAttentionState(agent.state);
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
-  const classes = ['session-agent-row', `state-${agent.state}`];
+  const state = agentWindowStateKey(agent.state);
+  const classes = ['session-agent-row', `state-${state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');

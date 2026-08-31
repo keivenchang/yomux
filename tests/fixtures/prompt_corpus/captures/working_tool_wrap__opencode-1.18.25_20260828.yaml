@@ -1,0 +1,79 @@
+agent: opencode
+capture_date: '2026-08-28'
+capture_mode: converted_real_text_capture
+case_name: working_tool_wrap
+client_name: OpenCode
+client_version: 1.18.25
+client_version_slug: opencode-1.18.25
+cursor:
+  character: ' '
+  current_command: opencode
+  pane_in_mode: false
+  x: 5
+  y: 45
+expected_promoted:
+  agent_kind: opencode
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: Working
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+fixture_id: working_tool_wrap__opencode-1.18.25_20260828
+fixture_scenario: working_tool_wrap
+height: 52
+id: working_tool_wrap__opencode-1.18.25_20260828
+operations: []
+raw_capture: |
+  <redacted-history-line>
+  <redacted-history-line>
+  ┃
+  <redacted-history-line>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⠦ General Task — <redacted-task>
+    ↳ Bash <redacted-command>
+      <redacted-command-continuation>
+      <redacted-command-continuation>
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+source: read-only real OpenCode 1.18.25 capture from an existing working pane
+source_target: working-pane
+styled_capture: |
+  <redacted-history-line>
+  <redacted-history-line>
+  ┃
+  <redacted-history-line>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⠦ General Task — <redacted-task>
+    ↳ Bash <redacted-command>
+      <redacted-command-continuation>
+      <redacted-command-continuation>
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+visible_text: |
+  <redacted-history-line>
+  <redacted-history-line>
+  ┃
+  <redacted-history-line>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⠦ General Task — <redacted-task>
+    ↳ Bash <redacted-command>
+      <redacted-command-continuation>
+      <redacted-command-continuation>
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+width: 101

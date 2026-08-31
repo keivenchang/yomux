@@ -2515,9 +2515,10 @@ const stateDefs = {
   'ready-review': {hasShort: true, priority: 5, attention: false},
   [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
   [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  unavailable: {hasShort: true, priority: 7, attention: false},
   done: {hasShort: false, priority: 8, attention: false},
 };
-const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput, STATE_KEY.blocked]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
 const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
@@ -2849,6 +2850,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, auto)
     : null;
+  const agentWindowRows = Array.isArray(agentWindowSummary?.agents) ? agentWindowSummary.agents : [];
+  const hasBlockedAgentWindow = agentWindowRows.some(agent => agentWindowStateKey(agent?.state) === STATE_KEY.blocked);
   const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
   const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
     ? agentWindowStatusToneForItem(agentWindowSummary?.item)
@@ -2904,6 +2907,19 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       attentionAgent: agent,
       attentionAgentItem: agentWindowSummary.item,
     });
+  }
+  if (agentWindowTone === 'blocked' || hasBlockedAgentWindow) {
+    const agent = agentWindowSummary.agent || agentWindowRows.find(item => agentWindowStateKey(item?.state) === STATE_KEY.blocked);
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || agent?.error || '').trim() || stateReason('agentErrorBlocker');
+    return stateValue(STATE_KEY.blocked, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: STATE_KEY.blocked,
+      blockedAgent: agent,
+      blockedAgentItem: agentWindowSummary.item,
+    });
+  }
+  if (agentWindowTone === 'unavailable') {
+    return stateValue('unavailable', t('common.notAvailable'), {agentWindowState: 'unavailable'});
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -3034,6 +3050,22 @@ function tmuxSignalWindows() {
 
 const tmuxSignalAgentCommands = new Set(['claude', 'codex']);
 
+function tmuxSignalAuthoritativeAgentKind(pane) {
+  const session = tmuxSignalPaneSession(pane);
+  const target = tmuxSignalPaneTarget(pane);
+  if (!session || !target) return '';
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
+    : autoApproveStates.get(session)?.agent_windows;
+  if (!Array.isArray(rows)) return '';
+  const matches = rows.filter(row => (
+    agentWindowKind(row?.kind) === 'opencode'
+      && String(row?.pane_target || row?.pane || '').trim() === target
+  ));
+  return matches.length === 1 ? 'opencode' : '';
+}
+
 function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
@@ -3069,7 +3101,7 @@ function tmuxSignalPaneCommand(pane) {
 }
 
 function tmuxSignalPaneIsAgent(pane) {
-  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
 }
 
 function tmuxSignalWindowAgentPanes(windowRecord) {
@@ -3229,9 +3261,11 @@ function tmuxSignalAgentStateForSession(session) {
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
   }
-  const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
+  const runningPane = livePanes.find(pane => (
+    tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || tmuxSignalAuthoritativeAgentKind(pane)
+  ) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
-    const command = tmuxSignalPaneCommand(runningPane);
+    const command = tmuxSignalPaneCommand(runningPane) || tmuxSignalAuthoritativeAgentKind(runningPane);
     const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
     return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
@@ -3430,8 +3464,8 @@ function globalActivityCounts() {
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
     if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
-    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === STATE_KEY.blocked) blocked += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = countedSignalWindows.size
@@ -3466,6 +3500,7 @@ function globalActivityCountsFromAgentWindows() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
+  let unavailable = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
@@ -3482,11 +3517,12 @@ function globalActivityCountsFromAgentWindows() {
       if (classification.activity === STATE_KEY.working) running += 1;
       else if (classification.activity === 'ask') ask += 1;
       else if (classification.activity === 'blocked') blocked += 1;
+      else if (classification.activity === 'unavailable') unavailable += 1;
     }
   }
   if (!total) return null;
   const attention = ask + blocked;
-  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
 
 function globalActivityStatusLineHtml() {
@@ -3495,7 +3531,8 @@ function globalActivityStatusLineHtml() {
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -3534,7 +3571,10 @@ function syncTopbarActivityPlacement() {
 }
 
 function topbarActivityVisibleCount(counts = {}) {
-  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+  return Math.max(0, Number(counts.running) || 0)
+    + Math.max(0, Number(counts.ask) || 0)
+    + Math.max(0, Number(counts.blocked) || 0)
+    + Math.max(0, Number(counts.unavailable) || 0);
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
@@ -3805,6 +3845,8 @@ function statusIndicatorToneClasses(tone, options = {}) {
   if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
   if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'blocked') return ['status-indicator--blocked', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'unavailable') return ['status-indicator--blocked'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
@@ -3812,7 +3854,7 @@ function statusIndicatorToneClasses(tone, options = {}) {
 }
 
 function statusIndicatorToneStyle(tone, options = {}) {
-  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'blocked', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorExtractOptions(classes) {
@@ -5282,11 +5324,9 @@ function ensureCommandPalette() {
     commandPaletteState.index = 0;
     // Retire the previous query before repainting or waiting through the debounce interval. The
     // requestId remains the correctness fence, while AbortController stops irrelevant network work.
-    const previousSearchQuery = fileQuickOpenState.activeSearchQuery;
-    const retainedCandidates = fileQuickOpenRetainedCandidates(fileQuickOpenState.candidates, previousSearchQuery);
     abortFileQuickOpenSearch();
-    fileQuickOpenState.candidates = retainedCandidates;
-    fileQuickOpenState.retainedSearchQuery = previousSearchQuery;
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.retainedSearchQuery = '';
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();

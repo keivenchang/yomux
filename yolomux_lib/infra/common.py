@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.25"
+YOLOMUX_VERSION = "0.7.26"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -306,6 +306,7 @@ AUTO_APPROVE_LOCK_DIR = RUNTIME_DIR / "locks"
 CONTROL_SOCKET_DIR = RUNTIME_DIR / "control"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
+VISIBLE_AGENT_KINDS = frozenset({"claude", "codex", "opencode"})
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
@@ -860,6 +861,7 @@ class ProcessInfo:
     pid: int
     ppid: int
     command: str
+    executable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -875,6 +877,7 @@ class AgentInfo:
     transcript: str | None
     error: str | None
     model: str | None = None
+    started_at: float | None = None
 
 
 @dataclass(frozen=True)

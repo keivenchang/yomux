@@ -17,6 +17,7 @@ from .storage import CoverageEpoch
 from .storage import Observation
 from .storage import UsageAtom
 from .storage import UsageAtomTombstone
+from .storage import UnavailableSpan
 from .usage import normalize_usage_atom
 
 
@@ -35,6 +36,7 @@ class CollectorFacts:
     coverage_epochs: tuple[CoverageEpoch, ...] = ()
     usage_atoms: tuple[UsageAtom, ...] = ()
     usage_tombstones: tuple[UsageAtomTombstone, ...] = ()
+    unavailable_spans: tuple[UnavailableSpan, ...] = ()
     receipt: CollectorReceipt | None = None
     budget_exhausted_follow_up: bool = False
 
@@ -169,6 +171,8 @@ def usage_scan_success(
     atoms: Iterable[UsageAtom],
     tombstones: Iterable[UsageAtomTombstone] = (),
     receipt: CollectorReceipt | None = None,
+    unavailable_spans: Iterable[UnavailableSpan] = (),
+    additional_coverage: Iterable[CoverageEpoch] = (),
     *, epoch_id: str, epoch_started_at: float, observed_at: float,
     cadence_seconds: float, owner_generation: int, source_id: str,
     budget_exhausted_follow_up: bool = False,
@@ -182,11 +186,31 @@ def usage_scan_success(
         cadence_seconds, owner_generation,
     )
     return CollectorFacts(
-        coverage_epochs=(coverage,),
+        coverage_epochs=(coverage, *tuple(additional_coverage)),
         usage_atoms=tuple(normalize_usage_atom(atom) for atom in atoms),
         usage_tombstones=tuple(tombstones),
+        unavailable_spans=tuple(unavailable_spans),
         receipt=receipt,
         budget_exhausted_follow_up=budget_exhausted_follow_up,
+    )
+
+
+def collector_unavailable(
+    *, family: str, source_id: str, epoch_id: str, epoch_started_at: float,
+    observed_at: float, cadence_seconds: float, owner_generation: int, reason: str,
+) -> CollectorFacts:
+    """Record a bounded unknown interval instead of publishing a fabricated sample."""
+    if family not in FAMILY_BY_NAME:
+        raise ValueError(f"unknown current family {family!r}")
+    coverage_family = FAMILY_BY_NAME[family].coverage_family
+    _started, observed, cadence, generation = _context(
+        epoch_id, epoch_started_at, observed_at, cadence_seconds, owner_generation,
+    )
+    return CollectorFacts(
+        unavailable_spans=(UnavailableSpan(
+            coverage_family, _text(source_id, "source_id"), _text(epoch_id, "epoch_id"),
+            observed, observed + cadence, cadence, reason, generation,
+        ),),
     )
 
 

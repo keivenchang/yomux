@@ -2173,7 +2173,7 @@ function tmuxWindowButtonHtml(options = {}) {
 
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
-  if (base === 'claude' || base === 'codex') return base;
+  if (base === 'claude' || base === 'codex' || base === 'opencode') return base;
   if (['bash', 'sh', 'zsh', 'fish', 'shell', '-bash', '-zsh'].includes(base)) return 'shell';
   if (['vim', 'nvim', 'vi', 'nano', 'emacs', 'hx', 'helix'].includes(base)) return 'editor';
   if (['python', 'python3', 'ipython', 'node', 'ruby', 'irb', 'bun', 'deno'].includes(base)) return 'repl';
