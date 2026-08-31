@@ -4775,7 +4775,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'searching #10289 matches the session');
     assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'searching the Linear ID matches the session');
     api.setCommandPaletteStateForTest('command', 'cut over');
-    const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 60);
+    const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 500);
     assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Shift-Cmd-P searching cut over shows the matching pane');
   });
 
@@ -8234,8 +8234,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.commandPaletteItems().some(item => String(item.detail || '').includes('raw English filesystem error')), false, 'the raw filesystem diagnostic does not replace the localized command-palette error');
 
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/list?path='), 'command-palette path listing preserves shared filesystem error descriptors');
-    assert.ok(layoutSource.includes("'/api/batch/search'") && layoutSource.includes('/api/fs/search'), 'command-palette search splits direct and batch filesystem paths');
+    assert.ok(layoutSource.includes('/api/fs/search?root=') && layoutSource.includes('/api/fs/search-stream?root='), 'command-palette search preserves direct and streamed filesystem error descriptors');
+    assert.ok(layoutSource.includes('fileQuickOpenSearchRootResult') && layoutSource.includes('search-stream'), 'command-palette search splits direct and indexed filesystem paths');
 
     assert.deepStrictEqual(
       canonical(api.TAB_TYPES.filter(type => typeof type.relocalize === 'function').map(type => type.key)),

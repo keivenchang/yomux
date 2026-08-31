@@ -3103,18 +3103,26 @@ def _sqlite_subsequence_pattern(term: str) -> str:
 def _sqlite_search_candidates(
     conn: sqlite3.Connection,
     literal_terms: list[str] | None,
+    *,
+    include_metadata: bool = True,
 ) -> sqlite3.Cursor:
     terms = [term for term in (literal_terms or []) if term]
+    columns = "path, name, relative_path, size, mtime" if include_metadata else "path, name, relative_path"
     if not terms:
-        return conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY lower(relative_path), path")
+        return conn.execute(f"SELECT {columns} FROM entries ORDER BY lower(relative_path), path")
     clauses = []
     params = []
+    order_terms = []
+    order_params = []
     for term in terms:
         pattern = _sqlite_subsequence_pattern(term)
         clauses.append("(lower(name) LIKE ? ESCAPE '\\' OR lower(relative_path) LIKE ? ESCAPE '\\' OR lower(path) LIKE ? ESCAPE '\\')")
         params.extend([pattern, pattern, pattern])
+        normalized = str(term).lower()
+        order_terms.append("CASE WHEN lower(name) = ? THEN 0 WHEN lower(name) LIKE ? ESCAPE '\\' THEN 1 WHEN lower(name) LIKE ? ESCAPE '\\' THEN 2 ELSE 3 END")
+        order_params.extend([normalized, f"{normalized}%", f"%{normalized}%"])
     where = " AND ".join(clauses)
-    return conn.execute(f"SELECT path, name, relative_path, size, mtime FROM entries WHERE {where} ORDER BY lower(relative_path), path", params)
+    return conn.execute(f"SELECT {columns} FROM entries WHERE {where} ORDER BY {', '.join(order_terms)}, lower(name), lower(relative_path), path", [*params, *order_params])
 
 
 def search_disk_index(
@@ -3126,6 +3134,7 @@ def search_disk_index(
     literal_terms: list[str] | None = None,
     *,
     expected_root_identity: tuple[int, int] | None = None,
+    include_metadata: bool = True,
 ) -> tuple[list[dict[str, Any]], bool] | None:
     """Search a persisted index without making a follower own/build or deserialize it wholesale."""
     opened = _read_sqlite_index(
@@ -3139,13 +3148,19 @@ def search_disk_index(
     conn, metadata = opened
     try:
         results: list[dict[str, Any]] = []
-        rows = _sqlite_search_candidates(conn, literal_terms)
-        for path_str, name, rel, size, mtime in rows:
+        rows = _sqlite_search_candidates(conn, literal_terms) if include_metadata else _sqlite_search_candidates(
+            conn,
+            literal_terms,
+            include_metadata=False,
+        )
+        for row in rows:
+            path_str, name, rel = row[:3]
             entry = match(str(path_str), str(name), str(rel))
             if entry is None:
                 continue
-            entry["size"] = int(size)
-            entry["mtime"] = int(mtime)
+            if include_metadata:
+                entry["size"] = int(row[3])
+                entry["mtime"] = int(row[4])
             results.append(entry)
     except sqlite3.DatabaseError:
         return None
@@ -3157,6 +3172,74 @@ def search_disk_index(
         truncated = True
         results = results[:max_results]
     return results, truncated
+
+
+def iter_disk_search_chunks(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str,
+    match: Callable[[str, str, str], Any],
+    max_results: int,
+    literal_terms: list[str] | None = None,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+    include_metadata: bool = True,
+    chunk_size: int = 64,
+    flush_seconds: float = 0.5,
+    skip_paths: set[str] | None = None,
+    candidate_filter: Callable[[str, str, str], bool] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield bounded indexed matches while the SQLite cursor is still being consumed.
+
+    Quick Open does not need globally optimal ordering before painting its first rows. Keeping the
+    cursor open and yielding a small provisional batch lets the authenticated HTTP owner flush useful
+    names every few hundred milliseconds instead of accumulating and sorting the complete match set.
+    """
+    opened = _read_sqlite_index(
+        root,
+        skip_dirs,
+        exclude_signature,
+        expected_root_identity=expected_root_identity,
+    )
+    if opened is None:
+        yield {"available": False, "files": [], "truncated": False, "complete": True}
+        return
+    conn, metadata = opened
+    try:
+        rows = _sqlite_search_candidates(conn, literal_terms, include_metadata=include_metadata)
+        chunk: list[dict[str, Any]] = []
+        matched = 0
+        last_flush = time.monotonic()
+        skipped = skip_paths or set()
+        truncated = _metadata_truncated(metadata)
+        for row in rows:
+            path_str, name, rel = row[:3]
+            if str(path_str) in skipped:
+                continue
+            if candidate_filter is not None and not candidate_filter(str(path_str), str(name), str(rel)):
+                continue
+            entry = match(str(path_str), str(name), str(rel))
+            if entry is None:
+                continue
+            if include_metadata:
+                entry["size"] = int(row[3])
+                entry["mtime"] = int(row[4])
+            chunk.append(entry)
+            matched += 1
+            now = time.monotonic()
+            if len(chunk) >= max(1, int(chunk_size)) or now - last_flush >= max(0.05, float(flush_seconds)):
+                yield {"available": True, "files": chunk, "truncated": truncated, "complete": False}
+                chunk = []
+                last_flush = now
+            if matched >= max_results:
+                truncated = True
+                break
+        if chunk or matched == 0:
+            yield {"available": True, "files": chunk, "truncated": truncated, "complete": True}
+        else:
+            yield {"available": True, "files": [], "truncated": truncated, "complete": True}
+    finally:
+        conn.close()
 
 
 def current_delta_cursor(
@@ -4749,7 +4832,13 @@ def _servable_snapshot(ri: RootIndex) -> tuple[list[tuple[str, str, str, int, fl
         return list(ri.entries), ri.truncated
 
 
-def search_index(ri: RootIndex, match: Callable[[str, str, str], Any], max_results: int) -> tuple[list[dict[str, Any]], bool]:
+def search_index(
+    ri: RootIndex,
+    match: Callable[[str, str, str], Any],
+    max_results: int,
+    *,
+    include_metadata: bool = True,
+) -> tuple[list[dict[str, Any]], bool]:
     """Filter+rank the in-memory index with `match(path, name, rel) -> entry|None`.
     Returns (sorted results capped at max_results, truncated)."""
     snapshot, index_truncated = _servable_snapshot(ri)
@@ -4758,8 +4847,9 @@ def search_index(ri: RootIndex, match: Callable[[str, str, str], Any], max_resul
         entry = match(path_str, name, rel)
         if entry is None:
             continue
-        entry["size"] = size
-        entry["mtime"] = mtime
+        if include_metadata:
+            entry["size"] = size
+            entry["mtime"] = mtime
         results.append(entry)
     truncated = index_truncated
     results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))

@@ -1912,10 +1912,10 @@ FILESYSTEM_FRESH_ONLY_OPERATIONS = frozenset({"git_history", "git_commit"})
 
 # Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
 # result right now (an editor open, a file probe, an index badge).  These are the only filesystem
-# operations that take batchd's `point` lane.  Everything else -- recursive `list`, `search`,
-# `count`, `diff`, `blame`, recursive `delete`, Finder batches, watch-diff fanouts, forced
-# session-files transforms -- stays on the shared `interactive` lane, because its cost is unbounded
-# in the input and it is exactly the work that used to put an editor open behind it head-of-line.
+# operations that take batchd's `point` lane.  Ordinary large filesystem operations -- recursive
+# `list`, `search`, `count`, `diff`, `blame`, recursive `delete`, and forced session-files transforms
+# -- stay on the shared `interactive` lane.  Multi-request filesystem batches use `freshness`, which
+# batchd maps to `bulk`, so they cannot occupy the one-worker interactive lane.
 FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status", "resolve_file_candidates"})
 
 # The write-side half of that same principle, and the half that was missed when `point` was drawn:
@@ -1939,11 +1939,14 @@ FILESYSTEM_BOUNDED_MUTATIONS = frozenset({"write", "rename", "mkdir", "delete"})
 
 # The one operation whose lane depends on its arguments, and the argument that decides it.
 FILESYSTEM_RECURSIVE_MUTATION = "delete"
+FILESYSTEM_BATCH_OPERATION = "filesystem_batch"
 
 
 def filesystem_operation_priority(operation: str, args: Mapping[str, Any] | None = None) -> str:
     """Return the one batchd lane priority that owns a filesystem operation and its arguments."""
     name = str(operation)
+    if name == FILESYSTEM_BATCH_OPERATION:
+        return "freshness"
     # A directory Diff first paints its metadata-only history index. Per-commit file and diff
     # materialization starts only after an explicit disclosure, and must not queue ahead of a
     # different user's first history paint or ordinary interactive filesystem work.
@@ -3681,7 +3684,7 @@ class WatchBridge:
         response, body = app.job_client.produce(
             "filesystem_batch",
             payload,
-            priority="interactive",
+            priority=filesystem_operation_priority(FILESYSTEM_BATCH_OPERATION),
             generation=1,
             coalesce_key=product_key,
             deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
@@ -14900,7 +14903,8 @@ class TmuxWebtermApp:
             requests = filesystem.validated_batch_requests(payload)
         except ValueError as error:
             return self.fs_batch_invalid_request_result(payload, error), HTTPStatus.BAD_REQUEST
-        reservation = self.batchd_operation_service.reserve("bulk")
+        priority = filesystem_operation_priority(FILESYSTEM_BATCH_OPERATION)
+        reservation = self.batchd_operation_service.reserve(batchd_operation_lane(priority))
         if reservation is None:
             request_id = self.new_api_request_id()
             result = self.batchd_operation_failure_result(
@@ -14926,7 +14930,7 @@ class TmuxWebtermApp:
             response, body = self.job_client.produce(
                 "filesystem_batch",
                 job_payload,
-                priority="interactive",
+                priority=priority,
                 generation=generation,
                 coalesce_key=product_key,
                 deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
@@ -14987,7 +14991,7 @@ class TmuxWebtermApp:
             completion=self.complete_filesystem_batch_operation,
             completion_args=(tuple(request_ids),),
             reservation=reservation,
-            lane="bulk",
+            lane=batchd_operation_lane(priority),
         )
 
     def wait_for_filesystem_operation_product(

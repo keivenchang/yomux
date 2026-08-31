@@ -9216,6 +9216,7 @@ def test_filesystem_watch_diff_request_submits_bounded_batchd_batches_and_comple
     assert payload["operation"]["context"]["token"] == token
     assert [len(call[1]["requests"]) for call in submitted] == [64]
     assert all(call[0] == "filesystem_batch" for call in submitted)
+    assert all(call[2]["priority"] == "freshness" for call in submitted)
     assert all(call[2]["delivery"] == "ready_or_receipt" for call in submitted)
     assert result_status == HTTPStatus.OK
     assert result["state"] == "ready"
@@ -11622,6 +11623,62 @@ def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_
     assert emitted == {"point", "interactive", "maintenance"}
     assert emitted <= set(batchd.BATCHD_PRIORITIES)
     assert {batchd.BATCHD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive", "bulk"}
+
+
+def test_filesystem_batch_uses_bulk_production_and_completion_lanes_while_point_stays_isolated():
+    assert app_module.filesystem_operation_priority(app_module.FILESYSTEM_BATCH_OPERATION) == "freshness"
+    assert batchd.BATCHD_PRIORITY_LANES[app_module.filesystem_operation_priority(app_module.FILESYSTEM_BATCH_OPERATION)] == "bulk"
+    assert state_services.batchd_operation_lane(app_module.filesystem_operation_priority(app_module.FILESYSTEM_BATCH_OPERATION)) == "bulk"
+    assert app_module.filesystem_operation_priority("read") == "point"
+    assert state_services.batchd_operation_lane(app_module.filesystem_operation_priority("read")) == "point"
+    assert batchd.BATCHD_INTERACTIVE_WORKERS == 1
+    assert batchd.BATCHD_PRIORITY_LANES["freshness"] == "bulk"
+
+
+def test_filesystem_batch_request_uses_the_shared_bulk_classification_for_both_lanes(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    submissions = []
+    reservations = []
+    accepted = []
+
+    class QueuedBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append((task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-fs-batch", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+    class CompletionService:
+        stop_event = threading.Event()
+
+        def reserve(self, lane):
+            reservations.append(lane)
+            return _StubOperationReservation()
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = QueuedBatchJob()
+    webapp.batchd_operation_service = CompletionService()
+    _isolate_batchd_fs_batch_lease(webapp)
+    monkeypatch.setattr(
+        webapp,
+        "accept_batchd_product_operation",
+        lambda **kwargs: accepted.append(kwargs) or ({"state": "queued"}, HTTPStatus.ACCEPTED),
+    )
+    try:
+        result, status = webapp.fs_batch_http_payload({
+            "requests": [{"id": "list", "type": "list", "path": str(tmp_path)}],
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert result["state"] == "queued"
+    assert submissions[0][2]["priority"] == "freshness"
+    assert reservations == ["bulk"]
+    assert accepted[0]["lane"] == "bulk"
 
 
 def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():

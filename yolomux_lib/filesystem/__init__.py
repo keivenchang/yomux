@@ -377,9 +377,20 @@ def search_files(
     cursor: str | None = None,
     direct_only: bool = False,
     indexed_only: bool = False,
+    minimal: bool = False,
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor, direct_only=direct_only, indexed_only=indexed_only)
+    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor, direct_only=direct_only, indexed_only=indexed_only, minimal=minimal)
+
+
+def indexed_search_stream_payload(handle: Any, query: str, limit: int | str | None = 400) -> dict[str, Any]:
+    _sync_package_overrides()
+    return search.indexed_search_stream_payload(handle, query, limit)
+
+
+def iter_indexed_search_stream_payload(handle: Any, query: str, limit: int | str | None = 400, *, skip_paths: set[str] | None = None):
+    _sync_package_overrides()
+    return search.iter_indexed_search_stream_payload(handle, query, limit, skip_paths=skip_paths)
 
 
 @normalize_os_errors
@@ -672,6 +683,7 @@ __all__ = [
     "git_root_for_path",
     "git_tracks_path",
     "index_status",
+    "indexed_search_stream_payload",
     "is_text_path",
     "filesystem_batch_request_summary",
     "filesystem_batch_result",

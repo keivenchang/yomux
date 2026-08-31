@@ -20,6 +20,8 @@ flowchart LR
 - Any server can read the latest committed SQLite snapshot with a read-only connection.
 - If ownership changes, the new owner starts/reuses one indexer and re-leases the configured roots on the new daemon; no HTTP server becomes a database writer.
 
+Quick Open request modes are separate from index ownership. An empty Cmd-P query does not consult the index or filesystem; it lists the newest opened file paths from the bounded browser-memory history, newest first, with each row's last-opened date/time. An absolute or `~` query uses the authorized containing directory only, never recursive index search; the browser obtains one direct listing through `GET /api/fs/fast/list`, caches it, and filters names locally. A non-absolute query searches the configured indexed roots through the committed SQLite snapshots and may stream bounded result chunks. Indexed admission must prioritize exact and prefix basename matches and must not fill the bounded result page with matches assembled only from unrelated absolute-path fragments. The browser merges roots by path, rejects rows outside the producing root, and applies the visible priority order: currently open tabs, the newest 100 browser-memory file-history paths, files under the active Claude or Codex working directory, then the remaining indexed matches.
+
 ## Visibility policy
 
 ```mermaid

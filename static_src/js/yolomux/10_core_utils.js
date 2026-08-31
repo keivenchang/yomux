@@ -525,8 +525,49 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       }
     });
   }
+  const wrappedBody = response.body && typeof response.body.getReader === 'function'
+    ? new Proxy(response.body, {
+      get(target, property) {
+        if (property !== 'getReader') {
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (...args) => {
+          const reader = target.getReader(...args);
+          return new Proxy(reader, {
+            get(readerTarget, readerProperty) {
+              if (readerProperty === 'read') {
+                return async (...readArgs) => {
+                  try {
+                    const result = await readerTarget.read(...readArgs);
+                    if (result.done) noteConsumed();
+                    return result;
+                  } catch (error) {
+                    noteConsumed();
+                    throw error;
+                  }
+                };
+              }
+              if (readerProperty === 'cancel') {
+                return async (...cancelArgs) => {
+                  try {
+                    return await readerTarget.cancel(...cancelArgs);
+                  } finally {
+                    noteConsumed();
+                  }
+                };
+              }
+              const value = Reflect.get(readerTarget, readerProperty, readerTarget);
+              return typeof value === 'function' ? value.bind(readerTarget) : value;
+            },
+          });
+        };
+      },
+    })
+    : response.body;
   return new Proxy(response, {
     get(target, property) {
+      if (property === 'body') return wrappedBody;
       if (wrappedMethods.has(property)) return wrappedMethods.get(property);
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;

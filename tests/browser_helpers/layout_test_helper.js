@@ -1126,6 +1126,10 @@ globalThis.__layoutTestApi = {
   paneTabAriaLabelForTest: paneTabAriaLabel,
   fileQuickOpenItem,
   fileQuickOpenItems,
+  quickOpenFileHistory,
+  rememberQuickOpenFileForTest: rememberQuickOpenFile,
+  quickOpenFileHistoryForTest: () => quickOpenFileHistory.slice(),
+  quickOpenWorkingDirectory,
   movingEllipsisHtml,
   stripTrailingEllipsisText,
   fileQuickOpenExtraRootsForSearchQuery,
@@ -1134,6 +1138,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
   fileQuickOpenSearchPayloadResultForTest: fileQuickOpenSearchPayloadResult,
+  fileQuickOpenSseParserForTest: createFileQuickOpenSseParser,
   fileQuickOpenTargetSlot,
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
@@ -2717,7 +2722,7 @@ globalThis.__layoutTestApi = {
   },
   commandPaletteResultsHtmlForTest() {
     const query = commandPaletteSearchQuery();
-    const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+    const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, fileQuickOpenResultLimit);
     return rows.length ? commandPaletteResultsHtml(rows, query) : '';
   },
   commandPaletteEmptyTextForTest: commandPaletteEmptyText,

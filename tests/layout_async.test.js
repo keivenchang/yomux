@@ -63,6 +63,62 @@ function ambientDateStamp() {
   return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
 }
 
+function sseFrame(event, payload) {
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+function controllableSseResponse() {
+  const reads = [];
+  const queued = [];
+  let cancelled = false;
+  let closed = false;
+  const settleRead = () => {
+    if (!reads.length) return;
+    if (queued.length) reads.shift()({done: false, value: queued.shift()});
+    else if (closed) reads.shift()({done: true});
+  };
+  const response = {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (queued.length) return Promise.resolve({done: false, value: queued.shift()});
+            if (closed) return Promise.resolve({done: true});
+            return new Promise(resolve => reads.push(resolve));
+          },
+          cancel() {
+            cancelled = true;
+            closed = true;
+            queued.length = 0;
+            while (reads.length) reads.shift()({done: true});
+            return Promise.resolve();
+          },
+        };
+      },
+    },
+  };
+  return {
+    response,
+    push(text) {
+      queued.push(new TextEncoder().encode(text));
+      settleRead();
+    },
+    close() {
+      closed = true;
+      while (reads.length) reads.shift()({done: true});
+    },
+    bindSignal(signal) {
+      signal?.addEventListener?.('abort', () => {
+        cancelled = true;
+      }, {once: true});
+    },
+    cancelled() { return cancelled; },
+  };
+}
+
 function summarizedHangingShard(closeOnSignal) {
   const signals = [];
   const child = new EventEmitter();
@@ -78,6 +134,172 @@ function summarizedHangingShard(closeOnSignal) {
 }
 
 async function runLayoutAsyncSuite() {
+  test('Quick Open SSE parser accepts split event frames and joins data lines', () => {
+    const api = loadYolomux('', ['1']);
+    const events = [];
+    const parser = api.fileQuickOpenSseParserForTest((event, payload) => events.push({event, payload}));
+    parser.feed('event: ch');
+    parser.feed('unk\ndata: {"files":[{"path":"/repo/');
+    parser.feed('a.md"}]');
+    parser.feed('}\n\n');
+    parser.feed('event: done\ndata: {"files":1}\n');
+    parser.finish();
+    assert.deepStrictEqual(canonical(events), [
+      {event: 'chunk', payload: {files: [{path: '/repo/a.md'}]}},
+      {event: 'done', payload: {files: 1}},
+    ]);
+  });
+
+  await testAsync('Quick Open consumes indexed search chunks and repaints each arrival', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
+    api.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev', []);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    const stream = controllableSseResponse();
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), signal: options.signal});
+      stream.bindSignal(options.signal);
+      return Promise.resolve(stream.response);
+    });
+    const renderResults = api.commandPaletteStateForTest().node.querySelector('.command-palette-results');
+    renderResults.scrollTop = 240;
+    const search = api.refreshFileQuickOpenCandidatesForTest('t5t');
+    await flushAsyncWork();
+    assert.equal(requests[0].url, '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=t5t&limit=500');
+    stream.push(sseFrame('start', {root: '/home/test/yolomux.dev', query: 't5t'}));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    stream.push(sseFrame('chunk', {files: [{path: '/home/test/yolomux.dev/low/t5t-notes.md', name: 't5t-notes.md', relative_path: 'low/t5t-notes.md'}]}));
+    await flushAsyncWork();
+    assert.equal(api.fileQuickOpenStateForTest().candidates.length, 1, 'the first chunk is applied before the stream finishes');
+    assert.ok(api.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.includes('notes.md'), 'the first chunk is rendered before the stream finishes');
+    stream.push(sseFrame('chunk', {files: [{path: '/home/test/yolomux.dev/t5t.md', name: 't5t.md', relative_path: 't5t.md'}]}));
+    await flushAsyncWork();
+    assert.equal(renderResults.scrollTop, 240, 'stream repaint preserves the user scroll position');
+    assert.equal(api.commandPaletteStateForTest().items[0].label, 't5t.md', 'a later exact match is re-ranked above earlier rows');
+    stream.close();
+    await flushAsyncWork();
+    await search;
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/low/t5t-notes.md', '/home/test/yolomux.dev/t5t.md']);
+  });
+
+  await testAsync('Quick Open emits DIS basename matches in the first indexed stream chunk', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'dis');
+    api.setCommandPaletteQueryForTest('dis');
+    const stream = controllableSseResponse();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=dis&limit=500');
+      return Promise.resolve(stream.response);
+    });
+    const search = api.refreshFileQuickOpenCandidatesForTest('dis');
+    await flushAsyncWork();
+    stream.push(sseFrame('chunk', {files: [
+      {path: '/home/test/yolomux.dev/notes/DIS-123.md', name: 'DIS-123.md', relative_path: 'notes/DIS-123.md'},
+      {path: '/home/test/yolomux.dev/archive/d/i/s/notes.md', name: 'notes.md', relative_path: 'archive/d/i/s/notes.md'},
+    ]}));
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/notes/DIS-123.md'], 'a basename match is admitted while a weaker path-fragment row is not');
+    assert.equal(api.commandPaletteStateForTest().items[0].label, 'DIS-123.md', 'the basename match is visible immediately');
+    stream.close();
+    await search;
+  });
+
+  test('Quick Open priority is open tab, remembered file, active AI path, then index', () => {
+    const api = loadYolomux('', ['1']);
+    const openPath = '/repo/open/DIS-open.md';
+    const rememberedPath = '/repo/history/DIS-history.md';
+    const workingPath = '/repo/current/DIS-current.md';
+    const indexedPath = '/repo/other/DIS-indexed.md';
+    api.setOpenFileStateForTest(openPath, {kind: 'text', content: 'open', original: 'open', editorTabItems: new Set(['file:' + openPath])});
+    api.rememberQuickOpenFileForTest(rememberedPath);
+    api.setTranscriptInfoForTest('1', {panes: [{active: true, window_active: true, current_path: '/repo/current', process_label: 'codex', command: 'codex'}], selected_pane: {active: true, current_path: '/repo/current'}});
+    api.setFileQuickOpenCandidatesForTest('/repo', [
+      {path: openPath, name: 'DIS-open.md', relative_path: 'open/DIS-open.md'},
+      {path: rememberedPath, name: 'DIS-history.md', relative_path: 'history/DIS-history.md'},
+      {path: workingPath, name: 'DIS-current.md', relative_path: 'current/DIS-current.md'},
+      {path: indexedPath, name: 'DIS-indexed.md', relative_path: 'other/DIS-indexed.md'},
+    ]);
+    api.setCommandPaletteStateForTest('files', 'DIS-');
+    api.setCommandPaletteQueryForTest('DIS-');
+    const rows = api.commandPaletteRankItems(api.commandPaletteItems(), 'DIS-', {surface: 'files'})
+      .filter(item => item.path)
+      .map(item => item.path);
+    assert.deepStrictEqual(canonical(rows.slice(0, 4)), [openPath, rememberedPath, workingPath, indexedPath], 'Quick Open uses the requested four priority tiers');
+    assert.equal(api.quickOpenFileHistoryForTest().length, 1, 'the remembered-file list is separate and bounded');
+  });
+
+  test('Quick Open remembers only the newest 100 opened files', () => {
+    const api = loadYolomux('', ['1']);
+    for (let index = 0; index < 105; index += 1) api.rememberQuickOpenFileForTest(`/repo/history-${index}.md`);
+    const history = api.quickOpenFileHistoryForTest();
+    assert.equal(history.length, 100, 'file history is capped at 100 entries');
+    assert.equal(history[0], '/repo/history-104.md', 'the newest opened file is first');
+    assert.equal(history.at(-1), '/repo/history-5.md', 'the oldest entries beyond the cap are discarded');
+  });
+
+  test('opening empty Quick Open shows recent files without starting a search', () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.installCommandPaletteFixtureForTest();
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({files: []}));
+    });
+    api.rememberQuickOpenFileForTest('/repo/older.md');
+    api.rememberQuickOpenFileForTest('/repo/newer.md');
+
+    api.openCommandPaletteForTest({mode: 'files'});
+
+    const state = api.commandPaletteStateForTest();
+    const recentPaths = state.items.filter(item => item.category === 'file').map(item => item.path);
+    assert.equal(recentPaths[0], '/repo/newer.md', 'empty Quick Open lists the newest opened file first');
+    assert.equal(recentPaths[1], '/repo/older.md', 'empty Quick Open lists older opened files afterward');
+    assert.ok(state.items[0].detail.includes(' · '), 'recent Quick Open rows show their last-opened date and time');
+    assert.equal(api.fileQuickOpenStateForTest().loading, false, 'empty Quick Open is not loading');
+    assert.equal(state.node.querySelector('.command-palette-status').hidden, true, 'empty Quick Open has no searching status');
+    assert.deepStrictEqual(requests, [], 'opening empty Quick Open does not search');
+  });
+
+  await testAsync('Quick Open cancels a stale stream and fences its late chunk', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev', []);
+    api.setCommandPaletteStateForTest('files', 'old');
+    api.setCommandPaletteQueryForTest('old');
+    const oldStream = controllableSseResponse();
+    const newStream = controllableSseResponse();
+    let requestCount = 0;
+    api.setFetchForTest((_url, options = {}) => {
+      requestCount += 1;
+      const stream = requestCount === 1 ? oldStream : newStream;
+      assert.ok(options.signal, 'each stream receives the Quick Open AbortController signal');
+      stream.bindSignal(options.signal);
+      return Promise.resolve(stream.response);
+    });
+    const oldSearch = api.refreshFileQuickOpenCandidatesForTest('old');
+    await flushAsyncWork();
+    await flushAsyncWork();
+    api.setCommandPaletteQueryForTest('new');
+    const newSearch = api.refreshFileQuickOpenCandidatesForTest('new');
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(oldStream.cancelled(), true, `replacing the query cancels the old readable stream: ${JSON.stringify({requestCount, state: api.fileQuickOpenStateForTest()})}`);
+    oldStream.push(sseFrame('chunk', {files: [{path: '/home/test/yolomux.dev/stale.md', name: 'stale.md'}]}));
+    await flushAsyncWork();
+    newStream.push(sseFrame('chunk', {files: [{path: '/home/test/yolomux.dev/current.md', name: 'current.md'}]}));
+    newStream.close();
+    await flushAsyncWork();
+    await Promise.all([oldSearch, newSearch]);
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/current.md']);
+  });
+
   test('Git history commit rows keep the approved field order and responsive retention contract', () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
@@ -2816,19 +3038,19 @@ async function runLayoutAsyncSuite() {
       'the stale response never mutates the current candidate set');
   });
 
-  await testAsync('a superseded query stops presenting its rows once the user types a longer one', async () => {
+  await testAsync('a superseded query keeps its rows visible while the longer query loads', async () => {
     // The reported shape: typing `t5t.md` showed `DOIT.p1.e5.backend-lifetime-supervision.md` at row 1
     // and no `t5t.md` at all. Measured against the real index, the backend answer for `t5t.md` puts
     // `notes/t5t/t5t.md` at position 1 and that DOIT file at position 77 -- so the row on screen was
     // never an answer to `t5t.md`. It was the answer to the shorter `t5t`, still being presented while
     // the newer, more specific search sat accepted-but-unanswered behind the operation queue.
-    const api = loadYolomux();
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const decoy = '/repo/queues/DOIT.p1.e5.backend-lifetime-supervision.md';
     let answerLongQuery = null;
     api.setFetchForTest(url => {
       const target = String(url);
-      if (!target.includes('/api/fs/search') && !target.includes('/api/batch/search')) return Promise.resolve(jsonResponse({state: 'building'}));
+      if (!target.includes('/api/fs/search')) return Promise.resolve(jsonResponse({state: 'building'}));
       // The longer query is accepted but never answered during this test: the queued 202 case.
       if (target.includes(encodeURIComponent('t5t.md'))) return new Promise(resolve => { answerLongQuery = resolve; });
       return Promise.resolve(jsonResponse({
@@ -2853,8 +3075,12 @@ async function runLayoutAsyncSuite() {
 
     assert.ok(answerLongQuery, 'the longer query reached the backend and is still unanswered');
     assert.equal(api.fileQuickOpenStateForTest().loading, true, 'the palette reports that it is still searching');
-    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [],
-      'rows belonging to the superseded query are not presented as the newer query\'s ranked answer');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [decoy],
+      'rows belonging to the prior query remain visible while the newer query loads');
+    const retainedHtml = api.commandPaletteResultsHtmlForTest();
+    assert.ok(retainedHtml.includes('backend-life'), `the retained prior row remains rendered while the backend answers: ${retainedHtml}`);
+    assert.equal(api.commandPaletteItems().find(item => item.path === decoy)?.disabled, true,
+      'a retained prior row cannot be selected for the newer query');
 
     answerLongQuery(jsonResponse({
       root: '/repo', root_realpath: '/repo', query: 't5t.md', limit: 500,
@@ -2866,7 +3092,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a same-query refresh keeps its current rows visible until the new answer lands', async () => {
-    const api = loadYolomux();
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const retained = '/repo/notes/t5t/t5t.md';
     let searchCount = 0;
@@ -2900,12 +3126,12 @@ async function runLayoutAsyncSuite() {
       'the refreshed same-query answer replaces the retained rows once it lands');
   });
 
-  await testAsync('a path query with the same filter clears rows when its directory changes', async () => {
+  await testAsync('a path query clears prior rows while its directory changes', async () => {
     const api = loadYolomux();
     let listCount = 0;
     let answerSecondDirectory = null;
     api.setFetchForTest(url => {
-      if (!String(url).includes('/api/fs/list')) return Promise.resolve(jsonResponse({state: 'building'}));
+      if (!String(url).includes('/api/fs/fast/list')) return Promise.resolve(jsonResponse({state: 'building'}));
       listCount += 1;
       if (listCount > 1) return new Promise(resolve => { answerSecondDirectory = resolve; });
       return Promise.resolve(jsonResponse({
@@ -2926,8 +3152,8 @@ async function runLayoutAsyncSuite() {
     const inFlight = api.refreshFileQuickOpenCandidatesForTest('/repo-b/foo');
     await flushAsyncWork();
     assert.ok(answerSecondDirectory, 'the same-filter query for the second directory remains pending');
-    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates), [],
-      'rows from the prior directory cannot be selected while the new directory is loading');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/repo-a/foo.md'],
+      'rows from the prior directory remain visible while the new directory is loading');
 
     answerSecondDirectory(jsonResponse({path: '/repo-b', entries: []}));
     await inFlight;
@@ -5231,7 +5457,41 @@ async function runLayoutAsyncSuite() {
     assert.equal(hiddenCalls.length, 0, 'a hidden Tabber does not fetch for another client\'s completion');
   });
 
-  await testAsync('Quick Open record aborts path listings and rejects close-reopen stale completions', async () => {
+  await testAsync('Quick Open reuses one cached parent listing across path filters', async () => {
+    const api = loadYolomux();
+    const calls = [];
+    api.installCommandPaletteFixtureForTest();
+    api.setFetchForTest((url, options = {}) => {
+      calls.push({url: String(url), signal: options.signal});
+      return Promise.resolve(jsonResponse({path: '/tmp', entries: [
+        {name: 'helloworld', kind: 'dir'},
+        {name: 'hello-world.txt', kind: 'file'},
+        {name: 'unrelated.txt', kind: 'file'},
+      ]}));
+    });
+
+    api.setCommandPaletteStateForTest('files', '/tmp/hw');
+    api.setCommandPaletteQueryForTest('/tmp/hw');
+    await api.refreshFileQuickOpenCandidatesForTest('/tmp/hw');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(item => item.path)), [
+      '/tmp/helloworld', '/tmp/hello-world.txt', '/tmp/unrelated.txt',
+    ]);
+
+    api.setCommandPaletteQueryForTest('/tmp/helloworld');
+    await api.refreshFileQuickOpenCandidatesForTest('/tmp/helloworld');
+    assert.equal(calls.length, 1, 'changing only the path filter reuses the cached parent listing');
+    assert.equal(calls[0].url, '/api/fs/fast/list?path=%2Ftmp', 'path mode loads one direct parent listing');
+    assert.deepStrictEqual(canonical(api.commandPaletteStateForTest().items.filter(item => item.category === 'file').map(item => item.label)), [
+      'Open folder in File Explorer', 'helloworld/', 'hello-world.txt',
+    ]);
+
+    api.invalidateFileExplorerRootsForTest(['/tmp']);
+    api.setCommandPaletteQueryForTest('/tmp/hw');
+    await api.refreshFileQuickOpenCandidatesForTest('/tmp/hw');
+    assert.equal(calls.length, 2, 'a filesystem invalidation forces the next path query to reload its parent');
+  });
+
+  await testAsync('Quick Open path listing rejects stale completions after a parent change', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
     api.installCommandPaletteFixtureForTest();
@@ -5245,21 +5505,19 @@ async function runLayoutAsyncSuite() {
       return request.promise;
     });
 
-    const stale = api.refreshFileQuickOpenCandidatesForTest('/tmp/old');
-    assert.ok(pending[0].url.startsWith('/api/fs/list?path='), 'absolute path mode uses a directory listing');
-    assert.ok(pending[0].signal, 'path-mode listing receives the record abort signal');
+    const stale = api.refreshFileQuickOpenCandidatesForTest('/tmp-old/old');
+    assert.equal(pending[0].url, '/api/fs/fast/list?path=%2Ftmp-old', 'absolute path mode loads its containing directory through the fast listing route');
     api.abortFileQuickOpenSearchForTest();
-    assert.equal(pending[0].signal.aborted, true, 'closing/cancelling aborts the path-mode request');
 
-    const current = api.refreshFileQuickOpenCandidatesForTest('/tmp/new');
-    pending[1].resolve(jsonResponse({path: '/tmp', entries: [{name: 'new.txt', kind: 'file'}]}));
+    const current = api.refreshFileQuickOpenCandidatesForTest('/tmp-new/new');
+    assert.equal(pending[1].url, '/api/fs/fast/list?path=%2Ftmp-new', 'a parent change loads the new directory once');
+    pending[1].resolve(jsonResponse({path: '/tmp-new', entries: [{name: 'new.txt', kind: 'file'}]}));
     await current;
-    pending[0].resolve(jsonResponse({path: '/tmp', entries: [{name: 'old.txt', kind: 'file'}]}));
+    pending[0].resolve(jsonResponse({path: '/tmp-old', entries: [{name: 'old.txt', kind: 'file'}]}));
     await stale;
     const state = api.fileQuickOpenStateForTest();
-    assert.deepStrictEqual(canonical(state.candidates.map(item => item.path)), ['/tmp/new.txt'], 'stale completion after cancel/restart cannot replace current candidates');
+    assert.deepStrictEqual(canonical(state.candidates.map(item => item.path)), ['/tmp-new/new.txt'], 'stale completion after cancel/restart cannot replace current candidates');
     assert.equal(state.loading, false, 'the current request settles loading');
-    assert.equal(state.abortController, null, 'the current request releases its abort controller');
     assert.equal(state.error, '', 'stale completion cannot add an error to the current result');
   });
 

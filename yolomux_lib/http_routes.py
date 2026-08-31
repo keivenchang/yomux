@@ -1168,6 +1168,11 @@ def get_fs_search(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_search(parsed)
 
 
+def get_fs_search_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_indexed_search(parsed)
+
+
 def get_batch_search(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_batch_search(parsed)
@@ -1687,6 +1692,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/fast/list", "readonly", get_fs_fast_list, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/list", "readonly", get_fs_list, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/search", "readonly", get_fs_search, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/search-stream", "readonly", get_fs_search_stream, protocol=RESPONSE_SSE, group="filesystem"),
     Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/read", "readonly", get_fs_read, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),

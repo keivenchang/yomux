@@ -432,6 +432,9 @@ const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
+const quickOpenFileHistoryLimit = 100;
+const quickOpenFileHistory = [];
+const quickOpenFileOpenedAt = new Map();
 const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
@@ -640,6 +643,8 @@ const fileQuickOpenState = {
   // Candidate retention also includes the requested root or path directory; two path queries can
   // share a filter while naming different directories and must not present each other's rows.
   candidateQueryIdentity: '',
+  activeSearchQuery: '',
+  retainedSearchQuery: '',
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;

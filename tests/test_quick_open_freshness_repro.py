@@ -69,6 +69,7 @@ import pytest
 
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
+from yolomux_lib.filesystem import search as filesystem_search
 
 
 ONE_DAY_SECONDS = 24.0 * 60.0 * 60.0
@@ -652,6 +653,40 @@ def test_fixed_warming_owner_does_not_claim_a_refresh_elsewhere(tmp_path, monkey
     assert payload["refreshing_elsewhere"] is False
     assert payload["refresh_requested"] is False
     assert builds == [root], "the only refresh in existence is this process's own, not elsewhere"
+
+
+def test_indexed_only_follower_serves_available_sqlite_rows_before_warming_fallback(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "DIS-123.md"
+    target.write_text("row\n", encoding="utf-8")
+    _build_persisted_snapshot(root)
+    _clear_registry()
+    file_index.set_background_owner_checker(lambda _role: False)
+
+    payload = filesystem.search_files(str(root), query="DIS-", limit=50, recursive=True, indexed_only=True, minimal=True)
+
+    assert [entry["path"] for entry in payload["files"]] == [str(target)]
+    assert payload["index_state"] in {"follower-ready", "ready"}
+
+
+def test_indexed_search_stream_payload_reuses_authorized_search_owner(monkeypatch):
+    handle = object()
+    calls = []
+    expected = {"files": [{"path": "/repo/target.py"}], "index_state": "warming"}
+    monkeypatch.setattr(
+        filesystem_search,
+        "_search_files_from_authorized_handle",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or expected,
+    )
+
+    assert filesystem_search.indexed_search_stream_payload(handle, "target", 12) is expected
+    assert calls == [(
+        (handle,),
+        {"query": "target", "limit": 12, "recursive": True, "indexed_only": True, "minimal": True},
+    )]
 
 
 def test_contract_warming_owner_must_not_claim_a_refresh_elsewhere(tmp_path, monkeypatch):

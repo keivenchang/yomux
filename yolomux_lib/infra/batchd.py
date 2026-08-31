@@ -473,6 +473,7 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | BatchedTa
         search_args = {
             "recursive": args.get("recursive") is True,
             "cursor": cursor,
+            "minimal": args.get("minimal") is True,
         }
         if args.get("indexed_only") is True:
             search_args["indexed_only"] = True

@@ -2228,6 +2228,7 @@ function fetchFileGitMetadataPayload(path, options = {}) {
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
+  rememberQuickOpenFile(fullPath);
   const kind = openFileKindForPreviewPath(name);
   const identityDedupe = kind === 'text';
   if (identityDedupe) {

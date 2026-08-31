@@ -409,15 +409,21 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         recursive = query_bool(qs, "recursive")
-        if not recursive and not query_one(qs, "cursor", ""):
+        direct_only = query_bool(qs, "direct_only")
+        indexed_only = query_bool(qs, "indexed_only")
+        minimal = query_bool(qs, "minimal")
+        cursor = str(query_one(qs, "cursor", "") or "")
+        if direct_only or (indexed_only and not cursor):
             try:
                 self.write_json(
                     filesystem.search_files(
                         raw_root,
                         query=query,
                         limit=limit,
-                        recursive=False,
-                        direct_only=True,
+                        recursive=recursive,
+                        direct_only=direct_only,
+                        indexed_only=indexed_only,
+                        minimal=minimal,
                     ),
                     status=HTTPStatus.OK,
                 )
@@ -427,7 +433,6 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         # Recursive work and cursor deltas are batch work. They use the existing filesystem-operation
         # descriptor so the authenticated read path, safe-root containment, and exclusion policy are
         # identical to the other batch operations.
-        cursor = str(query_one(qs, "cursor", "") or "")
         self.submit_filesystem_operation(
             "GET /api/batch/search",
             "search",
@@ -435,17 +440,106 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor},
         )
 
+    def stream_indexed_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", "") or "")
+        query = str(query_one(qs, "query", "") or "")
+        limit, error = parse_query_int(
+            qs,
+            "limit",
+            400,
+            max_value=filesystem.MAX_SEARCH_LIMIT,
+            clamp_min=True,
+        )
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            with filesystem.paths.safe_path(
+                raw_root,
+                flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                operation="indexed_search_stream",
+            ) as handle:
+                self._stream_indexed_search_handle(handle, query, int(limit))
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
+
+    def _stream_indexed_search_handle(self, handle: Any, query: str, limit: int) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+
+        seen_paths: set[str] = set()
+        started_at = time.monotonic()
+        try:
+            self.write_sse_json("start", {"root": str(handle.resolved), "query": query, "limit": limit})
+            while True:
+                produced = False
+                coverage = {}
+                stream_complete = True
+                for payload in filesystem.iter_indexed_search_stream_payload(handle, query, limit, skip_paths=seen_paths):
+                    files = payload.get("files") if isinstance(payload, dict) else None
+                    new_files = [
+                        item for item in files
+                        if isinstance(item, dict)
+                        and str(item.get("path") or "")
+                        and str(item["path"]) not in seen_paths
+                    ] if isinstance(files, list) else []
+                    if new_files:
+                        if self.client_event_peer_disconnected():
+                            return
+                        seen_paths.update(str(item["path"]) for item in new_files)
+                        produced = True
+                        self.write_sse_json("chunk", {"files": new_files, "coverage": payload.get("progressive_coverage", {})})
+                    coverage = payload.get("progressive_coverage") if isinstance(payload, dict) else {}
+                    stream_complete = bool(payload.get("complete", True)) if isinstance(payload, dict) else True
+                    if self.client_event_peer_disconnected():
+                        return
+                if not isinstance(coverage, dict):
+                    coverage = {}
+                complete = stream_complete and not bool(coverage.get("frontier_size"))
+                refresh_pending = bool(coverage.get("frontier_size"))
+                warming = not complete
+                if complete or not (warming or refresh_pending):
+                    self.write_sse_json("done", {"files": len(seen_paths), "coverage": coverage})
+                    return
+                if stream_complete and not produced:
+                    self.write_sse_json("done", {"files": len(seen_paths), "coverage": coverage})
+                    return
+                if self.client_event_peer_disconnected():
+                    return
+                if self.server.persistent_request_stop.wait(0.5 if not produced else 0.05):
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        except Exception as error:
+            logger.exception("indexed Quick Open search stream failed")
+            try:
+                self.write_sse_json("error", {
+                    "error_code": "indexed_search_failed",
+                    "error": str(error),
+                    "reason": error.message_key if isinstance(error, filesystem.FilesystemError) else type(error).__name__,
+                    "elapsed_ms": round((time.monotonic() - started_at) * 1000, 3),
+                })
+            except OSError:
+                return
+
     def handle_batch_search(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         cursor = str(query_one(qs, "cursor", "") or "")
+        minimal = query_bool(qs, "minimal")
         self.submit_filesystem_operation(
             "GET /api/batch/search",
             "search",
             raw_root,
-            {"query": query, "limit": limit, "recursive": True, "cursor": cursor, "indexed_only": True},
+            {"query": query, "limit": limit, "recursive": True, "cursor": cursor, "indexed_only": True, "minimal": minimal},
         )
 
     def handle_fs_index_status(self, parsed: Any) -> None:
@@ -2221,6 +2315,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_batch_search(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_batch_search(self, parsed)
+
+    def stream_indexed_search(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.stream_indexed_search(self, parsed)
+
+    def _stream_indexed_search_handle(self, handle: Any, query: str, limit: int) -> None:
+        return FilesystemHttpAdapter._stream_indexed_search_handle(self, handle, query, limit)
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_index_status(self, parsed)

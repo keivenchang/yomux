@@ -2030,6 +2030,36 @@ def test_batchd_interactive_saturation_queues_until_reserved_capacity_is_release
     assert len(submitted_futures) == 2
 
 
+def test_batchd_filesystem_batch_uses_bulk_while_interactive_lane_is_held(tmp_path, monkeypatch):
+    service = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=2)
+    interactive = service._queue_record(
+        "text_facts", {"text": "interactive-holder"}, "interactive", 1, "interactive-holder",
+    )
+    interactive.status = "running"
+    interactive.future = Future()
+    submitted_lanes = []
+
+    class Executor:
+        def submit(self, *_args):
+            submitted_lanes.append(batchd.PersistentJobBroker._lane_for_priority("freshness"))
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    filesystem_batch = service._queue_record(
+        "filesystem_batch", {"requests": []},
+        app_module.filesystem_operation_priority(app_module.FILESYSTEM_BATCH_OPERATION),
+        1,
+        "filesystem-batch",
+    )
+
+    service._pump()
+
+    assert interactive.status == "running"
+    assert filesystem_batch.status == "running"
+    assert submitted_lanes == ["bulk"]
+    assert service.common_status()["lanes"]["interactive"]["active"] == batchd.BATCHD_INTERACTIVE_WORKERS
+
+
 def test_batchd_point_lane_dispatches_while_every_bulk_and_interactive_slot_is_held(tmp_path, monkeypatch):
     """A held bulk job must not put an editor open or an index probe behind it."""
     service = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=2)

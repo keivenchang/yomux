@@ -682,7 +682,7 @@ async function flushFileExplorerFsBatch() {
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   return requestFileExplorerFsResource('list', root, options, async () => {
-      hydrateFileExplorerRepoInfoCache();
+      if (options.enrich !== false) hydrateFileExplorerRepoInfoCache();
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same render window. LIST is intentionally a one-level direct
@@ -692,7 +692,7 @@ async function fetchDirectory(path, options = {}) {
     }, {
       onReuse: entries => {
         clearFileExplorerListError(root);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+        if (options.enrich !== false) scheduleFileExplorerRepoInfoEnrichment(root, entries, {
           includeRoot: options.enrichRoot === true,
           refresh: options.fresh === true,
         });
@@ -706,7 +706,7 @@ async function fetchDirectory(path, options = {}) {
         cacheFileExplorerRepoInfoEntries(root, entries);
         markNewDirectoryEntries(root, entries);
         if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+        if (options.enrich !== false) scheduleFileExplorerRepoInfoEnrichment(root, entries, {
           includeRoot: options.enrichRoot === true,
           refresh: options.fresh === true,
         });

@@ -286,18 +286,16 @@ def _fuzzy_subsequence_span(query: str, text: str) -> int | None:
     return end - start + 1
 
 
-def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
+def _search_token_name_rank(token: str, name: str) -> int | None:
     needle = _compact_search_text(token)
     if not needle:
         return 0
-    basename = _compact_search_text(path.name)
-    stem = _compact_search_text(path.stem)
-    rel_text = _compact_search_text(rel)
+    basename = _compact_search_text(name)
+    stem = _compact_search_text(name.rsplit(".", 1)[0] if "." in name else name)
     doit_needle = _doit_search_token(token)
     if doit_needle:
-        basename_alnum = _alnum_search_text(path.name)
-        stem_alnum = _alnum_search_text(path.stem)
-        rel_alnum = _alnum_search_text(rel)
+        basename_alnum = _alnum_search_text(name)
+        stem_alnum = _alnum_search_text(name.rsplit(".", 1)[0] if "." in name else name)
         if doit_needle in (stem_alnum, basename_alnum):
             return 0
         if stem_alnum.startswith(doit_needle) or basename_alnum.startswith(doit_needle):
@@ -306,8 +304,6 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
             return 20 + stem_alnum.find(doit_needle)
         if basename_alnum.find(doit_needle) >= 0:
             return 30 + basename_alnum.find(doit_needle)
-        if rel_alnum.find(doit_needle) >= 0:
-            return 90 + rel_alnum.find(doit_needle)
         return None
 
     if needle in (stem, basename):
@@ -326,13 +322,34 @@ def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
     span = _fuzzy_subsequence_span(needle, basename)
     if span is not None:
         return 60 + span
+    return None
+
+
+def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
+    name_rank = _search_token_name_rank(token, path.name)
+    if name_rank is not None:
+        return name_rank
+    needle = _compact_search_text(token)
+    rel_text = _compact_search_text(rel)
+    doit_needle = _doit_search_token(token)
+    if doit_needle:
+        index = _alnum_search_text(rel).find(doit_needle)
+        return 90 + index if index >= 0 else None
     index = rel_text.find(needle)
     if index >= 0:
         return 90 + index
     span = _fuzzy_subsequence_span(needle, rel_text)
-    if span is not None:
-        return 130 + rel.count("/") * 4 + span
-    return None
+    return 130 + rel.count("/") * 4 + span if span is not None else None
+
+
+def _direct_name_sort_key(name: str, tokens: list[str]) -> tuple[int, int, int, int, int, str] | None:
+    """Rank one direct child by name without constructing a Path for every sibling."""
+    ranks = [_search_token_name_rank(token, name) for token in tokens]
+    if any(rank is None for rank in ranks):
+        return None
+    if not ranks:
+        return (0, 0, 0, 0, len(name), name.lower())
+    return (min(ranks), sum(ranks), -sum(rank < 90 for rank in ranks), 0, len(name), name.lower())
 
 
 def _search_entry_sort_key(path: Path, rel: str, tokens: list[str]) -> tuple[int, int, int, int, int, str] | None:
@@ -383,6 +400,31 @@ def _search_file_entry(
         "_sort_key": sort_key,
         **paths._physical_file_identity(result_path, resolved=result_path, stat_result=st),
     }
+
+
+def _direct_search_entry(
+    root: Path,
+    path: Path,
+    *,
+    kind: str,
+    sort_key: tuple[int, int, int, int, int, str],
+) -> dict[str, Any] | None:
+    """Build a name-only direct-search row without reading child metadata."""
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.name
+    return {
+        "name": path.name,
+        "path": str(path),
+        "relative_path": rel,
+        "kind": kind,
+        "_sort_key": sort_key,
+    }
+
+
+def _minimal_search_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: entry[key] for key in ("name", "path", "relative_path", "kind") if key in entry}
 
 
 def _annotate_search_dedupe_fields(
@@ -618,6 +660,7 @@ def _search_files_from_safe_root(
     cursor: str | None = None,
     direct_only: bool = False,
     indexed_only: bool = False,
+    minimal: bool = False,
 ) -> dict[str, Any]:
     root = Path(raw_root)
     scan_root = access_root
@@ -663,7 +706,19 @@ def _search_files_from_safe_root(
             indexed_payload_state = ""
             indexed: tuple[list[dict[str, Any]], bool] | None = None
             if index.ready:
-                indexed = file_index.search_index(index, _match, max_results)
+                if minimal:
+                    indexed = file_index.search_disk_index(
+                        root,
+                        skip_dirs,
+                        index_policy["exclude_signature"],
+                        _match,
+                        max_results,
+                        [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                        expected_root_identity=authorized_root_identity,
+                        include_metadata=False,
+                    )
+                if indexed is None and not minimal:
+                    indexed = file_index.search_index(index, _match, max_results, include_metadata=not minimal)
             elif not can_build_index and index.disk_metadata_ready:
                 indexed = file_index.search_disk_index(
                     root,
@@ -673,6 +728,7 @@ def _search_files_from_safe_root(
                     max_results,
                     [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
                     expected_root_identity=authorized_root_identity,
+                    include_metadata=not minimal,
                 )
                 indexed_payload_state = "follower-ready" if indexed is not None else ""
             if indexed is not None:
@@ -683,7 +739,7 @@ def _search_files_from_safe_root(
                     # Annotate the (capped) results with realpath + size so the client can dedupe symlink
                     # overlaps and content-mirror copies. Bounded to <= max_results, so the stat is cheap.
                     if _annotate_search_dedupe_fields(entry, root=root, root_descriptor=access_descriptor):
-                        admitted_results.append(entry)
+                        admitted_results.append(_minimal_search_entry(entry) if minimal else entry)
                 indexed_results = admitted_results
                 freshness = _snapshot_freshness(index, root, index_policy)
                 payload = {
@@ -722,6 +778,7 @@ def _search_files_from_safe_root(
                     max_results,
                     [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
                     expected_root_identity=authorized_root_identity,
+                    include_metadata=not minimal,
                 )
                 if fallback_indexed is not None:
                     fallback_results, fallback_truncated = fallback_indexed
@@ -729,7 +786,7 @@ def _search_files_from_safe_root(
                     for entry in fallback_results:
                         entry.pop("_sort_key", None)
                         if _annotate_search_dedupe_fields(entry, root=root, root_descriptor=access_descriptor):
-                            admitted_results.append(entry)
+                            admitted_results.append(_minimal_search_entry(entry) if minimal else entry)
                     fallback_results = admitted_results
                     freshness = _snapshot_freshness(index, root, index_policy)
                     return {
@@ -776,6 +833,19 @@ def _search_files_from_safe_root(
                         "index_state": "follower",
                         **freshness.payload_fields(),
                     }
+            if indexed_only:
+                freshness = _snapshot_freshness(index, root, index_policy)
+                return {
+                    "root": str(root),
+                    "root_realpath": str(root),
+                    "query": str(query or ""),
+                    "limit": max_results,
+                    "truncated": False,
+                    "files": [],
+                    "index_state": "warming",
+                    "index_coverage": "pending",
+                    **freshness.payload_fields(),
+                }
             if not index.ready and can_build_index:
                 # The first query for a large root must not return an empty
                 # palette while its dedicated writer warms.  Child indexes are
@@ -821,6 +891,7 @@ def _search_files_from_safe_root(
                         _match,
                         max_results,
                         [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                        include_metadata=not minimal,
                     )
                     if child_indexed is None:
                         continue
@@ -839,6 +910,8 @@ def _search_files_from_safe_root(
                         entry.pop("_sort_key", None)
                         if not _annotate_search_dedupe_fields(entry, root=root, root_descriptor=access_descriptor):
                             continue
+                        if minimal:
+                            entry = _minimal_search_entry(entry)
                         seen_paths.add(path_text)
                         unique_rows.append(entry)
                         if len(unique_rows) >= max_results:
@@ -964,7 +1037,52 @@ def _search_files_from_safe_root(
     else:
         visited_dirs = 1
         scan_fd = access_descriptor
-        direct_names = sorted(os.listdir(scan_fd), key=str.lower)
+        if direct_only:
+            # Path-mode Quick Open only needs names and entry kinds. Enumerate once with scandir,
+            # match before opening children, and retain only bounded name-only rows. The parent
+            # descriptor already establishes the authorized scope; opening/statting a child here
+            # would duplicate work that file-open performs after the user selects a result.
+            direct_entries: list[tuple[str, str, tuple[int, int, int, int, int, str]]] = []
+            secret_policy = paths._compiled_secret_policy()
+            configured_exclusions = bool(index_policy["excluded_paths"])
+            try:
+                with os.scandir(scan_fd) as entries:
+                    for entry in entries:
+                        name = entry.name
+                        if name in skip_dirs:
+                            continue
+                        sort_key = _direct_name_sort_key(name, tokens)
+                        if sort_key is None:
+                            continue
+                        if paths._candidate_is_secret(root / name, secret_policy):
+                            continue
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            kind = "dir"
+                        elif entry.is_file(follow_symlinks=False):
+                            kind = "file"
+                        else:
+                            continue
+                        direct_entries.append((name, kind, sort_key))
+                        if not tokens and len(direct_entries) >= max_results:
+                            break
+            except OSError as error:
+                raise error
+            direct_entries.sort(key=lambda item: item[2])
+            admitted = 0
+            for name, kind, sort_key in direct_entries:
+                path = root / name
+                if configured_exclusions and index_policy["exclude_path"](path):
+                    continue
+                results.append(_direct_search_entry(root, path, kind=kind, sort_key=sort_key))
+                admitted += 1
+                if admitted >= max_results:
+                    break
+            truncated = len(direct_entries) > admitted
+            direct_names = []
+        else:
+            direct_names = sorted(os.listdir(scan_fd), key=str.lower)
         for name in direct_names:
             display_path = root / name
             if name in skip_dirs:
@@ -986,8 +1104,6 @@ def _search_files_from_safe_root(
                 ) as child:
                     entry_stat = child.stat_result
                     if stat.S_ISDIR(entry_stat.st_mode):
-                        if direct_only:
-                            continue
                         if not _directory_is_repo(child.descriptor):
                             continue
                         child_dirs, child_files, child_truncated = _search_full_tree(
@@ -1066,8 +1182,9 @@ def _search_files_from_authorized_handle(
     cursor: str | None = None,
     direct_only: bool = False,
     indexed_only: bool = False,
+    minimal: bool = False,
 ) -> dict[str, Any]:
-    inside_repo = git_ops._pinned_repo_root(handle, operation="search_files") is not None
+    inside_repo = False if direct_only else git_ops._pinned_repo_root(handle, operation="search_files") is not None
     payload = _search_files_from_safe_root(
         str(handle.resolved),
         query,
@@ -1079,8 +1196,9 @@ def _search_files_from_authorized_handle(
         cursor=cursor,
         direct_only=direct_only,
         indexed_only=indexed_only,
+        minimal=minimal,
     )
-    if not cursor and isinstance(payload, dict) and "changes" not in payload and not payload.get("rebase_required"):
+    if not cursor and not direct_only and isinstance(payload, dict) and "changes" not in payload and not payload.get("rebase_required"):
         # Step 4: the FIRST (snapshot) response carries the baseline cursor the client seeds its
         # subsequent delta reads with. `None` when nothing is committed yet -- the client then has no
         # cursor to pull with and repairs from the next snapshot once the writer publishes layer 1.
@@ -1093,6 +1211,62 @@ def _search_files_from_authorized_handle(
     return payload
 
 
+def indexed_search_stream_payload(handle: paths.SafePathHandle, query: str, limit: int | str | None) -> dict[str, Any]:
+    """Read one bounded indexed snapshot from an already-authorized root handle."""
+    return _search_files_from_authorized_handle(
+        handle,
+        query=query,
+        limit=limit,
+        recursive=True,
+        indexed_only=True,
+        minimal=True,
+    )
+
+
+def iter_indexed_search_stream_payload(
+    handle: paths.SafePathHandle,
+    query: str,
+    limit: int | str | None,
+    *,
+    skip_paths: set[str] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield minimal indexed Quick Open rows directly from the read-only SQLite cursor."""
+    root = Path(handle.resolved)
+    policy = _search_index_policy(root)
+    tokens = [token for token in str(query or "").split() if token]
+    match = _make_search_match(tokens)
+    expected_identity = None
+    descriptor = getattr(handle, "descriptor", None)
+    if isinstance(descriptor, int):
+        expected_identity = file_index.parse_root_identity(file_index.root_identity(os.fstat(descriptor)))
+    for chunk in file_index.iter_disk_search_chunks(
+        root,
+        policy["skip_dirs"],
+        policy["exclude_signature"],
+        match,
+        _search_limit(limit),
+        [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+        expected_root_identity=expected_identity,
+        include_metadata=False,
+        skip_paths=skip_paths,
+    ):
+        files = []
+        for entry in chunk.get("files", []):
+            if descriptor is not None and not _annotate_search_dedupe_fields(entry, root=root, root_descriptor=descriptor):
+                continue
+            files.append(_minimal_search_entry(entry))
+        coverage = file_index.read_index_coverage(root) or {}
+        yield {
+            "files": files,
+            "truncated": bool(chunk.get("truncated")),
+            "complete": bool(chunk.get("complete")),
+            "available": bool(chunk.get("available")),
+            "index_state": "ready" if coverage.get("full_coverage") else "warming",
+            "refresh_pending": bool(coverage.get("frontier_size")),
+            "progressive_coverage": coverage,
+        }
+
+
 def search_files(
     raw_root: str,
     query: str = "",
@@ -1101,10 +1275,11 @@ def search_files(
     cursor: str | None = None,
     direct_only: bool = False,
     indexed_only: bool = False,
+    minimal: bool = False,
 ) -> dict[str, Any]:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_root, flags=directory_flags, operation="search_files") as handle:
-        return _search_files_from_authorized_handle(handle, query, limit, recursive, cursor, direct_only, indexed_only)
+        return _search_files_from_authorized_handle(handle, query, limit, recursive, cursor, direct_only, indexed_only, minimal)
 
 
 def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -> dict[str, Any]:

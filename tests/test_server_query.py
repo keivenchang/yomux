@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+import threading
 from http import HTTPStatus
 from pathlib import Path
 from types import MethodType
@@ -1321,11 +1322,27 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/fs/batch").role == "admin"
     assert route_by_path("GET", "/api/fs/fast/list").handler is http_routes.get_fs_fast_list
     assert route_by_path("GET", "/api/fs/fast/list").role == "readonly"
+    search_stream = route_by_path("GET", "/api/fs/search-stream")
+    assert search_stream.handler is http_routes.get_fs_search_stream
+    assert search_stream.role == "readonly"
+    assert search_stream.protocol == http_routes.RESPONSE_SSE
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
     assert route_by_path("GET", "/api/batch/zip").handler is http_routes.get_fs_zip
     assert route_by_path("GET", "/api/batch/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
+
+
+def test_indexed_search_stream_requires_the_registered_authenticated_role():
+    handler, calls, writes = route_handler("/api/fs/search-stream?root=%2Frepo&query=x")
+    handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or False
+    handler.stream_indexed_search = lambda _parsed: writes.append(("stream",))
+    handler.redirect_plaintext_to_https_if_needed = lambda _parsed: False
+
+    http_routes.dispatch_http_route(handler, "GET")
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == []
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -2091,6 +2108,31 @@ def test_handle_fs_list_is_direct(monkeypatch):
     assert writes == [(HTTPStatus.OK, {"path": "/repo", "entries": []})]
 
 
+def test_handle_fs_search_uses_direct_owner_only_for_explicit_direct_queries(monkeypatch):
+    calls = []
+    writes = []
+    handler = object.__new__(Handler)
+    handler.submit_filesystem_operation = lambda *args: calls.append(args)
+    handler.write_json = lambda payload, status: writes.append((status, payload))
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "search_files",
+        lambda *args, **kwargs: calls.append(("direct", args, kwargs)) or {"files": []},
+    )
+
+    Handler.handle_fs_search(handler, urlparse("/api/fs/search?root=%2Frepo%2Fsrc&query=hw&limit=500&direct_only=1"))
+    Handler.handle_fs_search(handler, urlparse("/api/fs/search?root=%2Frepo&query=hw&limit=500"))
+
+    assert calls[0] == ("direct", ("/repo/src",), {
+        "query": "hw", "limit": "500", "recursive": False, "direct_only": True,
+        "indexed_only": False, "minimal": False,
+    })
+    assert calls[1] == ("GET /api/batch/search", "search", "/repo", {
+        "query": "hw", "limit": "500", "recursive": False, "cursor": "",
+    })
+    assert writes == [(HTTPStatus.OK, {"files": []})]
+
+
 def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_batchd_path(monkeypatch):
     calls = []
     writes = []
@@ -2622,6 +2664,102 @@ def test_write_sse_json_formats_event_stream():
     Handler.write_sse_json(handler, "delta", {"text": "hello"})
 
     assert handler.wfile.getvalue() == b'event: delta\ndata: {"text": "hello"}\n\n'
+
+
+def test_indexed_search_stream_emits_typed_chunks_and_closes_authorized_handle(monkeypatch):
+    events = []
+    writes = []
+    root = Path("/repo")
+
+    class RootHandle:
+        resolved = root
+
+        def __enter__(self):
+            events.append("entered")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            events.append("closed")
+            return False
+
+    payloads = iter((
+        {
+            "files": [{"path": "/repo/first.py", "name": "first.py"}],
+            "index_state": "follower-stale",
+            "refresh_pending": True,
+            "complete": False,
+            "progressive_coverage": {"published_depth": 1, "full_coverage": False},
+        },
+        {
+            "files": [{"path": "/repo/second.py", "name": "second.py"}],
+            "index_state": "ready",
+            "refresh_pending": False,
+            "progressive_coverage": {"published_depth": 2, "full_coverage": True},
+        },
+    ))
+    monkeypatch.setattr(server_module.filesystem.paths, "safe_path", lambda *args, **kwargs: RootHandle())
+    def stream_payloads(handle, query, limit, *, skip_paths=None):
+        del skip_paths
+        events.append((handle, query, limit))
+        for payload in (next(payloads),):
+            yield payload
+
+    monkeypatch.setattr(server_module.filesystem, "iter_indexed_search_stream_payload", stream_payloads)
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(persistent_request_stop=threading.Event())
+    handler.headers = {}
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda status: writes.append(("status", status))
+    handler.send_header = lambda name, value: writes.append((name, value))
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: writes.append(("headers",))
+    handler.write_sse_json = lambda event, payload: writes.append((event, payload))
+    handler.client_event_peer_disconnected = lambda: False
+
+    Handler.stream_indexed_search(handler, SimpleNamespace(query="root=%2Frepo&query=py&limit=7"))
+
+    assert events[0] == "entered"
+    assert events[-1] == "closed"
+    assert [(entry[0], entry[1]["files"]) for entry in writes if len(entry) == 2 and entry[0] == "chunk"] == [
+        ("chunk", [{"path": "/repo/first.py", "name": "first.py"}]),
+        ("chunk", [{"path": "/repo/second.py", "name": "second.py"}]),
+    ]
+    assert writes[-1][0] == "done"
+    assert any(event[1:] == ("py", 7) for event in events if isinstance(event, tuple))
+    assert [entry[0] for entry in writes if len(entry) == 2 and entry[0] == "error"] == []
+
+
+def test_indexed_search_stream_stops_before_writing_after_disconnect(monkeypatch):
+    writes = []
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(persistent_request_stop=threading.Event())
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.write_sse_json = lambda event, payload: writes.append((event, payload))
+    handler.client_event_peer_disconnected = lambda: True
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "iter_indexed_search_stream_payload",
+        lambda *_args, **_kwargs: iter(({"files": [{"path": "/repo/target.py"}], "index_state": "ready", "complete": True},)),
+    )
+
+    Handler._stream_indexed_search_handle(handler, SimpleNamespace(resolved=Path("/repo")), "needle", 10)
+
+    assert [event for event, _payload in writes] == ["start"]
+
+
+def test_indexed_search_stream_validates_limit_before_authorizing_root():
+    writes = []
+    handler = object.__new__(Handler)
+    handler.write_json = lambda payload, status=HTTPStatus.OK: writes.append((status, payload))
+
+    Handler.stream_indexed_search(handler, SimpleNamespace(query="root=%2Frepo&query=x&limit=nope"))
+
+    assert writes[0][0] == HTTPStatus.BAD_REQUEST
+    assert writes[0][1]["user_message"]["key"] == "request.error.integer"
 
 
 def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
