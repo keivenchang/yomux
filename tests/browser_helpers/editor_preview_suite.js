@@ -2406,8 +2406,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const pageFrames = [];
     const openCodeTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
     api.registerTerminalForTest('1', openCodeTerm, {readyState: 1, send(frame) { pageFrames.push(JSON.parse(frame)); }}).container = openCodeContainer;
-    assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'touch'}), true, 'OpenCode touch pan uses the shared app-wheel route even when tmux reports normal screen');
-    assert.deepStrictEqual(openCodeWheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', -1, 1], ['wheel', -1, 1], ['wheel', -1, 1]], 'OpenCode touch pan emits the same line-accurate internal-app wheel sequence as Claude');
+    assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'touch'}), true, 'OpenCode touch pan uses native page navigation even when tmux reports normal screen');
+    assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: '\x1b\x19\x1b\x19\x1b\x19'}, 'OpenCode touch pan sends native one-line-up bindings so the prompt/footer stays fixed');
+    assert.equal(openCodeWheelEvents.length, 0, 'OpenCode touch pan does not synthesize a wheel that can move the prompt');
 
     openCodeWheelEvents.length = 0;
     assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'wheel'}), true, 'desktop OpenCode wheel uses the internal app route on normal screen');

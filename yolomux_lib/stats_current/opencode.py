@@ -61,6 +61,7 @@ _STATE_REQUIRED_COLUMNS = {
     "session_input": frozenset(_SESSION_INPUT_COLUMNS),
 }
 _VALID_INPUT_DELIVERIES = frozenset({"queue", "steer"})
+_OPENCODE_TITLE_PREFIX = "OC | "
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,6 +631,76 @@ def read_usage(
             connection.close()
 
 
+def session_id_for_terminal_title(
+    database: Path = DEFAULT_DATABASE_PATH,
+    *,
+    directory: str,
+    title: str,
+    now: float | None = None,
+    max_session_age_seconds: float = DEFAULT_SESSION_MAX_AGE_SECONDS,
+    future_skew_seconds: float = DEFAULT_FUTURE_SKEW_SECONDS,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
+) -> str | None:
+    """Return an ID only when one recent session owns the visible OpenCode title prefix.
+
+    OpenCode's default TUI does not put its session ID in argv. Its terminal title does carry the
+    session title, however, and the title is useful only as a bounded disambiguator: duplicate or
+    missing matches remain unavailable rather than selecting the newest database row.
+    """
+    visible = str(title or "").strip()
+    if visible.startswith(_OPENCODE_TITLE_PREFIX):
+        visible = visible[len(_OPENCODE_TITLE_PREFIX):].strip()
+    if not visible or len(visible.encode("utf-8")) > MAX_JSON_BYTES:
+        return None
+    canonical_directory = _canonical_directory(directory)
+    current = float(now if now is not None else time.time())
+    if not math.isfinite(current) or max_sessions <= 0 or max_session_age_seconds <= 0 or future_skew_seconds < 0:
+        return None
+    truncated = visible.endswith("...") or visible.endswith("…")
+    if truncated:
+        visible = visible[:-3] if visible.endswith("...") else visible[:-1]
+    visible = visible.rstrip('"')
+    if not visible:
+        return None
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{quote(str(database.expanduser().resolve(strict=False)), safe='/')}?mode=ro",
+            uri=True,
+            timeout=1.0,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        if _validate_schema(connection) is not None:
+            return None
+        rows = connection.execute(
+            'SELECT id, directory, title, time_updated FROM "session" '
+            "WHERE directory IN (?, ?) AND time_updated >= ? AND time_updated <= ? "
+            "ORDER BY time_updated DESC, id DESC LIMIT ?",
+            (
+                directory,
+                canonical_directory,
+                int((current - max_session_age_seconds) * 1000),
+                int((current + future_skew_seconds) * 1000),
+                max_sessions + 1,
+            ),
+        ).fetchall()
+        matches: list[str] = []
+        for row in rows:
+            if _canonical_directory(_bounded_text(row["directory"])) != canonical_directory:
+                continue
+            candidate = _bounded_text(row["title"])
+            if (candidate.startswith(visible) if truncated else candidate == visible):
+                matches.append(_bounded_text(row["id"]))
+        return matches[0] if len(matches) == 1 else None
+    except (OSError, sqlite3.DatabaseError, ValueError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def read_state(
     database: Path = DEFAULT_DATABASE_PATH,
     *,
@@ -905,8 +976,9 @@ def _select_session(
         if row is None:
             return OpenCodeUnavailable("session-not-found")
         session = _session_from_row(row)
-        if directory is not None and _canonical_directory(session.directory) != _canonical_directory(directory):
-            return OpenCodeUnavailable("session-directory-mismatch")
+        # The process-provided session ID is authoritative. A pane cwd may be stale after a
+        # worktree move or may differ from OpenCode's canonical project path. Do not turn an exact
+        # session selector into an unavailable read because of that auxiliary hint.
         if started_at is not None:
             if not math.isfinite(float(started_at)):
                 return OpenCodeUnavailable("invalid-start-time")

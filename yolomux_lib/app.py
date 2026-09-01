@@ -8324,7 +8324,45 @@ class TmuxWebtermApp:
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
         payload = self.status_snapshot_payload()
-        return self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
+        rows = self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
+        if not rows:
+            return rows
+        discovered_sessions, _errors = discover_sessions(self.sessions)
+        discovered_rows = self.stats_agent_window_rows_from_discovered_sessions(discovered_sessions)
+        discovered_by_key = {
+            (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower()): row
+            for row in discovered_rows
+        }
+        for row in rows:
+            key = (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower())
+            discovered = discovered_by_key.get(key)
+            if discovered is None or str(row.get("kind") or "").lower() != "opencode":
+                continue
+            for field in ("agent_session_id", "cwd", "started_at"):
+                if row.get(field) in (None, "") and discovered.get(field) not in (None, ""):
+                    row[field] = discovered[field]
+        return rows
+
+    @staticmethod
+    def stats_agent_window_rows_from_discovered_sessions(discovered_sessions: dict[str, SessionInfo]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for session, info in discovered_sessions.items():
+            for agent in info.agents:
+                kind = str(agent.kind or "").lower()
+                if kind != "opencode":
+                    continue
+                window, _pane = session_files.agent_window_for_info(info, agent)
+                rows.append({
+                    "session": session,
+                    "window": window,
+                    "window_index": int(window) if window.isdigit() else None,
+                    "pane_target": str(agent.pane_target or ""),
+                    "kind": kind,
+                    "agent_session_id": str(agent.session_id or ""),
+                    "cwd": str(agent.cwd or ""),
+                    **({"started_at": float(agent.started_at)} if agent.started_at is not None and agent.started_at > 0 else {}),
+                })
+        return rows
 
     def start_status_collector_lease(self) -> bool:
         """Hold one statusd lease for this elected process's recurring status collectors."""
