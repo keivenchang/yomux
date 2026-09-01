@@ -90,14 +90,14 @@ def test_row_plans_strip_every_inherited_writable_path_across_platform_modes(tmp
     path_keys = (*PRODUCT_ROOT_KEYS, "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
     contaminated = {key: f"relative-{index}" for index, key in enumerate(path_keys)}
 
-    for port, platform_name in ((7770, "Linux"), (7771, "Linux"), (8881, "Darwin")):
+    for port, platform_name in ((7110, "Linux"), (7111, "Linux"), (8881, "Darwin")):
         plan = resolve_row_plan(port, contaminated, platform=platform_name, tempdir=SHORT_TEMP_ROOT)
         child = apply_row_plan(plan, contaminated)
 
         assert (set(path_keys) - {YOLOMUX_ROOT_ENV}).isdisjoint(child)
         assert child.get(YOLOMUX_ROOT_ENV) != contaminated[YOLOMUX_ROOT_ENV]
         assert set(path_keys).issubset(plan.unset)
-        if port == 7770:
+        if port == 7110:
             assert plan.assign == {}
         else:
             assert plan.assign[YOLOMUX_ROOT_ENV].endswith(f"/p{port}")
@@ -126,7 +126,7 @@ def test_row_plan_resolves_once_serializes_and_applies_without_secrets(tmp_path:
     assert contaminated[YOLOMUX_ROOT_ENV] == "/tmp/foreign/p9999"
 
     # a default (production) port carries no managed assignment
-    default_plan = resolve_row_plan(7770, {}, platform="Linux")
+    default_plan = resolve_row_plan(7110, {}, platform="Linux")
     assert default_plan.assign == {}
 
 
@@ -337,8 +337,8 @@ def test_caller_set_root_never_selects_the_managed_local_owner_adapter(tmp_path:
 
 
 def test_legacy_default_and_explicit_root_are_quiet(tmp_path: Path):
-    assert resolve_instance_environment(7770, {}, platform="Linux").environment == {}
-    assert is_managed_instance_port(7770, {}) is False
+    assert resolve_instance_environment(7110, {}, platform="Linux").environment == {}
+    assert is_managed_instance_port(7110, {}) is False
     custom = {YOLOMUX_ROOT_ENV: f"/tmp/yolomux-explicit-{os.getpid()}"}
     assert resolve_instance_environment(7771, custom, platform="Linux").error == ""
 

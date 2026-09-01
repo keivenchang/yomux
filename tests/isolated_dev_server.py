@@ -12,7 +12,7 @@ signal handling.
 WHAT ISOLATION MEANS HERE, and every clause is load-bearing:
 
   * EPHEMERAL PORT. `HttpPortLease.reserve()` with no candidate range binds port 0, so the kernel
-    picks it. `7770`-`7773` (and `8880`-`8883` on macOS) are the operator's live servers and an
+    picks it. `7110`-`7113` (and `8880`-`8883` on macOS) are the operator's live servers and an
     automated test must never reach them; `assert_isolated_dev_server_port` refuses them outright
     rather than trusting the kernel to be tactful.
   * PRIVATE TMUX SOCKET. `start_isolated_tmux_runtime` owns a `/tmp/yts-<pid>-<uuid>` socket dir
@@ -64,7 +64,7 @@ SERVER_READY_TIMEOUT_SECONDS = 20.0
 SERVER_STOP_TIMEOUT_SECONDS = 10.0
 
 # The operator's live servers, by platform. Never automated, on any lane, for any reason.
-FORBIDDEN_LIVE_PORTS = frozenset(range(8880, 8884) if sys.platform == "darwin" else range(7770, 7774))
+FORBIDDEN_LIVE_PORTS = frozenset(range(8880, 8884) if sys.platform == "darwin" else range(7110, 7114))
 
 
 @dataclass(frozen=True)

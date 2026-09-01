@@ -107,7 +107,11 @@ import platform
 import time
 
 detected_cpus = max(1, os.cpu_count() or 1)
-cpus = min(detected_cpus, 8) if platform.system() == "Darwin" else detected_cpus
+try:
+    schedulable_cpus = max(1, len(os.sched_getaffinity(0)))
+except (AttributeError, OSError):
+    schedulable_cpus = detected_cpus
+cpus = min(schedulable_cpus, 8) if platform.system() == "Darwin" else schedulable_cpus
 load1, load5, _load15 = os.getloadavg()
 
 
@@ -168,11 +172,14 @@ effective_load5 = max(0.0, load5 - discount)
 # developer-only YOLOmux restart. Keep a real CPU-saturation floor: this exemption is not a
 # blanket override for a machine that is actually busy.
 defender_load_ignored = defender_d_tasks > 0
-load_ok = defender_load_ignored or (effective_load1 <= cpus * 0.75 and effective_load5 <= cpus * 2.0)
+# The one-minute average can remain elevated after short-lived parallel work has
+# ended. Keep it as a burst guard at one full CPU per schedulable CPU; the
+# five-minute ceiling and, on Linux, the measured idle floor still reject sustained pressure.
+load_ok = defender_load_ignored or (effective_load1 <= cpus and effective_load5 <= cpus * 2.0)
 cpu_ok = idle_fraction >= 0.10
 ok = load_ok and cpu_ok
 print(
-    f"load1={load1:.2f} effective={effective_load1:.2f}/{cpus * 0.75:.2f} "
+    f"load1={load1:.2f} effective={effective_load1:.2f}/{cpus:.2f} "
     f"load5={load5:.2f} effective={effective_load5:.2f}/{cpus * 2.0:.2f} "
     f"discount={discount:.2f} cpu_idle={idle_fraction:.2%} defender_d_tasks={defender_d_tasks} "
     f"defender_load_ignored={defender_load_ignored} cpu_budget={cpus}"
