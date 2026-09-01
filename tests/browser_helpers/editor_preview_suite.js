@@ -8332,17 +8332,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
   test('preview and editor font preferences render and apply', () => {
-    // Preview font size is independent from the editor font size and defaults one px larger.
+    // Preview font size is independently configurable when global synchronization is disabled.
     const api = loadYolomux('', ['1']);
     api.setActiveLocaleForTest('en');
     api.setClientSettingsPayloadPatchForTest({localeKeyOverrides: {'appearance.preview_font_size': {label: 'common.previewFontSize'}}});
+    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
     const html = api.preferencesPanelHtmlForTest('');
-    assert.ok(/data-preference-section="terminal_editor"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Terminal / Editor preferences');
+    assert.ok(/data-preference-section="sizes"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Sizes preferences');
     assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);"), 'preview font size defaults one larger than editor font during bootstrap');
+    assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);"), 'preview font size defaults to 14px during bootstrap');
     assert.ok(source.includes("root.setProperty('--editor-preview-font-size'"), 'preview font size writes its own CSS variable');
-    assert.ok(source.includes("numberSetting('appearance.preview_font_size', editorFontSize + 1)"), 'preview font size reload preserves the editor+1 fallback');
+    assert.ok(source.includes("numberSetting('appearance.preview_font_size', 14)"), 'preview font size reload preserves the 14px fallback');
     assert.ok(source.includes('class="file-editor-preview-font-panel"'), 'preview toolbar includes a font-size control group');
     assert.ok(source.includes('data-editor-preview-font-step="-1"'), 'preview toolbar includes a decrease button');
     assert.ok(source.includes('data-editor-preview-font-step="1"'), 'preview toolbar includes an increase button');
@@ -8860,7 +8861,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
     for (const key of [
       'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
-      'pref.appearance.date_time_hour_cycle.label', 'pref.appearance.font_sizes.note',
+      'pref.appearance.date_time_hour_cycle.label',
       'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
       'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
       'pref.performance.server_directory_event_poll_ms.label',
@@ -8877,7 +8878,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(html.includes(enXA[key]), `pseudo-locale renders ${key}`);
     }
     for (const englishLeak of [
-      'Global appearance', 'Editor/Terminal font sizes are in Terminal / Editor.', 'Client pull: latency ping', 'Notification throttle',
+      'Global appearance', 'Client pull: latency ping', 'Notification throttle',
       'Terminal scrollback', 'File transfer size cap', 'YO!agent backend', 'Dry run',
     ]) {
       assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
@@ -9062,7 +9063,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setClientSettingsPatchForTest({file_explorer: {index_exclude_dir_names: ['node_modules', 'backup'], index_exclude_paths: ['glob:**/.uploads/**']}});
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
+    const expectedOrder = ['general', 'colors', 'sizes', 'terminal', 'editor_options', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
     assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
@@ -9098,13 +9099,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }, 'the combined Quick Open control splits exact directory names from advanced path rules without duplicates');
     const excludeItem = {path: 'file_explorer.index_exclude_paths', label: 'Quick Open exclusions', help: 'Exclude generated files with glob or regex patterns.'};
     assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
-    const appearanceHtml = sectionHtml('appearance');
-    assert.ok(appearanceHtml.includes('Global appearance'), 'Appearance shows the renamed Global appearance field');
-    assert.ok(appearanceHtml.includes('Theme color'), 'Appearance shows the renamed Theme color field');
-    assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
-    assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');
-    assert.ok(appearanceHtml.includes('Single pane') && appearanceHtml.includes('Split') && appearanceHtml.includes('Grid'), 'Default layout labels match View layout labels');
-    assert.equal(appearanceHtml.includes('Wall'), false, 'Wall is no longer offered as a default layout choice');
+    const appearanceHtml = sectionHtml('colors');
+    assert.ok(appearanceHtml.includes('Global appearance'), 'Colors shows the renamed Global appearance field');
+    assert.ok(appearanceHtml.includes('Theme color'), 'Colors shows the renamed Theme color field');
     assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
     assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
     assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
@@ -9123,8 +9120,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
     assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
-    assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Appearance');
-    assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.date_time_hour_cycle"/.test(appearanceHtml), 'Separator and Cursor color sit immediately after Active color in Appearance, with no YO rotation row between them');
+    assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Colors');
+    assert.ok(/data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"/.test(appearanceHtml), 'Separator and Cursor color stay with the other Colors settings');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
     const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
@@ -9133,18 +9130,31 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.editor_cursor_color'\][\s\S]*CURSOR_COLOR_CHOICES[\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices sync to the backend allowlist with a local fallback');
     assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*preset\?\.cursorLabelKey \? t\(preset\.cursorLabelKey\) : preferenceChoiceLabel\(value\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
     assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:#3b82f6[\\s\\S]*--preferences-radio-swatch:${UI_PINS.textSelectionBg}`).test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
-    assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
-    assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
     assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
     assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
     assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
-    const appearancePaths = [...appearanceHtml.matchAll(/data-setting-path="([^"]+)"/g)].map(match => match[1]);
-    assert.equal(appearancePaths.at(-1), 'appearance.date_time_hour_cycle', '12-hour / 24-hour Date/time clock is the last Appearance item');
-    const terminalEditorHtml = sectionHtml('terminal_editor');
-    assert.ok(terminalEditorHtml.includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
-    assert.equal(terminalEditorHtml.includes('data-setting-path="appearance.editor_cursor_color"'), false, 'Cursor color moved out of Terminal / Editor into Appearance');
-    assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
-    assert.equal(sectionHtml('general').includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
+    const terminalHtml = sectionHtml('terminal');
+    assert.ok(terminalHtml.includes('data-setting-path="appearance.tmux_status_bar"'), 'Terminal owns tmux status-bar placement');
+    assert.ok(terminalHtml.includes('data-setting-path="terminal_editor.scrollback"'), 'Terminal owns scrollback');
+    const sizesHtml = sectionHtml('sizes');
+    assert.ok(/data-setting-path="appearance\.sync_font_sizes"[\s\S]*data-setting-path="appearance\.global_font_size"/.test(sizesHtml), 'Sizes starts with sync control and global font size');
+    assert.equal(sizesHtml.includes('data-setting-path="appearance.ui_font_size"'), false, 'separate UI font size is hidden while synchronization is enabled');
+    assert.equal(sizesHtml.includes('data-setting-path="appearance.terminal_font_size"'), false, 'separate terminal font size is hidden while synchronization is enabled');
+    assert.ok(sizesHtml.includes('Global font size'), 'global font size renders in Sizes');
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(source.includes("'appearance.global_font_size': 14"), 'global font size defaults to 14px');
+    assert.ok(sizesHtml.includes('Sync all font sizes'), 'font-size synchronization control renders');
+    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
+    const separateSizesHtml = api.preferencesPanelHtmlForTest('');
+    const separateAppearanceHtml = separateSizesHtml.slice(separateSizesHtml.indexOf('data-preference-section="sizes"'), separateSizesHtml.indexOf('data-preference-section="terminal"'));
+    assert.equal(separateAppearanceHtml.includes('data-setting-path="appearance.global_font_size"'), false, 'global font size is hidden when synchronization is disabled');
+    assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.ui_font_size"'), 'unchecking synchronization reveals the separate UI font size');
+    assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.terminal_font_size"'), 'unchecking synchronization reveals the separate terminal font size');
+    assert.ok(/data-setting-path="appearance\.tab_width"[\s\S]*data-setting-path="appearance\.pane_spacing"/.test(sizesHtml), 'Sizes contains layout dimensions');
+    const editorOptionsHtml = sectionHtml('editor_options');
+    assert.ok(/data-setting-path="terminal_editor\.word_wrap"[\s\S]*data-setting-path="editor\.autosave"/.test(editorOptionsHtml), 'Editor options groups editor behavior settings');
+    assert.ok(sectionHtml('general').includes('data-setting-path="general.default_layout"'), 'Default layout lives in General');
+    assert.ok(sectionHtml('general').includes('data-setting-path="appearance.date_time_hour_cycle"'), 'Date/time clock lives in General');
     assert.equal(sectionHtml('general').includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
     // the GitHub section carries the watched-PRs list field.
     assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'the GitHub section has the watched_prs list field');

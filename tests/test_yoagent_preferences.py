@@ -61,7 +61,7 @@ def test_operator_writes_safe_admin_setting_through_callback(tmp_path):
     assert response is not None
     assert patches == [{"appearance": {"theme": "light"}}]
     assert "`appearance.theme`" in response["answer"]
-    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Appearance | `live` |" in response["answer"]
+    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Colors | `live` |" in response["answer"]
     assert settings_payload(path)["settings"]["appearance"]["theme"] == "light"
 
 
@@ -79,7 +79,7 @@ def test_operator_writes_background_white_as_light_theme(tmp_path):
     assert response is not None
     assert patches == [{"appearance": {"theme": "light"}}]
     assert "`appearance.theme`" in response["answer"]
-    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Appearance | `live` |" in response["answer"]
+    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Colors | `live` |" in response["answer"]
     assert settings_payload(path)["settings"]["appearance"]["theme"] == "light"
 
 
@@ -97,7 +97,7 @@ def test_operator_treats_bare_color_change_as_active_color(tmp_path):
     assert response is not None
     assert patches == [{"appearance": {"active_color": "orange"}}]
     assert "`appearance.active_color`" in response["answer"]
-    assert "| `appearance.active_color` | `green` | `orange` | Preferences -> Appearance | `live` |" in response["answer"]
+    assert "| `appearance.active_color` | `green` | `orange` | Preferences -> Colors | `live` |" in response["answer"]
     assert settings_payload(path)["settings"]["appearance"]["active_color"] == "orange"
 
 
@@ -155,7 +155,7 @@ def test_operator_catalog_exposes_shared_locale_keys(tmp_path):
         "description": "pref.appearance.theme.help",
         "label": "pref.appearance.theme.label",
     }
-    assert theme["gui"]["section_locale_key"] == "pref.section.appearance"
+    assert theme["gui"]["section_locale_key"] == "pref.section.colors"
     assert catalog["file_explorer.root_mode"]["gui"]["section_locale_key"] == "finder.label.finder"
     for path in [
         "general.default_sessions",
@@ -184,9 +184,9 @@ def test_operator_localizes_setting_section_and_help(tmp_path):
     )
 
     assert response is not None
-    assert "偏好设置 -> 外观" in response["answer"]
+    assert "偏好设置 -> 颜色" in response["answer"]
     assert "菜单、窗格、文件浏览器" in response["answer"]
-    assert "Preferences -> Appearance" not in response["answer"]
+    assert "Preferences -> Colors" not in response["answer"]
     assert "Theme for menus" not in response["answer"]
 
 

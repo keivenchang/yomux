@@ -8,6 +8,8 @@ copy-pasted across ~11 test files, and ensuring no test (e.g. the login-locale p
 general.language) can leave a *persistent* shared config dir mutated across runs.
 """
 
+import atexit
+from functools import partial
 import importlib
 import json
 import os
@@ -16,8 +18,12 @@ import re
 import socket
 import tempfile
 import time
+import uuid
 
 import pytest
+
+from yolomux_lib.infra.transient_paths import create_run_root
+from yolomux_lib.infra.transient_paths import remove_run_root
 
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
 # parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
@@ -25,12 +31,24 @@ import pytest
 # other's session summaries out of that shared file (prune_yoagent_session_summaries keeps only its
 # own sessions), a ~6% KeyError flake under `-n auto`. Give each xdist worker a distinct dir; keep
 # setdefault's external override (CI/dev) for the serial / controller process.
-_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
-for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLOMUX_STATE_DIR", "yolomux-test-state-")):
-    if _xdist_worker:
-        os.environ[_env_var] = tempfile.mkdtemp(prefix=f"{_prefix}{_xdist_worker}-")
-    else:
-        os.environ.setdefault(_env_var, tempfile.mkdtemp(prefix=_prefix))
+_inherited_test_root = os.environ.get("YOLOMUX_TEST_ROOT", "").strip()
+if _inherited_test_root:
+    _test_run_root = None
+    _test_process_root = Path(_inherited_test_root) / f"p{os.getpid()}"
+else:
+    _test_run_root = create_run_root(namespace="test", owner_role="pytest-controller")
+    _test_process_root = _test_run_root.child("pytest")
+    os.environ["YOLOMUX_TEST_ROOT"] = str(_test_run_root.path)
+_test_config_dir = _test_process_root / "config"
+_test_state_dir = _test_process_root / "state"
+_test_process_root.mkdir(mode=0o700, exist_ok=True)
+_test_config_dir.mkdir(mode=0o700, exist_ok=True)
+_test_state_dir.mkdir(mode=0o700, exist_ok=True)
+os.environ["YOLOMUX_CONFIG_DIR"] = str(_test_config_dir)
+os.environ["YOLOMUX_STATE_DIR"] = str(_test_state_dir)
+if _test_run_root is not None:
+    atexit.register(partial(remove_run_root, _test_run_root))
+
 os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
 
 
@@ -110,7 +128,9 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def isolated_tmux_socket(monkeypatch):
-    sock_dir = Path(tempfile.mkdtemp(prefix=f"yotmux-{os.getpid()}-", dir="/tmp"))
+    socket_parent = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux"
+    socket_parent.mkdir(mode=0o700, exist_ok=True)
+    sock_dir = Path(tempfile.mkdtemp(prefix=f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}-", dir=socket_parent))
     monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(sock_dir / "s"))
     yield
     try:

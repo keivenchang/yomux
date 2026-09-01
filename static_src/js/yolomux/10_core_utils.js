@@ -3322,7 +3322,14 @@ function readStoredCollapsedPreferenceSections() {
   const raw = storageGet(preferencesCollapsedStorageKey);
   if (!raw) return defaultCollapsedPreferenceSections();
   const parsed = safeJsonParse(raw, null);
-  return Array.isArray(parsed) ? normalizeCollapsedPreferenceSections(parsed) : defaultCollapsedPreferenceSections();
+  if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
+  const migrated = parsed.flatMap(value => {
+    const text = String(value || '');
+    if (text === 'appearance' || text === 'Appearance' || text === 'ui_sizes' || text === 'UI sizes') return ['sizes'];
+    if (text === 'terminal_editor' || text === 'Terminal / Editor' || text === 'editor_general' || text === 'Editor general') return ['editor_options'];
+    return [text];
+  });
+  return normalizeCollapsedPreferenceSections(migrated);
 }
 
 function writeStoredCollapsedPreferenceSections() {

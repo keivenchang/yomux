@@ -1029,13 +1029,21 @@ function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
-  const uiFontSize = numberSetting('appearance.ui_font_size', 13);
-  root.setProperty('--ui-font-size', `${uiFontSize}px`);
-  root.setProperty('--tab-label-size', `${uiFontSize}px`);
-  root.setProperty('--terminal-font-size', `${terminalFontSize}px`);
-  root.setProperty('--editor-font-size', `${editorFontSize}px`);
-  root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
-  root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
+  const globalFontSize = Math.max(6, Math.min(25, numberSetting('appearance.global_font_size', 14)));
+  const uiFontSize = numberSetting('appearance.ui_font_size', 14);
+  const syncFontSizes = boolSetting('appearance.sync_font_sizes', true);
+  if (syncFontSizes) {
+    terminalFontSize = globalFontSize;
+    editorFontSize = globalFontSize;
+    editorPreviewFontSize = globalFontSize;
+    fileExplorerFontSize = globalFontSize;
+  }
+  root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${syncFontSizes ? globalFontSize : terminalFontSize}px`);
+  root.setProperty('--editor-font-size', `${syncFontSizes ? globalFontSize : editorFontSize}px`);
+  root.setProperty('--editor-preview-font-size', `${syncFontSizes ? globalFontSize : editorPreviewFontSize}px`);
+  root.setProperty('--file-explorer-font-size', `${syncFontSizes ? globalFontSize : fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
@@ -1194,10 +1202,10 @@ function applySettingsPayload(payload, options = {}) {
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
-  terminalFontSize = numberSetting('appearance.terminal_font_size');
-  editorFontSize = numberSetting('appearance.editor_font_size');
-  editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
+  editorFontSize = numberSetting('appearance.editor_font_size', 14);
+  editorPreviewFontSize = numberSetting('appearance.preview_font_size', 14);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 14);
   terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');

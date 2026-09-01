@@ -20,6 +20,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1311,7 +1312,7 @@ CLIENT_EVENT_RECURRING_WORK_SPECS = {
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
 DEFAULT_APP_SETTINGS = default_settings()
 DEFAULT_PERFORMANCE_SETTINGS = DEFAULT_APP_SETTINGS["performance"]
-SELF_RESTART_LOG_PATH = "/tmp/yolomux-self-update-restart.log"
+SELF_RESTART_LOG_PATH = str(Path(tempfile.gettempdir()) / f"yolomux-server-{os.getuid()}" / "shared" / "logs" / "self-update-restart.log")
 SELF_RESTART_ENV_KEYS = (
     "PATH",
     "TERM",
@@ -7655,7 +7656,7 @@ class SystemStatusProjector:
             service_dir,
             table,
         )
-        evidence = sorted(Path("/tmp").glob(f"yolomux-overload-{port}-*.json")) if port else []
+        evidence = sorted((Path(tempfile.gettempdir()) / f"yolomux-server-{os.getuid()}" / "shared" / "evidence").glob(f"yolomux-overload-{port}-*.json")) if port else []
         return {
             "port_group": port_group,
             "service_groups": service_groups,

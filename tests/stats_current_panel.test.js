@@ -905,6 +905,36 @@ test('CPU hover resolves both binary areas and the existing line identities dire
   assert.match(detail, /seriesKey: series\.key/);
 });
 
+test('CPU coverage overlays exclude intervals already represented by plotted samples', () => {
+  const coverageSource = sourceFunction('debugGraphSeriesDataRanges', 'debugGraphHistoryCoverageGapRuns');
+  const context = {
+    Map,
+    Number,
+    Math,
+    result: null,
+    jsDebugGraphRawBucketMs: 1000,
+    debugGraphMergeTimeRanges: (ranges, domain) => {
+      const sorted = ranges.filter(range => range.endMs > range.startMs).sort((a, b) => a.startMs - b.startMs);
+      const merged = [];
+      for (const range of sorted) {
+        const previous = merged.at(-1);
+        if (previous && range.startMs <= previous.endMs) previous.endMs = Math.max(previous.endMs, range.endMs);
+        else merged.push({...range});
+      }
+      return merged;
+    },
+    debugGraphSeriesPlotValues: series => series.values,
+    debugGraphSeriesPlotHasDataValues: series => series.hasDataValues,
+  };
+  vm.runInNewContext(`${coverageSource}
+    result = debugGraphSeriesDataRanges([
+      {values: [25, 30], hasDataValues: [true, true], times: [0, 60000], durations: [60000, 60000]},
+    ], {startMs: 0, endMs: 120000});`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    {startMs: 0, endMs: 120000},
+  ]);
+});
+
 test('CPU hover chooses binary, System, yolomux, and nearest grid series without summing them', () => {
   const hoverSource = slice(source, 'function debugGraphHoverBucketIndex(', '\nfunction debugGraphHoverValueAtTime(');
   const series = [
@@ -4147,8 +4177,25 @@ test('the current snapshot adapter maps binary RSS series into memory processes'
     node: {label: 'node', total_bytes: 200, samples: 1},
   });
   assert.deepEqual(JSON.parse(JSON.stringify(context.result.host_metrics.cpu_processes)), {
-    python: {label: 'python', total_percent: 47, samples: 1},
+    python: {label: 'python', total_percent: 12, samples: 1},
   });
+});
+
+test('CPU projection keeps the average at coarse resolutions instead of promoting peaks', () => {
+  const projectionSource = sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentBucketRecord');
+  const context = {
+    Number,
+    result: null,
+    jsDebugCurrentSeriesValue: (series, name) => series[name] === undefined ? null : Number(series[name]),
+  };
+  vm.runInNewContext(`${projectionSource}
+    result = [
+      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
+      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
+      jsDebugCurrentCpuProjectionValue({average: 42, maximum: 100}, 'average'),
+    ];`, context);
+  assert.deepEqual([...context.result], [42, 42, 42]);
+  assert.match(projectionSource, /return average/);
 });
 
 test('the current snapshot adapter retains marginal cost, API-list cost, and usage-token series', () => {
@@ -4642,7 +4689,7 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
   assert.doesNotMatch(exactAdapterSource, /cpu_min_percent: value, cpu_max_percent: value/, 'the exact adapter never fabricates extrema from an average');
   assert.match(exactAdapterSource, /cpu_samples: sourceCount/);
   const cpuProjectionSource = sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentBucketRecord');
-  assert.match(cpuProjectionSource, /duration >= 60 && maximum !== null \? maximum : average/);
+  assert.match(cpuProjectionSource, /return average/);
   assert.match(exactAdapterSource, /jsDebugCurrentCpuProjectionValue\(series, name, 'system_cpu_max_percent', duration\)/);
   assert.match(exactAdapterSource, /jsDebugCurrentCpuProjectionValue\(series, name, `cpu_max_percent:\$\{source\}`, duration\)/);
 

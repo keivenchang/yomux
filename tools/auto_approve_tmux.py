@@ -45,6 +45,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -274,19 +275,22 @@ def _self_test() -> bool:
     """Run the pytest coverage that replaced the old inline self-test."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     env = os.environ.copy()
-    env.setdefault("PYTHONPYCACHEPREFIX", "/tmp/yolomux-pyc")
-    env.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-    env.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "-p",
-        "no:cacheprovider",
-        os.path.join(script_dir, "tests/test_auto_approve_detector.py"),
-        os.path.join(script_dir, "tests/test_yolo_rules.py"),
-    ]
-    return subprocess.run(cmd, env=env, check=False).returncode == 0
+    with tempfile.TemporaryDirectory(prefix=f"yolomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp") as raw_root:
+        test_root = Path(raw_root)
+        test_root.chmod(0o700)
+        env.setdefault("PYTHONPYCACHEPREFIX", str(test_root / "pyc"))
+        env.setdefault("YOLOMUX_CONFIG_DIR", str(test_root / "config"))
+        env.setdefault("YOLOMUX_STATE_DIR", str(test_root / "state"))
+        cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            os.path.join(script_dir, "tests/test_auto_approve_detector.py"),
+            os.path.join(script_dir, "tests/test_yolo_rules.py"),
+        ]
+        return subprocess.run(cmd, env=env, check=False).returncode == 0
 
 
 # ---------------------------------------------------------------------------

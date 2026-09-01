@@ -127,7 +127,7 @@ def test_root_unset_preserves_existing_default_paths(monkeypatch, tmp_path: Path
     assert paths.state_dir == Path.home() / ".local" / "state" / "yolomux"
     assert paths.cache_dir == Path.home() / ".cache" / "yolomux"
     assert paths.codex_home == Path.home() / ".codex"
-    assert paths.runtime_dir == tmp_path / "tmp" / "yolomux-1000" / "h-host-a" / "b-boot-a"
+    assert paths.runtime_dir == tmp_path / "tmp" / "yolomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
 
 
 def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Path):

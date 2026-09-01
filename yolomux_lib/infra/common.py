@@ -162,7 +162,7 @@ def runtime_root(
         ) / "yolomux"
     else:
         resolved_uid = os.getuid() if uid is None else int(uid)
-        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
+        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-server-{resolved_uid}" / "shared"
     # Keep the socket-bearing root readable while leaving enough sockaddr_un
     # budget for the longest service filename. These stable prefixes identify
     # the host and boot in diagnostics without an opaque hash.

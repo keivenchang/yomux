@@ -115,7 +115,10 @@ done
 evidence_dir="${YOLOMUX_E2E_EVIDENCE_DIR:-}"
 remove_empty_evidence_dir=0
 if [ -z "$evidence_dir" ]; then
-  evidence_dir="$(mktemp -d /tmp/yolomux-e2e-browser-evidence.XXXXXX)"
+  test_root="${YOLOMUX_TEST_ROOT:-/tmp/yolomux-test-${BASHPID}-$(id -u)}"
+  mkdir -p "$test_root"
+  chmod 700 "$test_root"
+  evidence_dir="$(mktemp -d "$test_root/evidence.XXXXXX")"
   remove_empty_evidence_dir=1
 else
   mkdir -p "$evidence_dir"

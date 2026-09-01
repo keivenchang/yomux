@@ -568,7 +568,8 @@ class LocalRpcEnvelope:
 def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | None = None) -> Path:
     """Keep Unix-domain paths portable without leaking a long state directory.
 
-    The fallback always nests inside its own `{prefix}-{uid}-{digest}/` directory,
+    The fallback always nests inside the server-owned `yolomux-server-<uid>/shared/s/`
+    directory with a bounded digest path,
     never a bare file directly under `/tmp` -- a caller deriving sibling paths from
     this one (e.g. `.with_suffix(".service.json")` for a record path) must still get
     a `.parent` that is a private, owned directory, not the shared `/tmp` root itself.
@@ -589,7 +590,17 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
         return candidate
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
-    return Path("/tmp") / f"{prefix}-{uid}-{digest}" / (fallback_name or candidate.name)
+    fallback = fallback_name or candidate.name
+    bounded_name = hashlib.sha256(os.fsencode(fallback)).hexdigest()[:16]
+    configured_root = os.environ.get("YOLOMUX_ROOT", "").strip()
+    configured_runtime = os.environ.get("YOLOMUX_RUNTIME_DIR", "").strip()
+    if configured_root:
+        fallback_base = Path(configured_root).expanduser() / "runtime" / "s"
+    elif configured_runtime:
+        fallback_base = Path(configured_runtime).expanduser() / "yolomux" / "s"
+    else:
+        fallback_base = Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s"
+    return fallback_base / digest[:8] / bounded_name
 
 
 def new_envelope(

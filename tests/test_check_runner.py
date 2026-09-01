@@ -898,7 +898,7 @@ def test_performance_report_path_is_tmp_only(monkeypatch):
     monkeypatch.setattr(check.os, "getpid", lambda: 4321)
     monkeypatch.setattr(check.time, "time_ns", lambda: 123456789)
 
-    assert check.performance_report_path("") == Path("/tmp/yolomux-check-runs/check-123456789-4321.json")
+    assert check.performance_report_path("") == Path(os.environ["YOLOMUX_TEST_ROOT"]) / "check" / "check-123456789.json"
     assert check.performance_report_path("/tmp/yolomux-report.json") == Path("/tmp/yolomux-report.json")
     with pytest.raises(ValueError, match="under /tmp"):
         check.performance_report_path("report.json")
@@ -2117,7 +2117,7 @@ def test_retirement_joins_a_real_owned_child_and_reports_a_survivor_by_deadline(
 def test_certification_evidence_dir_must_stay_under_tmp():
     check = load_check_module()
     assert check.certification_evidence_dir("/tmp/yolomux-certification/explicit") == Path("/tmp/yolomux-certification/explicit")
-    assert str(check.certification_evidence_dir(None)).startswith("/tmp/yolomux-certification/")
+    assert str(check.certification_evidence_dir(None)).startswith(f"{os.environ['YOLOMUX_TEST_ROOT']}/certification/")
     with pytest.raises(ValueError):
         check.certification_evidence_dir(str(REPO_ROOT / "docs"))
 

@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 from collections.abc import Callable

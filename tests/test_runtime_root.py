@@ -30,7 +30,7 @@ def test_runtime_root_fallback_is_scoped_to_host_and_boot(tmp_path):
         uid=1000,
     )
 
-    assert root == tmp_path / "temporary" / "yolomux-1000" / "h-host-a" / "b-boot-a"
+    assert root == tmp_path / "temporary" / "yolomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
 
 
 def test_runtime_root_refuses_a_network_filesystem(tmp_path):

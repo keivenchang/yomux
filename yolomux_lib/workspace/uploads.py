@@ -19,7 +19,7 @@ from ..infra.common import UPLOAD_SAFE_NAME_RE
 from ..infra.common import UploadedFile
 
 
-UPLOAD_TMP_BASE = Path("/tmp")
+UPLOAD_TMP_BASE = Path("/tmp") / f"yolomux-server-{os.getuid()}" / "shared"
 UPLOAD_RETENTION_SWEEP_SECONDS = 24 * 60 * 60
 UPLOAD_RETENTION_MAX_ENTRIES = 10_000
 
