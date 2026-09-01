@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from .tmux_utils import run_cmd
 from .tmux_utils import tmux
 from ..server_logs import emit_server_log
 from ..infra.host_identity import process_start_identity
+from ..stats_current import opencode as stats_current_opencode
 
 
 # (st_dev, st_ino, st_mtime_ns, st_size) — see transcript_file_identity for why all four.
@@ -302,6 +304,16 @@ def command_option_value(command: str, long_name: str, short_name: str | None = 
 def agent_session_id_from_command(command: str) -> str | None:
     value = command_option_value(command, "--session", "-s")
     return value.strip("\"'") if isinstance(value, str) and value.strip("\"'") else None
+
+
+def agent_session_id_from_title(title: str, directory: str) -> str | None:
+    """Resolve one explicit OpenCode session title without guessing among database rows."""
+    if not title or not directory:
+        return None
+    return stats_current_opencode.session_id_for_terminal_title(
+        directory=directory,
+        title=title,
+    )
 
 
 def process_started_at(pid: int) -> float | None:
@@ -1220,7 +1232,10 @@ def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessI
             command=process.command,
             cwd=(process_cwd(process.pid) or pane.current_path) if enrich_paths else pane.current_path,
             status=None,
-            session_id=agent_session_id_from_command(process.command),
+            session_id=(
+                agent_session_id_from_command(process.command)
+                or agent_session_id_from_title(pane.title, pane.current_path)
+            ),
             transcript=None,
             error=None,
             model=agent_model_from_command(process.command),

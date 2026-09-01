@@ -1076,7 +1076,8 @@ def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, m
     # sibling path (e.g. a `.service.json` record) must never inherit `/tmp` itself as
     # `.parent`. See yolomux_lib/local_services/rpc.py:safe_socket_path.
     assert client.socket_path.parent != Path("/tmp")
-    assert client.socket_path.parent.parent == Path("/tmp")
+    assert client.socket_path.parent.name == "s"
+    assert client.socket_path.parent.parent.parent.parent == Path("/tmp") / f"yolomux-server-{os.getuid()}"
     expected_service_dir = state_dir / "services"
     assert client.registry.service_dir == expected_service_dir
     assert client.registry.lock_path.parent == expected_service_dir

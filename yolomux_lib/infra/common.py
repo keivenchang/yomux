@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.26"
+YOLOMUX_VERSION = "0.7.27"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -162,7 +162,7 @@ def runtime_root(
         ) / "yolomux"
     else:
         resolved_uid = os.getuid() if uid is None else int(uid)
-        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
+        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-server-{resolved_uid}" / "shared"
     # Keep the socket-bearing root readable while leaving enough sockaddr_un
     # budget for the longest service filename. These stable prefixes identify
     # the host and boot in diagnostics without an opaque hash.

@@ -8674,7 +8674,7 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert admin["terminalFontSize"] == "18px"
     assert admin["notifyLevel"] == "none"
     assert "Updated this Preference" in admin["text"]
-    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Appearance | `live` |" in admin["text"]
+    assert "| `appearance.theme` | `dark` | `light` | Preferences -> Colors | `live` |" in admin["text"]
     assert "Which setting do you mean" in admin["text"]
     assert admin["assistantCount"] >= 6
     assert admin["formEnabled"] is True

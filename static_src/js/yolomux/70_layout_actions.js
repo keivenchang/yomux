@@ -3358,6 +3358,17 @@ function enableTerminalScroll(session, term, container) {
     });
   };
   const queueTouchLines = (state, signedLines) => {
+    if (terminalUsesAppWheel(session, container)) {
+      // OpenCode's wheel handler scrolls the whole rendered terminal, which moves its prompt and
+      // footer on iPadOS. Its documented Ctrl+Alt+Y/E bindings scroll the message viewport by one
+      // line, so preserve fractional finger movement and emit one line command per crossed row.
+      state.pendingLines += signedLines;
+      const whole = Math.trunc(state.pendingLines);
+      if (!whole) return;
+      state.pendingLines -= whole;
+      routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+      return;
+    }
     state.pendingLines += signedLines;
     if (Math.abs(state.pendingLines) < 1 || state.timer) return;
     state.timer = setTimeout(() => {
@@ -3532,10 +3543,16 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     && terminalUsesAppWheel(session, container)) {
     // OpenCode pages its internal message viewport with native PageUp/PageDown. Mouse reports
     // work for a finger/desktop wheel, but replacing a page key with them can leave its footer
-    // moving or the message viewport unchanged. Keep this keyboard path on the normal data owner.
+    // moving or the message viewport unchanged. Keep keyboard and touch paging on the data owner.
     const data = signedLines < 0 ? '\x1b[5~' : '\x1b[6~';
     noteTerminalExplicitInput(session);
     return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  if (!options.forceTmuxScrollback && options.source === 'touch' && terminalUsesAppWheel(session, container)) {
+    const data = signedLines < 0 ? '\x1b\x19' : '\x1b\x05';
+    const repeat = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signedLines))));
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data.repeat(repeat), {bypassMobileAccessoryModifiers: true});
   }
   const usesAppWheel = terminalUsesAppWheel(session, container);
   if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {

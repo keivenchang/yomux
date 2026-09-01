@@ -483,8 +483,10 @@ let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
 const PREFERENCE_SECTION_IDS = Object.freeze({
   general: 'general',
-  appearance: 'appearance',
-  terminalEditor: 'terminal_editor',
+  colors: 'colors',
+  sizes: 'sizes',
+  terminal: 'terminal',
+  editorOptions: 'editor_options',
   notifications: 'notifications',
   chat: 'chat',
   fileExplorer: 'file_explorer',
@@ -497,21 +499,29 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
 });
 const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
   PREFERENCE_SECTION_IDS.general,
-  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.colors,
+  PREFERENCE_SECTION_IDS.sizes,
   PREFERENCE_SECTION_IDS.performance,
   PREFERENCE_SECTION_IDS.cost,
   PREFERENCE_SECTION_IDS.notifications,
-  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.terminal,
+  PREFERENCE_SECTION_IDS.editorOptions,
   PREFERENCE_SECTION_IDS.fileExplorer,
   PREFERENCE_SECTION_IDS.uploads,
 ]);
 const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   General: PREFERENCE_SECTION_IDS.general,
-  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Colors: PREFERENCE_SECTION_IDS.colors,
+  Appearance: PREFERENCE_SECTION_IDS.sizes,
+  Sizes: PREFERENCE_SECTION_IDS.sizes,
+  'UI sizes': PREFERENCE_SECTION_IDS.sizes,
+  Terminal: PREFERENCE_SECTION_IDS.terminal,
+  'Editor general': PREFERENCE_SECTION_IDS.editorOptions,
+  'Editor options': PREFERENCE_SECTION_IDS.editorOptions,
   Performance: PREFERENCE_SECTION_IDS.performance,
   'YO!cost': PREFERENCE_SECTION_IDS.cost,
   Notifications: PREFERENCE_SECTION_IDS.notifications,
-  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.editorOptions,
   'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
   Finder: PREFERENCE_SECTION_IDS.fileExplorer,
   'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
@@ -658,9 +668,11 @@ let clientSettingsMetadataRefreshTimer = null;
 const activitySummaryEnabled = bootstrap.activitySummary?.enabled === true;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
-  'appearance.editor_font_size': 13,
-  'appearance.file_explorer_font_size': 13,
-  'appearance.terminal_font_size': 13,
+  'appearance.editor_font_size': 14,
+  'appearance.file_explorer_font_size': 14,
+  'appearance.terminal_font_size': 14,
+  'appearance.ui_font_size': 14,
+  'appearance.global_font_size': 14,
   'editor.autosave_delay_seconds': 2.5,
   'file_explorer.image_open_mode': 'same-tab',
   'file_explorer.image_preview_max_px': 320,
@@ -753,11 +765,11 @@ let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
 let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size');
+let terminalFontSize = initialSetting('appearance.terminal_font_size', 14);
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size');
-let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let editorFontSize = initialSetting('appearance.editor_font_size', 14);
+let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 14);
 let terminalScrollback = initialSetting('terminal_editor.scrollback');
 let autoFocusEnabled = initialSetting('general.auto_focus');
 let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;

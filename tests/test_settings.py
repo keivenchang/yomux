@@ -401,6 +401,10 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
 
     assert catalog["appearance.tab_width"]["limits"] == {"min": 120, "max": 420}
     assert catalog["appearance.tab_width"]["units"] == "pixels"
+    assert catalog["appearance.global_font_size"]["default"] == 14
+    assert catalog["appearance.global_font_size"]["limits"] == {"min": 6, "max": 25}
+    assert catalog["appearance.sync_font_sizes"]["default"] is True
+    assert catalog["appearance.global_font_size"]["gui"]["section"] == "Sizes"
     assert catalog["performance.workflow_transition_glow_seconds"]["default"] == 60
     assert catalog["performance.workflow_transition_glow_seconds"]["limits"] == {"min": 0, "max": 300}
     assert catalog["chat.retention_days"] == {
@@ -441,8 +445,8 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
     assert catalog["appearance.theme"]["gui"] == {
-        "section": "Appearance",
-        "section_locale_key": "pref.section.appearance",
+        "section": "Colors",
+        "section_locale_key": "pref.section.colors",
         "visible": True,
     }
     assert catalog["cost.openai_pricing_profile"]["choices"] == ["default", "subscription"]
@@ -547,8 +551,8 @@ def test_yoagent_deterministic_preference_alias_write_fixtures():
         ("change background to black", "appearance.theme", "dark"),
         ("make tabs wider", "appearance.tab_width", 192),
         ("tab width 220", "appearance.tab_width", 220),
-        ("make UI smaller", "appearance.ui_font_size", 12),
-        ("terminal font bigger", "appearance.terminal_font_size", 14),
+            ("make UI smaller", "appearance.global_font_size", 13),
+            ("terminal font bigger", "appearance.terminal_font_size", 15),
         ("no notifications", "notifications.notify_transitions", []),
         ("quiet notifications", "notifications.notify_transitions", []),
         ("light terminal", "appearance.terminal_theme", "light"),

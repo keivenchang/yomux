@@ -433,6 +433,11 @@ def run_local_rpc_service(
         os.chmod(socket_path.parent, 0o700)
     except OSError:
         pass
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(lock_path.parent, 0o700)
+    except OSError:
+        pass
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         owns_lock = False

@@ -89,6 +89,17 @@ def test_select_pane_agent_preserves_breadth_first_native_opencode_owner(monkeyp
     assert (agent.kind, agent.pid, agent.cwd) == ("opencode", 101, pane.current_path)
 
 
+def test_opencode_session_id_accepts_only_explicit_terminal_title_identity(monkeypatch):
+    monkeypatch.setattr(
+        sessions.stats_current_opencode,
+        "session_id_for_terminal_title",
+        lambda **kwargs: "ses-title" if kwargs["directory"] == "/repo" else None,
+    )
+    session_id = sessions.agent_session_id_from_title('OC | "session title..."', "/repo")
+    assert session_id == "ses-title"
+    assert sessions.agent_session_id_from_title("", "/repo") is None
+
+
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"

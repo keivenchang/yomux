@@ -473,14 +473,14 @@ def test_explicit_session_directory_match_uses_canonical_equality(tmp_path: Path
     assert isinstance(result, opencode.OpenCodeReadSuccess)
 
 
-def test_explicit_session_directory_mismatch_fails_closed(tmp_path: Path) -> None:
+def test_explicit_session_id_remains_authoritative_over_a_stale_directory_hint(tmp_path: Path) -> None:
     database = tmp_path / "opencode.db"
-    _database(database, [_session("ses-a", "/repo/a")], [], [])
+    _database(database, [_session("ses-a", "/repo/a", tokens=(1, 2, 0, 0, 0))], [_message("msg-a", "ses-a")], [_part("part-a", "msg-a", "ses-a", {"input": 1, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}})])
 
     result = opencode.read_usage(database, session_id="ses-a", directory="/repo/b")
 
-    assert isinstance(result, opencode.OpenCodeUnavailable)
-    assert result.reason == "session-directory-mismatch"
+    assert isinstance(result, opencode.OpenCodeReadSuccess)
+    assert result.session.session_id == "ses-a"
 
 
 def test_unqualified_same_directory_match_fails_closed_as_ambiguous(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ import threading
 import time
 import traceback
 from typing import Any, Protocol, runtime_checkable
+import uuid
 from urllib.parse import quote
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
@@ -360,7 +361,8 @@ def gate_runtime_paths(
     # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
     # deletes pytest's cached base and every later tmp_path fixture fails during setup.
     tmp_path_factory.getbasetemp()
-    root = Path(tempfile.mkdtemp(prefix="yag-", dir="/tmp"))
+    root = Path(os.environ["YOLOMUX_TEST_ROOT"]) / f"g-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    root.mkdir(mode=0o700)
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
     home_dir = root / "home"

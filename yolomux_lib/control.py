@@ -289,7 +289,7 @@ class YolomuxControlServer:
         # else's, so this second pass is what stops them leaking forever.
         #
         # Both directories are scanned because `safe_socket_path` relocates a
-        # too-long socket path into a per-name `/tmp/ycs-*/` fallback: when that
+        # too-long socket path into a per-name server-owned `/tmp/yolomux-server-*/` fallback: when that
         # happens `self.path.parent` is NOT the control directory, and a
         # predecessor's leftover sits in the control directory that this server
         # would otherwise never look at.

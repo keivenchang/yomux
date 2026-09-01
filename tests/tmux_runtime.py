@@ -206,7 +206,8 @@ def start_isolated_tmux_runtime(
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux" / f"e-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     socket_dir.mkdir(mode=0o700)
     socket_path = socket_dir / "s"
     commands = dict(session_commands or {})
@@ -250,7 +251,8 @@ def start_isolated_default_tmux_runtime(monkeypatch, tmp_path: Path, session_cou
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_dir = Path("/tmp") / f"ytd-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux" / f"d-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     socket_dir.mkdir(mode=0o700)
     session_names = [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
     monkeypatch.delenv(YOLOMUX_TMUX_SOCKET_ENV, raising=False)

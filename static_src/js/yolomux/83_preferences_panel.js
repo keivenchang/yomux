@@ -253,8 +253,10 @@ function preferencesStatusPulseExampleHtml() {
 function orderedPreferenceSections(sections) {
   const orderedIds = [
     PREFERENCE_SECTION_IDS.general,
-    PREFERENCE_SECTION_IDS.appearance,
-    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.colors,
+    PREFERENCE_SECTION_IDS.sizes,
+    PREFERENCE_SECTION_IDS.terminal,
+    PREFERENCE_SECTION_IDS.editorOptions,
     PREFERENCE_SECTION_IDS.notifications,
     ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
       id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
@@ -277,47 +279,52 @@ function preferenceSections() {
       preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
       preferenceSettingItem('general.auto_focus', {type: 'boolean'}),
       preferenceSettingItem('general.startup_tips', {type: 'boolean'}),
-    ]},
-    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
-      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('general.default_layout', {type: 'radio', choices: layoutModePreferenceChoices()}),
-      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}}),
-      {type: 'note', text: t('pref.appearance.font_sizes.note')},
-      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
-      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
-      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
       ]}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
+    {id: PREFERENCE_SECTION_IDS.colors, title: t('pref.section.colors'), items: [
+      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('appearance.terminal_theme', {type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('common.theme.dark')},
         {value: 'light', label: t('common.theme.light')},
       ]}),
+      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
+      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
+      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
+        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
+        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
+      ]}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
+      preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
+      preferenceSettingItem('appearance.global_font_size', {type: 'number', min: 6, max: 25, step: 1, suffix: 'px', whenSyncFontSizes: true}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
+      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), items: [
       preferenceSettingItem('appearance.tmux_status_bar', {type: 'radio', choices: [
         {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
         {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
         {value: 'bottom', label: t('pref.appearance.tmux_status_bar.bottom')},
       ]}),
-      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px'}),
       preferenceSettingItem('terminal_editor.scrollback', {type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other')}),
-      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
-      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
-      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
-        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
-        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
-      ]}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.editorOptions, title: t('pref.section.editor_options'), items: [
       preferenceSettingItem('terminal_editor.word_wrap', {type: 'boolean'}),
       preferenceSettingItem('terminal_editor.line_numbers', {type: 'boolean'}),
       preferenceSettingItem('editor.autosave', {type: 'boolean'}),
@@ -654,6 +661,7 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.whenSyncFontSizes === false && boolSetting('appearance.sync_font_sizes', true)) return '';
   if (item.type === 'notification-delivery') {
     const checked = notificationDeliveryEnabled(item.channel) ? ' checked' : '';
     return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="preference-notification-${esc(item.channel)}">${esc(item.label)}<span class="preferences-setting-help">${esc(item.help)}</span></label><span class="preferences-setting-control"><input type="checkbox" id="preference-notification-${esc(item.channel)}" data-notification-delivery="${esc(item.channel)}"${checked}></span></div>`;
@@ -722,6 +730,11 @@ function preferenceControlHtml(item, query = '') {
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
+function preferenceItemIsVisible(item, query = '') {
+  return preferenceItemMatches(item, query)
+    && (item.whenSyncFontSizes === undefined || item.whenSyncFontSizes === boolSetting('appearance.sync_font_sizes', true));
+}
+
 function preferenceNumberDisplayValue(item, value) {
   const scale = Number(item.scale) || 1;
   const raw = scale !== 1 ? Number(value) / scale : value;
@@ -755,7 +768,7 @@ function preferencesPanelHtml() {
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
-      const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
+       const visibleItems = section.items.filter(item => preferenceItemIsVisible(item, query) && (titleMatches || preferenceItemMatches(item, query)));
       const collapsed = !query && collapsedPreferenceSections.has(section.id);
       const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()

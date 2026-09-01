@@ -484,8 +484,10 @@ let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
 const PREFERENCE_SECTION_IDS = Object.freeze({
   general: 'general',
-  appearance: 'appearance',
-  terminalEditor: 'terminal_editor',
+  colors: 'colors',
+  sizes: 'sizes',
+  terminal: 'terminal',
+  editorOptions: 'editor_options',
   notifications: 'notifications',
   chat: 'chat',
   fileExplorer: 'file_explorer',
@@ -498,21 +500,29 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
 });
 const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
   PREFERENCE_SECTION_IDS.general,
-  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.colors,
+  PREFERENCE_SECTION_IDS.sizes,
   PREFERENCE_SECTION_IDS.performance,
   PREFERENCE_SECTION_IDS.cost,
   PREFERENCE_SECTION_IDS.notifications,
-  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.terminal,
+  PREFERENCE_SECTION_IDS.editorOptions,
   PREFERENCE_SECTION_IDS.fileExplorer,
   PREFERENCE_SECTION_IDS.uploads,
 ]);
 const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   General: PREFERENCE_SECTION_IDS.general,
-  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Colors: PREFERENCE_SECTION_IDS.colors,
+  Appearance: PREFERENCE_SECTION_IDS.sizes,
+  Sizes: PREFERENCE_SECTION_IDS.sizes,
+  'UI sizes': PREFERENCE_SECTION_IDS.sizes,
+  Terminal: PREFERENCE_SECTION_IDS.terminal,
+  'Editor general': PREFERENCE_SECTION_IDS.editorOptions,
+  'Editor options': PREFERENCE_SECTION_IDS.editorOptions,
   Performance: PREFERENCE_SECTION_IDS.performance,
   'YO!cost': PREFERENCE_SECTION_IDS.cost,
   Notifications: PREFERENCE_SECTION_IDS.notifications,
-  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.editorOptions,
   'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
   Finder: PREFERENCE_SECTION_IDS.fileExplorer,
   'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
@@ -659,9 +669,11 @@ let clientSettingsMetadataRefreshTimer = null;
 const activitySummaryEnabled = bootstrap.activitySummary?.enabled === true;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
-  'appearance.editor_font_size': 13,
-  'appearance.file_explorer_font_size': 13,
-  'appearance.terminal_font_size': 13,
+  'appearance.editor_font_size': 14,
+  'appearance.file_explorer_font_size': 14,
+  'appearance.terminal_font_size': 14,
+  'appearance.ui_font_size': 14,
+  'appearance.global_font_size': 14,
   'editor.autosave_delay_seconds': 2.5,
   'file_explorer.image_open_mode': 'same-tab',
   'file_explorer.image_preview_max_px': 320,
@@ -754,11 +766,11 @@ let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
 let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size');
+let terminalFontSize = initialSetting('appearance.terminal_font_size', 14);
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size');
-let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let editorFontSize = initialSetting('appearance.editor_font_size', 14);
+let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 14);
 let terminalScrollback = initialSetting('terminal_editor.scrollback');
 let autoFocusEnabled = initialSetting('general.auto_focus');
 let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;
@@ -5836,7 +5848,14 @@ function readStoredCollapsedPreferenceSections() {
   const raw = storageGet(preferencesCollapsedStorageKey);
   if (!raw) return defaultCollapsedPreferenceSections();
   const parsed = safeJsonParse(raw, null);
-  return Array.isArray(parsed) ? normalizeCollapsedPreferenceSections(parsed) : defaultCollapsedPreferenceSections();
+  if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
+  const migrated = parsed.flatMap(value => {
+    const text = String(value || '');
+    if (text === 'appearance' || text === 'Appearance' || text === 'ui_sizes' || text === 'UI sizes') return ['sizes'];
+    if (text === 'terminal_editor' || text === 'Terminal / Editor' || text === 'editor_general' || text === 'Editor general') return ['editor_options'];
+    return [text];
+  });
+  return normalizeCollapsedPreferenceSections(migrated);
 }
 
 function writeStoredCollapsedPreferenceSections() {
@@ -33084,13 +33103,21 @@ function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
-  const uiFontSize = numberSetting('appearance.ui_font_size', 13);
-  root.setProperty('--ui-font-size', `${uiFontSize}px`);
-  root.setProperty('--tab-label-size', `${uiFontSize}px`);
-  root.setProperty('--terminal-font-size', `${terminalFontSize}px`);
-  root.setProperty('--editor-font-size', `${editorFontSize}px`);
-  root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
-  root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
+  const globalFontSize = Math.max(6, Math.min(25, numberSetting('appearance.global_font_size', 14)));
+  const uiFontSize = numberSetting('appearance.ui_font_size', 14);
+  const syncFontSizes = boolSetting('appearance.sync_font_sizes', true);
+  if (syncFontSizes) {
+    terminalFontSize = globalFontSize;
+    editorFontSize = globalFontSize;
+    editorPreviewFontSize = globalFontSize;
+    fileExplorerFontSize = globalFontSize;
+  }
+  root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${syncFontSizes ? globalFontSize : terminalFontSize}px`);
+  root.setProperty('--editor-font-size', `${syncFontSizes ? globalFontSize : editorFontSize}px`);
+  root.setProperty('--editor-preview-font-size', `${syncFontSizes ? globalFontSize : editorPreviewFontSize}px`);
+  root.setProperty('--file-explorer-font-size', `${syncFontSizes ? globalFontSize : fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
@@ -33249,10 +33276,10 @@ function applySettingsPayload(payload, options = {}) {
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
-  terminalFontSize = numberSetting('appearance.terminal_font_size');
-  editorFontSize = numberSetting('appearance.editor_font_size');
-  editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
+  editorFontSize = numberSetting('appearance.editor_font_size', 14);
+  editorPreviewFontSize = numberSetting('appearance.preview_font_size', 14);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 14);
   terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
@@ -38898,6 +38925,17 @@ function enableTerminalScroll(session, term, container) {
     });
   };
   const queueTouchLines = (state, signedLines) => {
+    if (terminalUsesAppWheel(session, container)) {
+      // OpenCode's wheel handler scrolls the whole rendered terminal, which moves its prompt and
+      // footer on iPadOS. Its documented Ctrl+Alt+Y/E bindings scroll the message viewport by one
+      // line, so preserve fractional finger movement and emit one line command per crossed row.
+      state.pendingLines += signedLines;
+      const whole = Math.trunc(state.pendingLines);
+      if (!whole) return;
+      state.pendingLines -= whole;
+      routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+      return;
+    }
     state.pendingLines += signedLines;
     if (Math.abs(state.pendingLines) < 1 || state.timer) return;
     state.timer = setTimeout(() => {
@@ -39072,10 +39110,16 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     && terminalUsesAppWheel(session, container)) {
     // OpenCode pages its internal message viewport with native PageUp/PageDown. Mouse reports
     // work for a finger/desktop wheel, but replacing a page key with them can leave its footer
-    // moving or the message viewport unchanged. Keep this keyboard path on the normal data owner.
+    // moving or the message viewport unchanged. Keep keyboard and touch paging on the data owner.
     const data = signedLines < 0 ? '\x1b[5~' : '\x1b[6~';
     noteTerminalExplicitInput(session);
     return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  if (!options.forceTmuxScrollback && options.source === 'touch' && terminalUsesAppWheel(session, container)) {
+    const data = signedLines < 0 ? '\x1b\x19' : '\x1b\x05';
+    const repeat = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signedLines))));
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data.repeat(repeat), {bypassMobileAccessoryModifiers: true});
   }
   const usesAppWheel = terminalUsesAppWheel(session, container);
   if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {
@@ -48906,8 +48950,10 @@ function preferencesStatusPulseExampleHtml() {
 function orderedPreferenceSections(sections) {
   const orderedIds = [
     PREFERENCE_SECTION_IDS.general,
-    PREFERENCE_SECTION_IDS.appearance,
-    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.colors,
+    PREFERENCE_SECTION_IDS.sizes,
+    PREFERENCE_SECTION_IDS.terminal,
+    PREFERENCE_SECTION_IDS.editorOptions,
     PREFERENCE_SECTION_IDS.notifications,
     ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
       id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
@@ -48930,47 +48976,52 @@ function preferenceSections() {
       preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
       preferenceSettingItem('general.auto_focus', {type: 'boolean'}),
       preferenceSettingItem('general.startup_tips', {type: 'boolean'}),
-    ]},
-    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
-      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('general.default_layout', {type: 'radio', choices: layoutModePreferenceChoices()}),
-      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}}),
-      {type: 'note', text: t('pref.appearance.font_sizes.note')},
-      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
-      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
-      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
       ]}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
+    {id: PREFERENCE_SECTION_IDS.colors, title: t('pref.section.colors'), items: [
+      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('appearance.terminal_theme', {type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('common.theme.dark')},
         {value: 'light', label: t('common.theme.light')},
       ]}),
+      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
+      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
+      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
+        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
+        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
+      ]}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
+      preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
+      preferenceSettingItem('appearance.global_font_size', {type: 'number', min: 6, max: 25, step: 1, suffix: 'px', whenSyncFontSizes: true}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
+      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), items: [
       preferenceSettingItem('appearance.tmux_status_bar', {type: 'radio', choices: [
         {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
         {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
         {value: 'bottom', label: t('pref.appearance.tmux_status_bar.bottom')},
       ]}),
-      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px'}),
       preferenceSettingItem('terminal_editor.scrollback', {type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other')}),
-      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
-      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
-      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
-        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
-        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
-      ]}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.editorOptions, title: t('pref.section.editor_options'), items: [
       preferenceSettingItem('terminal_editor.word_wrap', {type: 'boolean'}),
       preferenceSettingItem('terminal_editor.line_numbers', {type: 'boolean'}),
       preferenceSettingItem('editor.autosave', {type: 'boolean'}),
@@ -49307,6 +49358,7 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.whenSyncFontSizes === false && boolSetting('appearance.sync_font_sizes', true)) return '';
   if (item.type === 'notification-delivery') {
     const checked = notificationDeliveryEnabled(item.channel) ? ' checked' : '';
     return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="preference-notification-${esc(item.channel)}">${esc(item.label)}<span class="preferences-setting-help">${esc(item.help)}</span></label><span class="preferences-setting-control"><input type="checkbox" id="preference-notification-${esc(item.channel)}" data-notification-delivery="${esc(item.channel)}"${checked}></span></div>`;
@@ -49375,6 +49427,11 @@ function preferenceControlHtml(item, query = '') {
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
+function preferenceItemIsVisible(item, query = '') {
+  return preferenceItemMatches(item, query)
+    && (item.whenSyncFontSizes === undefined || item.whenSyncFontSizes === boolSetting('appearance.sync_font_sizes', true));
+}
+
 function preferenceNumberDisplayValue(item, value) {
   const scale = Number(item.scale) || 1;
   const raw = scale !== 1 ? Number(value) / scale : value;
@@ -49408,7 +49465,7 @@ function preferencesPanelHtml() {
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
-      const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
+       const visibleItems = section.items.filter(item => preferenceItemIsVisible(item, query) && (titleMatches || preferenceItemMatches(item, query)));
       const collapsed = !query && collapsedPreferenceSections.has(section.id);
       const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
@@ -58014,7 +58071,24 @@ function jsDebugHistoryCoverageIntervalsForFamily(family) {
   return jsDebugHistoryReadiness.coverageIntervals;
 }
 
-function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = []) {
+function debugGraphSeriesDataRanges(groupSeries, domain) {
+  const ranges = [];
+  for (const series of groupSeries || []) {
+    const values = debugGraphSeriesPlotValues(series);
+    const hasData = debugGraphSeriesPlotHasDataValues(series);
+    const times = Array.isArray(series.times) ? series.times : [];
+    const durations = Array.isArray(series.durations) ? series.durations : [];
+    for (let index = 0; index < values.length; index += 1) {
+      if (hasData && hasData[index] !== true) continue;
+      const startMs = Number(times[index]);
+      const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+      if (Number.isFinite(startMs)) ranges.push({startMs, endMs: startMs + durationMs});
+    }
+  }
+  return debugGraphMergeTimeRanges(ranges, domain);
+}
+
+function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
   if (!family) return [];
   const requestedRanges = (jsDebugHistoryReadiness.requestCoverageIntervals || []).map(interval => ({
@@ -58030,12 +58104,14 @@ function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = 
     gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
   }
   const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
-  const trimmedGaps = !alreadyPaintedRanges.length
+  const dataRanges = debugGraphSeriesDataRanges(groupSeries, domain);
+  const paintedRanges = [...alreadyPaintedRanges, ...dataRanges];
+  const trimmedGaps = !paintedRanges.length
     ? mergedGaps
     : debugGraphMergeTimeRanges(
-      mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
-      domain,
-    );
+       mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(paintedRanges, gap)),
+       domain,
+     );
   return debugGraphMeaningfulCoverageGaps(trimmedGaps, domain);
 }
 
@@ -58054,9 +58130,9 @@ function debugGraphMeaningfulCoverageGaps(ranges, domain) {
   });
 }
 
-function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
+function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
-  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges).map((range, index) => {
+  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges, groupSeries).map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     return `<g data-js-debug-history-coverage-family="${esc(family)}">${debugGraphPlotOverlayRectHtml(
@@ -58077,7 +58153,7 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
 function debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries) {
   const ranges = [];
   const statusRuns = group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [];
-  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns));
+  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns, groupSeries));
   ranges.push(...statusRuns);
   if (group.noDataOverlay === true) {
     ranges.push(...debugGraphNoDataRuns(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)));
@@ -59028,7 +59104,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
-          ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
+           ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [], groupSeries)}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
@@ -60667,11 +60743,12 @@ function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
   return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
 }
 
-function jsDebugCurrentCpuProjectionValue(series, averageName, maximumName, duration) {
+function jsDebugCurrentCpuProjectionValue(series, averageName) {
   const average = jsDebugCurrentSeriesValue(series, averageName);
-  if (average === null) return null;
-  const maximum = jsDebugCurrentSeriesValue(series, maximumName);
-  return duration >= 60 && maximum !== null ? maximum : average;
+  // CPU charts show utilization over the bucket, not its instantaneous peak. Using the
+  // maximum for coarse buckets made a 60s/300s view disagree with the 1s view and could
+  // display an invalid host percentage above 100% when a legacy maximum was malformed.
+  return average;
 }
 
 function jsDebugCurrentServiceLoadItem(record, source) {
@@ -68130,6 +68207,27 @@ function codexModelDefaultEffort(model) {
 function settingPatchForPath(path, value) {
   if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
+  if (path === 'appearance.global_font_size' && boolSetting('appearance.sync_font_sizes', true)) {
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: value,
+      editor_font_size: value,
+      preview_font_size: value,
+      file_explorer_font_size: value,
+      ui_font_size: value,
+    };
+  }
+  if (path === 'appearance.sync_font_sizes' && value === true) {
+    const size = preferenceValue('appearance.global_font_size');
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: size,
+      editor_font_size: size,
+      preview_font_size: size,
+      file_explorer_font_size: size,
+      ui_font_size: size,
+    };
+  }
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
     if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};
