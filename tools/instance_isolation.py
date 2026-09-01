@@ -236,7 +236,7 @@ class InstanceResolution:
 
 
 def default_port(platform: str) -> int:
-    return 8880 if platform.casefold() == "darwin" else 7110
+    return 8880 if platform.casefold() == "darwin" else 7770
 
 
 def scan_port(argv: list[str]) -> int | None:

@@ -79,7 +79,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
             browser.get(base_url + search)
             metrics = assert_live_runtime_boot_healthy(browser, case_name, timeout=12)
             if case_name == "saved-layout":
-                assert "appearance" in metrics["collapsedPreferenceSectionIds"], metrics
+                assert "sizes" in metrics["collapsedPreferenceSectionIds"], metrics
                 assert "file_explorer" in metrics["collapsedPreferenceSectionIds"], metrics
     finally:
         try:

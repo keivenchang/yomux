@@ -1,7 +1,7 @@
 {
   "class_budgets": {
     "yolomux_lib/app.py:TmuxWebtermApp": {
-      "methods": 572,
+      "methods": 573,
       "self_fields": 100
     },
     "yolomux_lib/infra/background_owner.py:BackgroundOwnerRegistry": {
@@ -174,12 +174,12 @@
     "static_src/css/yolomux/30_preferences_changes.css": 3646,
     "static_src/css/yolomux/50_terminal_file_tree.css": 4310,
     "static_src/css/yolomux/60_editor_file_panels.css": 3339,
-    "static_src/js/yolomux/10_core_utils.js": 7452,
+    "static_src/js/yolomux/10_core_utils.js": 7459,
     "static_src/js/yolomux/20_layout_state.js": 7429,
     "static_src/js/yolomux/40_file_explorer_files.js": 5947,
-    "static_src/js/yolomux/85_debug_panel.js": 8451,
+    "static_src/js/yolomux/85_debug_panel.js": 8471,
     "static_src/js/yolomux/99_terminal_boot.js": 7026,
-    "yolomux_lib/app.py": 18450,
+    "yolomux_lib/app.py": 18489,
     "yolomux_lib/infra/listener_census.py": 651,
     "yolomux_lib/infra/state_services.py": 1207,
     "yolomux_lib/search/file_index.py": 5015,
@@ -993,13 +993,13 @@
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "editorFontSize",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "editorPreviewFontSize",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
@@ -1071,7 +1071,7 @@
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "fileExplorerFontSize",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
@@ -1149,7 +1149,7 @@
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
     },
     {
-      "count": 1,
+      "count": 2,
       "name": "terminalFontSize",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
@@ -1736,6 +1736,8 @@
       "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready:1",
       "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready:2",
       "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready:3",
+      "tests/test_dev_restart_script.py:test_startup_capacity_uses_portable_eight_cpu_macos_ceiling:1",
+      "tests/test_dev_restart_script.py:test_startup_capacity_uses_portable_eight_cpu_macos_ceiling:2",
       "tests/test_filesystem.py:test_filesystem_implementations_leave_os_error_normalization_to_package_facade:1",
       "tests/test_filesystem_access_policy.py:test_one_owner_builds_every_filesystem_job_descriptor:1",
       "tests/test_gate_stats_range.py:test_debug_stats_sample_endpoint_is_not_a_live_client_contract:1",
@@ -1977,7 +1979,7 @@
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:8",
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:9"
     ],
-    "inventory_sha256": "d12bccb7bf63014f6d2ac619ab5ad3752f979c4cb173641fa0c24d513e83e9eb",
+    "inventory_sha256": "ae0c099b20b4b9c8594d97ab8f318521a56a47a3f10dff9eadaad29354d1f61e",
     "unallowlisted": [],
     "validation_errors": []
   },
@@ -1985,7 +1987,7 @@
     "tests/backend_health_indicator.test.js": 447,
     "tests/browser_helpers/cross_surface_quick_open_suite.js": 70,
     "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
-    "tests/browser_helpers/editor_preview_suite.js": 9581,
+    "tests/browser_helpers/editor_preview_suite.js": 9592,
     "tests/cross_surface_state.test.js": 6422,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
@@ -2001,7 +2003,7 @@
     "tests/open_file_413_reason.test.js": 154,
     "tests/open_file_missing_guard.test.js": 368,
     "tests/side_panes.test.js": 728,
-    "tests/stats_current_panel.test.js": 4665,
+    "tests/stats_current_panel.test.js": 4712,
     "tests/stats_current_ui.test.js": 3406,
     "tests/subsystems/app_batchd_product.py": 131,
     "tests/subsystems/app_darwin_memory.py": 68,
@@ -2059,7 +2061,7 @@
     "tests/test_control.py": 224,
     "tests/test_cross_layer_matrix.py": 146,
     "tests/test_defect2_harness.py": 551,
-    "tests/test_dev_restart_script.py": 748,
+    "tests/test_dev_restart_script.py": 760,
     "tests/test_diagnostic_redaction.py": 1018,
     "tests/test_drop_actions.py": 160,
     "tests/test_e2e_api_errors.py": 490,
@@ -2151,7 +2153,7 @@
     "tests/test_local_service_registry_state.py": 284,
     "tests/test_local_service_runtime_row_projection.py": 158,
     "tests/test_local_services_host_identity.py": 594,
-    "tests/test_local_services_launch.py": 4313,
+    "tests/test_local_services_launch.py": 4314,
     "tests/test_local_services_rpc.py": 1728,
     "tests/test_local_services_watchdog.py": 809,
     "tests/test_login_auth.py": 1031,
@@ -2190,15 +2192,14 @@
     "tests/test_service_failure_matrix.py": 256,
     "tests/test_session_actions.py": 406,
     "tests/test_session_files.py": 6173,
-    "tests/test_sessions.py": 1111,
-    "tests/test_settings.py": 889,
+    "tests/test_sessions.py": 1128,
+    "tests/test_settings.py": 893,
     "tests/test_shared_config_lock.py": 121,
     "tests/test_source_inventory.py": 32,
     "tests/test_state_services.py": 141,
     "tests/test_static_build.py": 1699,
     "tests/test_stats_batched_persistence.py": 937,
     "tests/test_stats_current_app.py": 2362,
-    "tests/test_transient_paths.py": 139,
     "tests/test_stats_current_client.py": 576,
     "tests/test_stats_current_collectors.py": 320,
     "tests/test_stats_current_coverage_performance.py": 503,
@@ -2209,7 +2210,7 @@
     "tests/test_stats_current_materializer.py": 2162,
     "tests/test_stats_current_migration.py": 1046,
     "tests/test_stats_current_observations.py": 568,
-    "tests/test_stats_current_opencode.py": 877,
+    "tests/test_stats_current_opencode.py": 915,
     "tests/test_stats_current_pricing.py": 410,
     "tests/test_stats_current_process_performance.py": 142,
     "tests/test_stats_current_protocol.py": 521,
@@ -2246,6 +2247,7 @@
     "tests/test_tmux_utils.py": 399,
     "tests/test_tmux_wall.py": 229,
     "tests/test_transcripts.py": 268,
+    "tests/test_transient_paths.py": 139,
     "tests/test_ui_pins.py": 103,
     "tests/test_uploads.py": 173,
     "tests/test_watch_diff_route_contract.py": 585,

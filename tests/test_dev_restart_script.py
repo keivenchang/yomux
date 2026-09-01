@@ -243,7 +243,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    assert not 7110 <= port <= 7113, port
+    assert not 7770 <= port <= 7773, port
     try:
         result = subprocess.run(
             ["/bin/bash", "-c", f'source "$1"; yolomux_port_listener_pids {port}',
@@ -267,7 +267,7 @@ def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    assert not 7110 <= port <= 7113, port
+    assert not 7770 <= port <= 7773, port
     try:
         result = subprocess.run(
             ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {port}',
@@ -290,7 +290,7 @@ def test_startup_listener_boundary_propagates_an_absent_listener_exactly(tmp_pat
     probe.bind(("127.0.0.1", 0))
     free_port = probe.getsockname()[1]
     probe.close()
-    assert not 7110 <= free_port <= 7113, free_port
+    assert not 7770 <= free_port <= 7773, free_port
 
     result = subprocess.run(
         ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {free_port}',

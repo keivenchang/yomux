@@ -6,7 +6,7 @@ source "$repo_root/tools/startup_common.sh"
 if [[ "$(uname -s)" == "Darwin" ]]; then
   platform_default_port=8880
 else
-  platform_default_port=7110
+  platform_default_port=7770
 fi
 primary_port="${YOLOMUX_PORT:-$platform_default_port}"
 # An explicit port names this launcher's primary owner. Do not let an inherited server's owner
@@ -31,7 +31,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command|--check-assets] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7110 on Linux. Non-primary ports use --dev by default.
+Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7770 on Linux. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh

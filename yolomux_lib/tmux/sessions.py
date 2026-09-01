@@ -303,7 +303,12 @@ def command_option_value(command: str, long_name: str, short_name: str | None = 
 
 def agent_session_id_from_command(command: str) -> str | None:
     value = command_option_value(command, "--session", "-s")
-    return value.strip("\"'") if isinstance(value, str) and value.strip("\"'") else None
+    if not isinstance(value, str):
+        return None
+    value = value.strip("\"'")
+    if not value or len(value.encode("utf-8")) > 256 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    return value
 
 
 def agent_session_id_from_title(title: str, directory: str) -> str | None:

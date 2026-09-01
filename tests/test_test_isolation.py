@@ -9,7 +9,7 @@ from tools.test_plan import automatic_test_markers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_YOLOMUX_PORTS = ("7110", "7111", "7112", "7113")
+LIVE_YOLOMUX_PORTS = ("7770", "7771", "7772", "7773")
 
 
 def automated_test_source_paths():

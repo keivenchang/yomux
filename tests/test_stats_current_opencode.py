@@ -18,6 +18,7 @@ def _database(path: Path, sessions: list[tuple[object, ...]], messages: list[tup
             CREATE TABLE session (
                 id TEXT PRIMARY KEY, directory TEXT NOT NULL, agent TEXT, model TEXT,
                 time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, cost REAL NOT NULL DEFAULT 0,
+                title TEXT NOT NULL DEFAULT '',
                 tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
                 tokens_cache_read INTEGER, tokens_cache_write INTEGER
             );
@@ -37,7 +38,12 @@ def _database(path: Path, sessions: list[tuple[object, ...]], messages: list[tup
             CREATE TABLE credential (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             """
         )
-        connection.executemany("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sessions)
+        connection.executemany(
+            "INSERT INTO session (id, directory, agent, model, time_created, time_updated, cost, "
+            "tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            sessions,
+        )
         connection.executemany("INSERT INTO message VALUES (?, ?, ?, ?, ?)", messages)
         connection.executemany("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", parts)
 
@@ -111,6 +117,38 @@ def test_read_usage_emits_exact_step_finish_dimensions_without_message_double_co
     assert all(item.model_evidence == "message.providerID+message.modelID" for item in result.components)
     assert all(item.telemetry_complete is True for item in result.components)
     assert all(item.event_id.startswith("opencode:ses-a:part-a:") for item in result.components)
+
+
+def test_session_id_for_terminal_title_unquotes_visible_title(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(database, [_session("ses-a", "/repo/a", updated=2_000)], [], [])
+    with sqlite3.connect(database) as connection:
+        connection.execute('UPDATE session SET title = ? WHERE id = ?', ("build", "ses-a"))
+
+    result = opencode.session_id_for_terminal_title(
+        database,
+        directory="/repo/a",
+        title='OC | "build"',
+        now=2.0,
+    )
+
+    assert result == "ses-a"
+
+
+def test_session_id_for_terminal_title_handles_quoted_ellipsis(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(database, [_session("ses-a", "/repo/a", updated=2_000)], [], [])
+    with sqlite3.connect(database) as connection:
+        connection.execute('UPDATE session SET title = ? WHERE id = ?', ('"build: follow-up work"', "ses-a"))
+
+    result = opencode.session_id_for_terminal_title(
+        database,
+        directory="/repo/a",
+        title='OC | "build: ..."',
+        now=2.0,
+    )
+
+    assert result == "ses-a"
 
 
 def test_read_state_reports_running_tool_without_token_atoms(tmp_path: Path) -> None:
