@@ -50,6 +50,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_common.py:test_main_process_cpu_work_has_named_allowlist": "The process-accounting allowlist is an explicit static inventory.",
     "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready": "The boot script's listener sequencing is an operator safety contract best checked before execution.",
     "tests/test_dev_restart_script.py:test_boot_restart_requires_old_listener_to_stop_before_launch": "The boot script's old-listener shutdown protocol is an operator safety contract best checked before execution.",
+    "tests/test_dev_restart_script.py:test_startup_capacity_uses_portable_eight_cpu_macos_ceiling": "The startup capacity test combines live load-snapshot behavior with a source assertion for the platform-independent schedulable-CPU threshold; the threshold's source shape cannot be established from one host's runtime output.",
     "tests/test_filesystem.py:test_filesystem_implementations_leave_os_error_normalization_to_package_facade": "The package facade is the deliberate sole owner of OS-error normalization.",
     "tests/test_gate_stats_range.py:test_debug_stats_sample_endpoint_is_not_a_live_client_contract": "The debug endpoint must stay absent from shipped client source.",
     "tests/test_gate_worktree_protection.py:test_docs_separate_relocated_artifacts_from_single_writer_generated_source": "The written worktree ownership policy is an explicit repository contract.",
@@ -114,7 +115,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "d12bccb7bf63014f6d2ac619ab5ad3752f979c4cb173641fa0c24d513e83e9eb"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "ae0c099b20b4b9c8594d97ab8f318521a56a47a3f10dff9eadaad29354d1f61e"
 
 
 @dataclass(frozen=True, slots=True)

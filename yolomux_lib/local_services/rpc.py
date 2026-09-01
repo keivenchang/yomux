@@ -590,8 +590,8 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
         return candidate
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
-    fallback = fallback_name or candidate.name
-    bounded_name = hashlib.sha256(os.fsencode(fallback)).hexdigest()[:16]
+    fallback_leaf = fallback_name or candidate.name
+    bounded_name = hashlib.sha256(os.fsencode(fallback_leaf)).hexdigest()[:16]
     configured_root = os.environ.get("YOLOMUX_ROOT", "").strip()
     configured_runtime = os.environ.get("YOLOMUX_RUNTIME_DIR", "").strip()
     if configured_root:
@@ -600,7 +600,13 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
         fallback_base = Path(configured_runtime).expanduser() / "yolomux" / "s"
     else:
         fallback_base = Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s"
-    return fallback_base / digest[:8] / bounded_name
+    fallback = fallback_base / digest[:8] / bounded_name
+    if len(os.fsencode(str(fallback))) <= LOCAL_RPC_SOCKET_PATH_BYTES:
+        return fallback
+    # Test and rooted runtime directories can themselves be long enough to make a
+    # bounded child exceed sockaddr_un's limit. Keep the digest identity, but
+    # move only the socket transport to the fixed private server root.
+    return Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s" / digest[:8] / bounded_name
 
 
 def new_envelope(

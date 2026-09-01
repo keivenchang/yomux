@@ -78,7 +78,7 @@ def test_relative_yolomux_root_is_refused_before_cwd_can_choose_its_location(mon
 
 @pytest.mark.parametrize("key", CONFIGURED_PATH_KEYS)
 def test_tilde_prefixed_configured_path_is_relative_and_refused(key: str) -> None:
-    resolution = resolve_instance_environment(7110, {key: "~/unsafe-root"}, platform="Linux")
+    resolution = resolve_instance_environment(7770, {key: "~/unsafe-root"}, platform="Linux")
 
     assert key in resolution.error
     assert "absolute" in resolution.error
@@ -213,7 +213,7 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
     ),
 )
 def test_instance_resolution_rejects_unsafe_explicit_roots(key: str, value: str, message: str) -> None:
-    resolution = resolve_instance_environment(7110, {key: value}, platform="Linux")
+    resolution = resolve_instance_environment(7770, {key: value}, platform="Linux")
 
     assert key in resolution.error
     assert message in resolution.error
@@ -248,7 +248,7 @@ def test_explicit_yolomux_codex_home_ignores_ambient_codex_home(tmp_path: Path, 
     if rooted:
         values["YOLOMUX_ROOT"] = str(root)
 
-    resolution = resolve_instance_environment(7771 if rooted else 7110, values, platform="Linux")
+    resolution = resolve_instance_environment(7771 if rooted else 7770, values, platform="Linux")
 
     assert resolution.error == ""
     paths = common.resolve_yolomux_roots(values, identity=_identity())

@@ -100,6 +100,12 @@ def test_opencode_session_id_accepts_only_explicit_terminal_title_identity(monke
     assert sessions.agent_session_id_from_title("", "/repo") is None
 
 
+def test_opencode_session_id_rejects_unbounded_or_control_values():
+    assert sessions.agent_session_id_from_command("opencode -s ses-valid") == "ses-valid"
+    assert sessions.agent_session_id_from_command("opencode -s 'ses-\n-invalid'") is None
+    assert sessions.agent_session_id_from_command("opencode -s " + "x" * 257) is None
+
+
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"

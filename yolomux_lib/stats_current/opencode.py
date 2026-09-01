@@ -656,10 +656,13 @@ def session_id_for_terminal_title(
     current = float(now if now is not None else time.time())
     if not math.isfinite(current) or max_sessions <= 0 or max_session_age_seconds <= 0 or future_skew_seconds < 0:
         return None
+    if len(visible) >= 2 and visible[0] == '"' and visible[-1] == '"':
+        visible = visible[1:-1]
+    else:
+        visible = visible.rstrip('"')
     truncated = visible.endswith("...") or visible.endswith("…")
     if truncated:
         visible = visible[:-3] if visible.endswith("...") else visible[:-1]
-    visible = visible.rstrip('"')
     if not visible:
         return None
     connection: sqlite3.Connection | None = None
@@ -673,6 +676,11 @@ def session_id_for_terminal_title(
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
         if _validate_schema(connection) is not None:
+            return None
+        session_columns = {
+            str(row[1]) for row in connection.execute('PRAGMA table_info("session")').fetchall()
+        }
+        if "title" not in session_columns:
             return None
         rows = connection.execute(
             'SELECT id, directory, title, time_updated FROM "session" '
@@ -691,6 +699,8 @@ def session_id_for_terminal_title(
             if _canonical_directory(_bounded_text(row["directory"])) != canonical_directory:
                 continue
             candidate = _bounded_text(row["title"])
+            if len(candidate) >= 2 and candidate[0] == '"' and candidate[-1] == '"':
+                candidate = candidate[1:-1]
             if (candidate.startswith(visible) if truncated else candidate == visible):
                 matches.append(_bounded_text(row["id"]))
         return matches[0] if len(matches) == 1 else None
