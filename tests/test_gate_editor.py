@@ -307,7 +307,7 @@ const done = arguments[arguments.length - 1];
 def test_explicit_reload_and_push_refresh_for_one_path_share_one_read(gate_browser_runtime, tmp_path):
     """An explicit reload and a files_changed push for the same file issue one /api/fs/read.
 
-    Before filesystem reads had their own jobd lane this held by accident: a read could not be
+    Before filesystem reads had their own batchd lane this held by accident: a read could not be
     dispatched while the explicit reload's directory batch held the single shared interactive
     worker.  With a reserved point lane the two run concurrently, so the deduplication has to be
     explicit.  Serialization is not deduplication.
@@ -675,7 +675,7 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
         assert payload["error"]["message"]["params"] == {"path": str(target)}
         assert payload["error"]["details"]["path"] == str(target)
         # The descriptor-authorized base read is intentionally direct. A missing file has the
-        # same typed API outcome without manufacturing a jobd operation/receipt.
+        # same typed API outcome without manufacturing a batchd operation/receipt.
         assert "operation_id" not in payload["error"]["details"]
         assert "transport" not in payload["error"]["message"]["key"].lower()
 
@@ -692,11 +692,11 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
             if str(entry.get("level") or "").lower() in {"warning", "error"}
         ]
         assert blocking == [], blocking
-        # The direct descriptor read has no jobd receipt to replay. Its one API response records
+        # The direct descriptor read has no batchd receipt to replay. Its one API response records
         # the expected caller-owned outcome at info without manufacturing a second operation row.
         outcomes = [
             entry for entry in transition["newLogs"]
-            if (entry["source"], entry["category"]) in {("jobd-operation", "operation"), ("api-response", "api")}
+            if (entry["source"], entry["category"]) in {("batchd-operation", "operation"), ("api-response", "api")}
         ]
         assert [
             (str(entry["level"]).lower(), entry["source"], entry["category"]) for entry in outcomes

@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.24"
+YOLOMUX_VERSION = "0.7.28"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -162,7 +162,7 @@ def runtime_root(
         ) / "yolomux"
     else:
         resolved_uid = os.getuid() if uid is None else int(uid)
-        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
+        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-server-{resolved_uid}" / "shared"
     # Keep the socket-bearing root readable while leaving enough sockaddr_un
     # budget for the longest service filename. These stable prefixes identify
     # the host and boot in diagnostics without an opaque hash.
@@ -306,6 +306,7 @@ AUTO_APPROVE_LOCK_DIR = RUNTIME_DIR / "locks"
 CONTROL_SOCKET_DIR = RUNTIME_DIR / "control"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
+VISIBLE_AGENT_KINDS = frozenset({"claude", "codex", "opencode"})
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
@@ -860,6 +861,7 @@ class ProcessInfo:
     pid: int
     ppid: int
     command: str
+    executable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -875,6 +877,7 @@ class AgentInfo:
     transcript: str | None
     error: str | None
     model: str | None = None
+    started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -917,7 +920,7 @@ _METADATA_WARM_WORK_METRICS: contextvars.ContextVar[dict[str, int] | None] = con
 
 @contextmanager
 def metadata_warm_work_metrics() -> Any:
-    """Count only the Git/network work performed by one metadata-warm jobd task."""
+    """Count only the Git/network work performed by one metadata-warm batchd task."""
     metrics = {"git_spawns": 0, "github_http_calls": 0, "linear_http_calls": 0}
     token = _METADATA_WARM_WORK_METRICS.set(metrics)
     try:

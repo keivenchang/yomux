@@ -12,7 +12,7 @@ from yolomux_lib import local_service_projection
 from yolomux_lib import statusd_client
 from yolomux_lib import watchd_client
 from yolomux_lib.approval import approvald
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.search import search_indexer
 
 
@@ -121,7 +121,7 @@ def test_registry_runtime_row_reads_only_the_supplied_status_and_samples_the_lea
 def test_registry_runtime_row_preserves_group_resource_sampling():
     registry = RegistryStub()
     row = local_service_projection.registry_runtime_row(
-        "jobd",
+        "batchd",
         registry,
         {"healthy": True},
         {"pid": 31, "started_at": 9.5},
@@ -138,7 +138,7 @@ def test_every_registry_row_producer_delegates_to_the_shared_parent():
         watchd_client.WatchClient.runtime_status,
         approvald.ApprovalClient.runtime_status,
         search_indexer.SearchIndexerClient.runtime_status,
-        jobd.JobClient.runtime_status,
+            batchd.BatchClient._runtime_status_for_service,
     )
     for producer in producers:
         source = inspect.getsource(producer)

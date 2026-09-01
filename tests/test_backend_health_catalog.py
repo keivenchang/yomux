@@ -49,17 +49,17 @@ Re-pointed after M2 and M3, each change verified against source here before it w
   M4's health contract re-decided the demand/health split PER SERVICE instead of flagging all
   six. The previous freeze here said "only two of six declare demand_started" and explained it
   with a comment claiming all six were demand-started in fact. That claim was false: statsd and
-  jobd are each pinned up by a background owner in this process, so their absence is a verified
+  batchd are each pinned up by a background owner in this process, so their absence is a verified
   outage and neither may carry the flag. statusd and approvald genuinely are demand-scoped and
-  now declare it, taking the count to four. jobd's one legitimate absence -- this process does
+  now declare it, taking the count to four. batchd's one legitimate absence -- this process does
   not own background scheduling -- is expressed by a separate typed field with its own named
-  owner, because reusing `demand_started` for it would have made a real jobd outage silent.
+  owner, because reusing `demand_started` for it would have made a real batchd outage silent.
 
   M7 added statsd's BOUNDED expected-absence window and the observer's recovery path. Two rows
   declare a typed expected absence now, not one. The freeze that had to move is `declared`;
   what did NOT move is that each declaration still names the symbol deciding it, still reaches
   its token through one production constant, and still may not coexist with `demand_started`.
-  The per-service loop used to hardcode jobd's constant name and resolve the owner with
+  The per-service loop used to hardcode batchd's constant name and resolve the owner with
   `.fget`, i.e. it required the decider to be a `@property`. statsd's decider is deliberately a
   module-level function -- the row producer already holds the one `StatsCurrentRuntime.status()`
   read it needs, and a property would cost a second status RPC per probe -- so the loop resolves
@@ -84,7 +84,7 @@ Re-pointed after M2 and M3, each change verified against source here before it w
   dict lookup and nothing else, so `LocalServiceRegistry.retry` is still the one primitive.
 
   M9 also found the M7 needle still half-blind, one shape further out. `.retry(` matches an
-  invocation; the app's map reaches recovery by NAMING the bound method -- `"jobd":
+  invocation; the app's map reaches recovery by NAMING the bound method -- `"batchd":
   self.job_client.retry,` -- so the invocation census would have gone on reporting app.py as
   recovery-free while app.py was the only module in the tree that could start a retry. The
   census has a second half now, `RETRY_ATTRIBUTE_FILES`, whose needle matches a reference.
@@ -232,7 +232,7 @@ class ServiceOwners:
     # claiming both as `down`, and `test_no_service_declares_both_absence_excuses` pins it.
     absence_expected_reason: str
     # The exact symbol whose state decides that reason, so the claim has a named owner too.
-    # Deliberately NOT constrained to one Python shape: jobd's decider is a `@property` on the
+    # Deliberately NOT constrained to one Python shape: batchd's decider is a `@property` on the
     # client that already holds the answer, statsd's is a module-level function the row producer
     # calls with the ONE `StatsCurrentRuntime.status()` read it already performed. Forcing
     # statsd's into a property would buy a uniform test at the price of a second status RPC per
@@ -318,16 +318,16 @@ CATALOG: dict[str, ServiceOwners] = {
         absence_expected_owner="yolomux_lib.app:statsd_pin_pending",
         absence_expected_constant="STATSD_ABSENT_WHILE_PIN_PENDING",
     ),
-    "jobd": ServiceOwners(
-        # Load-bearing shim: yolomux_lib/jobd.py aliases yolomux_lib.infra.jobd, and the spec
+    "batchd": ServiceOwners(
+        # Load-bearing shim: yolomux_lib/batchd.py aliases yolomux_lib.infra.batchd, and the spec
         # names the shim, so the child really launches through it.
-        spec_module="yolomux_lib.jobd",
-        implementation_module="yolomux_lib.infra.jobd",
-        client_owner="yolomux_lib.infra.jobd:JobClient",
+        spec_module="yolomux_lib.batchd",
+        implementation_module="yolomux_lib.infra.batchd",
+        client_owner="yolomux_lib.infra.batchd:BatchClient",
         demand_owner=DEMAND_PRIMITIVE,
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
-        status_owner="yolomux_lib.infra.jobd:JobClient.runtime_status",
+        status_owner="yolomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
         status_row_expression="app.job_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="status = self.registry.status()",
@@ -336,8 +336,8 @@ CATALOG: dict[str, ServiceOwners] = {
         metrics_evidence='"resources": self.registry.resources_for_pids(pid, worker_pids)',
         recovery_owner=RECOVERY_PRIMITIVE,
         recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
-        # M9. The observer's control maps jobd to this wrapper, so a jobd that is down while
-        # THIS process holds the scheduler lease is retried; a jobd absent because the lease is
+        # M9. The observer's control maps batchd to this wrapper, so a batchd that is down while
+        # THIS process holds the scheduler lease is retried; a batchd absent because the lease is
         # held elsewhere still publishes `retry_blocked_scheduler_not_owned` and is not touched.
         recovery_wired_today=True,
         essential=True,
@@ -345,8 +345,8 @@ CATALOG: dict[str, ServiceOwners] = {
         # Pinned up by the scheduler lease, so NOT demand_started. The one expected absence is
         # the other side of that lease: this process does not own background scheduling.
         absence_expected_reason="scheduler_not_owned",
-        absence_expected_owner="yolomux_lib.infra.jobd:JobClient.holds_scheduler_lease",
-        absence_expected_constant="JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE",
+        absence_expected_owner="yolomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
+        absence_expected_constant="BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE",
     ),
     "statusd": ServiceOwners(
         spec_module="yolomux_lib.statusd",
@@ -409,7 +409,7 @@ CATALOG: dict[str, ServiceOwners] = {
         absence_expected_constant="",
     ),
     "approvald": ServiceOwners(
-        # Load-bearing shim, same shape as jobd.
+        # Load-bearing shim, same shape as batchd.
         spec_module="yolomux_lib.approvald",
         implementation_module="yolomux_lib.approval.approvald",
         client_owner="yolomux_lib.approval.approvald:ApprovalClient",
@@ -456,7 +456,7 @@ RETRY_DEFINITIONS = {
 # cannot drift apart.
 RECOVERY_ENTRYPOINT_EXPRESSIONS = {
     "statsd": "app.stats_current_client.retry",
-    "jobd": "app.job_client.retry",
+    "batchd": "app.job_client.retry",
     "statusd": "app.status_client.retry",
     "watchd": "app.watch_client.retry",
     "approvald": "app.approval_client.retry",
@@ -489,7 +489,7 @@ RETRY_CALL_SITE_FILES = frozenset({
 })
 # The SECOND half of the census, added by M9 because the first half still could not see the
 # shape M9 introduces. `.retry(` matches an INVOCATION. `app.py` reaches recovery by naming the
-# bound method -- `"jobd": self.job_client.retry,` -- and calling it later through a local name,
+# bound method -- `"batchd": self.job_client.retry,` -- and calling it later through a local name,
 # so the invocation needle would have gone on reporting app.py as recovery-free while app.py was
 # the only thing in the tree that could start a retry. That is the same hole `.retry()` had, one
 # shape further out, so the fix is a needle that matches a REFERENCE too.
@@ -757,7 +757,7 @@ def _classify(row: dict[str, object]) -> dict[str, object]:
 def test_owner_matrix_covers_exactly_the_frozen_inventory():
     """The matrix has a row for every service the projection ships, in order, and no extras."""
     inventory = _inventory_literal()
-    assert inventory == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald"), inventory
+    assert inventory == ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald"), inventory
     assert tuple(CATALOG) == inventory, (tuple(CATALOG), inventory)
     # The AST read above found the live symbol, not a lookalike in some other scope.
     live = getattr(importlib.import_module(INVENTORY_MODULE), INVENTORY_NAME)
@@ -900,11 +900,11 @@ def test_a_second_recovery_entrypoint_for_one_service_is_rejected():
         "def local_services_recovery_entrypoints(self):\n"
         "    return {\n"
         "        'statsd': self.stats_current_client.retry,\n"
-        "        'jobd': self.job_client.retry,\n"
-        "        'jobd': self.legacy_job_client.retry,\n"
+        "        'batchd': self.job_client.retry,\n"
+        "        'batchd': self.legacy_job_client.retry,\n"
         "    }\n"
     )
-    with pytest.raises(AssertionError, match="jobd has two recovery entrypoints"):
+    with pytest.raises(AssertionError, match="batchd has two recovery entrypoints"):
         _service_id_expressions(poisoned, tuple(CATALOG), "recovery entrypoints")
 
 
@@ -1176,7 +1176,7 @@ def _production_attribute_files(pattern: str) -> frozenset[str]:
     """Production files whose source NAMES the attribute `pattern` matches, called or not.
 
     The companion to `_production_call_site_files`, and the reason it exists is measured, not
-    theoretical: the invocation needle `.retry(` cannot see `"jobd": self.job_client.retry,`,
+    theoretical: the invocation needle `.retry(` cannot see `"batchd": self.job_client.retry,`,
     so a census built only on invocations would have reported the module that owns the whole
     recovery map as recovery-free. A regex rather than a substring so `\\b` can keep
     `.retry_at` / `.retry_band` / `.retry_seconds` out without an exclusion list.
@@ -1219,9 +1219,9 @@ def test_demand_started_is_declared_by_exactly_the_four_services_nothing_keeps_h
                (`stats_current/runtime.py:365-368`) and the scheduler appends over RPC at the
                `cpu` family's 1s cadence (`families.py:130-134`). Flagging it `demand_started`
                would have turned a real statsd outage into silence.
-      jobd     is pinned by the scheduler lease `start_for_scheduler()` takes on background
-               ownership (`infra/jobd.py:1377-1385`, called at `app.py:2962`); the broker's
-               idle rule refuses to retire while any lease is held (`infra/jobd.py:1330-1337`).
+      batchd     is pinned by the scheduler lease `start_for_scheduler()` takes on background
+               ownership (`infra/batchd.py:1377-1385`, called at `app.py:2962`); the broker's
+               idle rule refuses to retire while any lease is held (`infra/batchd.py:1330-1337`).
                Same verdict as statsd, different keeper.
       statusd  is demand-scoped. The only thing that pins it is the SSE generation lease
                (`app.py:7098-7145`), released with the last subscriber; the 60s idle-cadence
@@ -1229,7 +1229,7 @@ def test_demand_started_is_declared_by_exactly_the_four_services_nothing_keeps_h
       approvald is demand-scoped. Only `start_worker` creates it, and its idle rule
                (`approval/approvald.py:252`) retires it when it holds no worker record.
 
-    So the flag lands on four services, and jobd's legitimate absence is expressed by a
+    So the flag lands on four services, and batchd's legitimate absence is expressed by a
     different, typed field instead -- pinned by the next test.
     """
     declared = frozenset(name for name, owners in CATALOG.items() if owners.demand_started_declared)
@@ -1240,15 +1240,15 @@ def test_demand_started_is_declared_by_exactly_the_four_services_nothing_keeps_h
         assert status_source.count('"demand_started"') == expected, (service, status_source)
     # The two services a background loop keeps hot stay outside the flag, permanently.
     kept_hot = frozenset(name for name, owners in CATALOG.items() if not owners.demand_started_declared)
-    assert kept_hot == {"statsd", "jobd"}, kept_hot
+    assert kept_hot == {"statsd", "batchd"}, kept_hot
     assert "demand_started = row.get(\"demand_started\") is True" in _source(SYSTEM_STATUS_SERVICE)
 
 
 def _deciding_callable(ref: str) -> object:
     """Resolve an `absence_expected_owner` to the callable that actually decides the excuse.
 
-    Two Python shapes are accepted, and the shape is NOT the invariant. jobd's decider is a
-    `@property` on `JobClient` because the client already holds the lease id and answering costs
+    Two Python shapes are accepted, and the shape is NOT the invariant. batchd's decider is a
+    `@property` on `BatchClient` because the client already holds the lease id and answering costs
     an attribute read; statsd's is a module-level function because `statsd_runtime_status`
     already performed the ONE `StatsCurrentRuntime.status()` read the decision needs and a
     property would issue a second status RPC on every probe. This test used to hardcode
@@ -1270,7 +1270,7 @@ def test_every_typed_expected_absence_is_declared_once_and_has_a_named_owner():
     for each one the symbol whose state decides it is resolved and the constant that spells the
     token is read out of production source, so neither claim can become free-floating prose.
 
-    Re-pointed at M7. jobd's `scheduler_not_owned` is a STEADY-STATE fact about a lost election.
+    Re-pointed at M7. batchd's `scheduler_not_owned` is a STEADY-STATE fact about a lost election.
     statsd's `stats_pin_pending` is a BOUNDED in-flight window: this process is on its way to
     taking the statsd pin and has not taken it yet, which is why the token has to be withdrawn by
     the owner's own live status rather than by a timer. The freeze below is deliberately exact --
@@ -1278,7 +1278,7 @@ def test_every_typed_expected_absence_is_declared_once_and_has_a_named_owner():
     of these is a path by which a real outage becomes silent.
     """
     declared = {name: owners.absence_expected_reason for name, owners in CATALOG.items() if owners.absence_expected_reason}
-    assert declared == {"statsd": "stats_pin_pending", "jobd": "scheduler_not_owned"}, declared
+    assert declared == {"statsd": "stats_pin_pending", "batchd": "scheduler_not_owned"}, declared
     for service, owners in CATALOG.items():
         status_source = _source(owners.status_owner)
         expected = 1 if owners.absence_expected_reason else 0
@@ -1323,8 +1323,8 @@ def test_no_service_declares_both_absence_excuses():
 
 
 def test_the_two_shimmed_services_launch_through_their_shim():
-    """jobd and approvald spawn `python -m <shim>`, so the shim is load-bearing, not dead code."""
-    for service in ("jobd", "approvald"):
+    """batchd and approvald spawn `python -m <shim>`, so the shim is load-bearing, not dead code."""
+    for service in ("batchd", "approvald"):
         owners = CATALOG[service]
         assert owners.spec_module != owners.implementation_module, service
         shim = importlib.import_module(owners.spec_module)
@@ -1339,7 +1339,7 @@ def test_spawned_module_string_matches_the_client_spec():
     """The spec module in each client is the string registry._spawn passes to `python -m`."""
     spec_sources = {
         "indexd": "yolomux_lib.search.search_indexer:SearchIndexerClient.__init__",
-        "jobd": "yolomux_lib.infra.jobd:JobClient.__init__",
+        "batchd": "yolomux_lib.infra.batchd:BatchClient.__init__",
         "statusd": "yolomux_lib.statusd_client:StatusClient.__init__",
         "watchd": "yolomux_lib.watchd_client:WatchClient.__init__",
         "approvald": "yolomux_lib.approval.approvald:ApprovalClient.__init__",
@@ -1391,12 +1391,12 @@ def test_no_abandoned_topology_name_is_a_service_row_or_an_owner():
 
 def test_an_abandoned_name_in_an_inventory_is_rejected():
     """Permanent negative control for the abandoned-name rule."""
-    poisoned = ["indexd", "statsd", "storaged", "jobd"]
+    poisoned = ["indexd", "statsd", "storaged", "batchd"]
     assert _abandoned_names_in(poisoned) == ["storaged"], _abandoned_names_in(poisoned)
     assert _abandoned_names_in(["yolomux_lib.daemon.supervisor"]) == ["daemon"]
     # Substrings of real identifiers are not hits: this rule must not fire on `storaged.products`
-    # style keys or on `jobd`.
-    assert _abandoned_names_in(["storagedaemonish", "jobd", "search_indexer"]) == []
+    # style keys or on `batchd`.
+    assert _abandoned_names_in(["storagedaemonish", "batchd", "search_indexer"]) == []
 
 
 @contextlib.contextmanager

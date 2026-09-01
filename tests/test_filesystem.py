@@ -2146,6 +2146,49 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     assert hit["size"] == len("print('ok')\n")
 
 
+def test_direct_search_fuzzy_matches_only_the_requested_parent(tmp_path):
+    (tmp_path / "helloworld").write_text("x", encoding="utf-8")
+    (tmp_path / "helloHAHAworldHAHA").write_text("x", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "helloworld").write_text("x", encoding="utf-8")
+
+    for query in ("hell", "hw"):
+        payload = filesystem.search_files(str(tmp_path), query=query, direct_only=True)
+        names = {item["name"] for item in payload["files"]}
+        assert names == {"helloworld", "helloHAHAworldHAHA"}
+        assert all(item["kind"] == "file" for item in payload["files"])
+        assert all(set(item) == {"name", "path", "relative_path", "kind"} for item in payload["files"])
+
+
+def test_direct_search_returns_fuzzy_matching_directories_without_descending(tmp_path):
+    matching = tmp_path / "hello-folder"
+    matching.mkdir()
+    (matching / "nested-hit.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "other").mkdir()
+
+    payload = filesystem.search_files(str(tmp_path), query="hf", direct_only=True)
+
+    assert [(item["name"], item["kind"]) for item in payload["files"]] == [("hello-folder", "dir")]
+
+
+def test_direct_search_does_not_open_non_matching_children(monkeypatch, tmp_path):
+    (tmp_path / "helloworld").write_text("x", encoding="utf-8")
+    (tmp_path / "unrelated.txt").write_text("x", encoding="utf-8")
+    opened = []
+    original_scandir = filesystem_search.os.scandir
+
+    def record_scandir(path):
+        opened.append(path)
+        return original_scandir(path)
+
+    monkeypatch.setattr(filesystem_search.os, "scandir", record_scandir)
+    payload = filesystem.search_files(str(tmp_path), query="hw", direct_only=True)
+
+    assert [item["name"] for item in payload["files"]] == ["helloworld"]
+    assert len(opened) == 1
+
+
 def test_search_ranking_does_not_span_absolute_root_prefix_into_filename():
     path = Path("/tmp/target-04") / "dir" / "target-00949.py"
 

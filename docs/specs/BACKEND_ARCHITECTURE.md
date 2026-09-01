@@ -22,7 +22,7 @@ flowchart TB
     subgraph services[Six independent local-service processes]
         indexd[indexd]
         statsd[statsd]
-        jobd[jobd]
+        batchd[batchd]
         statusd[statusd]
         watchd[watchd]
         approvald[approvald]
@@ -30,19 +30,19 @@ flowchart TB
 
     web <-->|Versioned Unix-socket RPC| indexd
     web <-->|Versioned Unix-socket RPC| statsd
-    web <-->|Versioned Unix-socket RPC| jobd
+    web <-->|Versioned Unix-socket RPC| batchd
     web <-->|Versioned Unix-socket RPC| statusd
     web <-->|Versioned Unix-socket RPC| watchd
     web <-->|Versioned Unix-socket RPC| approvald
     indexd <--> filesystem
-    jobd --> workers[Bounded spawn workers]
+    batchd --> workers[Bounded spawn workers]
     workers <--> filesystem
     statusd <--> tmux
     watchd --> filesystem
     approvald --> tmux
     indexd <--> runtime
     statsd <--> runtime
-    jobd <--> runtime
+    batchd <--> runtime
     statusd <--> runtime
     watchd <--> runtime
     approvald <--> runtime
@@ -64,7 +64,7 @@ Terminal bytes remain a direct browser-WebSocket-to-web-process-to-tmux path. Sh
 | --- | --- |
 | `indexd` | Quick Open indexes, per-root SQLite snapshots, manifests, tombstones, and the persisted breadth-first indexing frontier. |
 | `statsd` | Original metric observations and usage atoms, retention, derived in-memory layers, and encoded snapshot/delta products. |
-| `jobd` | Deferred or CPU-heavy typed work, bounded queues and spawn workers, coalescing, cancellation, and last-known-good materialized products. |
+| `batchd` | Deferred or CPU-heavy typed work, bounded queues and spawn workers, coalescing, cancellation, and last-known-good materialized products. |
 | `statusd` | Shared tmux session inventory, pane classification, immutable status generations, and encoded auto-approve status bytes. |
 | `watchd` | Shallow native filesystem watch descriptors, whole-configuration polling fallback after native-backend failure/unavailability, revisions, and changed-path evidence used by browser refresh and index invalidation. Per-root local/network mount partitioning is not implemented yet. |
 | `approvald` | Per-target auto-approval workers, target locks, lifecycle actions, and approved tmux input. |
@@ -80,7 +80,7 @@ Two rules are structural rather than per-row. First, a *future* event is never a
 | Process/caller | Lifetime owner | Root decision | Service record | Lock | Claim | Surviving supervisor | Shutdown/reap owner | Destructive dimensions bound |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `watchd` | `LocalServiceRegistry` (spawn/adopt) + `run_local_rpc_service`'s `ServiceLifetimeOwner` (retirement) | `caller-shared-root-retain` | `<socket>.service.json` written by `_publish_record` from a proven `status`, carrying `service`, `namespace`, `spawn_generation`, `supervisor`, `claim_id`, `root_sharing` | Service flock in `run_local_rpc_service` | `local-service:watchd` claim under `STATE_DIR/<host>/` published at spawn | `<socket>.lifetime.json`, republished on every transition | Self-bounded exit through `ServiceLifetimeOwner`; supervisor-side stop through `lifetime.terminate_authorized_process` | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + namespace + service kind + live spawn generation + claim |
-| `jobd` | Same, plus `PersistentJobBroker._idle_should_stop()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:jobd` | Same | Same, plus `LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS` while `jobd_retirement_state` reports `draining` | Same |
+| `batchd` | Same, plus `PersistentJobBroker._idle_should_stop()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:batchd` | Same | Same, plus `LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS` while the batch retirement state reports `draining` | Same |
 | `statusd` | Same, plus `PersistentStatusService.idle_due()` | `caller-shared-root-retain` | Same owner | Service flock | `local-service:statusd` | Same | Same | Same |
 | `approvald` | Same, plus the `idle_due` predicate in `ApprovalDaemon` | `caller-shared-root-retain` | Same owner | Service flock + per-target locks | `local-service:approvald` | Same | Same | Same |
 | `indexd` (`search_indexer.py`) | Same, plus its `idle_due` predicate | `caller-shared-root-retain` | Same owner | Service flock + per-root SQLite | `local-service:indexd` | Same | Same | Same |
@@ -96,7 +96,7 @@ Two rules are structural rather than per-row. First, a *future* event is never a
 | Web-process background-owner election (`infra/background_owner.py`) | `BackgroundOwnerRegistry`, or `DisabledBackgroundOwner` | `private-root-remove` for a managed instance (election skipped entirely); `caller-shared-root-retain` for an explicit caller-set `YOLOMUX_ROOT` | Owner record + generation index, fenced by `process_fence` | `file_lock` on the generation index | None | The owner record itself | `stop()` unlinks its own record only when identity, generation id, and instance nonce all match; every index-write and unlink failure is published as `maintenance_failures` in `status_payload` | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + generation id + instance nonce |
 | tmux control client (`tmux/tmux_signals.py`) | The spawning web process through its live `Popen`, plus `PR_SET_PDEATHSIG` on Linux | `caller-shared-root-retain` | None | Claim file per client | `tmux-control-client` claim carrying host, boot, PID, process-start identity, kind, namespace, generation (session), supervisor, and root sharing | `surviving_supervisor` on the retained claim row | Own `Popen` teardown; a stranded client is reaped by `reap_unsupervised_tmux_control_clients` only when the claim's supervisor is provably gone | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + kind + namespace + supervisor |
 | Codex app-server session (`agent_comms/codex_app_server.py`) | The requesting thread; `send()` closes it in `finally` | `private-root-remove` (stdio pipe, no shared root) | **None** — a stdio child with no persisted record | The caller's `RLock` | None | The requesting thread, in-process | `close()` in the request's `finally`; the process is a direct child and dies with the server | None claimed, and none needed: no cross-restart authority is ever exercised |
-| jobd spawn workers (`infra/jobd.py`) | `PersistentJobBroker` through its `ProcessPoolExecutor` | `caller-shared-root-retain` (inherits jobd's row) | **None** — pool children covered by jobd's record and process group | The broker's lane executor | Inherits jobd's claim through the process group | jobd itself | Synchronous `terminate()` → 2 s join → `kill()` → 1 s join per worker | The live executor handle |
+| batchd spawn workers (`infra/batchd.py`) | `PersistentJobBroker` through its `ProcessPoolExecutor` | `caller-shared-root-retain` (inherits batchd's row) | **None** — pool children covered by batchd's record and process group | The broker's lane executor | Inherits batchd's claim through the process group | batchd itself | Synchronous `terminate()` → 2 s join → `kill()` → 1 s join per worker | The live executor handle |
 | `terminate_process_group` (`infra/common.py`) | The `Popen` carrying the recorded `ProcessGroupIdentity` | `caller-shared-root-retain` | In-memory `ProcessGroupIdentity`: deployment id, leader pid, pgid, leader start identity | The live `Popen` handle | None | The owning `Popen` | SIGTERM → 2 s wait → SIGKILL | Deployment id + live pgid + leader birth identity, each `killpg` refused with a typed reason otherwise |
 | `YolomuxControlServer` socket (`yolomux_lib/control.py`) | The web process that created it | `caller-shared-root-retain` — a same-PID successor must be able to reclaim a predecessor's leftover | `<socket>.owner.json` carrying the full process record | None | None | The owner record | `stop()` unlinks its own socket and record; `reclaim_stale_control_sockets` removes a predecessor's pair only when the owner record proves that process is gone | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) |
 
@@ -142,7 +142,7 @@ The tmux control client is the original consumer. Linux closes the leak at the s
 
 Demand is a *claim*, and a claim must name a live external client. A daemon may never lease itself: the self-connection exclusion was closed at the connection level (`run_local_rpc_service` compares `peer_pid` to `os.getpid()` before calling `on_client`) and was wide open at the lease level, where `acquire_client_lease` trusted a caller-supplied `client_pid` verbatim — one self-issued lease pinned the idle deadline forever and no correctness in `claim_gated_idle_due` could undo it. That request is now refused with `diagnostic.reason == "self_connection"`.
 
-`bool(self.leases)` is a different question from "is any client still alive". A hard-killed client cannot release its lease, so `live_client_claim` is the one predicate that reaps first and then answers; `approvald` and `indexd` alone lacked that reap and could be pinned indefinitely by one crashed caller. `jobd` additionally held two definitions of idle — `shutdown_if_idle` gated on leases alone while `_idle_should_stop` also honoured `_has_active_work()` — so a caller could stop the broker out from under queued work simply by asking through the other path. There is now one definition.
+`bool(self.leases)` is a different question from "is any client still alive". A hard-killed client cannot release its lease, so `live_client_claim` is the one predicate that reaps first and then answers; `approvald` and `indexd` alone lacked that reap and could be pinned indefinitely by one crashed caller. `batchd` additionally held two definitions of idle — `shutdown_if_idle` gated on leases alone while `_idle_should_stop` also honoured `_has_active_work()` — so a caller could stop the broker out from under queued work simply by asking through the other path. There is now one definition.
 
 When the last valid external claim disappears, `stop_event` is a request the listener may never honour: a stuck handler, a blocking shutdown hook, or a non-daemon thread at interpreter exit all leave the daemon up, and the only thing that used to force it was a future launcher start. `ServiceLifetimeOwner` bounds that exit inside the daemon itself, and publishes `<socket>.lifetime.json` beside the socket rather than behind the status RPC — because the moment "who retains this, and has it already been asked to stop?" matters most is exactly when the daemon is too wedged to answer an RPC.
 
@@ -156,14 +156,17 @@ The background owner is a role elected among web processes sharing one local `YO
 
 ## Filesystem boundaries
 
-`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path.
+`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path. Human-interactive bounded reads stay under `/api/fs/...` and return directly; recursive or input-sized work is submitted through `/api/batch/...` and may return an operation receipt.
 
 Git-backed filesystem consumers enter `git_ops.pinned_git_scope_from_handle()` from the already-authorized file, directory, or parent handle. The scope pins the repository marker, linked-worktree Git directory, common directory, and object directory; builds a bounded private view of config, HEAD, refs, packed refs, objects, and the index; passes only that view to `_run_pinned_git()`; and revalidates the live namespace when the consumer retires. Read metadata, path info, Finder repository enrichment, diff, and blame use this same scope. A tracked rename rewrites the old index entries to their new paths in the private index without reopening worktree content, performs the descriptor-relative filesystem rename, then publishes the private index through the pinned Git-directory descriptor and its owned `index.lock`. If the repository, object store, real index, or lock changes, the operation returns `fs.error.gitRepositoryChanged` and never runs against the replacement. Finder may defer optional repository badges when the bounded view exceeds its enrichment budget; the directory row remains usable.
 
 | Surface | Execution path | Current use |
 | --- | --- | --- |
-| `GET /api/fs/fast/list?path=...` | `FilesystemHttpAdapter` calls `filesystem.list_directory(..., include_repo_info=False)` in the web process and returns the snapshot directly. It does not call `jobd`. | Every Finder directory LIST, including the root and remembered descendants. A successful call is HTTP 200 and contains only that directory's direct entries and base metadata. |
-| `POST /api/fs/batch` | The web process submits a bounded typed batch to `jobd`; a cold product may return an operation receipt and complete through the shared client-event/operation path. | Deferred detailed work. Finder sends Git/repository `INFO` enrichment here after base rows exist and patches mounted rows when results arrive. |
+| `GET /api/fs/fast/list?path=...` | `FilesystemHttpAdapter` calls `filesystem.list_directory(..., include_repo_info=False)` in the web process and returns the snapshot directly. It does not call `batchd`. | Every Finder directory LIST, including the root and remembered descendants. A successful call is HTTP 200 and contains only that directory's direct entries and base metadata. |
+| `POST /api/fs/batch` | The web process submits a bounded typed batch to `batchd`; a cold product may return an operation receipt and complete through the shared client-event/operation path. | Deferred detailed work. Finder sends Git/repository `INFO` enrichment here after base rows exist and patches mounted rows when results arrive. |
+| `GET /api/fs/fast/list` | The accepting web process returns one authorized directory listing for absolute or `~` Quick Open path prefixes; the browser caches the parent listing and filters its names locally. | Immediate, non-recursive path-mode results; no index or batch receipt. |
+| `GET /api/fs/search` | The accepting web process performs the indexed/non-indexed search contract for non-absolute Quick Open queries and retains the compatibility direct-search path only when explicitly requested. | Search-root results or a typed batch receipt, depending on the request mode. |
+| `GET /api/batch/search` | The web process submits recursive search and cursor-delta work to `batchd`; a cold product returns an operation receipt. | Slow recursive `find`-style discovery and indexed progress. |
 | `GET /api/fs/list` | The compatibility single-operation path submits `list` through the existing filesystem-product owner. | Existing callers outside Finder; it is not the Finder first-paint route. |
 
 ```mermaid
@@ -171,7 +174,7 @@ sequenceDiagram
     participant Browser as Finder in browser
     participant Web as Web process
     participant FS as Filesystem owner
-    participant Jobd as jobd and workers
+    participant Batchd as batchd and workers
 
     Browser->>Web: GET /api/fs/fast/list?path=root
     Web->>FS: list_directory(root, include_repo_info=false)
@@ -186,15 +189,15 @@ sequenceDiagram
         Web-->>Browser: HTTP 200
         Browser->>Browser: Paint each completed subtree
     and Enrich repository details after paint
-        Browser->>Web: POST /api/fs/batch with INFO items
-        Web->>Jobd: Submit bounded filesystem batch
-        Jobd-->>Web: Ready product or operation receipt
+         Browser->>Web: POST /api/fs/batch with INFO items
+         Web->>Batchd: Submit bounded filesystem batch
+         Batchd-->>Web: Ready product or operation receipt
         Web-->>Browser: INFO results now or after completion event
         Browser->>Browser: Patch mounted rows in place
     end
 ```
 
-Cold Finder Sync has no whole-tree render barrier. It awaits the fast root, paints it, and then fetches remembered descendant directories with bounded concurrency; each completed listing triggers another render. Git enrichment is independently scheduled after LIST publication, so a cold `jobd`, a queued product, or slow Git cannot delay names, types, sizes, or dates from the fast snapshot.
+Cold Finder Sync has no whole-tree render barrier. It awaits the fast root, paints it, and then fetches remembered descendant directories with bounded concurrency; each completed listing triggers another render. Git enrichment is independently scheduled after LIST publication, so a cold `batchd`, a queued product, or slow Git cannot delay names, types, sizes, or dates from the fast snapshot.
 
 Quick Open indexing is separate from Finder listing. `indexd` persists a breadth-first, directory-at-a-time frontier. It publishes a complete depth before advancing `published_depth`, retains the previous readable generation while replacement work proceeds, and resumes the shallowest pending directory after restart. Finder visibility and concrete watch/mutation paths promote or repair work through the shared index invalidation owner; they do not start a second crawl.
 

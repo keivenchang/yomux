@@ -3,17 +3,17 @@
 """A historical WORK-ITEM failure must never be published as a CURRENT daemon failure.
 
 Measured on live 7771 (pid 2353047, commit 71ab4d6bc) on 2026-08-08: the retained health
-document reported `jobd degraded / terminal_failure`, while a status RPC over that port's own
-`jobd.sock` answered `ok=true` in 0.42-0.94ms with every lane idle and free capacity. The
+document reported `batchd degraded / terminal_failure`, while a status RPC over that port's own
+`batchd.sock` answered `ok=true` in 0.42-0.94ms with every lane idle and free capacity. The
 daemon was healthy; the monitor was wrong.
 
 The cause was one name carrying two meanings. `PersistentJobBroker.common_status()` derived
 `last_failure` by scanning the bounded record ring for the most recent `failed`/`timed_out`
 job. That is history: a later success does NOT clear it, and only eviction from the 256-entry
-ring ever does. `JobClient.runtime_status()` passed it through `local_service_failure_text()`,
+ring ever does. `BatchClient.runtime_status()` passed it through `local_service_failure_text()`,
 which publishes exactly that name, and `observed_health()` reads any non-empty `last_failure`
 on a live pid as CURRENT degradation. So two `session_files_view` jobs that timed out under
-load pinned a healthy, serving jobd to `degraded`/`terminal_failure` indefinitely -- the
+load pinned a healthy, serving batchd to `degraded`/`terminal_failure` indefinitely -- the
 "always-on indicator is as useless as silence" failure the daemon-monitor DOIT names.
 
 The split is at the PRODUCER, not in the reducer. Weakening `observed_health()` to ignore
@@ -33,19 +33,19 @@ from yolomux_lib.backend_health.observer import REASON_EXITED
 from yolomux_lib.backend_health.observer import REASON_NONE
 from yolomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
 from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.infra.jobd import JobRecord
-from yolomux_lib.infra.jobd import PersistentJobBroker
+from yolomux_lib.infra.batchd import JobRecord
+from yolomux_lib.infra.batchd import PersistentJobBroker
 from yolomux_lib.local_services.runtime import local_service_failure_text
 
 
-# The exact error text the live jobd was reporting when it was measured healthy.
+# The exact error text the live batchd was reporting when it was measured healthy.
 LIVE_STALE_ERROR = "deadline exceeded while executing"
 
 
 def _broker(tmp_path: Path) -> PersistentJobBroker:
     """Build the real producer. `__init__` only derives paths; nothing binds or spawns."""
 
-    return PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=60.0, workers=1)
+    return PersistentJobBroker(tmp_path / "batchd.sock", idle_seconds=60.0, workers=1)
 
 
 def _record(job_id: str, status: str, *, error: str = "", completed_at: float = 0.0) -> JobRecord:
@@ -94,7 +94,7 @@ def test_a_later_success_does_not_erase_the_job_failure_from_its_own_diagnostic(
     assert "last_failure" not in payload
 
 
-def test_a_jobd_payload_carrying_only_job_history_yields_no_service_failure_text(tmp_path):
+def test_a_batchd_payload_carrying_only_job_history_yields_no_service_failure_text(tmp_path):
     """`local_service_failure_text` is the seam that names a service failure; history is not one."""
 
     broker = _broker(tmp_path)
@@ -109,22 +109,22 @@ def test_a_current_registry_failure_still_reaches_the_service_failure_text(tmp_p
     broker = _broker(tmp_path)
     broker.records["j1"] = _record("j1", "failed", error=LIVE_STALE_ERROR)
 
-    text = local_service_failure_text({"failure_reason": "jobd exited (1)"}, broker.common_status())
+    text = local_service_failure_text({"failure_reason": "batchd exited (1)"}, broker.common_status())
 
-    assert text == "jobd exited (1)"
+    assert text == "batchd exited (1)"
 
 
 # --- The reducer: unchanged contract, proven in both directions ---------------------------
 
 
-def test_a_healthy_running_jobd_with_a_stale_job_failure_reduces_to_ready(tmp_path):
+def test_a_healthy_running_batchd_with_a_stale_job_failure_reduces_to_ready(tmp_path):
     """The live contradiction, end to end: healthy daemon + old failed job => ready."""
 
     broker = _broker(tmp_path)
     broker.records["j1"] = _record("j1", "timed_out", error=LIVE_STALE_ERROR)
     payload = broker.common_status()
     row = {
-        "service": "jobd",
+        "service": "batchd",
         "pid": 2353349,
         "healthy": True,
         "last_success": payload["last_success"],
@@ -144,7 +144,7 @@ def test_a_running_daemon_reporting_itself_unhealthy_still_degrades(tmp_path):
     not `terminal_failure`, because a live pid is not the registry's latched permanent death.
     """
 
-    row = {"service": "jobd", "pid": 2353349, "healthy": False, "last_failure": ""}
+    row = {"service": "batchd", "pid": 2353349, "healthy": False, "last_failure": ""}
 
     assert observed_health(row, PROBE_OK) == ("degraded", REASON_SERVICE_UNHEALTHY)
 
@@ -156,7 +156,7 @@ def test_a_running_daemon_with_a_current_registry_failure_still_degrades():
     latched `terminal_failure` fence, which the absent-daemon control below still exercises.
     """
 
-    row = {"service": "jobd", "pid": 2353349, "healthy": True, "last_failure": "jobd exited (1)"}
+    row = {"service": "batchd", "pid": 2353349, "healthy": True, "last_failure": "batchd exited (1)"}
 
     assert observed_health(row, PROBE_OK) == ("degraded", REASON_SERVICE_UNHEALTHY)
 
@@ -164,7 +164,7 @@ def test_a_running_daemon_with_a_current_registry_failure_still_degrades():
 def test_an_absent_daemon_with_a_current_failure_is_still_down():
     """Negative control: the not-running branch keeps reading `last_failure` as a real failure."""
 
-    row = {"service": "jobd", "pid": 0, "healthy": False, "last_failure": "jobd exited (1)"}
+    row = {"service": "batchd", "pid": 0, "healthy": False, "last_failure": "batchd exited (1)"}
 
     assert observed_health(row, PROBE_OK) == ("down", REASON_EXITED)
 
@@ -172,6 +172,6 @@ def test_an_absent_daemon_with_a_current_failure_is_still_down():
 def test_the_reducer_still_ignores_the_diagnostic_name_entirely():
     """`last_job_failure` is diagnostic only. If the reducer ever reads it, this bug returns."""
 
-    row = {"service": "jobd", "pid": 2353349, "healthy": True, "last_failure": "", "last_job_failure": LIVE_STALE_ERROR}
+    row = {"service": "batchd", "pid": 2353349, "healthy": True, "last_failure": "", "last_job_failure": LIVE_STALE_ERROR}
 
     assert observed_health(row, PROBE_OK) == ("ready", REASON_NONE)

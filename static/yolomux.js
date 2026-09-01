@@ -433,6 +433,9 @@ const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
+const quickOpenFileHistoryLimit = 100;
+const quickOpenFileHistory = [];
+const quickOpenFileOpenedAt = new Map();
 const pendingFileEditorFocus = new Set();
 const paneViewState = new Map();  // layout item -> generic pane scroll state
 const pendingPaneViewStateCaptures = new Set();
@@ -481,8 +484,10 @@ let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
 const PREFERENCE_SECTION_IDS = Object.freeze({
   general: 'general',
-  appearance: 'appearance',
-  terminalEditor: 'terminal_editor',
+  colors: 'colors',
+  sizes: 'sizes',
+  terminal: 'terminal',
+  editorOptions: 'editor_options',
   notifications: 'notifications',
   chat: 'chat',
   fileExplorer: 'file_explorer',
@@ -495,21 +500,29 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
 });
 const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
   PREFERENCE_SECTION_IDS.general,
-  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.colors,
+  PREFERENCE_SECTION_IDS.sizes,
   PREFERENCE_SECTION_IDS.performance,
   PREFERENCE_SECTION_IDS.cost,
   PREFERENCE_SECTION_IDS.notifications,
-  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.terminal,
+  PREFERENCE_SECTION_IDS.editorOptions,
   PREFERENCE_SECTION_IDS.fileExplorer,
   PREFERENCE_SECTION_IDS.uploads,
 ]);
 const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   General: PREFERENCE_SECTION_IDS.general,
-  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Colors: PREFERENCE_SECTION_IDS.colors,
+  Appearance: PREFERENCE_SECTION_IDS.sizes,
+  Sizes: PREFERENCE_SECTION_IDS.sizes,
+  'UI sizes': PREFERENCE_SECTION_IDS.sizes,
+  Terminal: PREFERENCE_SECTION_IDS.terminal,
+  'Editor general': PREFERENCE_SECTION_IDS.editorOptions,
+  'Editor options': PREFERENCE_SECTION_IDS.editorOptions,
   Performance: PREFERENCE_SECTION_IDS.performance,
   'YO!cost': PREFERENCE_SECTION_IDS.cost,
   Notifications: PREFERENCE_SECTION_IDS.notifications,
-  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.editorOptions,
   'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
   Finder: PREFERENCE_SECTION_IDS.fileExplorer,
   'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
@@ -641,6 +654,8 @@ const fileQuickOpenState = {
   // Candidate retention also includes the requested root or path directory; two path queries can
   // share a filter while naming different directories and must not present each other's rows.
   candidateQueryIdentity: '',
+  activeSearchQuery: '',
+  retainedSearchQuery: '',
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -654,9 +669,11 @@ let clientSettingsMetadataRefreshTimer = null;
 const activitySummaryEnabled = bootstrap.activitySummary?.enabled === true;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
-  'appearance.editor_font_size': 13,
-  'appearance.file_explorer_font_size': 13,
-  'appearance.terminal_font_size': 13,
+  'appearance.editor_font_size': 14,
+  'appearance.file_explorer_font_size': 14,
+  'appearance.terminal_font_size': 14,
+  'appearance.ui_font_size': 14,
+  'appearance.global_font_size': 14,
   'editor.autosave_delay_seconds': 2.5,
   'file_explorer.image_open_mode': 'same-tab',
   'file_explorer.image_preview_max_px': 320,
@@ -749,11 +766,11 @@ let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode');
 let uploadMaxBytes = initialSetting('uploads.max_bytes');
 const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
-let terminalFontSize = initialSetting('appearance.terminal_font_size');
+let terminalFontSize = initialSetting('appearance.terminal_font_size', 14);
 const terminalFontFamily = '"YOLOmux Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
-let editorFontSize = initialSetting('appearance.editor_font_size');
-let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);
-let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size');
+let editorFontSize = initialSetting('appearance.editor_font_size', 14);
+let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 14);
 let terminalScrollback = initialSetting('terminal_editor.scrollback');
 let autoFocusEnabled = initialSetting('general.auto_focus');
 let startupHelpersEnabled = initialSetting('general.startup_tips') !== false;
@@ -3034,8 +3051,49 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       }
     });
   }
+  const wrappedBody = response.body && typeof response.body.getReader === 'function'
+    ? new Proxy(response.body, {
+      get(target, property) {
+        if (property !== 'getReader') {
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (...args) => {
+          const reader = target.getReader(...args);
+          return new Proxy(reader, {
+            get(readerTarget, readerProperty) {
+              if (readerProperty === 'read') {
+                return async (...readArgs) => {
+                  try {
+                    const result = await readerTarget.read(...readArgs);
+                    if (result.done) noteConsumed();
+                    return result;
+                  } catch (error) {
+                    noteConsumed();
+                    throw error;
+                  }
+                };
+              }
+              if (readerProperty === 'cancel') {
+                return async (...cancelArgs) => {
+                  try {
+                    return await readerTarget.cancel(...cancelArgs);
+                  } finally {
+                    noteConsumed();
+                  }
+                };
+              }
+              const value = Reflect.get(readerTarget, readerProperty, readerTarget);
+              return typeof value === 'function' ? value.bind(readerTarget) : value;
+            },
+          });
+        };
+      },
+    })
+    : response.body;
   return new Proxy(response, {
     get(target, property) {
+      if (property === 'body') return wrappedBody;
       if (wrappedMethods.has(property)) return wrappedMethods.get(property);
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -5060,6 +5118,7 @@ function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
+  if (key === 'opencode') return 'OpenCode';
   return String(kind || '');
 }
 
@@ -5789,7 +5848,14 @@ function readStoredCollapsedPreferenceSections() {
   const raw = storageGet(preferencesCollapsedStorageKey);
   if (!raw) return defaultCollapsedPreferenceSections();
   const parsed = safeJsonParse(raw, null);
-  return Array.isArray(parsed) ? normalizeCollapsedPreferenceSections(parsed) : defaultCollapsedPreferenceSections();
+  if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
+  const migrated = parsed.flatMap(value => {
+    const text = String(value || '');
+    if (text === 'appearance' || text === 'Appearance' || text === 'ui_sizes' || text === 'UI sizes') return ['sizes'];
+    if (text === 'terminal_editor' || text === 'Terminal / Editor' || text === 'editor_general' || text === 'Editor general') return ['editor_options'];
+    return [text];
+  });
+  return normalizeCollapsedPreferenceSections(migrated);
 }
 
 function writeStoredCollapsedPreferenceSections() {
@@ -7474,7 +7540,9 @@ function terminalLineLinks(lineText, y) {
 }
 
 function terminalBufferLineText(line) {
-  return line?.translateToString?.(true) || '';
+  // xterm versions/renderers can return a full-width string even with trimRight requested. Parsing must
+  // ignore those blank cells; terminalRowReachesRightEdge separately uses the physical row length.
+  return (line?.translateToString?.(true) || '').replace(/\s+$/, '');
 }
 
 // did `line` fill the terminal to its right edge? translateToString(true) trims trailing
@@ -7482,9 +7550,18 @@ function terminalBufferLineText(line) {
 // was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
 // hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
 // clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
-function terminalRowReachesRightEdge(line, cols) {
+function terminalRowReachesRightEdge(line, cols, trailingSlack = 1) {
   if (!Number.isFinite(cols) || cols <= 0) return false;
-  return terminalBufferLineText(line).length >= Math.max(1, cols - 1);
+  const physicalLength = Number(line?.length);
+  const rowLength = Number.isFinite(physicalLength) && physicalLength > 0
+    ? physicalLength
+    : terminalBufferLineText(line).length;
+  return rowLength >= Math.max(1, cols - Math.max(1, trailingSlack));
+}
+
+function terminalVisibleRowReachesRightEdge(line, cols, trailingSlack = 1) {
+  if (!Number.isFinite(cols) || cols <= 0) return false;
+  return terminalBufferLineText(line).length >= Math.max(1, cols - Math.max(1, trailingSlack));
 }
 
 // does the joined group text end mid-URL? True when the LAST url token reaches the very end of
@@ -7513,8 +7590,92 @@ function terminalRowHangingShape(buffer, index) {
   const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
   const text = raw.slice(match[1].length);
-  if (!text || terminalRowStartsNewUrlToken(text)) return null;
+  if (!text || /\s/.test(text) || terminalRowStartsNewUrlToken(text)) return null;
   return {indent: match[1].length, text};
+}
+
+function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
+  if (!match || !match[1] || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  const indent = match[1].length;
+  const text = raw.slice(indent);
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {indent, text};
+}
+
+function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const text = terminalBufferLineText(line);
+  if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {text};
+}
+
+function terminalUrlContinuationTextIsStrong(baseText, continuationText, requireSplitDelimiter = false) {
+  const base = String(baseText || '');
+  const continuation = String(continuationText || '');
+  if (!base || !terminalTailIsUnterminatedUrl(base)) return false;
+  if (!continuation || /\s/.test(continuation) || terminalRowStartsNewUrlToken(continuation)) return false;
+  if (!/^[A-Za-z0-9!$'()*+,;=:@/?%#[\]_.~-]+$/.test(continuation)) return false;
+  const delimiter = base.at(-1);
+  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (delimiter === '%') return /^[0-9A-Fa-f]/.test(continuation);
+  if (delimiter === '?' || delimiter === '&' || delimiter === '=') return /^[A-Za-z0-9]/.test(continuation);
+  return /^[A-Za-z0-9]/.test(continuation);
+}
+
+function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
+  if (!shape?.indent || index < 1) return false;
+  // OpenCode reprints its gutter on every hard-wrapped row. Validate the complete adjacent chain from
+  // its original URL row so a shorter middle row cannot make the forward sweep lose its context.
+  let baseIndex = index - 1;
+  while (baseIndex >= 0) {
+    const context = terminalRepeatedGutterUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) {
+      const candidate = terminalRowHangingShape(buffer, baseIndex);
+      if (!candidate || candidate.indent !== shape.indent) return false;
+      baseIndex -= 1;
+      continue;
+    }
+    if (context.indent !== shape.indent) return false;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalRowHangingShape(buffer, rowIndex);
+      if (!continuation || continuation.indent !== context.indent
+        || !terminalUrlContinuationTextIsStrong(joined, continuation.text, rowIndex === baseIndex + 1)) return false;
+      joined += continuation.text;
+    }
+    return true;
+  }
+  return false;
+}
+
+function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
+  if (index < 1) return false;
+  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+    const context = terminalZeroIndentUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) continue;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalBufferLineText(buffer.getLine(rowIndex));
+      if (!terminalUrlContinuationTextIsStrong(joined, continuation, rowIndex === baseIndex + 1)) {
+        joined = '';
+        break;
+      }
+      joined += continuation;
+    }
+    if (joined) return true;
+  }
+  return false;
+}
+
+function terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) {
+  if (!shape?.indent || index < 1) return false;
+  const previous = terminalBufferLineText(buffer.getLine(index - 1));
+  const previousIndent = (previous.match(/^\s*/) || [''])[0].length;
+  return previousIndent === shape.indent && /^(?:https?:\/\/|file:\/\/|www\.)/i.test(previous.slice(shape.indent));
 }
 
 // row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
@@ -7528,9 +7689,11 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (!shape) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
-  if (!terminalRowReachesRightEdge(prev, cols)) return false;
-  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))
-    || terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
+  if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
+  if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
+  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))) return true;
+  return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
 function terminalWrappedLineGroup(term, y) {
@@ -7547,6 +7710,7 @@ function terminalWrappedLineGroup(term, y) {
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
     if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -7556,6 +7720,8 @@ function terminalWrappedLineGroup(term, y) {
   let offset = 0;
   let joined = '';
   let index = start;
+  const repeatedGutterGroup = Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  const zeroIndentGroup = Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
   for (;;) {
     let text;
     let indent = 0;
@@ -7563,9 +7729,19 @@ function terminalWrappedLineGroup(term, y) {
       text = terminalBufferLineText(buffer.getLine(index));
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined) && terminalRowReachesRightEdge(buffer.getLine(index - 1), cols)) {
+    } else if (terminalTailIsUnterminatedUrl(joined)) {
       const shape = terminalRowHangingShape(buffer, index);
       if (!shape) break;
+      const repeatedContinuation = repeatedGutterGroup
+        && shape.indent > 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const zeroIndentContinuation = zeroIndentGroup
+        && shape.indent === 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const genericContinuation = !repeatedGutterGroup && !zeroIndentGroup
+        && !terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)
+        && terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
+      if (!repeatedContinuation && !zeroIndentContinuation && !genericContinuation) break;
       indent = shape.indent;
       text = shape.text;
     } else {
@@ -7594,7 +7770,23 @@ function terminalWrappedRange(group, startIndex, endIndex) {
   const start = terminalWrappedOffsetPosition(group, startIndex, false);
   const end = terminalWrappedOffsetPosition(group, endIndex, true);
   if (!start || !end) return null;
-  return {start, end};
+  const segments = group.rows
+    .map(row => {
+      const segmentStart = Math.max(startIndex, row.start);
+      const segmentEnd = Math.min(endIndex, row.end);
+      if (segmentEnd <= segmentStart) return null;
+      const indent = row.indent || 0;
+      return {
+        start: {x: indent + segmentStart - row.start + 1, y: row.y},
+        end: {x: indent + segmentEnd - row.start, y: row.y},
+      };
+    })
+    .filter(Boolean);
+  const range = {start, end};
+  // Keep the public logical range stable while giving hit testing the actual painted segment on each
+  // row. The segments are an implementation detail, so they must not change serialized range keys.
+  Object.defineProperty(range, 'segments', {value: segments, enumerable: false});
+  return range;
 }
 
 function terminalWrappedGroupTailMayContinue(term, group) {
@@ -7640,18 +7832,104 @@ function terminalReferenceXtermLink(reference) {
   };
 }
 
-async function terminalReferenceProviderLinks(session, term, y) {
+function terminalReferenceXtermLinkWithOptions(reference, options = {}) {
+  const link = terminalReferenceXtermLink(reference);
+  if (!link) return null;
+  link.decorations = {
+    underline: options.underline !== false,
+    pointerCursor: options.pointerCursor === true,
+  };
+  if (typeof options.hover === 'function') link.hover = options.hover;
+  if (typeof options.leave === 'function') link.leave = options.leave;
+  return link;
+}
+
+function terminalReferenceXtermLinks(reference, options = {}) {
+  if (!reference?.range) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  const physicalRanges = Number.isFinite(options.row)
+    ? ranges.filter(range => range.start?.y === options.row && range.end?.y === options.row)
+    : ranges;
+  return physicalRanges
+    .map(range => terminalReferenceXtermLinkWithOptions({...reference, range}, options))
+    .filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineSegments(term, reference) {
+  if (!reference?.range?.start || !reference.range.end) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  return ranges.map(range => {
+    const start = range.start || {};
+    const end = range.end || {};
+    const cells = Number(end.x) - Number(start.x) + 1;
+    return cells > 0 && start.y === end.y ? {x: start.x, y: start.y, cells} : null;
+  }).filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineLayer(container) {
+  if (!container) return null;
+  let layer = container.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'terminal-url-link-underlines';
+    layer.setAttribute('aria-hidden', 'true');
+    container.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearTerminalUrlReferenceUnderlines(container) {
+  const layer = container?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  layer?.replaceChildren?.();
+  return 0;
+}
+
+function renderTerminalUrlReferenceUnderlines(term, container, reference) {
+  const layer = terminalUrlReferenceUnderlineLayer(container);
+  if (!layer) return 0;
+  const cell = terminalCellDimensions(term, container);
+  const screen = terminalScreenElement(container);
+  const screenRect = screen?.getBoundingClientRect?.();
+  const containerRect = container?.getBoundingClientRect?.();
+  const cellWidth = Number(cell.width || 0);
+  const cellHeight = Number(cell.height || 0);
+  if (!screenRect || !containerRect || !(cellWidth > 0) || !(cellHeight > 0)) {
+    return clearTerminalUrlReferenceUnderlines(container);
+  }
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const leftOrigin = screenRect.left - containerRect.left;
+  const topOrigin = screenRect.top - containerRect.top;
+  const nodes = [];
+  for (const segment of terminalUrlReferenceUnderlineSegments(term, reference)) {
+    const screenRow = segment.y - viewportY;
+    if (screenRow < 1 || screenRow > Number(term?.rows || 0)) continue;
+    const line = document.createElement('div');
+    line.className = 'terminal-url-link-underline';
+    line.style.left = `${leftOrigin + ((segment.x - 1) * cellWidth)}px`;
+    line.style.top = `${topOrigin + (screenRow * cellHeight) - 2}px`;
+    line.style.width = `${segment.cells * cellWidth}px`;
+    nodes.push(line);
+  }
+  layer.replaceChildren(...nodes);
+  return nodes.length;
+}
+
+async function terminalReferenceProviderLinks(session, term, y, container = null) {
   const refs = terminalWrappedLineReferences(term, y);
-  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
+    row: y,
+    underline: false,
+    hover: () => renderTerminalUrlReferenceUnderlines(term, container, ref),
+    leave: () => clearTerminalUrlReferenceUnderlines(container),
+  }));
   const fileRefs = refs.filter(ref => ref.type === 'file');
   if (!fileRefs.length) return links;
   // This provider runs once for each visible terminal line. Its output is only a visual underline:
   // right-click determines the syntactic path and the selected editor tab owns the real read/error.
-  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // Do not turn terminal repaint into one batchd admission per token merely to decide whether to draw
   // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
   for (const ref of fileRefs) {
-    const link = terminalReferenceXtermLink(ref);
-    if (link) links.push(link);
+    links.push(...terminalReferenceXtermLinks(ref));
   }
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
@@ -8017,11 +8295,11 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 }
 
-function installTerminalLinkProvider(session, term) {
+function installTerminalLinkProvider(session, term, container) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
+      terminalReferenceProviderLinks(session, term, y, container).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -8115,6 +8393,13 @@ function terminalExtendTouchSelection(term, selection, container, clientX, clien
 
 function terminalRangeContainsPosition(range, position) {
   if (!range || !position) return false;
+  if (Array.isArray(range.segments)) {
+    return range.segments.some(segment => (
+      position.y === segment.start.y
+      && position.x >= segment.start.x
+      && position.x <= segment.end.x
+    ));
+  }
   const start = range.start || {};
   const end = range.end || {};
   if (position.y < start.y || position.y > end.y) return false;
@@ -9376,8 +9661,13 @@ function terminalKeyScrollIntent(event) {
     return null;
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  if (event.key === 'PageUp' || event.code === 'PageUp') return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
-  if (event.key === 'PageDown' || event.code === 'PageDown') return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  const key = String(event.key || '');
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  const pageUp = key === 'PageUp' || code === 'PageUp' || keyCode === 33;
+  const pageDown = key === 'PageDown' || code === 'PageDown' || keyCode === 34;
+  if (pageUp) return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  if (pageDown) return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
   return null;
 }
 
@@ -9414,6 +9704,10 @@ function installTerminalCopyShortcut(session, term, container = null) {
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
+    // OpenCode owns Ctrl+Alt+B/F as message navigation. Returning true here is important: the
+    // browser/global shortcut layers must not turn the documented native binding into terminal
+    // Meta input before xterm can deliver the original key event to OpenCode.
+    if (terminalOpenCodeNativeShortcut(session, container, event)) return true;
     return (handleTerminalScrollbackKeydown(session, term, container, event)
       || handleTerminalTmuxWindowShortcutKeydown(session, event)
       || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
@@ -9429,7 +9723,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
   // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
   // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
-  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on batchd's
   // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
   const optimisticFilePath = terminalReference?.type === 'file'
     ? terminalFileReferenceAbsolutePath(session, terminalReference)
@@ -9492,15 +9786,21 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  const preservesNativeContextMenu = () => terminalContextMenuPreservesNativeBehavior(session, container);
+  const terminalPointReference = event => terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
+  const nativeContextMenuForEvent = event => preservesNativeContextMenu() && !terminalPointReference(event);
   container.addEventListener('pointerdown', event => {
+    if (preservesNativeContextMenu() && !terminalPointReference(event)) return;
     if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
   }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
+    if (nativeContextMenuForEvent(event)) return;
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
     event.stopPropagation();
   }, {capture: true});
   container.addEventListener('contextmenu', event => {
+    if (nativeContextMenuForEvent(event)) return;
     event.preventDefault();
     event.stopPropagation();
     const touchSelection = touchContextMenuSyntheticEvents.has(event)
@@ -9509,7 +9809,7 @@ function installTerminalContextMenu(session, term, container) {
     // The touch-scroll owner observes this same bridged contextmenu after us, so its existing
     // state machine can claim the press and extend this selection without another gesture owner.
     if (touchSelection) event.yolomuxTerminalTouchSelection = touchSelection;
-    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, presetSelection: touchSelection?.text || rightClickSelection});
+    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, reference: terminalPointReference(event), presetSelection: touchSelection?.text || rightClickSelection});
     rightClickSelection = null;
   });
 }
@@ -12545,9 +12845,10 @@ const stateDefs = {
   'ready-review': {hasShort: true, priority: 5, attention: false},
   [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
   [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  unavailable: {hasShort: true, priority: 7, attention: false},
   done: {hasShort: false, priority: 8, attention: false},
 };
-const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput, STATE_KEY.blocked]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
 const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
@@ -12879,6 +13180,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, auto)
     : null;
+  const agentWindowRows = Array.isArray(agentWindowSummary?.agents) ? agentWindowSummary.agents : [];
+  const hasBlockedAgentWindow = agentWindowRows.some(agent => agentWindowStateKey(agent?.state) === STATE_KEY.blocked);
   const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
   const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
     ? agentWindowStatusToneForItem(agentWindowSummary?.item)
@@ -12934,6 +13237,19 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       attentionAgent: agent,
       attentionAgentItem: agentWindowSummary.item,
     });
+  }
+  if (agentWindowTone === 'blocked' || hasBlockedAgentWindow) {
+    const agent = agentWindowSummary.agent || agentWindowRows.find(item => agentWindowStateKey(item?.state) === STATE_KEY.blocked);
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || agent?.error || '').trim() || stateReason('agentErrorBlocker');
+    return stateValue(STATE_KEY.blocked, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: STATE_KEY.blocked,
+      blockedAgent: agent,
+      blockedAgentItem: agentWindowSummary.item,
+    });
+  }
+  if (agentWindowTone === 'unavailable') {
+    return stateValue('unavailable', t('common.notAvailable'), {agentWindowState: 'unavailable'});
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -13064,6 +13380,22 @@ function tmuxSignalWindows() {
 
 const tmuxSignalAgentCommands = new Set(['claude', 'codex']);
 
+function tmuxSignalAuthoritativeAgentKind(pane) {
+  const session = tmuxSignalPaneSession(pane);
+  const target = tmuxSignalPaneTarget(pane);
+  if (!session || !target) return '';
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
+    : autoApproveStates.get(session)?.agent_windows;
+  if (!Array.isArray(rows)) return '';
+  const matches = rows.filter(row => (
+    agentWindowKind(row?.kind) === 'opencode'
+      && String(row?.pane_target || row?.pane || '').trim() === target
+  ));
+  return matches.length === 1 ? 'opencode' : '';
+}
+
 function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
@@ -13099,7 +13431,7 @@ function tmuxSignalPaneCommand(pane) {
 }
 
 function tmuxSignalPaneIsAgent(pane) {
-  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
 }
 
 function tmuxSignalWindowAgentPanes(windowRecord) {
@@ -13259,9 +13591,11 @@ function tmuxSignalAgentStateForSession(session) {
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
   }
-  const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
+  const runningPane = livePanes.find(pane => (
+    tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || tmuxSignalAuthoritativeAgentKind(pane)
+  ) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
-    const command = tmuxSignalPaneCommand(runningPane);
+    const command = tmuxSignalPaneCommand(runningPane) || tmuxSignalAuthoritativeAgentKind(runningPane);
     const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
     return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
@@ -13460,8 +13794,8 @@ function globalActivityCounts() {
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
     if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
-    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === STATE_KEY.blocked) blocked += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = countedSignalWindows.size
@@ -13496,6 +13830,7 @@ function globalActivityCountsFromAgentWindows() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
+  let unavailable = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
@@ -13512,11 +13847,12 @@ function globalActivityCountsFromAgentWindows() {
       if (classification.activity === STATE_KEY.working) running += 1;
       else if (classification.activity === 'ask') ask += 1;
       else if (classification.activity === 'blocked') blocked += 1;
+      else if (classification.activity === 'unavailable') unavailable += 1;
     }
   }
   if (!total) return null;
   const attention = ask + blocked;
-  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
 
 function globalActivityStatusLineHtml() {
@@ -13525,7 +13861,8 @@ function globalActivityStatusLineHtml() {
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -13564,7 +13901,10 @@ function syncTopbarActivityPlacement() {
 }
 
 function topbarActivityVisibleCount(counts = {}) {
-  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+  return Math.max(0, Number(counts.running) || 0)
+    + Math.max(0, Number(counts.ask) || 0)
+    + Math.max(0, Number(counts.blocked) || 0)
+    + Math.max(0, Number(counts.unavailable) || 0);
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
@@ -13835,6 +14175,8 @@ function statusIndicatorToneClasses(tone, options = {}) {
   if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
   if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'blocked') return ['status-indicator--blocked', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'unavailable') return ['status-indicator--blocked'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
@@ -13842,7 +14184,7 @@ function statusIndicatorToneClasses(tone, options = {}) {
 }
 
 function statusIndicatorToneStyle(tone, options = {}) {
-  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'blocked', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorExtractOptions(classes) {
@@ -14664,6 +15006,20 @@ function fileQuickOpenPathQuery(query = commandPaletteState.query) {
   return {active: true, directory: text.slice(0, slash) || '/', filter: text.slice(slash + 1)};
 }
 
+function fileQuickOpenPathDirectory(pathQuery) {
+  return normalizeDirectoryPath(expandUserPath(pathQuery?.directory || '/'));
+}
+
+function fileQuickOpenPathEntries(entries, directory) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
+    .map(entry => ({
+      ...entry,
+      path: entry.path || joinDirectoryPath(directory, entry.name || ''),
+      relative_path: entry.relative_path || entry.name || '',
+    }));
+}
+
 function joinDirectoryPath(directory, name) {
   if (!directory || directory === '/') return `/${name}`;
   if (directory === '~') return `~/${name}`;
@@ -14748,9 +15104,52 @@ function fileQuickOpenItem(path, options = {}) {
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} ${t('editor.mode.split')}`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
+    quickOpenHistory: options.quickOpenHistory === true,
+    staleSearchQuery: String(options.staleSearchQuery || ''),
+    staleSearchItem: options.staleSearchItem === true,
+    disabled: options.staleSearchItem === true,
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
     splitRun: isDir ? null : () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
   };
+}
+
+function rememberQuickOpenFile(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized || normalized === '/') return;
+  const index = quickOpenFileHistory.indexOf(normalized);
+  if (index >= 0) quickOpenFileHistory.splice(index, 1);
+  quickOpenFileHistory.unshift(normalized);
+  quickOpenFileOpenedAt.set(normalized, Date.now() / 1000);
+  if (quickOpenFileHistory.length > quickOpenFileHistoryLimit) quickOpenFileHistory.length = quickOpenFileHistoryLimit;
+  for (const rememberedPath of quickOpenFileOpenedAt.keys()) {
+    if (!quickOpenFileHistory.includes(rememberedPath)) quickOpenFileOpenedAt.delete(rememberedPath);
+  }
+}
+
+function quickOpenFileHistoryItems() {
+  return quickOpenFileHistory
+    .filter(path => !commandPaletteFilePathKnownMissing(path))
+    .map((path, index) => fileQuickOpenItem(path, {
+      group: t('palette.group.recent'),
+      sortBonus: quickOpenFileHistoryLimit - index,
+      mtime: quickOpenFileOpenedAt.get(path) || 0,
+      quickOpenHistory: true,
+    }));
+}
+
+function quickOpenRecentOpenedAtText(timestamp) {
+  return localizedDateTimeFormat(timestamp, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+}
+
+function quickOpenOpenTabPaths() {
+  return new Set(Array.from(fileState.keys()).filter(path => !commandPaletteFilePathKnownMissing(path)));
+}
+
+function quickOpenWorkingDirectory() {
+  const target = currentSessionActionTarget();
+  return target && isTmuxSession(target) && ['claude', 'codex'].includes(sessionAgentKind(target))
+    ? activeTmuxDirectoryPath(target)
+    : '';
 }
 
 function recentFileQuickOpenItems() {
@@ -14790,7 +15189,7 @@ function fileQuickOpenOpenFolderItem() {
   let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
-    const match = fileQuickOpenState.candidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    const match = fileQuickOpenState.candidates.find(entry => entry.staleSearchItem !== true && entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
     if (match?.path) target = match.path;
   }
   if (!target) return null;
@@ -14836,7 +15235,8 @@ function fileQuickOpenItems() {
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
-  for (const file of fileQuickOpenState.candidates) {
+  quickOpenFileHistoryItems().forEach(add);
+  for (const file of dedupeFileSearchResults(fileQuickOpenState.candidates)) {
     const path = file.path || '';
     if (!path) continue;
     if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
@@ -14853,6 +15253,8 @@ function fileQuickOpenItems() {
       group: externalIndexed ? t('common.indexedPath', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
+      staleSearchQuery: file.staleSearchQuery || '',
+      staleSearchItem: file.staleSearchItem === true,
       imageIndex,
       mtime: file.mtime || 0,
       mtimeNs: file.mtime_ns || 0,
@@ -14884,6 +15286,14 @@ function fileQuickOpenItems() {
   return items.map(item => ({...item, category: 'file'}));
 }
 
+function fileQuickOpenEmptyItems() {
+  return quickOpenFileHistoryItems().map(item => ({
+    ...item,
+    detail: `${item.detail} · ${quickOpenRecentOpenedAtText(item.mtime)}`,
+    searchFields: [...item.searchFields, quickOpenRecentOpenedAtText(item.mtime)],
+  }));
+}
+
 function commandPaletteFilePath(item) {
   return item?.path || item?.searchFields?.[1] || fileItemPath(item?.targetItem || '') || item?.detail || item?.label || '';
 }
@@ -14898,6 +15308,8 @@ function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = comm
   const parts = fileQuickOpenQueryParts(rawQuery);
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
   if (parts.symbolMode || fileQuickOpenPathQuery(rawQuery).active) return fileQuickOpenItems(); // `@` / path = files only
+  if (mode === 'files' && !String(rawQuery || '').trim()
+    && !fileQuickOpenState.error && !fileQuickOpenState.loading && !fileQuickOpenState.indexWarming) return fileQuickOpenEmptyItems();
   // Cmd-P is a file chooser, not a broad command search.  Keeping its candidate
   // source file-only means an exact filename cannot be displaced by contextual
   // FILE ACTIONS rows. Shift-Cmd-P remains the mixed command/pane surface.
@@ -14914,7 +15326,22 @@ function commandPaletteItems() {
 
 function commandPaletteRankItems(items, query, options = {}) {
   const ranked = (items || [])
-    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query, options), sortIndex}))
+    .map((item, sortIndex) => {
+      let score = item.staleSearchItem === true
+        ? Number.NEGATIVE_INFINITY
+        : commandPaletteItemScore(item, query, options);
+      // Keep the last answer visible while a replacement query is in flight. It is explicitly
+      // demoted and remains non-selectable only if the normal result list has current matches.
+      if (!Number.isFinite(score) && item.staleSearchQuery && (fileQuickOpenState.loading || fileQuickOpenState.retainedSearchQuery)) {
+        const staleScore = commandPaletteItemScore(
+          {...item, staleSearchItem: false, staleSearchQuery: ''},
+          item.staleSearchQuery,
+          options,
+        );
+        if (Number.isFinite(staleScore)) score = staleScore - 1e6;
+      }
+      return {...item, score, sortIndex, disabled: item.staleSearchItem === true || item.disabled === true};
+    })
     .filter(item => Number.isFinite(item.score))
     .sort((left, right) => query
       ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
@@ -15034,10 +15461,17 @@ function commandPaletteRepoAffinityBonus(item, options = {}) {
 
 function commandPaletteItemScore(item, query, options = {}) {
   if (item.disabled) return 0;
+  if (item.staleSearchItem === true) return Number.NEGATIVE_INFINITY;
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = commandPaletteDomainPrior(item, options)
+  const path = normalizeDirectoryPath(commandPaletteFilePath(item));
+  const openTabBonus = item?.category === 'file' && quickOpenOpenTabPaths().has(path) ? 1000000 : 0;
+  const historyBonus = item?.category === 'file' && quickOpenFileHistory.includes(path) ? 500000 : 0;
+  const workingPath = quickOpenWorkingDirectory();
+  const workingPathBonus = item?.category === 'file' && workingPath && pathIsInsideDirectory(path, workingPath) ? 100000 : 0;
+  const bonus = openTabBonus + historyBonus + workingPathBonus
+    + commandPaletteDomainPrior(item, options)
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
     + commandPalettePaneExactIdentifierBonus(item, query)
@@ -15218,6 +15652,11 @@ function ensureCommandPalette() {
   input.addEventListener('input', () => {
     commandPaletteState.query = input.value || '';
     commandPaletteState.index = 0;
+    // Retire the previous query before repainting or waiting through the debounce interval. The
+    // requestId remains the correctness fence, while AbortController stops irrelevant network work.
+    abortFileQuickOpenSearch();
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.retainedSearchQuery = '';
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -15259,13 +15698,15 @@ function ensureCommandPalette() {
   return node;
 }
 
-function renderCommandPaletteResults() {
+function renderCommandPaletteResults(options = {}) {
   const node = ensureCommandPalette();
   const dialog = node.querySelector('.command-palette-dialog');
   const input = node.querySelector('.command-palette-input');
   const status = node.querySelector('.command-palette-status');
   const results = node.querySelector('.command-palette-results');
   const query = commandPaletteSearchQuery();
+  const preserveScroll = options.preserveScroll === true;
+  const scrollTop = results?.scrollTop || 0;
   dialog?.setAttribute('aria-label', commandPaletteLabel());
   if (input) {
     input.placeholder = commandPalettePlaceholder();
@@ -15282,14 +15723,15 @@ function renderCommandPaletteResults() {
     status.classList.toggle('stale', Boolean(commandPaletteFreshnessText()));
     status.innerHTML = html;
   }
-  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, fileQuickOpenResultLimit);
   commandPaletteState.index = Math.min(commandPaletteState.index, Math.max(0, commandPaletteState.items.length - 1));
   if (!commandPaletteState.items.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
   results.innerHTML = commandPaletteResultsHtml(commandPaletteState.items, query);
-  results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
+  if (preserveScroll) results.scrollTop = scrollTop;
+  else results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
 function openCommandPalette(options = {}) {
@@ -15310,9 +15752,8 @@ function openCommandPalette(options = {}) {
   fileQuickOpenState.loading = false;
   fileQuickOpenState.freshness = null;
   fileQuickOpenState.error = '';
-  // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
-  // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
-  if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
+  // An empty Cmd-P is a local recent-files view, not a search. The first non-empty keystroke
+  // starts the indexed/path search through the input handler.
   renderCommandPaletteResults();
   input.focus({preventScroll: true});
 }
@@ -15374,6 +15815,16 @@ function abortFileQuickOpenSearch() {
   resetFileQuickOpenDeltaCursors('');
 }
 
+function fileQuickOpenRetainedCandidates(candidates, query) {
+  const retainedQuery = String(query || '');
+  if (!retainedQuery) return [];
+  return (Array.isArray(candidates) ? candidates : []).map(file => ({
+    ...file,
+    staleSearchQuery: retainedQuery,
+    staleSearchItem: true,
+  }));
+}
+
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
 // overlap), or same basename+size (content-mirror copies kept in two repos). Genuinely-different
 // same-name files (different size) both survive; unknown-size hits dedupe by path/realpath only.
@@ -15423,53 +15874,222 @@ function fileQuickOpenWorstFreshness(records) {
       || ((right.ageSeconds === null ? -1 : right.ageSeconds) - (left.ageSeconds === null ? -1 : left.ageSeconds)))[0] || null;
 }
 
+// The indexed-search endpoint is an SSE response. Keep framing state between network reads because a
+// browser can split an event anywhere, including in the middle of a UTF-8-decoded line or JSON value.
+// The server currently sends one JSON object per event, but standard SSE data-line joining keeps this
+// parser correct if a future payload is wrapped across multiple data lines.
+function createFileQuickOpenSseParser(onEvent) {
+  let buffer = '';
+  let eventName = '';
+  let dataLines = [];
+
+  const dispatch = () => {
+    if (!dataLines.length) {
+      eventName = '';
+      return;
+    }
+    const data = dataLines.join('\n');
+    const payload = JSON.parse(data);
+    onEvent(eventName || 'message', payload);
+    eventName = '';
+    dataLines = [];
+  };
+
+  const processLine = line => {
+    if (!line) {
+      dispatch();
+      return;
+    }
+    if (line.startsWith(':')) return;
+    const separator = line.indexOf(':');
+    const field = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
+    if (field === 'event') eventName = value;
+    else if (field === 'data') dataLines.push(value);
+  };
+
+  return {
+    feed(text) {
+      buffer += String(text || '');
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        let line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        processLine(line);
+      }
+    },
+    finish() {
+      if (buffer) processLine(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
+      buffer = '';
+      dispatch();
+    },
+  };
+}
+
+function fileQuickOpenSseStreamOptions(fetchOptions) {
+  return {
+    ...fetchOptions,
+    headers: {...(fetchOptions?.headers || {}), Accept: 'text/event-stream'},
+  };
+}
+
+function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
+  if (requestId !== fileQuickOpenState.requestId) return false;
+  const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot) || String(searchRoot || '');
+  const changes = (Array.isArray(files) ? files : [])
+    .filter(file => {
+      if (!file || typeof file !== 'object') return false;
+      if (!pathIsInsideDirectory(normalizeDirectoryPath(file.path || ''), normalizedRoot)) return false;
+      const query = commandPaletteSearchQuery();
+      const basename = String(file.name || basenameOf(file.path || ''));
+      const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
+      const segments = String(file.relative_path || '').split('/').filter(Boolean);
+      return [basename, stem, ...segments].some(value => Number.isFinite(fuzzySubsequenceScore(query, value)));
+    })
+    .map(file => ({...file, operation: 'upsert'}));
+  if (!changes.length) return true;
+  fileQuickOpenState.candidates = mergeFileQuickOpenChanges(
+    fileQuickOpenState.candidates,
+    changes,
+    normalizedRoot,
+  );
+  fileQuickOpenState.indexWarming = false;
+  renderCommandPaletteResults({preserveScroll: true});
+  return true;
+}
+
+function quickOpenStreamResultSummary(payload) {
+  return {
+    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    freshness: fileIndexFreshnessFromPayload(payload),
+  };
+}
+
+async function consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fetchOptions) {
+  const url = `/api/fs/search-stream?root=${encodeURIComponent(searchRoot)}`
+    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`;
+  const response = await apiFetch(url, fileQuickOpenSseStreamOptions(fetchOptions), {recordDebug: true});
+  if (!response.ok) {
+    const error = new Error(response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    return {legacyPayload: await response.json()};
+  }
+  const decoder = new TextDecoder();
+  const files = [];
+  let streamRoot = searchRoot;
+  let streamError = null;
+  let streamSummary = {};
+  let cancelled = false;
+  const cancelReader = () => {
+    cancelled = true;
+    Promise.resolve(reader.cancel?.()).catch(() => {});
+  };
+  fetchOptions?.signal?.addEventListener?.('abort', cancelReader, {once: true});
+  const parser = createFileQuickOpenSseParser((event, payload) => {
+    if (requestId !== fileQuickOpenState.requestId) return;
+    if (event === 'start') {
+      streamRoot = String(payload?.root || searchRoot);
+    } else if (event === 'chunk') {
+      const chunk = Array.isArray(payload?.files) ? payload.files : [];
+      files.push(...chunk);
+      applyFileQuickOpenSearchChunk(requestId, streamRoot, chunk);
+      streamSummary = quickOpenStreamResultSummary(payload);
+    } else if (event === 'error') {
+      streamError = new Error(String(payload?.error || payload?.reason || 'indexed search stream failed'));
+    }
+  });
+
+  while (true) {
+    const result = await reader.read();
+    if (cancelled) return {stale: true, root: streamRoot, files: []};
+    if (requestId !== fileQuickOpenState.requestId) {
+      cancelReader();
+      return {stale: true, root: streamRoot, files: []};
+    }
+    if (result.done) break;
+    parser.feed(decoder.decode(result.value, {stream: true}));
+  }
+  parser.feed(decoder.decode());
+  parser.finish();
+  fetchOptions?.signal?.removeEventListener?.('abort', cancelReader);
+  if (streamError) throw streamError;
+  return {ok: true, stream: true, root: streamRoot, searchRoot, files, ...streamSummary};
+}
+
+async function fileQuickOpenSearchRootResult(searchRoot, query, requestId, fetchOptions) {
+  const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
+  if (normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot)) {
+    const result = await consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fetchOptions);
+    if (!result.legacyPayload) return result;
+    return {ok: true, ...fileQuickOpenSearchPayloadResult(result.legacyPayload, searchRoot)};
+  }
+  const payload = await apiFetchJson(
+    `/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`,
+    fetchOptions,
+  );
+  return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
+}
+
+async function fetchQuickOpenPathDirectory(directory, fetchOptions) {
+  const entries = await fetchDirectory(directory, {user: true, enrich: false});
+  if (entries !== null) return entries;
+  const error = new Error(currentFileExplorerListError(directory) || t('common.searchFailed'));
+  error.status = 404;
+  throw error;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
-  const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
+  const pathQuery = fileQuickOpenPathQuery(query);
+  // Path mode temporarily stores its containing directory in `root`. Ordinary searches must always
+  // recompute the workspace root, or a later query after `/tmp/...` will search only `/tmp`.
+  const root = pathQuery.active ? (fileQuickOpenState.root || fileQuickOpenRootForSearch()) : fileQuickOpenRootForSearch();
   if (!root) return;
   const searchQuery = commandPaletteSearchQuery(query);
   const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
   const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
+  const previousSearchQuery = fileQuickOpenState.activeSearchQuery;
+  const previousCandidates = fileQuickOpenState.candidates;
+  const retainedCandidates = fileQuickOpenRetainedCandidates(previousCandidates, previousSearchQuery);
   abortFileQuickOpenSearch();
   fileQuickOpenState.candidateQueryIdentity = candidateQueryIdentity;
+  fileQuickOpenState.activeSearchQuery = searchQuery;
   const requestId = ++fileQuickOpenState.requestId;
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
-  // Rows retained across a refresh of the same query are still that query's answer, so they stay
-  // visible while the reread lands. Rows retained across a changed query are not its ranked answer.
-  if (candidateQueryIdentity !== previousCandidateQueryIdentity) fileQuickOpenState.candidates = [];
+  // Keep the previous answer visible while a changed query is waiting on the backend. It is marked
+  // with the query that produced it so ranking can demote it without treating it as a current hit.
+  if (candidateQueryIdentity !== previousCandidateQueryIdentity) {
+    fileQuickOpenState.candidates = retainedCandidates;
+    fileQuickOpenState.retainedSearchQuery = previousSearchQuery;
+  }
   // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
   // mutate this palette, and the roots/query it belonged to may have changed entirely.
   resetFileQuickOpenDeltaCursors(searchQuery);
   renderCommandPaletteResults();
   try {
-    const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`, fetchOptions);
+      // Path-mode queries share the existing direct-directory cache. The first query loads the
+      // parent once; subsequent keystrokes filter the same entries locally instead of rescanning a
+      // large directory for every intermediate prefix.
+      const directory = fileQuickOpenPathDirectory(pathQuery);
+      const entries = await fetchQuickOpenPathDirectory(directory, fetchOptions);
       if (requestId !== fileQuickOpenState.requestId) return;
-      fileQuickOpenState.root = payload.path || pathQuery.directory || root;
-      const filter = String(pathQuery.filter || '').toLowerCase();
-      fileQuickOpenState.candidates = (Array.isArray(payload.entries) ? payload.entries : [])
-        .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
-        .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
-        .map(entry => ({
-          name: entry.name || '',
-          path: joinDirectoryPath(payload.path || pathQuery.directory || '/', entry.name || ''),
-          relative_path: entry.name || '',
-          kind: entry.kind || 'file',
-          size: entry.size,
-          mtime: entry.mtime,
-        }));
+      fileQuickOpenState.root = directory;
+      fileQuickOpenState.candidates = fileQuickOpenPathEntries(entries, directory);
+      fileQuickOpenState.retainedSearchQuery = '';
     } else {
       const searchRoots = fileQuickOpenRootsForSearch(root, commandPaletteSearchQuery(query));
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
-          const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
-          const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
+          return await fileQuickOpenSearchRootResult(searchRoot, commandPaletteSearchQuery(query), requestId, fetchOptions);
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
@@ -15487,14 +16107,16 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
+      fileQuickOpenState.retainedSearchQuery = '';
       // A new or externally indexed root can take a moment to publish its first durable snapshot.
       // The backend explicitly marks that response as warming; it is not a completed empty search.
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
       // Stale rows stay in the list. What changes is that the palette now says they are stale.
       fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
-      // Seed one delta cursor per answering root so a search_progress signal can stream the crawl's
-      // newly-published matches into this list without re-issuing the whole query (steps 6-7).
-      seedFileQuickOpenDeltaCursors(successful, requestId);
+      // The stream has no cursor: it owns the complete indexed crawl for this request. Direct roots
+      // retain their existing cursor metadata for the later progress-signal repair path.
+      const cursorResults = successful.filter(result => result.stream !== true && result.cursor !== undefined);
+      seedFileQuickOpenDeltaCursors(cursorResults, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -15510,7 +16132,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     });
   } finally {
     if (requestId === fileQuickOpenState.requestId) {
-      fileQuickOpenState.abortController = null;
+      if (fileQuickOpenState.deltaRoots.size === 0) fileQuickOpenState.abortController = null;
       fileQuickOpenState.loading = false;
       renderCommandPaletteResults();
     }
@@ -15654,16 +16276,17 @@ function fileQuickOpenDeltasActive() {
 }
 
 // Read ONE bounded committed-delta page for a root through the same authenticated /api/fs/search
-// endpoint, appending `&cursor=`. Deltas deliberately do NOT share the snapshot's AbortController:
-// they outlive the initial fetch and are fenced by requestId inside ingest instead of by abort.
+// endpoint, appending `&cursor=`. The active query controller is also passed here so a replacement
+// query stops an irrelevant delta request; requestId remains the independent stale-result fence.
 async function fetchFileQuickOpenDeltaPage(deltaRoot) {
   const requestId = deltaRoot.requestId;
   const query = fileQuickOpenState.deltaQuery;
   const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
-  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+  const url = `/api/batch/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
     + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
     + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
-  const payload = await apiFetchJson(url);
+  const controller = fileQuickOpenState.abortController;
+  const payload = await apiFetchJson(url, controller ? {signal: controller.signal} : {});
   return ingestFileQuickOpenDeltaPayload(deltaRoot.normalizedRoot, requestId, payload);
 }
 
@@ -19098,13 +19721,13 @@ function closeAppMenus(keepOpen = null) {
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
+// Shared Claude/Codex/OpenCode tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
 
-const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
-const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'blocked', 'unavailable', 'cooldown']);
+const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'blocked', 'unavailable', 'cooldown', STATE_KEY.working]);
 const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
   'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
-  'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id',
+    'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id', 'cwd',
 ]);
 
 function agentWindowVisibleTone(value) {
@@ -19179,7 +19802,9 @@ function agentWindowPhysicalKey(agent, info = null) {
 }
 
 function agentWindowStateKey(state) {
-  return String(state || '').trim();
+  const key = String(state || '').trim();
+  if (key === 'paused') return STATE_KEY.blocked;
+  return key === 'blocked' ? STATE_KEY.blocked : key;
 }
 
 function agentWindowIsWorkingState(state) {
@@ -19199,34 +19824,41 @@ function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }
 
+function agentWindowIsUnavailableState(state) {
+  return agentWindowStateKey(state) === 'unavailable';
+}
+
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
   if (key === STATE_KEY.working) return STATE_KEY.working;
+  if (key === 'blocked') return 'blocked';
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
   if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
+  if (key === 'unavailable') return 'unavailable';
   return STATE_KEY.idle;
 }
 
 function agentWindowStateRank(state) {
-  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
+  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, blocked: 2, unavailable: 3, [STATE_KEY.idle]: 4}[agentWindowStateKey(state)] ?? 9;
 }
 
 function agentWindowActivityVisualRank(state) {
   const tone = agentWindowActivityTone(state);
-  if (tone === 'attention') return 0;
+  if (tone === 'attention' || tone === 'blocked') return 0;
   // A live worker wins over a completed worker. Otherwise a yellow child can make the session
   // look stopped while another child is still doing work.
   if (tone === STATE_KEY.working) return 1;
   if (tone === 'cooldown') return 2;
+  if (tone === 'unavailable') return 0;
   if (tone === 'active') return 3;
   return 9;
 }
 
 function agentWindowKind(value) {
   const key = String(value || '').trim().toLowerCase();
-  return key === 'claude' || key === 'codex' ? key : '';
+  return key === 'claude' || key === 'codex' || key === 'opencode' ? key : '';
 }
 
 function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
@@ -19426,10 +20058,21 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
   // metadata can identify a window and enrich its path/git details, but never provide a
   // color, transition, or acknowledgement when the canonical status is unavailable.
-  const source = stateRows.length
-    ? stateRows
-    : mergedAgentWindowMetadataRows(trustedActivityRows, infoRows, info);
-  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+  const metadataRows = mergedAgentWindowMetadataRows(
+    trustedActivityRows,
+    [...infoRows, ...agentWindowPayloadRows(info?.agents)],
+    info,
+  );
+  const source = stateRows.length ? stateRows : metadataRows;
+  const knownPhysicalKeys = new Set(stateRows.map(agent => agentWindowPhysicalKey(agent, info)).filter(Boolean));
+  const missingOpenCodeRows = stateRows.length
+    ? metadataRows.filter(agent => (
+      agentWindowKind(agent?.kind) === 'opencode'
+      && !knownPhysicalKeys.has(agentWindowPhysicalKey(agent, info))
+    ))
+    : [];
+  const fallbackSource = [...source, ...missingOpenCodeRows];
+  const fallback = fallbackSource.length ? fallbackSource : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
       state: '',
@@ -19446,6 +20089,19 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
+  for (const agent of agents) {
+    if (agentWindowKind(agent.kind) !== 'opencode') continue;
+    const canonical = stateRows.some(row => (
+      agentWindowKind(row?.kind) === 'opencode'
+      && agentWindowPhysicalKey(row, info) === agentWindowPhysicalKey(agent, info)
+    ));
+    if (!canonical) {
+      agent.state = 'unavailable';
+      agent.unavailable_reason = 'canonical OpenCode status unavailable';
+      agent.last_active_ts = 0;
+      agent.idle_since = null;
+    }
+  }
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
     if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
@@ -19457,10 +20113,10 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
   // so the window bar, parent tab, Tabber, and session working count all see the same row.
   const screenProxyIndex = screenWorking && !hasWorkingWindow
-    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const fallbackProxyIndex = screenWorking && !hasWorkingWindow && screenProxyIndex < 0
-    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const proxyIndex = screenProxyIndex >= 0 ? screenProxyIndex : fallbackProxyIndex;
   const effectiveAgents = proxyIndex >= 0
@@ -19497,7 +20153,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     visibleItems.push({agent, item, tone});
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
     if (tone === 'acknowledged') acknowledging = {agent, item};
-    if (['attention', 'cooldown'].includes(tone)) {
+    if (['attention', 'blocked', 'cooldown'].includes(tone)) {
       const acknowledgementRank = acknowledgement ? agentWindowStatusItemVisualRank(acknowledgement.item) : 99;
       const acknowledgementCurrent = acknowledgement ? agentWindowPayloadCurrent(acknowledgement.agent) === true : false;
       if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
@@ -19976,7 +20632,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const itemOptions = agentWindowActivityOptionsForStatus(agent, sessionKey, {scheduleRefresh: false});
   const item = agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
   if (item?.acknowledged === true) return null;
-  if (!['attention', 'cooldown'].includes(item?.state)) return null;
+  if (!['attention', 'blocked', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
   const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
@@ -20028,6 +20684,7 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
 function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
   const kind = agentWindowKind(agentKey);
   const stateKey = agentWindowStateKey(state);
+  if (stateKey === 'unavailable') return t('state.agentStatus', {agent: agentLabel(kind), status: t('common.notAvailable')});
   const status = stateKey === 'cooldown'
     ? t('state.cooldown')
     : stateKey === 'active'
@@ -20054,7 +20711,18 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     acknowledgementDurationMs: acknowledgementVisual.durationMs,
     acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
   } : {};
-  const acknowledgementVisualTone = ['attention', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  const acknowledgementVisualTone = ['attention', 'blocked', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  if (stateKey === 'unavailable') {
+    return {
+      state: 'unavailable',
+      icon: '?',
+      label: `${agentLabel(kind)} ${t('common.notAvailable')}`,
+      pulseActive: false,
+      transitionPulseActive: false,
+      acknowledged: false,
+      acknowledging: false,
+    };
+  }
   // Switching the clicked tmux window can immediately promote its screen capture to `working`.
   // Preserve the acknowledged red/yellow state during its promised gray interval instead of
   // replacing it with a green play before the user can see the acknowledgement.
@@ -20071,6 +20739,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     };
   }
   if (agentWindowIsAttentionState(stateKey)) {
+    const visualTone = stateKey === STATE_KEY.blocked ? 'blocked' : 'attention';
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     const recordedAcknowledgement = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
@@ -20080,7 +20749,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       clearAgentWindowStoppedRefresh(transitionKey);
       record.activity = {
         state: stateKey,
-        visualTone: 'attention',
+        visualTone,
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
@@ -20091,9 +20760,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
     return {
-      state: 'attention',
+      state: visualTone,
       icon: '●',
-      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
+      label: agentWindowActivityLabel(kind, stateKey, acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
@@ -20185,13 +20854,18 @@ function agentWindowStatusClassification(item) {
     : item?.acknowledged === true
     ? ''
     : agentWindowActivityTone(item?.state);
+  if (tone === 'unavailable') return Object.freeze({tone, activity: 'unavailable'});
   const visibleTone = tone === 'acknowledged' || agentWindowVisibleTone(tone) ? tone : '';
   const activity = visibleTone === STATE_KEY.working
     ? STATE_KEY.working
     : visibleTone === 'attention'
     ? 'ask'
+    : visibleTone === 'blocked'
+    ? 'blocked'
     : visibleTone === 'cooldown'
     ? 'blocked'
+    : visibleTone === 'unavailable'
+    ? 'unavailable'
     : 'idle';
   return Object.freeze({tone: visibleTone, activity});
 }
@@ -20203,6 +20877,7 @@ function agentWindowStatusToneForItem(item) {
 function agentWindowStatusItemVisualRank(item) {
   const tone = agentWindowStatusToneForItem(item);
   if (tone === 'acknowledged') return 8;
+  if (tone === 'unavailable') return 0;
   return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
@@ -20250,8 +20925,9 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   // Acknowledged is the temporary gray color/timing tone, not a new shape. Keep the original
   // play/stop/pause modifier so live feedback and the Preferences example use the same renderer.
+  const acknowledgementShapeTone = item.state === 'unavailable' ? 'blocked' : item.state;
   const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
-    ? `status-indicator--${item.state}`
+    ? `status-indicator--${acknowledgementShapeTone}`
     : '';
   const aggregateTones = Array.isArray(item.aggregateTones)
     ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
@@ -20279,6 +20955,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
+    tone === 'unavailable' ? 'status-indicator--blocked' : '',
     {pulse},
   );
   const label = String(options.label || '').trim();
@@ -21234,7 +21911,7 @@ async function flushFileExplorerFsBatch() {
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   return requestFileExplorerFsResource('list', root, options, async () => {
-      hydrateFileExplorerRepoInfoCache();
+      if (options.enrich !== false) hydrateFileExplorerRepoInfoCache();
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same render window. LIST is intentionally a one-level direct
@@ -21244,7 +21921,7 @@ async function fetchDirectory(path, options = {}) {
     }, {
       onReuse: entries => {
         clearFileExplorerListError(root);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+        if (options.enrich !== false) scheduleFileExplorerRepoInfoEnrichment(root, entries, {
           includeRoot: options.enrichRoot === true,
           refresh: options.fresh === true,
         });
@@ -21258,7 +21935,7 @@ async function fetchDirectory(path, options = {}) {
         cacheFileExplorerRepoInfoEntries(root, entries);
         markNewDirectoryEntries(root, entries);
         if (options.recordSignature !== false) recordDirectorySignature(root, entries);
-        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+        if (options.enrich !== false) scheduleFileExplorerRepoInfoEnrichment(root, entries, {
           includeRoot: options.enrichRoot === true,
           refresh: options.fresh === true,
         });
@@ -23416,12 +24093,12 @@ function fileTreeChangedFile(path) {
 
 function sessionFileAgentKinds(item) {
   const raw = Array.isArray(item?.agents) ? item.agents : (item?.agent ? [item.agent] : []);
-  const order = {claude: 0, codex: 1};
+  const order = {claude: 0, codex: 1, opencode: 2};
   const seen = new Set();
   return raw
     .map(value => String(value || '').toLowerCase())
     .filter(value => value && !seen.has(value) && seen.add(value))
-    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+    .sort((a, b) => (order[a] ?? 3) - (order[b] ?? 3) || a.localeCompare(b));
 }
 
 function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
@@ -24388,7 +25065,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
 }
 
 function zipFileDownloadUrl(path) {
-  return `/api/fs/zip?path=${encodeURIComponent(path)}`;
+  return `/api/batch/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {
@@ -25468,7 +26145,7 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 // ---------------------------------------------------------------------------
 // Tabber — the Finder pane's third mode (Finder / Differ / Tabber). A live, default-expanded tree:
 // tmux sessions (level 0) -> their tmux sub-windows (level 1, index:process, the current window marked) -> for
-// claude/codex windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
+// visible agent windows, the paths that agent touched grouped by repo (level 2/3, from /api/session-files).
 // Rows render through the SHARED row pipeline (renderTreeChildren -> updateFileTreeRow ->
 // updateFileTreeRowContents) via a mode:'tabber' option whose display values are precomputed as data; the
 // collapse state is a persisted COLLAPSED set (default expanded), window times come from one semantic
@@ -25545,7 +26222,7 @@ function tabberAgentRecency(agent) {
 // Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
 // visible date text, and parent session bubbling.
 function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
-  const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
+  const isAgent = row?.isAgent === true || ['claude', 'codex', 'opencode'].includes(String(row?.agentKey || '').toLowerCase());
   if (isAgent) {
     const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
     if (workingTs > 0) return workingTs;
@@ -25563,11 +26240,11 @@ function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
   if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
-  const state = String(agentStatus?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agentStatus?.state || STATE_KEY.idle);
   const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
-    return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
+    return {text: '', html: statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', 'tabber-agent-status', 'agent-status-attention')};
   }
   return {text, html: ''};
 }
@@ -25767,7 +26444,7 @@ function tabberOrderedSessions() {
 
 function tabberWindowIsAgent(name) {
   const key = tmuxWindowAgentKey(name);
-  return key === 'claude' || key === 'codex';
+  return typeof agentWindowKind === 'function' ? Boolean(agentWindowKind(key)) : key === 'claude' || key === 'codex' || key === 'opencode';
 }
 
 function tabberAgentSessions() {
@@ -25845,7 +26522,7 @@ function buildTabberTree() {
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
-      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex'].includes(agentKey)
+      const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex', 'opencode'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
       const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
@@ -25972,7 +26649,7 @@ function tabberWindowButtonHtml(data, label) {
   const visibleName = String(label || '').trim();
   if (!visibleName) return '';
   if (typeof tmuxWindowButtonHtml !== 'function') {
-    const iconHtml = ['claude', 'codex'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
+    const iconHtml = ['claude', 'codex', 'opencode'].includes(data?.agentKey) ? (data.activityIconHtml || agentIcon(data.agentKey, {label: agentLabel(data.agentKey)})) : '';
     return tabberWindowLabelHtml(visibleName, iconHtml, {active: data?.active === true, pid: data?.pid});
   }
   const windowIndex = data?.windowIndex !== null && data?.windowIndex !== undefined ? String(data.windowIndex) : visibleName;
@@ -26557,7 +27234,7 @@ async function fetchFilePathInfo(path, options = {}) {
 
 async function fetchDirectoryFileCount(path) {
   const normalized = normalizeDirectoryPath(path);
-  return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
+  return apiFetchJson(`/api/batch/count?path=${encodeURIComponent(normalized)}`);
 }
 
 function finderRelativeCopyEntryForSelection(path, info, options = {}) {
@@ -28702,7 +29379,7 @@ async function fetchFilesystemOperationPayload(url, operation, options = {}) {
 async function fetchFileReadPayload(path, options = {}) {
   const url = `/api/fs/read?path=${encodeURIComponent(path)}${options.includeGit === true ? '&include_git=1' : ''}`;
   // The first content read is a browser-owned direct lifecycle: it paints into the already-open
-  // tab and resolves to bytes or a typed file state without a jobd receipt. Git enrichment stays
+  // tab and resolves to bytes or a typed file state without a batchd receipt. Git enrichment stays
   // on the retained-operation path because it may inspect repository history.
   if (options.includeGit !== true) {
     return apiFetchJson(url, {startupImmediate: true, ...(options.signal ? {signal: options.signal} : {})}, {
@@ -28727,6 +29404,7 @@ function fetchFileGitMetadataPayload(path, options = {}) {
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
+  rememberQuickOpenFile(fullPath);
   const kind = openFileKindForPreviewPath(name);
   const identityDedupe = kind === 'text';
   if (identityDedupe) {
@@ -29115,7 +29793,7 @@ function markOpenFileExternalError(path, error) {
 // can collapse into one /api/fs/read.
 //
 // The duplicate was always there; it was hidden by accident. Before filesystem reads had their own
-// jobd lane, a read could not be dispatched while the explicit reload's directory batch held the
+// batchd lane, a read could not be dispatched while the explicit reload's directory batch held the
 // single shared interactive worker, so the explicit reload's read always went first and the push
 // refresh found nothing left to do. Once reads got a reserved lane the two ran concurrently and the
 // same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
@@ -30054,7 +30732,7 @@ function codeMirrorWrapMarkerExtension(api) {
 async function fetchEditorBlame(path) {
   return dedupeInflight(editorBlameFetches, path, true, () => (async () => {
     try {
-      const data = await apiFetchJson(`/api/blame?path=${encodeURIComponent(path)}`);
+      const data = await apiFetchJson(`/api/batch/blame?path=${encodeURIComponent(path)}`);
       setEditorBlameForPath(path, data);
       return data;
     } catch (_error) {
@@ -32425,13 +33103,21 @@ function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
   if (!root) return;
-  const uiFontSize = numberSetting('appearance.ui_font_size', 13);
-  root.setProperty('--ui-font-size', `${uiFontSize}px`);
-  root.setProperty('--tab-label-size', `${uiFontSize}px`);
-  root.setProperty('--terminal-font-size', `${terminalFontSize}px`);
-  root.setProperty('--editor-font-size', `${editorFontSize}px`);
-  root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
-  root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
+  const globalFontSize = Math.max(6, Math.min(25, numberSetting('appearance.global_font_size', 14)));
+  const uiFontSize = numberSetting('appearance.ui_font_size', 14);
+  const syncFontSizes = boolSetting('appearance.sync_font_sizes', true);
+  if (syncFontSizes) {
+    terminalFontSize = globalFontSize;
+    editorFontSize = globalFontSize;
+    editorPreviewFontSize = globalFontSize;
+    fileExplorerFontSize = globalFontSize;
+  }
+  root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${syncFontSizes ? globalFontSize : terminalFontSize}px`);
+  root.setProperty('--editor-font-size', `${syncFontSizes ? globalFontSize : editorFontSize}px`);
+  root.setProperty('--editor-preview-font-size', `${syncFontSizes ? globalFontSize : editorPreviewFontSize}px`);
+  root.setProperty('--file-explorer-font-size', `${syncFontSizes ? globalFontSize : fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
@@ -32590,10 +33276,10 @@ function applySettingsPayload(payload, options = {}) {
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
-  terminalFontSize = numberSetting('appearance.terminal_font_size');
-  editorFontSize = numberSetting('appearance.editor_font_size');
-  editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
-  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size');
+  terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
+  editorFontSize = numberSetting('appearance.editor_font_size', 14);
+  editorPreviewFontSize = numberSetting('appearance.preview_font_size', 14);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 14);
   terminalScrollback = numberSetting('terminal_editor.scrollback');
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
@@ -34044,7 +34730,8 @@ function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, o
 }
 
 function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
-  const state = String(agent?.state || STATE_KEY.idle);
+  const state = agentWindowStateKey(agent?.state || STATE_KEY.idle);
+  if (state === 'unavailable') return t('common.notAvailable');
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
     return Number.isFinite(elapsed) && elapsed >= 0
@@ -34058,7 +34745,9 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
   const text = sessionPopoverAgentStateText(agent, nowSeconds);
-  if (agentWindowIsAttentionState(agent?.state)) return statusIndicatorLabelHtml(text, 'attention', className, 'agent-status-attention');
+  if (agentWindowIsUnavailableState(agent?.state)) return statusIndicatorLabelHtml(text, 'blocked', className, 'agent-status-unavailable');
+  const state = agentWindowStateKey(agent?.state);
+  if (agentWindowIsAttentionState(state)) return statusIndicatorLabelHtml(text, state === STATE_KEY.blocked ? 'blocked' : 'attention', className, 'agent-status-attention');
   return `<span class="${esc(className)}">${esc(text)}</span>`;
 }
 
@@ -34107,13 +34796,13 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       _session: session,
       _index: index,
       kind: String(agent?.kind || '').toLowerCase(),
-      state: String(agent?.state || STATE_KEY.idle),
+       state: agentWindowStateKey(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
         : activeWindowIndex !== null && agentWindowIndex(agent) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
-    .filter(agent => ['claude', 'codex'].includes(agent.kind))
+    .filter(agent => ['claude', 'codex', 'opencode'].includes(agent.kind))
     .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
@@ -34124,7 +34813,8 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   const attention = agentWindowIsAttentionState(agent.state);
   const descriptor = tmuxWindowDescriptorLabel(agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.window_label || agent.kind));
   const label = typeof tmuxWindowDisplayLabel === 'function' ? tmuxWindowDisplayLabel(descriptor, agent.pid) : descriptor;
-  const classes = ['session-agent-row', `state-${agent.state}`];
+  const state = agentWindowStateKey(agent.state);
+  const classes = ['session-agent-row', `state-${state}`];
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
@@ -36244,7 +36934,86 @@ function sessionAgentKind(session) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
-  return kind === 'claude' || kind === 'codex' ? kind : '';
+  return kind === 'claude' || kind === 'codex' || kind === 'opencode' ? kind : '';
+}
+
+function terminalContextMenuPaneTargetForSession(session) {
+  const windows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
+  const activeWindows = windows.filter(window => window?.active === true);
+  if (activeWindows.length === 1) return terminalContextMenuPaneTargetForWindow(activeWindows[0]);
+  if (activeWindows.length > 1) return '';
+  // The first terminal bind can precede the initial tmux signal snapshot. Use only an
+  // unambiguous active metadata pane for that short bootstrap window; once live signals arrive,
+  // they remain authoritative and replace this provisional identity.
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const selectedTarget = String(info?.selected_pane?.target || info?.selected_pane?.pane_id || '').trim();
+  if (selectedTarget && panes.filter(pane => String(pane?.target || pane?.pane_id || '').trim() === selectedTarget).length === 1) {
+    return selectedTarget;
+  }
+  const activePanes = panes.filter(pane => pane?.window_active === true && pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForWindow(windowRecord) {
+  const panes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  const activePanes = panes.filter(pane => pane?.active === true);
+  if (activePanes.length !== 1) return '';
+  return String(activePanes[0]?.target || activePanes[0]?.pane_id || '').trim();
+}
+
+function terminalContextMenuPaneTargetForContainer(container) {
+  return String(container?.dataset?.terminalPaneTarget || '').trim();
+}
+
+function setTerminalContextMenuPaneTarget(container, paneTarget) {
+  if (!container?.dataset) return '';
+  const target = String(paneTarget || '').trim();
+  if (target) container.dataset.terminalPaneTarget = target;
+  else delete container.dataset.terminalPaneTarget;
+  return target;
+}
+
+function terminalContextMenuCapabilityForSession(session, options = {}) {
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const paneTarget = String(
+    typeof options.paneTarget === 'function' ? options.paneTarget() : options.paneTarget,
+  ).trim();
+  const matches = paneTarget && Array.isArray(info?.agents)
+    ? info.agents.filter(agent => String(agent?.pane_target || agent?.pane_id || '').trim() === paneTarget)
+    : [];
+  const clientKind = matches.length === 1 ? String(matches[0]?.kind || '').trim().toLowerCase() : '';
+  return Object.freeze({
+    paneTarget,
+    clientKind,
+    // Only a positively identified OpenCode pane owns native selection/copy behavior. Unknown
+    // identity must stay on the established YOLOmux path rather than accidentally bypassing it.
+    preserveNativeContextMenu: clientKind === 'opencode',
+  });
+}
+
+function terminalContextMenuPreservesNativeBehavior(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).preserveNativeContextMenu;
+}
+
+function terminalUsesAppWheel(session, container) {
+  return terminalContextMenuCapabilityForSession(session, {
+    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+  }).clientKind === 'opencode';
+}
+
+function terminalOpenCodeNativeShortcut(session, container, event) {
+  if (!terminalUsesAppWheel(session, container) || event?.type !== 'keydown') return false;
+  if (event.ctrlKey !== true || event.altKey !== true || event.metaKey === true || event.shiftKey === true) return false;
+  const key = String(event.key || '').toLowerCase();
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  return code === 'KeyB' || code === 'KeyF'
+    || key === 'b' || key === 'f'
+    || keyCode === 66 || keyCode === 70;
 }
 
 function agentIcon(kind, options = {}) {
@@ -36258,6 +37027,9 @@ function agentIcon(kind, options = {}) {
   }
   if (kind === 'claude') {
     return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
+  }
+  if (kind === 'opencode') {
+    return `<span class="${esc(classes('opencode'))}"${labelAttr}>OC</span>`;
   }
   return '';
 }
@@ -36287,7 +37059,7 @@ function claudeIcon() {
 }
 
 function agentName(kind) {
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Xterm' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'opencode' ? 'OpenCode' : kind === 'term' ? 'Xterm' : '';
 }
 
 function numericSessionName(session) {
@@ -36642,7 +37414,7 @@ function panelFullPath(session, info) {
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
-  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
+  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex', 'opencode'].includes(String(pane.command || '').toLowerCase()));
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
@@ -38146,9 +38918,24 @@ function enableTerminalScroll(session, term, container) {
     const whole = Math.trunc(state.pendingLines);
     if (!whole) return false;
     state.pendingLines -= whole;
-    return routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+    return routeTerminalScrollLines(session, term, container, whole, {
+      source: 'touch',
+      clientX: state.lastX,
+      clientY: state.lastY,
+    });
   };
   const queueTouchLines = (state, signedLines) => {
+    if (terminalUsesAppWheel(session, container)) {
+      // OpenCode's wheel handler scrolls the whole rendered terminal, which moves its prompt and
+      // footer on iPadOS. Its documented Ctrl+Alt+Y/E bindings scroll the message viewport by one
+      // line, so preserve fractional finger movement and emit one line command per crossed row.
+      state.pendingLines += signedLines;
+      const whole = Math.trunc(state.pendingLines);
+      if (!whole) return;
+      state.pendingLines -= whole;
+      routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+      return;
+    }
     state.pendingLines += signedLines;
     if (Math.abs(state.pendingLines) < 1 || state.timer) return;
     state.timer = setTimeout(() => {
@@ -38179,6 +38966,7 @@ function enableTerminalScroll(session, term, container) {
       identifier: touch.identifier,
       startX: touch.clientX,
       startY: touch.clientY,
+      lastX: touch.clientX,
       lastY: touch.clientY,
       startAt: performanceNow(),
       claimed: false,
@@ -38224,6 +39012,7 @@ function enableTerminalScroll(session, term, container) {
     event.preventDefault();
     event.stopPropagation();
     const deltaY = touch.clientY - state.lastY;
+    state.lastX = touch.clientX;
     state.lastY = touch.clientY;
     const rowHeight = terminalCellDimensions(term, container).height;
     const signedLines = terminalTouchSignedRows(deltaY, rowHeight);
@@ -38317,11 +39106,28 @@ function enableTerminalScroll(session, term, container) {
 
 function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
   if (!signedLines) return false;
-  if (!options.forceTmuxScrollback && sessionPaneIsAlternateScreen(session)) {
+  if (!options.forceTmuxScrollback && options.source === 'page-key'
+    && terminalUsesAppWheel(session, container)) {
+    // OpenCode pages its internal message viewport with native PageUp/PageDown. Mouse reports
+    // work for a finger/desktop wheel, but replacing a page key with them can leave its footer
+    // moving or the message viewport unchanged. Keep keyboard and touch paging on the data owner.
+    const data = signedLines < 0 ? '\x1b[5~' : '\x1b[6~';
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  if (!options.forceTmuxScrollback && options.source === 'touch' && terminalUsesAppWheel(session, container)) {
+    const data = signedLines < 0 ? '\x1b\x19' : '\x1b\x05';
+    const repeat = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signedLines))));
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data.repeat(repeat), {bypassMobileAccessoryModifiers: true});
+  }
+  const usesAppWheel = terminalUsesAppWheel(session, container);
+  if (!options.forceTmuxScrollback && (sessionPaneIsAlternateScreen(session) || usesAppWheel)) {
     // Explicit tmux keys keep their native meaning in an alternate-screen TUI. Plain page keys
     // become wheel reports only for mouse-owning apps; other TUIs receive their native key event.
-    if (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term))) return false;
-    if (options.source !== 'touch' || terminalHasMouseTracking(term)) {
+    if (!usesAppWheel && (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term)))) return false;
+    const usesMouseReports = terminalHasMouseTracking(term) || usesAppWheel;
+    if (options.source !== 'touch' || usesMouseReports) {
       forwardAltScreenWheel(session, container, signedLines, options);
       return true;
     }
@@ -43824,7 +44630,7 @@ function tmuxWindowButtonHtml(options = {}) {
 
 function tmuxWindowAgentKey(name) {
   const base = String(name || '').trim().toLowerCase().replace(/\(\d+\)$/, '').split(/[\s:/]/)[0];
-  if (base === 'claude' || base === 'codex') return base;
+  if (base === 'claude' || base === 'codex' || base === 'opencode') return base;
   if (['bash', 'sh', 'zsh', 'fish', 'shell', '-bash', '-zsh'].includes(base)) return 'shell';
   if (['vim', 'nvim', 'vi', 'nano', 'emacs', 'hx', 'helix'].includes(base)) return 'editor';
   if (['python', 'python3', 'ipython', 'node', 'ruby', 'irb', 'bun', 'deno'].includes(base)) return 'repl';
@@ -45714,6 +46520,7 @@ function yoagentRecentAgentSortTs(agent, signal = yoagentRecentAgentSignal(agent
 
 function yoagentRecentAgentSignal(agent) {
   const target = String(agent?.pane_target || '').trim();
+  const agentKind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.agent_kind) : '';
   let pane = target ? tmuxSignalPaneForTarget(target) : null;
   if (!pane) {
     const session = String(agent?.session || '').trim();
@@ -45723,7 +46530,7 @@ function yoagentRecentAgentSignal(agent) {
       tmuxSignalPaneSession(candidate) === session
       && String(candidate?.window_index ?? '').trim() === windowText
       && (!paneText || String(candidate?.pane_index ?? '').trim() === paneText)
-      && tmuxSignalPaneIsAgent(candidate)
+      && (tmuxSignalPaneIsAgent(candidate) || agentKind === 'opencode')
     )) || null;
   }
   const windowRecord = pane ? tmuxSignalWindowForPane(pane) : tmuxSignalWindowForSessionIndex(agent?.session, agent?.window);
@@ -48143,8 +48950,10 @@ function preferencesStatusPulseExampleHtml() {
 function orderedPreferenceSections(sections) {
   const orderedIds = [
     PREFERENCE_SECTION_IDS.general,
-    PREFERENCE_SECTION_IDS.appearance,
-    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.colors,
+    PREFERENCE_SECTION_IDS.sizes,
+    PREFERENCE_SECTION_IDS.terminal,
+    PREFERENCE_SECTION_IDS.editorOptions,
     PREFERENCE_SECTION_IDS.notifications,
     ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
       id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
@@ -48167,47 +48976,52 @@ function preferenceSections() {
       preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
       preferenceSettingItem('general.auto_focus', {type: 'boolean'}),
       preferenceSettingItem('general.startup_tips', {type: 'boolean'}),
-    ]},
-    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
-      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('general.default_layout', {type: 'radio', choices: layoutModePreferenceChoices()}),
-      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}}),
-      {type: 'note', text: t('pref.appearance.font_sizes.note')},
-      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
-      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
-      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
-      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
       ]}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
+    {id: PREFERENCE_SECTION_IDS.colors, title: t('pref.section.colors'), items: [
+      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
       preferenceSettingItem('appearance.terminal_theme', {type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('common.theme.dark')},
         {value: 'light', label: t('common.theme.light')},
       ]}),
+      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
+      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
+      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
+        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
+        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
+      ]}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
+      preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
+      preferenceSettingItem('appearance.global_font_size', {type: 'number', min: 6, max: 25, step: 1, suffix: 'px', whenSyncFontSizes: true}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
+      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.terminal, title: t('pref.section.terminal'), items: [
       preferenceSettingItem('appearance.tmux_status_bar', {type: 'radio', choices: [
         {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
         {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
         {value: 'bottom', label: t('pref.appearance.tmux_status_bar.bottom')},
       ]}),
-      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
-      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px'}),
       preferenceSettingItem('terminal_editor.scrollback', {type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other')}),
-      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
-      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
-      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
-        {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
-        {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
-      ]}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.editorOptions, title: t('pref.section.editor_options'), items: [
       preferenceSettingItem('terminal_editor.word_wrap', {type: 'boolean'}),
       preferenceSettingItem('terminal_editor.line_numbers', {type: 'boolean'}),
       preferenceSettingItem('editor.autosave', {type: 'boolean'}),
@@ -48544,6 +49358,7 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.whenSyncFontSizes === false && boolSetting('appearance.sync_font_sizes', true)) return '';
   if (item.type === 'notification-delivery') {
     const checked = notificationDeliveryEnabled(item.channel) ? ' checked' : '';
     return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="preference-notification-${esc(item.channel)}">${esc(item.label)}<span class="preferences-setting-help">${esc(item.help)}</span></label><span class="preferences-setting-control"><input type="checkbox" id="preference-notification-${esc(item.channel)}" data-notification-delivery="${esc(item.channel)}"${checked}></span></div>`;
@@ -48612,6 +49427,11 @@ function preferenceControlHtml(item, query = '') {
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
+function preferenceItemIsVisible(item, query = '') {
+  return preferenceItemMatches(item, query)
+    && (item.whenSyncFontSizes === undefined || item.whenSyncFontSizes === boolSetting('appearance.sync_font_sizes', true));
+}
+
 function preferenceNumberDisplayValue(item, value) {
   const scale = Number(item.scale) || 1;
   const raw = scale !== 1 ? Number(value) / scale : value;
@@ -48645,7 +49465,7 @@ function preferencesPanelHtml() {
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
-      const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
+       const visibleItems = section.items.filter(item => preferenceItemIsVisible(item, query) && (titleMatches || preferenceItemMatches(item, query)));
       const collapsed = !query && collapsedPreferenceSections.has(section.id);
       const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
@@ -51290,7 +52110,7 @@ function bindPreferencesPanel(panel) {
     const full = String(value || '').trim();
     if (!full) return '';
     const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
     }
     return full;
@@ -57251,7 +58071,24 @@ function jsDebugHistoryCoverageIntervalsForFamily(family) {
   return jsDebugHistoryReadiness.coverageIntervals;
 }
 
-function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = []) {
+function debugGraphSeriesDataRanges(groupSeries, domain) {
+  const ranges = [];
+  for (const series of groupSeries || []) {
+    const values = debugGraphSeriesPlotValues(series);
+    const hasData = debugGraphSeriesPlotHasDataValues(series);
+    const times = Array.isArray(series.times) ? series.times : [];
+    const durations = Array.isArray(series.durations) ? series.durations : [];
+    for (let index = 0; index < values.length; index += 1) {
+      if (hasData && hasData[index] !== true) continue;
+      const startMs = Number(times[index]);
+      const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+      if (Number.isFinite(startMs)) ranges.push({startMs, endMs: startMs + durationMs});
+    }
+  }
+  return debugGraphMergeTimeRanges(ranges, domain);
+}
+
+function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
   if (!family) return [];
   const requestedRanges = (jsDebugHistoryReadiness.requestCoverageIntervals || []).map(interval => ({
@@ -57267,12 +58104,14 @@ function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = 
     gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
   }
   const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
-  const trimmedGaps = !alreadyPaintedRanges.length
+  const dataRanges = debugGraphSeriesDataRanges(groupSeries, domain);
+  const paintedRanges = [...alreadyPaintedRanges, ...dataRanges];
+  const trimmedGaps = !paintedRanges.length
     ? mergedGaps
     : debugGraphMergeTimeRanges(
-      mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
-      domain,
-    );
+       mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(paintedRanges, gap)),
+       domain,
+     );
   return debugGraphMeaningfulCoverageGaps(trimmedGaps, domain);
 }
 
@@ -57291,9 +58130,9 @@ function debugGraphMeaningfulCoverageGaps(ranges, domain) {
   });
 }
 
-function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
+function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
-  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges).map((range, index) => {
+  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges, groupSeries).map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     return `<g data-js-debug-history-coverage-family="${esc(family)}">${debugGraphPlotOverlayRectHtml(
@@ -57314,7 +58153,7 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
 function debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries) {
   const ranges = [];
   const statusRuns = group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [];
-  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns));
+  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns, groupSeries));
   ranges.push(...statusRuns);
   if (group.noDataOverlay === true) {
     ranges.push(...debugGraphNoDataRuns(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)));
@@ -58265,7 +59104,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
-          ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
+           ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [], groupSeries)}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
@@ -59904,11 +60743,12 @@ function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
   return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
 }
 
-function jsDebugCurrentCpuProjectionValue(series, averageName, maximumName, duration) {
+function jsDebugCurrentCpuProjectionValue(series, averageName) {
   const average = jsDebugCurrentSeriesValue(series, averageName);
-  if (average === null) return null;
-  const maximum = jsDebugCurrentSeriesValue(series, maximumName);
-  return duration >= 60 && maximum !== null ? maximum : average;
+  // CPU charts show utilization over the bucket, not its instantaneous peak. Using the
+  // maximum for coarse buckets made a 60s/300s view disagree with the 1s view and could
+  // display an invalid host percentage above 100% when a legacy maximum was malformed.
+  return average;
 }
 
 function jsDebugCurrentServiceLoadItem(record, source) {
@@ -63763,6 +64603,10 @@ function gitDiffErrorSnapshot(error) {
   return userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: t('common.requestFailed')});
 }
 
+function gitDiffHistoryCursorIsInvalid(error) {
+  return String(error?.payload?.user_message?.key || '') === 'fs.error.gitHistoryCursor';
+}
+
 function gitDiffHistoryPayloadIsValid(payload) {
   return Boolean(payload && typeof payload === 'object'
     && typeof payload.path === 'string'
@@ -63869,6 +64713,14 @@ async function refreshGitDiffHistory(item, options = {}) {
     return true;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
+    if (!append && cursor && gitDiffHistoryCursorIsInvalid(error)) {
+      // A saved layout can outlive the server's cursor format. Drop that opaque cursor once and
+      // reload the current snapshot instead of leaving the restored Diff tab permanently failed.
+      state.snapshotCursor = '';
+      state.nextCursor = '';
+      state.error = null;
+      return refreshGitDiffHistory(item, {refresh: true});
+    }
     state.error = gitDiffErrorSnapshot(error);
     return false;
   } finally {
@@ -67355,6 +68207,27 @@ function codexModelDefaultEffort(model) {
 function settingPatchForPath(path, value) {
   if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
+  if (path === 'appearance.global_font_size' && boolSetting('appearance.sync_font_sizes', true)) {
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: value,
+      editor_font_size: value,
+      preview_font_size: value,
+      file_explorer_font_size: value,
+      ui_font_size: value,
+    };
+  }
+  if (path === 'appearance.sync_font_sizes' && value === true) {
+    const size = preferenceValue('appearance.global_font_size');
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: size,
+      editor_font_size: size,
+      preview_font_size: size,
+      file_explorer_font_size: size,
+      ui_font_size: size,
+    };
+  }
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
     if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};
@@ -70937,7 +71810,7 @@ function htmlPreviewHasDisabledJavaScript(text) {
 }
 
 function htmlPreviewUrl(path) {
-  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+  return `/api/batch/html-preview?path=${encodeURIComponent(path)}`;
 }
 
 function renderRawImagePreviewInto(container, path, state = null, options = {}) {
@@ -79744,6 +80617,10 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
   const info = transcriptMetadataState.payload.sessions?.[session];
+  setTerminalContextMenuPaneTarget(
+    document.getElementById(terminalDomId(session)),
+    terminalContextMenuPaneTargetForWindow(windowRecord),
+  );
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -80606,6 +81483,7 @@ function bindTerminalContainerForSession(session, term, container) {
   normalizeAppOwnedControls(container);
   installTerminalMobileAccessoryResizeSync();
   installTerminalMobileAccessorySurfaceSync();
+  setTerminalContextMenuPaneTarget(container, terminalContextMenuPaneTargetForSession(session));
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -80709,7 +81587,7 @@ function startTerminal(session) {
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   applyTerminalContainerTheme(container, displayTheme);
-  installTerminalLinkProvider(session, term);
+  installTerminalLinkProvider(session, term, container);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
@@ -83887,6 +84765,10 @@ function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key 
 
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
+  const focusedTerminalItem = focusedTerminal ? terminals.get(focusedTerminal) : null;
+  // OpenCode documents Ctrl+Alt+B/F as native message navigation. The exact-pane check prevents
+  // an unknown or ambiguous terminal from changing the shortcut behavior of other clients.
+  if (terminalOpenCodeNativeShortcut(focusedTerminal, focusedTerminalItem?.container, event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
   // the global Mod+Delete tab-close fallback can fire.
   if (handleFileExplorerDeleteShortcut(event)) return;

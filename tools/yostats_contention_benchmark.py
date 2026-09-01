@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Capture a bounded, read-only YOLOmux CPU/jobd contention window.
+"""Capture a bounded, read-only YOLOmux CPU/batchd contention window.
 
 The harness deliberately does not drive a browser or refresh any API. Run it while
-the operator keeps the target browser state open, then compare its start/end jobd
+the operator keeps the target browser state open, then compare its start/end batchd
 counters and per-PID CPU samples with the browser request/long-task capture.
 """
 
@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.jobd import JobClient
+from yolomux_lib.batchd import BatchClient
 from tools.yostats_capture_common import positive_float, positive_int, process_cpu_seconds
 
 
@@ -75,8 +75,8 @@ def cpu_time_delta_percent(
     return result
 
 
-def bounded_jobd_status() -> dict[str, Any]:
-    status = JobClient().runtime_status()
+def bounded_batchd_status() -> dict[str, Any]:
+    status = batchd.BatchClient().runtime_status()
     return {
         "healthy": bool(status.get("healthy")),
         "pid": int(status.get("pid") or 0),
@@ -94,7 +94,7 @@ def bounded_jobd_status() -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture a read-only YOLOmux CPU/jobd contention window")
+    parser = argparse.ArgumentParser(description="Capture a read-only YOLOmux CPU/batchd contention window")
     parser.add_argument("--duration", type=positive_float, default=60.0, help="capture duration in seconds (default: 60)")
     parser.add_argument("--interval", type=positive_float, default=1.0, help="CPU sample interval in seconds (default: 1)")
     parser.add_argument("--web-pid", type=positive_int, required=True, help="active yolomux.py web PID")
@@ -107,15 +107,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     started_at = time.time()
-    jobd_start = bounded_jobd_status()
+    batchd_start = bounded_batchd_status()
     pids = {
         "web": args.web_pid,
         "indexd": args.indexer_pid,
         "statsd": args.statsd_pid,
-        "jobd": int(jobd_start["pid"]),
+        "batchd": int(batchd_start["pid"]),
     }
-    for index, pid in enumerate(jobd_start["worker_pids"]):
-        pids[f"jobd-worker-{index}"] = pid
+    for index, pid in enumerate(batchd_start["worker_pids"]):
+        pids[f"batchd-worker-{index}"] = pid
     samples: list[dict[str, Any]] = []
     deadline = time.monotonic() + args.duration
     while True:
@@ -124,7 +124,7 @@ def main() -> int:
         if remaining <= 0:
             break
         time.sleep(min(args.interval, remaining))
-    jobd_end = bounded_jobd_status()
+    batchd_end = bounded_batchd_status()
     ended_at = time.time()
     final_cpu = process_snapshot(pids)
     payload = {
@@ -134,8 +134,8 @@ def main() -> int:
         "requested_duration_seconds": args.duration,
         "interval_seconds": args.interval,
         "pids": pids,
-        "jobd_start": jobd_start,
-        "jobd_end": jobd_end,
+        "batchd_start": batchd_start,
+        "batchd_end": batchd_end,
         "samples": samples,
         "final_cpu": final_cpu,
         "cpu_time_delta_percent": cpu_time_delta_percent(samples[0]["cpu_percent"], final_cpu, ended_at - started_at),

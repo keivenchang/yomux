@@ -559,12 +559,12 @@ def _retire_correlated_route_failures(
     runtime.server_log_boundary = current
 
 
-def _assert_route_sweep_jobd_transport_failure(entry: dict[str, Any]) -> None:
+def _assert_route_sweep_batchd_transport_failure(entry: dict[str, Any]) -> None:
     event = str(entry.get("event") or "")
     request_id = str(entry.get("requestId") or "")
     message = str(entry.get("message") or "")
     assert entry.get("delivery") == "timeout" and event in {"produce", "product"}, entry
-    assert entry.get("route") == "local-service:jobd" and request_id, entry
+    assert entry.get("route") == "local-service:batchd" and request_id, entry
     assert f"action={event} request_id={request_id}" in message, entry
     assert "TimeoutError: timed out" in message, entry
 
@@ -580,7 +580,7 @@ def _retire_route_sweep_server_failures(runtime: GateLiveServer, outcomes: list[
     # it is taken becomes correct. It runs before the server-log interval is collected as well, because a
     # completion that terminalizes after `current` is sampled leaves the ring boundary stale and resurfaces
     # every unretired entry at teardown.
-    runtime.app.wait_for_jobd_operations_terminal(ROUTE_SWEEP_OPERATION_SETTLE_SECONDS)
+    runtime.app.wait_for_batchd_operations_terminal(ROUTE_SWEEP_OPERATION_SETTLE_SECONDS)
     start = validate_server_log_ring_payload(runtime.server_log_boundary)
     current = validate_server_log_ring_payload(SERVER_LOGS.payload())
     transition = validate_server_log_ring_transition(start, current)
@@ -600,7 +600,7 @@ def _retire_route_sweep_server_failures(runtime: GateLiveServer, outcomes: list[
         if outcome.get("outcome") == "exercised"
     }
     api_request_ids: list[str] = []
-    jobd_failures: list[tuple[str, str]] = []
+    batchd_failures: list[tuple[str, str]] = []
     transport_phases: list[str] = []
     assert transition["droppedCount"] == 0, transition
     for entry in failures:
@@ -615,22 +615,22 @@ def _retire_route_sweep_server_failures(runtime: GateLiveServer, outcomes: list[
             assert payload.get("code") == outcome.get("response_error_code"), {"entry": entry, "outcome": outcome}
             api_request_ids.append(request_id)
             continue
-        if (source, category) == ("jobd-operation", "operation"):
+        if (source, category) == ("batchd-operation", "operation"):
             payload = json.loads(str(entry["message"]))
             stack = payload.get("stack") if isinstance(payload.get("stack"), list) else []
             route_frame = stack[0] if stack and isinstance(stack[0], dict) else {}
             assert route_frame.get("operation") in exercised_surfaces, {"entry": entry, "outcomes": outcomes}
-            assert payload.get("origin") == "local_services.jobd", entry
+            assert payload.get("origin") == "local_services.batchd", entry
             assert isinstance(payload.get("request"), dict) and payload["request"].get("id"), entry
             assert isinstance(payload.get("operation"), dict) and payload["operation"].get("id"), entry
             failure_frame = stack[-1] if stack and isinstance(stack[-1], dict) else {}
-            jobd_failures.append((
+            batchd_failures.append((
                 str(payload.get("code") or ""),
                 str(failure_frame.get("operation") or ""),
             ))
             continue
-        if (source, category) == ("local-service:jobd", "transport"):
-            _assert_route_sweep_jobd_transport_failure(entry)
+        if (source, category) == ("local-service:batchd", "transport"):
+            _assert_route_sweep_batchd_transport_failure(entry)
             transport_phases.append(str(entry["event"]))
             continue
         raise AssertionError({"unexpected_route_sweep_server_failure": entry})
@@ -640,17 +640,17 @@ def _retire_route_sweep_server_failures(runtime: GateLiveServer, outcomes: list[
     }
     if transport_phases:
         terminal_operation_by_phase = {
-            "produce": "jobd.produce",
-            "product": "jobd.result",
+            "produce": "batchd.produce",
+            "product": "batchd.result",
         }
         for phase in set(transport_phases):
             operation = terminal_operation_by_phase[phase]
             assert sum(
                 code == "service_unavailable" and observed_operation == operation
-                for code, observed_operation in jobd_failures
+                for code, observed_operation in batchd_failures
             ) >= transport_phases.count(phase), {
                 "transport_phases": transport_phases,
-                "jobd_failures": jobd_failures,
+                "batchd_failures": batchd_failures,
             }
         expected_terminal_operations = {
             terminal_operation_by_phase[phase]
@@ -658,10 +658,10 @@ def _retire_route_sweep_server_failures(runtime: GateLiveServer, outcomes: list[
         }
         assert all(
             code != "service_unavailable" or operation in expected_terminal_operations
-            for code, operation in jobd_failures
+            for code, operation in batchd_failures
         ), {
             "transport_phases": transport_phases,
-            "jobd_failures": jobd_failures,
+            "batchd_failures": batchd_failures,
         }
     assert runtime.app.queued_delivery_ledger.open_operations() == [], {
         "open_operations": runtime.app.queued_delivery_ledger.open_operations(),
@@ -822,19 +822,19 @@ def test_route_sweep_accepts_contract_errors_and_rejects_genuinely_untyped_error
 
 
 @pytest.mark.parametrize("event", ("produce", "product"))
-def test_route_sweep_accepts_only_correlated_jobd_timeout_phases(event: str) -> None:
+def test_route_sweep_accepts_only_correlated_batchd_timeout_phases(event: str) -> None:
     entry = {
         "delivery": "timeout",
         "event": event,
-        "route": "local-service:jobd",
-        "requestId": "fixture-jobd-request",
-        "message": f"action={event} request_id=fixture-jobd-request\nTimeoutError: timed out",
+        "route": "local-service:batchd",
+        "requestId": "fixture-batchd-request",
+        "message": f"action={event} request_id=fixture-batchd-request\nTimeoutError: timed out",
     }
 
-    _assert_route_sweep_jobd_transport_failure(entry)
+    _assert_route_sweep_batchd_transport_failure(entry)
 
     with pytest.raises(AssertionError):
-        _assert_route_sweep_jobd_transport_failure({**entry, "event": "relay"})
+        _assert_route_sweep_batchd_transport_failure({**entry, "event": "relay"})
 
 
 def test_authenticated_private_server_exercises_every_registered_route(

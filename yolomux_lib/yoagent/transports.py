@@ -13,6 +13,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -418,7 +419,7 @@ class CodexExecTransport(AgentTransport):
         timeout = float(kwargs.get("timeout") or 45.0)
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         session_id = str(target.get("agent_session_id") or "").strip()
-        with tempfile.TemporaryDirectory(prefix="yolomux-codex-exec-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="exec-", dir=os.environ.get("TMPDIR")) as temp_dir:
             result_path = Path(temp_dir) / "last-message.txt"
             args = codex_exec_argv(
                 resume_session_id=session_id or None,

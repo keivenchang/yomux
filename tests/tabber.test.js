@@ -1427,7 +1427,7 @@ async function runTabberSuite() {
   test('terminal context menu preserves captured right-click selection', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
-    assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, presetSelection: touchSelection\?\.text \|\| rightClickSelection\}\)/.test(source), 'N7: the context menu receives a touch selection when present and otherwise preserves the captured right-click selection');
+    assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, reference: terminalPointReference\(event\), presetSelection: touchSelection\?\.text \|\| rightClickSelection\}\)/.test(source), 'N7: the context menu receives a touch selection when present and otherwise preserves the captured right-click selection');
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*presetSelection == null \? terminalSelectedText\(term, container\) : String\(presetSelection \|\| ''\)/.test(source), 'N7: an explicitly captured empty right-click selection is not replaced by a live under-cursor re-read');
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*recentTerminalAppClipboardText\(session\)/.test(source), 'N7: Claude/TUI OSC 52 clipboard text is the context-menu fallback when the app owns the visible selection');
     assert.ok(/copyTerminalSelection\(session, term, \{action, button, dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text while passing the ephemeral control to shared feedback');
@@ -1437,6 +1437,194 @@ async function runTabberSuite() {
     assert.deepEqual(api.terminalContextMenuSelectionForTest('1', badLiveRead, null, ''), {text: '', source: 'none'}, 'captured empty right-click selection does not copy under-cursor live text');
     api.rememberTerminalAppClipboardTextForTest('1', 'claude selected block');
     assert.deepEqual(api.terminalContextMenuSelectionForTest('1', badLiveRead, null, ''), {text: 'claude selected block', source: 'app-clipboard'}, 'recent Claude OSC 52 app selection beats under-cursor live text');
+  });
+
+  test('terminal context menu uses exact pane identity and preserves native fallback behavior', () => {
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function terminalContextMenuCapabilityForSession\(session, options = \{\}\)[\s\S]*paneTarget[\s\S]*info\.agents\.filter\(agent => String\(agent\?\.pane_target \|\| agent\?\.pane_id \|\| ''\)\.trim\(\) === paneTarget\)[\s\S]*matches\.length === 1/.test(layoutSource), 'context-menu capability is resolved from one exact pane agent');
+    assert.ok(/function terminalContextMenuCapabilityForSession\(session, options = \{\}\)[\s\S]*typeof options\.paneTarget === 'function' \? options\.paneTarget\(\) : options\.paneTarget/.test(layoutSource), 'missing container identity does not fall back to a session-selected pane');
+    assert.ok(/function installTerminalContextMenu\(session, term, container\)[\s\S]*const preservesNativeContextMenu = \(\) => terminalContextMenuPreservesNativeBehavior\(session, container\)/.test(coreSource), 'event handling rechecks the exact terminal-container capability at event time');
+    assert.ok(/const nativeContextMenuForEvent = event => preservesNativeContextMenu\(\) && !terminalPointReference\(event\)[\s\S]*container\.addEventListener\('mousedown', event => \{[\s\S]*if \(nativeContextMenuForEvent\(event\)\) return;[\s\S]*rightClickSelection = terminalSelectedText\(term, container\)/.test(coreSource), 'OpenCode keeps native selection outside URLs while the shared handler captures URL actions');
+    assert.ok(/setTerminalContextMenuPaneTarget\(container, terminalContextMenuPaneTargetForSession\(session\)\)[\s\S]*installTerminalContextMenu\(session, term, container\)/.test(terminalBootSource), 'terminal startup stores the live pane target on the terminal container before installing its exact resolver');
+    assert.ok(/function terminalUsesAppWheel\(session, container\)[\s\S]*clientKind === 'opencode'/.test(layoutSource), 'OpenCode scrolling uses the existing exact-pane capability owner');
+    assert.ok(/options\.source === 'page-key'[\s\S]*terminalUsesAppWheel\(session, container\)[\s\S]*handleTerminalData\(session, data, \{bypassMobileAccessoryModifiers: true\}\)/.test(layoutSource), 'OpenCode plain page keys use native page bytes through the terminal data owner');
+    assert.ok(/const usesAppWheel = terminalUsesAppWheel\(session, container\)[\s\S]*source !== 'touch' \|\| usesMouseReports/.test(layoutSource), 'OpenCode desktop wheel and touch routes retain the synthetic-wheel owner');
+    const capabilitySource = layoutSource.slice(layoutSource.indexOf('function terminalContextMenuCapabilityForSession'));
+    const capabilityEnd = capabilitySource.indexOf('\nfunction ', 10);
+    const capability = vm.runInNewContext(`(${capabilitySource.slice(0, capabilityEnd)})`, {
+      transcriptMetadataState: {payload: {sessions: {
+        opencode: {agents: [{kind: 'opencode', pane_target: '%open'}]},
+        claude: {agents: [{kind: 'claude', pane_target: '%claude'}]},
+        codex: {agents: [{kind: 'codex', pane_target: '%codex'}]},
+        split: {agents: [{kind: 'opencode', pane_target: '%open'}, {kind: 'claude', pane_target: '%claude'}]},
+      }}},
+      Object,
+      String,
+      terminalContextMenuPaneTargetForSession: () => '',
+    });
+    assert.deepEqual({...capability('opencode', {paneTarget: '%open'})}, {paneTarget: '%open', clientKind: 'opencode', preserveNativeContextMenu: true}, 'OpenCode receives the native-menu capability');
+    assert.deepEqual({...capability('claude', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'Claude remains on the YOLOmux menu path');
+    assert.deepEqual({...capability('codex', {paneTarget: '%codex'})}, {paneTarget: '%codex', clientKind: 'codex', preserveNativeContextMenu: false}, 'Codex remains on the YOLOmux menu path');
+    assert.deepEqual({...capability('split', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'split panes use the matching pane agent instead of the first session agent');
+     assert.deepEqual({...capability('split', {paneTarget: '%missing'})}, {paneTarget: '%missing', clientKind: '', preserveNativeContextMenu: false}, 'unknown pane identity retains the shared YOLOmux menu');
+     assert.deepEqual({...capability('split', {paneTarget: ''})}, {paneTarget: '', clientKind: '', preserveNativeContextMenu: false}, 'missing terminal-container identity retains the shared YOLOmux menu');
+    const api = loadYolomux('', ['split']);
+    api.setTranscriptInfoForTest('split', {
+      agents: [
+        {kind: 'opencode', pane_target: '%open'},
+        {kind: 'claude', pane_target: '%claude'},
+      ],
+      panes: [
+        {target: '%open', window: '0', pane: '0', active: true, window_active: true},
+        {target: '%claude', window: '1', pane: '0', active: true, window_active: false},
+      ],
+      selected_pane: {target: '%open', window: '0', pane: '0'},
+    });
+    api.setTmuxSignalStateForTest({ok: true, windows: [{session: 'split', window_index: '1', active: true, panes: [{target: '%claude', pane_index: '0', active: true}]}]});
+    assert.equal(api.terminalContextMenuPaneTargetForSessionForTest('split'), '%claude', 'live tmux pane target wins over stale selected-pane metadata');
+    api.setTmuxSignalStateForTest({ok: true, windows: [{session: 'split', window_index: '2', active: true, panes: [{target: '%unknown', pane_index: '0', active: true}]}]});
+    assert.equal(api.terminalContextMenuPaneTargetForSessionForTest('split'), '%unknown', 'unknown live pane target is retained so capability resolution fails open');
+    api.setTmuxSignalStateForTest({ok: true, windows: [
+      {session: 'split', window_index: '0', active: true, panes: [
+        {target: '%one', pane_index: '0', active: true},
+        {target: '%two', pane_index: '1', active: true},
+      ]},
+    ]});
+    assert.equal(api.terminalContextMenuPaneTargetForSessionForTest('split'), '', 'ambiguous active split panes preserve native context-menu behavior');
+
+    const container = api.testElementForId('term-split');
+    api.setTerminalContextMenuPaneTargetForTest(container, '%open');
+    const term = {
+      getSelection: () => '  selected\n    indented',
+      clearSelection() { this.cleared = true; },
+    };
+    api.installTerminalContextMenuForTest('split', term, container);
+    const mousedown = container.listeners.get('mousedown')[0];
+    const contextmenu = container.listeners.get('contextmenu')[0];
+    let prevented = 0;
+    let stopped = 0;
+    const nativeEvent = {
+      button: 2,
+      preventDefault() { prevented += 1; },
+      stopPropagation() { stopped += 1; },
+    };
+    mousedown(nativeEvent);
+    contextmenu(nativeEvent);
+    assert.equal(prevented, 0, 'OpenCode container binding leaves the native context menu uncancelled');
+    assert.equal(stopped, 0, 'OpenCode container binding leaves native right-click propagation untouched');
+    assert.equal(api.terminalContextMenuPreservesNativeBehaviorForTest('split', container), true, 'OpenCode keeps native copy behavior at event time');
+    assert.equal(api.dedentSelectionText(term.getSelection()), 'selected\n  indented', 'the selected split-pane fixture includes indented text for the explicit YOLOmux-only dedent path');
+
+    const urlParts = [
+      '     https://example.test/long/path/for/opencode/',
+      '     action=inspect',
+    ];
+    const url = urlParts.join('').replace(/^\s+/, '');
+    const urlTerm = {
+      cols: urlParts[0].length + 2,
+      _core: { _renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {getLine: index => index < urlParts.length ? terminalLine(urlParts[index], false) : null}},
+      getSelection: () => '',
+    };
+    const urlContainer = api.testElementForId('term-url');
+    urlContainer.rect = {left: 0, top: 0, width: urlTerm.cols * 10, height: 40, right: urlTerm.cols * 10, bottom: 40};
+    urlContainer.className = 'terminal';
+    api.setTranscriptInfoForTest('url', {agents: [{kind: 'opencode', pane_target: '%url'}]});
+    api.setTerminalContextMenuPaneTargetForTest(urlContainer, '%url');
+    api.installTerminalContextMenuForTest('url', urlTerm, urlContainer);
+    const urlMouse = urlContainer.listeners.get('mousedown')[0];
+    const urlContext = urlContainer.listeners.get('contextmenu')[0];
+    let urlPrevented = 0;
+    let urlStopped = 0;
+    const urlEvent = {
+      button: 2,
+      clientX: 6 * 10,
+      clientY: 10,
+      preventDefault() { urlPrevented += 1; },
+      stopPropagation() { urlStopped += 1; },
+    };
+    urlMouse(urlEvent);
+    urlContext(urlEvent);
+    assert.equal(urlPrevented, 1, 'OpenCode URL right-click uses the shared application context menu');
+    assert.ok(urlStopped >= 1, 'OpenCode URL right-click stops the handled URL event');
+    const urlMenu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+    assert.deepEqual(Array.from(urlMenu.children).map(child => child.textContent).filter(Boolean).slice(0, 2), ['Open URL in a new tab', 'Copy URL'], 'OpenCode URL menu exposes the complete shared URL actions');
+    const continuationEvent = {...urlEvent, clientY: 30};
+    urlContext(continuationEvent);
+    assert.equal(urlPrevented, 2, 'OpenCode URL continuation right-click also uses the shared application context menu');
+    assert.deepEqual(Array.from(urlMenu.children).map(child => child.textContent).filter(Boolean).slice(0, 2), ['Open URL in a new tab', 'Copy URL'], 'OpenCode URL continuation exposes the complete shared URL actions');
+    api.setTerminalContextMenuPaneTargetForTest(container, '');
+    assert.equal(api.terminalContextMenuPreservesNativeBehaviorForTest('split', container), false, 'missing container pane identity keeps the shared menu at event time');
+    prevented = 0;
+    stopped = 0;
+    const unknownMouseEvent = {
+      button: 2,
+      preventDefault() { prevented += 1; },
+      stopPropagation() { stopped += 1; },
+    };
+    mousedown(unknownMouseEvent);
+    contextmenu(unknownMouseEvent);
+    assert.equal(prevented, 1, 'missing pane identity uses the shared context-menu event owner');
+    assert.equal(stopped, 2, 'missing pane identity uses the shared context-menu event owner');
+    api.setTerminalContextMenuPaneTargetForTest(container, '%open');
+    api.setTerminalContextMenuPaneTargetForTest(container, '%missing');
+    assert.equal(api.terminalContextMenuPreservesNativeBehaviorForTest('split', container), false, 'unknown pane identity keeps the shared menu at event time');
+    prevented = 0;
+    stopped = 0;
+    mousedown(unknownMouseEvent);
+    contextmenu(unknownMouseEvent);
+    assert.equal(prevented, 1, 'unknown pane identity uses the shared context-menu event owner');
+    assert.equal(stopped, 2, 'unknown pane identity uses the shared context-menu event owner');
+    api.setTerminalContextMenuPaneTargetForTest(container, '%claude');
+    assert.deepEqual(
+      {...api.terminalContextMenuCapabilityForSessionForTest('split', {paneTarget: () => api.terminalContextMenuPaneTargetForContainerForTest(container)})},
+      {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false},
+      'the same split-session terminal uses the exact container-bound Claude pane, not the first session agent',
+    );
+    const claudeMouseEvent = {
+      button: 2,
+      stopPropagation() { stopped += 1; },
+    };
+    stopped = 0;
+    mousedown(claudeMouseEvent);
+    assert.equal(stopped, 1, 'the exact Claude container binding retains YOLOmux right-click selection capture');
+  });
+
+  test('OpenCode is a visible Tabber owner and blocked top-bar counts use the blocked tone', () => {
+    const tabberSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    assert.match(tabberSource, /function tabberWindowIsAgent\(name\)[\s\S]*key === 'claude' \|\| key === 'codex' \|\| key === 'opencode'/, 'OpenCode is included in the shared visible Tabber owner');
+    assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'blocked', 'topbar-activity-blocked'\)/, 'blocked top-bar counts use the blocked red tone');
+    const api = loadYolomux('', ['1']);
+    assert.equal(api.tabberWindowIsAgentForTest('opencode'), true, 'OpenCode is recognized by the shared tmux-window agent owner');
+    assert.match(api.topbarActivityCountBallHtmlForTest(1, 'blocked', 'topbar-activity-blocked'), /status-indicator--blocked/, 'blocked count renders the blocked status class');
+  });
+
+  test('OpenCode green and red balls share one renderer across pane tabs, Tabber, popovers, and topbar', () => {
+    const api = loadYolomux('', ['open']);
+    const info = {
+      panes: [{window: '0', window_index: '0', target: '%open', pane: '0', active: true, window_active: true, process_label: 'opencode', command: 'opencode'}],
+      agents: [{kind: 'opencode', pane_target: '%open', window_index: 0, window_active: true, current: true}],
+    };
+    api.setTranscriptInfoForTest('open', info);
+    for (const [state, tone] of [['working', 'working'], ['needs-input', 'attention']]) {
+      api.setAutoApproveStateForTest('open', {agent_windows: [{kind: 'opencode', pane_target: '%open', window_index: 0, state, window_active: true, current: true}]});
+      const currentInfo = api.transcriptInfoForTest('open');
+      const paneTab = api.tmuxPaneTabHtml('open', currentInfo, null, false);
+      const windowTab = api.tmuxWindowButtonHtmlForTest({
+        session: 'open', visibleName: '0:opencode', numberLabel: '0', agentKey: 'opencode',
+        agentStatus: {kind: 'opencode', pane_target: '%open', window_index: 0, state, window_active: true, current: true},
+      });
+      const popover = api.sessionPopoverHtml('open', currentInfo, 'opencode', false);
+      const topbar = api.topbarActivityCountBallHtmlForTest(1, tone, `topbar-activity-${tone}`);
+      for (const [surface, html] of [['pane tab', paneTab], ['Tabber', windowTab], ['popover', popover], ['topbar', topbar]]) {
+        assert.match(html, new RegExp(`status-indicator--${tone}`), `OpenCode ${state} status reaches the ${surface}`);
+      }
+      assert.match(windowTab, /agent-icon opencode/, `OpenCode identity is retained beside the ${state} Tabber status`);
+      assert.match(popover, /OpenCode/, `OpenCode identity is retained in the ${state} popover`);
+    }
   });
 
   test('Tabber window recency uses one timestamp for display, sorting, and parent bubbling', () => {

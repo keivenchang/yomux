@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
+// Shared Claude/Codex/OpenCode tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
 
-const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
-const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'blocked', 'unavailable', 'cooldown']);
+const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'blocked', 'unavailable', 'cooldown', STATE_KEY.working]);
 const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
   'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
-  'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id',
+    'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id', 'cwd',
 ]);
 
 function agentWindowVisibleTone(value) {
@@ -81,7 +81,9 @@ function agentWindowPhysicalKey(agent, info = null) {
 }
 
 function agentWindowStateKey(state) {
-  return String(state || '').trim();
+  const key = String(state || '').trim();
+  if (key === 'paused') return STATE_KEY.blocked;
+  return key === 'blocked' ? STATE_KEY.blocked : key;
 }
 
 function agentWindowIsWorkingState(state) {
@@ -101,34 +103,41 @@ function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }
 
+function agentWindowIsUnavailableState(state) {
+  return agentWindowStateKey(state) === 'unavailable';
+}
+
 function agentWindowActivityTone(state) {
   const key = agentWindowStateKey(state);
   if (key === STATE_KEY.working) return STATE_KEY.working;
+  if (key === 'blocked') return 'blocked';
   if (key === 'cooldown') return 'cooldown';
   if (key === 'attention') return 'attention';
   if (key === 'active') return 'active';
   if (key === 'settled') return 'settled';
+  if (key === 'unavailable') return 'unavailable';
   return STATE_KEY.idle;
 }
 
 function agentWindowStateRank(state) {
-  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, [STATE_KEY.idle]: 3}[agentWindowStateKey(state)] ?? 9;
+  return {[STATE_KEY.working]: 0, [STATE_KEY.approval]: 1, [STATE_KEY.needsInput]: 2, blocked: 2, unavailable: 3, [STATE_KEY.idle]: 4}[agentWindowStateKey(state)] ?? 9;
 }
 
 function agentWindowActivityVisualRank(state) {
   const tone = agentWindowActivityTone(state);
-  if (tone === 'attention') return 0;
+  if (tone === 'attention' || tone === 'blocked') return 0;
   // A live worker wins over a completed worker. Otherwise a yellow child can make the session
   // look stopped while another child is still doing work.
   if (tone === STATE_KEY.working) return 1;
   if (tone === 'cooldown') return 2;
+  if (tone === 'unavailable') return 0;
   if (tone === 'active') return 3;
   return 9;
 }
 
 function agentWindowKind(value) {
   const key = String(value || '').trim().toLowerCase();
-  return key === 'claude' || key === 'codex' ? key : '';
+  return key === 'claude' || key === 'codex' || key === 'opencode' ? key : '';
 }
 
 function agentWindowCanonicalLabel(windowIndex, agentKey, fallback = '') {
@@ -328,10 +337,21 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
   // metadata can identify a window and enrich its path/git details, but never provide a
   // color, transition, or acknowledgement when the canonical status is unavailable.
-  const source = stateRows.length
-    ? stateRows
-    : mergedAgentWindowMetadataRows(trustedActivityRows, infoRows, info);
-  const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
+  const metadataRows = mergedAgentWindowMetadataRows(
+    trustedActivityRows,
+    [...infoRows, ...agentWindowPayloadRows(info?.agents)],
+    info,
+  );
+  const source = stateRows.length ? stateRows : metadataRows;
+  const knownPhysicalKeys = new Set(stateRows.map(agent => agentWindowPhysicalKey(agent, info)).filter(Boolean));
+  const missingOpenCodeRows = stateRows.length
+    ? metadataRows.filter(agent => (
+      agentWindowKind(agent?.kind) === 'opencode'
+      && !knownPhysicalKeys.has(agentWindowPhysicalKey(agent, info))
+    ))
+    : [];
+  const fallbackSource = [...source, ...missingOpenCodeRows];
+  const fallback = fallbackSource.length ? fallbackSource : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
       state: '',
@@ -348,6 +368,19 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
+  for (const agent of agents) {
+    if (agentWindowKind(agent.kind) !== 'opencode') continue;
+    const canonical = stateRows.some(row => (
+      agentWindowKind(row?.kind) === 'opencode'
+      && agentWindowPhysicalKey(row, info) === agentWindowPhysicalKey(agent, info)
+    ));
+    if (!canonical) {
+      agent.state = 'unavailable';
+      agent.unavailable_reason = 'canonical OpenCode status unavailable';
+      agent.last_active_ts = 0;
+      agent.idle_since = null;
+    }
+  }
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
     if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
@@ -359,10 +392,10 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
   // so the window bar, parent tab, Tabber, and session working count all see the same row.
   const screenProxyIndex = screenWorking && !hasWorkingWindow
-    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const fallbackProxyIndex = screenWorking && !hasWorkingWindow && screenProxyIndex < 0
-    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state))
+    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state) && !agentWindowIsUnavailableState(agent.state))
     : -1;
   const proxyIndex = screenProxyIndex >= 0 ? screenProxyIndex : fallbackProxyIndex;
   const effectiveAgents = proxyIndex >= 0
@@ -399,7 +432,7 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
     visibleItems.push({agent, item, tone});
     if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
     if (tone === 'acknowledged') acknowledging = {agent, item};
-    if (['attention', 'cooldown'].includes(tone)) {
+    if (['attention', 'blocked', 'cooldown'].includes(tone)) {
       const acknowledgementRank = acknowledgement ? agentWindowStatusItemVisualRank(acknowledgement.item) : 99;
       const acknowledgementCurrent = acknowledgement ? agentWindowPayloadCurrent(acknowledgement.agent) === true : false;
       if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
@@ -878,7 +911,7 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const itemOptions = agentWindowActivityOptionsForStatus(agent, sessionKey, {scheduleRefresh: false});
   const item = agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
   if (item?.acknowledged === true) return null;
-  if (!['attention', 'cooldown'].includes(item?.state)) return null;
+  if (!['attention', 'blocked', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
   const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
@@ -930,6 +963,7 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
 function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
   const kind = agentWindowKind(agentKey);
   const stateKey = agentWindowStateKey(state);
+  if (stateKey === 'unavailable') return t('state.agentStatus', {agent: agentLabel(kind), status: t('common.notAvailable')});
   const status = stateKey === 'cooldown'
     ? t('state.cooldown')
     : stateKey === 'active'
@@ -956,7 +990,18 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     acknowledgementDurationMs: acknowledgementVisual.durationMs,
     acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
   } : {};
-  const acknowledgementVisualTone = ['attention', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  const acknowledgementVisualTone = ['attention', 'blocked', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  if (stateKey === 'unavailable') {
+    return {
+      state: 'unavailable',
+      icon: '?',
+      label: `${agentLabel(kind)} ${t('common.notAvailable')}`,
+      pulseActive: false,
+      transitionPulseActive: false,
+      acknowledged: false,
+      acknowledging: false,
+    };
+  }
   // Switching the clicked tmux window can immediately promote its screen capture to `working`.
   // Preserve the acknowledged red/yellow state during its promised gray interval instead of
   // replacing it with a green play before the user can see the acknowledgement.
@@ -973,6 +1018,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     };
   }
   if (agentWindowIsAttentionState(stateKey)) {
+    const visualTone = stateKey === STATE_KEY.blocked ? 'blocked' : 'attention';
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
     const recordedAcknowledgement = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
     const acknowledging = acknowledgementVisualActive;
@@ -982,7 +1028,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       clearAgentWindowStoppedRefresh(transitionKey);
       record.activity = {
         state: stateKey,
-        visualTone: 'attention',
+        visualTone,
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
@@ -993,9 +1039,9 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
     return {
-      state: 'attention',
+      state: visualTone,
       icon: '●',
-      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
+      label: agentWindowActivityLabel(kind, stateKey, acknowledged),
       pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
@@ -1087,13 +1133,18 @@ function agentWindowStatusClassification(item) {
     : item?.acknowledged === true
     ? ''
     : agentWindowActivityTone(item?.state);
+  if (tone === 'unavailable') return Object.freeze({tone, activity: 'unavailable'});
   const visibleTone = tone === 'acknowledged' || agentWindowVisibleTone(tone) ? tone : '';
   const activity = visibleTone === STATE_KEY.working
     ? STATE_KEY.working
     : visibleTone === 'attention'
     ? 'ask'
+    : visibleTone === 'blocked'
+    ? 'blocked'
     : visibleTone === 'cooldown'
     ? 'blocked'
+    : visibleTone === 'unavailable'
+    ? 'unavailable'
     : 'idle';
   return Object.freeze({tone: visibleTone, activity});
 }
@@ -1105,6 +1156,7 @@ function agentWindowStatusToneForItem(item) {
 function agentWindowStatusItemVisualRank(item) {
   const tone = agentWindowStatusToneForItem(item);
   if (tone === 'acknowledged') return 8;
+  if (tone === 'unavailable') return 0;
   return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
@@ -1152,8 +1204,9 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   // Acknowledged is the temporary gray color/timing tone, not a new shape. Keep the original
   // play/stop/pause modifier so live feedback and the Preferences example use the same renderer.
+  const acknowledgementShapeTone = item.state === 'unavailable' ? 'blocked' : item.state;
   const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
-    ? `status-indicator--${item.state}`
+    ? `status-indicator--${acknowledgementShapeTone}`
     : '';
   const aggregateTones = Array.isArray(item.aggregateTones)
     ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
@@ -1181,6 +1234,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
+    tone === 'unavailable' ? 'status-indicator--blocked' : '',
     {pulse},
   );
   const label = String(options.label || '').trim();

@@ -8,14 +8,14 @@ from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 
 
-def test_registry_waits_for_long_running_accepted_jobd_work_before_code_replacement(
+def test_registry_waits_for_long_running_accepted_batchd_work_before_code_replacement(
     tmp_path,
     monkeypatch,
 ):
     current_protocol = 25
     service_protocol = current_protocol
     service_pid = 4242
-    source_epoch = "retained-jobd"
+    source_epoch = "retained-batchd"
     clock = [100.0]
     drain_completed_at = clock[0] + 1.2
     state = {"alive": True, "shutdown": False}
@@ -24,9 +24,9 @@ def test_registry_waits_for_long_running_accepted_jobd_work_before_code_replacem
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
             current_protocol,
             code_revision="current-revision",
             build_revision=1,
@@ -42,7 +42,7 @@ def test_registry_waits_for_long_running_accepted_jobd_work_before_code_replacem
     )
     registry._write_record({
         **FixtureProcessRecordBuilder(pid=service_pid).build(),
-        "service": "jobd",
+        "service": "batchd",
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,
@@ -109,19 +109,19 @@ def test_registry_waits_for_long_running_accepted_jobd_work_before_code_replacem
 
 
 @pytest.mark.parametrize("active", (True, False))
-def test_registry_legacy_jobd_shutdown_requires_observable_idle(active, tmp_path, monkeypatch):
+def test_registry_legacy_batchd_shutdown_requires_observable_idle(active, tmp_path, monkeypatch):
     current_protocol = 25
     service_protocol = 24
     service_pid = 4242
-    source_epoch = "retained-jobd"
+    source_epoch = "retained-batchd"
     state = {"alive": True}
     actions = []
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
             current_protocol,
             code_revision="current-revision",
             build_revision=1,
@@ -129,7 +129,7 @@ def test_registry_legacy_jobd_shutdown_requires_observable_idle(active, tmp_path
     )
     registry._write_record({
         **FixtureProcessRecordBuilder(pid=service_pid).build(),
-        "service": "jobd",
+        "service": "batchd",
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,
@@ -189,10 +189,10 @@ def test_registry_legacy_jobd_shutdown_requires_observable_idle(active, tmp_path
     assert registry.socket_path.exists() is active
 
 
-def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path, monkeypatch):
+def test_registry_bounds_batchd_drain_before_signalling_stuck_replacement(tmp_path, monkeypatch):
     service_pid = 4242
     service_protocol = 25
-    source_epoch = "retained-jobd"
+    source_epoch = "retained-batchd"
     spawn_generation = "1" * 32
     clock = [100.0]
     state = {"alive": True}
@@ -200,9 +200,9 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
             service_protocol,
             code_revision="current-revision",
             build_revision=1,
@@ -212,7 +212,7 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
     )
     registry._write_record({
         **FixtureProcessRecordBuilder(pid=service_pid).build(),
-        "service": "jobd",
+        "service": "batchd",
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,
@@ -278,25 +278,25 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
 
     assert registry._retire_incompatible_service() is True
 
-    assert clock[0] >= 100.0 + registry_mod.LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
-    assert clock[0] < 100.1 + registry_mod.LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
+    assert clock[0] >= 100.0 + registry_mod.LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS
+    assert clock[0] < 100.1 + registry_mod.LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS
     assert signals == [(service_pid, signal.SIGTERM)]
     assert registry.record_path.exists() is False
     assert registry.socket_path.exists() is False
 
 
-def test_registry_refuses_jobd_shutdown_receipt_from_another_source_epoch(tmp_path, monkeypatch):
+def test_registry_refuses_batchd_shutdown_receipt_from_another_source_epoch(tmp_path, monkeypatch):
     service_pid = 4242
     service_protocol = 25
-    source_epoch = "retained-jobd"
+    source_epoch = "retained-batchd"
     state = {"alive": True}
     signals = []
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
             service_protocol,
             code_revision="current-revision",
             build_revision=1,
@@ -304,7 +304,7 @@ def test_registry_refuses_jobd_shutdown_receipt_from_another_source_epoch(tmp_pa
     )
     registry._write_record({
         **FixtureProcessRecordBuilder(pid=service_pid).build(),
-        "service": "jobd",
+        "service": "batchd",
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,
@@ -333,7 +333,7 @@ def test_registry_refuses_jobd_shutdown_receipt_from_another_source_epoch(tmp_pa
                 "draining": False,
                 "pid": service_pid,
                 "version": service_protocol,
-                "source_epoch": "replacement-jobd",
+                "source_epoch": "replacement-batchd",
             }
         return {}
 
@@ -352,10 +352,10 @@ def test_registry_refuses_jobd_shutdown_receipt_from_another_source_epoch(tmp_pa
     assert registry.socket_path.exists() is True
 
 
-def test_registry_stops_jobd_drain_wait_when_same_pid_identity_is_reused(tmp_path, monkeypatch):
+def test_registry_stops_batchd_drain_wait_when_same_pid_identity_is_reused(tmp_path, monkeypatch):
     service_pid = 4242
     service_protocol = 25
-    source_epoch = "retained-jobd"
+    source_epoch = "retained-batchd"
     retained_start = f"proc:{service_pid + 1000}"
     clock = [100.0]
     current_start = [retained_start]
@@ -368,9 +368,9 @@ def test_registry_stops_jobd_drain_wait_when_same_pid_identity_is_reused(tmp_pat
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "jobd",
-            "yolomux_lib.jobd",
-            "jobd.sock",
+            "batchd",
+            "yolomux_lib.batchd",
+            "batchd.sock",
             service_protocol,
             code_revision="current-revision",
             build_revision=1,
@@ -380,7 +380,7 @@ def test_registry_stops_jobd_drain_wait_when_same_pid_identity_is_reused(tmp_pat
     )
     registry._write_record({
         **FixtureProcessRecordBuilder(pid=service_pid).build(),
-        "service": "jobd",
+        "service": "batchd",
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,

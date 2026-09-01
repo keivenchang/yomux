@@ -56,7 +56,7 @@ TOKEN_DETAIL_DIMENSIONS = (
 MAX_PRIVATE_BROWSER_CLIENTS = 4
 MAX_CACHED_OBSERVATION_PROJECTIONS = 32_768
 PUBLIC_EXECUTION_SOURCES = frozenset({
-    "claude", "codex", "images", "messages", "responses", "unknown",
+    "claude", "codex", "opencode", "images", "messages", "responses", "unknown",
 })
 
 
@@ -1604,7 +1604,7 @@ def _privacy_safe_agent_label(agent_id: str, source: str) -> str:
     parts = agent_id.split("|")
     if (
         2 <= len(parts) <= 4
-        and parts[-1] in {"claude", "codex", "term"}
+        and parts[-1] in {"claude", "codex", "opencode", "term"}
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", parts[0])
         and all(0 < len(part) <= 128 and not any(character.isspace() for character in part) for part in parts[1:])
     ):

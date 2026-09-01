@@ -15,7 +15,7 @@ WHAT ISOLATION MEANS HERE, and every clause is load-bearing:
     picks it. `7770`-`7773` (and `8880`-`8883` on macOS) are the operator's live servers and an
     automated test must never reach them; `assert_isolated_dev_server_port` refuses them outright
     rather than trusting the kernel to be tactful.
-  * PRIVATE TMUX SOCKET. `start_isolated_tmux_runtime` owns a `/tmp/yts-<pid>-<uuid>` socket dir
+  * PRIVATE TMUX SOCKET. `start_isolated_tmux_runtime` owns a socket directory below `YOLOMUX_TEST_ROOT`
     and fixture-created `yt-<pid>-<uuid>-N` sessions, so the server can never see, drive, or kill
     a session belonging to the person running the tests.
   * ITS OWN CONFIG AND STATE ROOT, AND ITS OWN `config/auth.yaml`. This is the detail that has

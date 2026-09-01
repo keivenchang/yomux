@@ -1,0 +1,61 @@
+agent: opencode
+capture_date: '2026-08-28'
+capture_mode: converted_real_text_capture
+case_name: completed_output
+client_name: OpenCode
+client_version: 1.18.25
+client_version_slug: opencode-1.18.25
+cursor:
+  character: ' '
+  current_command: opencode
+  pane_in_mode: false
+  x: 37
+  y: 45
+expected_promoted:
+  agent_kind: opencode
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: empty
+  reason_code: idle
+  screen_key: idle
+failures: []
+fixture_id: completed_output__opencode-1.18.25_20260828
+fixture_scenario: completed_output
+height: 52
+id: completed_output__opencode-1.18.25_20260828
+operations: []
+raw_capture: |
+  <redacted-completed-output>
+  <redacted-completed-output>
+  ╭────────────────────────────────────────────────────────────╮
+  │ Ask anything...                                            │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+source: read-only real OpenCode 1.18.25 capture from an existing completed pane
+source_target: completed-pane
+styled_capture: |
+  <redacted-completed-output>
+  <redacted-completed-output>
+  ╭────────────────────────────────────────────────────────────╮
+  │ Ask anything...                                            │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+visible_text: |
+  <redacted-completed-output>
+  <redacted-completed-output>
+  ╭────────────────────────────────────────────────────────────╮
+  │ Ask anything...                                            │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+width: 101

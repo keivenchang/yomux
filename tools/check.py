@@ -1062,7 +1062,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
 def performance_report_path(value: str) -> Path:
     """Limit raw machine evidence to /tmp, never the source tree or docs."""
 
-    path = Path(value) if value else Path("/tmp") / "yolomux-check-runs" / f"check-{time.time_ns()}-{os.getpid()}.json"
+    path = Path(value) if value else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yolomux-test-{os.getpid()}-{os.getuid()}")) / "check" / f"check-{time.time_ns()}.json"
     _tmp_only_path(path, label="--performance-report")
     # Keep the caller-visible `/tmp/...` spelling on macOS, where resolving the path turns it
     # into `/private/tmp/...`; the resolved value above remains the security check.
@@ -1329,7 +1329,7 @@ def certification_evidence_dir(explicit: str | None = None) -> Path:
     evidence written by the containerized run is readable here without a second transport.
     """
 
-    path = Path(explicit) if explicit else Path("/tmp") / "yolomux-certification" / f"cert-{time.time_ns()}-{os.getpid()}"
+    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yolomux-test-{os.getpid()}-{os.getuid()}")) / "certification" / f"cert-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("certification evidence dir must be under /tmp")
     return path

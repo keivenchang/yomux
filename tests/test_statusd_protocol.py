@@ -56,13 +56,31 @@ def test_statusd_inventory_contract_accepts_bounded_identifiers_with_source_sign
     body = json.dumps({
         "inventory_generation": 3,
         "roster": ["a"],
-        "sessions": {"a": {"windows": 1, "panes": [{"target": "a:0.0", "cwd": "/repo"}], "source_signature": "abc123"}},
+        "sessions": {"a": {"windows": 1, "panes": [{"target": "a:0.0", "cwd": "/repo"}], "agents": [], "source_signature": "abc123"}},
     }).encode("utf-8")
 
     decoded = validate_inventory(metadata, body)
 
     assert decoded["inventory_generation"] == 3
     assert decoded["sessions"]["a"]["source_signature"] == "abc123"
+
+
+def test_statusd_inventory_contract_accepts_bounded_opencode_identity():
+    metadata = {"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 3}
+    body = json.dumps({
+        "inventory_generation": 3,
+        "roster": ["a"],
+        "sessions": {"a": {
+            "windows": 1,
+            "panes": [],
+            "agents": [{"kind": "opencode", "pane": "%1", "session_id": "ses-a", "cwd": "/repo", "started_at": 12.5}],
+            "source_signature": "abc123",
+        }},
+    }).encode("utf-8")
+
+    decoded = validate_inventory(metadata, body)
+
+    assert decoded["sessions"]["a"]["agents"][0]["session_id"] == "ses-a"
 
 
 @pytest.mark.parametrize("metadata, body", [

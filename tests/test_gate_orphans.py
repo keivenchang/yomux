@@ -349,16 +349,16 @@ def test_preflight_reaps_exact_recorded_sidecar_after_its_launcher_dies(tmp_path
 def test_preflight_keeps_a_recorded_sidecar_with_a_live_client(tmp_path):
     """Launcher provenance never overrides a shared service's active lease."""
     _lease(tmp_path)
-    socket_path = tmp_path / "services" / "jobd.sock"
+    socket_path = tmp_path / "services" / "batchd.sock"
     _service_record(
         tmp_path,
-        service="jobd",
+        service="batchd",
         pid=600,
         socket_path=socket_path,
         launcher_pid=400,
         launcher_port=18991,
     )
-    table = _table([(600, 1, 600, 1.0, f"python3 -m yolomux_lib.infra.jobd --serve --socket {socket_path}")])
+    table = _table([(600, 1, 600, 1.0, f"python3 -m yolomux_lib.infra.batchd --serve --socket {socket_path}")])
     kills = []
 
     result = preflight_port(

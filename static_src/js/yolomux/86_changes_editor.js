@@ -2856,6 +2856,27 @@ function codexModelDefaultEffort(model) {
 function settingPatchForPath(path, value) {
   if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
+  if (path === 'appearance.global_font_size' && boolSetting('appearance.sync_font_sizes', true)) {
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: value,
+      editor_font_size: value,
+      preview_font_size: value,
+      file_explorer_font_size: value,
+      ui_font_size: value,
+    };
+  }
+  if (path === 'appearance.sync_font_sizes' && value === true) {
+    const size = preferenceValue('appearance.global_font_size');
+    patch.appearance = {
+      ...(patch.appearance || {}),
+      terminal_font_size: size,
+      editor_font_size: size,
+      preview_font_size: size,
+      file_explorer_font_size: size,
+      ui_font_size: size,
+    };
+  }
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
     if (defaultEffort) patch.yoagent = {...(patch.yoagent || {}), codex_effort: defaultEffort};

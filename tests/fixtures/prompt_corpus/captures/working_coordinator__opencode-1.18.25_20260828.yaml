@@ -1,0 +1,70 @@
+agent: opencode
+capture_date: '2026-08-28'
+capture_mode: converted_real_text_capture
+case_name: working_coordinator
+client_name: OpenCode
+client_version: 1.18.25
+client_version_slug: opencode-1.18.25
+cursor:
+  character: ' '
+  current_command: opencode
+  pane_in_mode: false
+  x: 5
+  y: 46
+expected_promoted:
+  agent_kind: opencode
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: Working
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+fixture_id: working_coordinator__opencode-1.18.25_20260828
+fixture_scenario: working_coordinator
+height: 53
+id: working_coordinator__opencode-1.18.25_20260828
+operations: []
+raw_capture: |
+  <redacted-history>
+  <redacted-history>
+  ┃
+  <redacted-history>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⬝⬝■■■■■■  esc interrupt                                  │
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+source: read-only real OpenCode 1.18.25 capture from the authorized coordinator pane
+source_target: coordinator-pane
+styled_capture: |
+  <redacted-history>
+  <redacted-history>
+  ┃
+  <redacted-history>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⬝⬝■■■■■■  esc interrupt                                  │
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+visible_text: |
+  <redacted-history>
+  <redacted-history>
+  ┃
+  <redacted-history>
+  ╭────────────────────────────────────────────────────────────╮
+  │ <redacted-composer>                                        │
+  ╰────────────────────────────────────────────────────────────╯
+  ┃  ⬝⬝■■■■■■  esc interrupt                                  │
+  ┃  Build · <model> | <usage>
+  ┃                                                               <provider>
+  ╹<separator>
+   <usage>  ctrl+p commands
+width: 106

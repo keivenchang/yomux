@@ -1,7 +1,8 @@
-"""Compatibility alias for :mod:`yolomux_lib.infra.jobd`."""
+"""Canonical import and executable entry point for YOLOmux's batch broker."""
 
-from .infra import jobd as _implementation
 import sys
+
+from .infra import batchd as _implementation
 
 sys.modules[__name__] = _implementation
 

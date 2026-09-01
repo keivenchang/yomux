@@ -283,7 +283,7 @@ def _dispatch_route_handler(request: Any, parsed: Any, route: Route) -> None:
     required_role = route_required_role(route, request, parsed)
     if required_role is not None and not request.require_auth(required_role):
         return
-    if route.group == "filesystem" and request.auth_readonly():
+    if route.group in {"filesystem", "batch"} and request.auth_readonly():
         request.reject_forbidden(request.auth_identity(), "admin")
         return
     route.handler(request, parsed, route)
@@ -341,7 +341,7 @@ def get_healthz(request: Any, parsed: Any, route: Route) -> None:
     """Answer the process supervisor's unauthenticated liveness probe from the HTTP listener alone.
 
     boot.sh polls this while restarting, before any operator cookie exists. It must never consult
-    tmux, jobd, watchd, statusd, the filesystem, or any local service: this is liveness for the
+    tmux, batchd, watchd, statusd, the filesystem, or any local service: this is liveness for the
     listener, not readiness for the system. Reporting anything richer would both leak system state
     to an unauthenticated caller and make an unrelated subsystem able to fail a restart.
     """
@@ -1168,6 +1168,17 @@ def get_fs_search(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_search(parsed)
 
 
+def get_fs_search_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_indexed_search(parsed)
+
+
+def get_batch_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_batch_search(parsed)
+    request.write_json({"state": "accepted"})
+
+
 def get_fs_index_status(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_fs_index_status(parsed)
@@ -1681,6 +1692,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/fast/list", "readonly", get_fs_fast_list, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/list", "readonly", get_fs_list, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/search", "readonly", get_fs_search, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/search-stream", "readonly", get_fs_search_stream, protocol=RESPONSE_SSE, group="filesystem"),
     Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/read", "readonly", get_fs_read, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),
@@ -1688,11 +1700,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/git-history", "readonly", get_fs_git_history, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/git-commit", "readonly", get_fs_git_commit, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/blame", "readonly", get_blame, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/raw", "readonly", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem"),
-    Route("GET", "/api/fs/zip", "readonly", get_fs_zip, protocol=RESPONSE_BINARY, group="filesystem"),
-    Route("GET", "/api/fs/count", "readonly", get_fs_count, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, protocol=RESPONSE_BINARY, group="filesystem"),
     Route("POST", "/api/fs/batch", "admin", post_fs_batch, protocol=RESPONSE_JSON_BATCH, body_limit=64 * 1024, group="filesystem"),
     Route("POST", "/api/fs/resolve-file-candidates", "readonly", post_fs_resolve_file_candidates, protocol=RESPONSE_JSON, body_limit=32 * 1024, group="filesystem"),
     Route("POST", "/api/fs/write", "admin", post_fs_write, protocol=RESPONSE_JSON, group="filesystem"),
@@ -1700,6 +1708,14 @@ FILESYSTEM_ROUTES = (
     Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/rename", "admin", post_fs_rename, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/mkdir", "admin", post_fs_mkdir, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
+)
+
+BATCH_ROUTES = (
+    Route("GET", "/api/batch/search", "readonly", get_batch_search, protocol=RESPONSE_JSON, group="batch"),
+    Route("GET", "/api/batch/blame", "admin", get_blame, protocol=RESPONSE_JSON, group="batch"),
+    Route("GET", "/api/batch/zip", "admin", get_fs_zip, protocol=RESPONSE_BINARY, group="batch"),
+    Route("GET", "/api/batch/count", "admin", get_fs_count, protocol=RESPONSE_JSON, group="batch"),
+    Route("GET", "/api/batch/html-preview", "admin", get_fs_html_preview, protocol=RESPONSE_BINARY, group="batch"),
 )
 
 TMUX_ROUTES = (
@@ -1723,6 +1739,7 @@ ROUTE_GROUPS = {
     "yoagent": YOAGENT_ROUTES,
     "chat": CHAT_ROUTES,
     "filesystem": FILESYSTEM_ROUTES,
+    "batch": BATCH_ROUTES,
     "tmux": TMUX_ROUTES,
 }
 ALL_ROUTES = tuple(route for routes in ROUTE_GROUPS.values() for route in routes)

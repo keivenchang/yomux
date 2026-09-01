@@ -92,7 +92,7 @@ from .local_services.runtime import local_service_failure_text
 
 # The frozen inventory. This is the one place the six ids and their order are
 # declared; `tests/test_gate_panels.py:12,227` pins the same six for the panel.
-LOCAL_SERVICE_INVENTORY: tuple[str, ...] = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
+LOCAL_SERVICE_INVENTORY: tuple[str, ...] = ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
 
 # Bumping this is a browser-visible change: `85_debug_panel.js` guards the whole
 # Local-services render on this exact number. M3 preserved 1 deliberately; M8 moved it to 2

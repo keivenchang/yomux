@@ -44,7 +44,7 @@ from tests.gate_harness import wait_for_fixture_client_event_demand
 
 T = TypeVar("T")
 E2E_EVIDENCE_ROOT_ENV = "YOLOMUX_E2E_EVIDENCE_DIR"
-DEFAULT_E2E_EVIDENCE_ROOT = Path("/tmp/yolomux-e2e-browser-evidence")
+DEFAULT_E2E_EVIDENCE_ROOT = Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yolomux-test-e2e")) / "evidence"
 DEFAULT_BROWSER_BOUND_SECONDS = 20.0
 FINDER_PANEL_SELECTOR = "#panel-__finder__"
 DIFFER_PANEL_SELECTOR = "#panel-__differ__"

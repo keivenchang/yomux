@@ -95,7 +95,7 @@ class GroupOverloadWatchdog:
     grace_seconds: float = GROUP_TERMINATION_GRACE_SECONDS
     force_seconds: float = GROUP_TERMINATION_FORCE_SECONDS
     max_tracked_children: int = WATCHDOG_MAX_TRACKED_CHILDREN
-    evidence_dir: Path = Path("/tmp")
+    evidence_dir: Path = Path("/tmp") / f"yolomux-server-{os.getuid()}" / "shared" / "evidence"
     table_reader: Callable[[], dict[int, ProcessTableEntry]] = bounded_process_table
     # The two live dimension probes behind a group-scoped destructive decision,
     # injectable for exactly the reason `kill` and `table_reader` are: whoever

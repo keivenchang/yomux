@@ -544,9 +544,17 @@ test('session token identity groups tmux panes without merging background agents
   const api = loadNamespace();
   assert.equal(api.canonicalSessionKey('yo7771-b|0|codex'), 'yo7771-b');
   assert.equal(api.canonicalSessionKey('yo7771-b|1|claude'), 'yo7771-b');
+  assert.equal(api.canonicalSessionKey('yo7771-b|2|opencode'), 'yo7771-b');
   const background = 'claude-bg:project:123456789abc:deadbeef';
   assert.equal(api.canonicalSessionKey(background), background);
   assert.equal(api.canonicalAgentLabel('yo7771-b|1|claude'), 'yo7771-b');
+});
+
+test('session token chart consolidates OpenCode panes by the canonical tmux session key', () => {
+  const api = loadNamespace();
+  assert.equal(api.canonicalSessionKey('workspace|0|%17|opencode'), 'workspace');
+  assert.equal(api.canonicalSessionKey('workspace|1|%18|opencode'), 'workspace');
+  assert.equal(api.canonicalAgentLabel('workspace|0|%17|opencode'), 'workspace');
 });
 
 test('normalizes saved choices and builds one exact current request', () => {

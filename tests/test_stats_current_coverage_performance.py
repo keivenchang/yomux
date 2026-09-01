@@ -267,7 +267,7 @@ def test_normalized_gap_build_indexes_each_retained_fact_once(monkeypatch):
         storage.CoverageEpoch(
             "service_load", source, f"epoch:{index}", index * 2, index * 2 + 1, 1, 42,
         )
-        for source in ("approvald", "indexd", "jobd", "statsd", "statusd", "watchd")
+        for source in ("approvald", "indexd", "batchd", "statsd", "statusd", "watchd")
         for index in range(64)
     )
     unavailable = CountingTuple(
@@ -275,7 +275,7 @@ def test_normalized_gap_build_indexes_each_retained_fact_once(monkeypatch):
             "service_load", source, f"miss:{index}", index * 2 + 1, index * 2 + 2,
             1, "scheduler_deadline_missed", 42,
         )
-        for source in ("approvald", "indexd", "jobd", "statsd", "statusd", "watchd")
+        for source in ("approvald", "indexd", "batchd", "statsd", "statusd", "watchd")
         for index in range(64)
     )
     snapshot = storage.StoreSnapshot(
@@ -411,7 +411,7 @@ def test_cached_multi_source_gaps_match_full_build_after_live_tail_extensions(
     coverage = (
         storage.CoverageEpoch("service_load", "statsd", "statsd:old", 0, 20, 1, 42),
         storage.CoverageEpoch("service_load", "statsd", "statsd:live", 40, 80, 1, 42),
-        storage.CoverageEpoch("service_load", "jobd", "jobd:live", 0, 70, 1, 42),
+        storage.CoverageEpoch("service_load", "batchd", "batchd:live", 0, 70, 1, 42),
         storage.CoverageEpoch("cpu", "host", "cpu:live", 0, 90, 1, 42),
     )
     unavailable = (
@@ -420,7 +420,7 @@ def test_cached_multi_source_gaps_match_full_build_after_live_tail_extensions(
             "scheduler_deadline_missed", 42,
         ),
         storage.UnavailableSpan(
-            "service_load", "jobd", "jobd:miss", 72, 74, 1,
+            "service_load", "batchd", "batchd:miss", 72, 74, 1,
             "scheduler_deadline_missed", 42,
         ),
         storage.UnavailableSpan(
@@ -485,7 +485,7 @@ def test_cached_multi_source_gaps_match_full_build_after_live_tail_extensions(
         for gap in second
     )
     assert not any(
-        gap.source_id == "jobd"
+        gap.source_id == "batchd"
         and gap.reason == "coverage_gap"
         and gap.end == 101
         for gap in second

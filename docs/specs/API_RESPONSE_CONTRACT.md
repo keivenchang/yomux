@@ -9,10 +9,10 @@ Six distinct user-visible failures on 2026-08-02 share one root: **a response th
 | Incident | What the API returned | What was true |
 |---|---|---|
 | Differ hung on `loading…` forever | `200 OK` carrying `refreshing_elsewhere: true` | not ready; still refreshing elsewhere |
-| `/api/session-files` while `jobd` was a zombie | `202 QUEUED` | the job could never be scheduled |
+| `/api/session-files` while `batchd` was a zombie | `202 QUEUED` | the job could never be scheduled |
 | 24h stats repeat selection | bare `409` with no body the browser could read | a repair was required and possible |
 | `/api/auto-approve` under lock contention | bare `503` | a valid retained snapshot existed |
-| jobd transport failure | `FileNotFoundError` traceback every 5-8s, forever | service dead, no terminal state |
+| batchd transport failure | `FileNotFoundError` traceback every 5-8s, forever | service dead, no terminal state |
 | terminal file references | 14 `client_failure` records at error severity | speculative guesses that were never files |
 
 The pattern in one line: **success codes carrying failure, failure codes carrying no diagnosis, and no identifier connecting either end.**
@@ -28,11 +28,11 @@ Every JSON API response — success or failure — is exactly this shape:
   "data":     { },
   "progress": { "phase": "scanning", "done": 41, "total": 120, "eta_ms": 900 },
   "error":    {
-    "code":      "jobd_unavailable",
+    "code":      "batchd_unavailable",
     "message":   "Job broker is not running.",
     "origin":    "server:local_services.registry",
     "retryable": false,
-    "detail":    { "service": "jobd", "diagnostic": "process_defunct" }
+    "detail":    { "service": "batchd", "diagnostic": "process_defunct" }
   }
 }
 ```
@@ -55,7 +55,7 @@ Every handler returns within **250 ms** with one of the three states. A handler 
 
 Return `queued` **only after confirming the executor can actually run the work now** — the service is live and serving, the queue accepts, capacity exists. If it cannot, return `failed` with a typed code.
 
-> `/api/session-files?force=1` returned `202 QUEUED` while `jobd` was a defunct process holding no socket. The browser waited for a completion that could never be published. **A queue acknowledgement is a promise; an unkeepable one is worse than a refusal**, because a refusal is actionable and a false promise is a hang.
+> `/api/session-files?force=1` returned `202 QUEUED` while `batchd` was a defunct process holding no socket. The browser waited for a completion that could never be published. **A queue acknowledgement is a promise; an unkeepable one is worse than a refusal**, because a refusal is actionable and a false promise is a hang.
 
 ### 3. Every `queued` reaches a terminal state, on every surface
 

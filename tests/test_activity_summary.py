@@ -120,6 +120,69 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     assert signature["files"][0][2] == "app.py"
 
 
+def test_recent_agents_uses_shared_status_for_transcriptless_opencode():
+    info = SessionInfo(
+        session="open",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo("open", "opencode", 1, "open:0.0", "opencode", "/repo", "running", "ses", None, None, model="model")],
+    )
+    rows = build_recent_agents_payload(
+        {"open": info}, ["open"],
+        agent_states_by_identity={("open", "open:0.0", "opencode"): {"key": "working", "text": "agent is working"}},
+    )
+    assert rows[0]["state"] == "working"
+    assert rows[0]["running"] is True
+
+
+def test_recent_agents_uses_shared_status_for_transcriptless_opencode():
+    info = SessionInfo(
+        session="open",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo("open", "opencode", 1, "open:0.0", "opencode", "/repo", None, "ses", None, None, model="model")],
+    )
+    rows = build_recent_agents_payload(
+        {"open": info}, ["open"],
+        agent_states_by_identity={("open", "open:0.0", "opencode"): {"key": "working", "text": "agent is working"}},
+    )
+    assert rows[0]["state"] == "working"
+    assert rows[0]["running"] is True
+
+
+def test_recent_agents_preserves_opencode_question_state_from_shared_status():
+    info = SessionInfo(
+        session="open",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo("open", "opencode", 1, "open:0.0", "opencode", "/repo", None, "ses", None, None, model="model")],
+    )
+    rows = build_recent_agents_payload(
+        {"open": info}, ["open"],
+        agent_states_by_identity={("open", "open:0.0", "opencode"): {"key": "needs-input", "text": "Which backend?"}},
+    )
+
+    assert rows[0]["state"] == "needs-input"
+    assert rows[0]["running"] is False
+
+
+def test_session_summary_preserves_opencode_question_state_from_shared_status():
+    info = SessionInfo(
+        session="open",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo("open", "opencode", 1, "open:0.0", "opencode", "/repo", None, "ses", None, None, model="model")],
+    )
+    summary = build_session_activity_summary(
+        info,
+        {},
+        {"files": []},
+        agent_state={"key": "needs-input", "text": "Which backend?"},
+    )
+
+    assert summary["state"]["key"] == "needs-input"
+
+
 def test_session_activity_summary_only_calls_stale_sessions_idle(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

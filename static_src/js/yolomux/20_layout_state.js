@@ -2515,9 +2515,10 @@ const stateDefs = {
   'ready-review': {hasShort: true, priority: 5, attention: false},
   [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
   [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  unavailable: {hasShort: true, priority: 7, attention: false},
   done: {hasShort: false, priority: 8, attention: false},
 };
-const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
+const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput, STATE_KEY.blocked]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
 const AGENT_WINDOW_APPROVAL_STATES = new Set([STATE_KEY.approval, STATE_KEY.needsApproval]);
 
@@ -2849,6 +2850,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, auto)
     : null;
+  const agentWindowRows = Array.isArray(agentWindowSummary?.agents) ? agentWindowSummary.agents : [];
+  const hasBlockedAgentWindow = agentWindowRows.some(agent => agentWindowStateKey(agent?.state) === STATE_KEY.blocked);
   const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
   const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
     ? agentWindowStatusToneForItem(agentWindowSummary?.item)
@@ -2904,6 +2907,19 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       attentionAgent: agent,
       attentionAgentItem: agentWindowSummary.item,
     });
+  }
+  if (agentWindowTone === 'blocked' || hasBlockedAgentWindow) {
+    const agent = agentWindowSummary.agent || agentWindowRows.find(item => agentWindowStateKey(item?.state) === STATE_KEY.blocked);
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || agent?.error || '').trim() || stateReason('agentErrorBlocker');
+    return stateValue(STATE_KEY.blocked, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: STATE_KEY.blocked,
+      blockedAgent: agent,
+      blockedAgentItem: agentWindowSummary.item,
+    });
+  }
+  if (agentWindowTone === 'unavailable') {
+    return stateValue('unavailable', t('common.notAvailable'), {agentWindowState: 'unavailable'});
   }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
@@ -3034,6 +3050,22 @@ function tmuxSignalWindows() {
 
 const tmuxSignalAgentCommands = new Set(['claude', 'codex']);
 
+function tmuxSignalAuthoritativeAgentKind(pane) {
+  const session = tmuxSignalPaneSession(pane);
+  const target = tmuxSignalPaneTarget(pane);
+  if (!session || !target) return '';
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
+    : autoApproveStates.get(session)?.agent_windows;
+  if (!Array.isArray(rows)) return '';
+  const matches = rows.filter(row => (
+    agentWindowKind(row?.kind) === 'opencode'
+      && String(row?.pane_target || row?.pane || '').trim() === target
+  ));
+  return matches.length === 1 ? 'opencode' : '';
+}
+
 function tmuxSignalWindowSession(windowRecord) {
   return String(windowRecord?.session || windowRecord?.session_name || '').trim();
 }
@@ -3069,7 +3101,7 @@ function tmuxSignalPaneCommand(pane) {
 }
 
 function tmuxSignalPaneIsAgent(pane) {
-  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane));
+  return tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || Boolean(tmuxSignalAuthoritativeAgentKind(pane));
 }
 
 function tmuxSignalWindowAgentPanes(windowRecord) {
@@ -3229,9 +3261,11 @@ function tmuxSignalAgentStateForSession(session) {
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
   }
-  const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
+  const runningPane = livePanes.find(pane => (
+    tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) || tmuxSignalAuthoritativeAgentKind(pane)
+  ) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
-    const command = tmuxSignalPaneCommand(runningPane);
+    const command = tmuxSignalPaneCommand(runningPane) || tmuxSignalAuthoritativeAgentKind(runningPane);
     const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
     return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
@@ -3430,8 +3464,8 @@ function globalActivityCounts() {
     const promptSignature = promptAttentionPayloadSignature(payload);
     const promptCleared = promptAttentionIsCleared(session, promptSignature, payload);
     if (key === STATE_KEY.working && !runningSignalSessions.has(session)) running += 1;
-    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
     else if (key === STATE_KEY.blocked) blocked += 1;
+    else if (ATTENTION_SCREEN_KEYS.has(promptAttentionKey) && !promptCleared && !signalAttentionSessions.has(session)) ask += 1;
   }
   const fallbackTotal = [...countedSessions].filter(isTmuxSession).length;
   const total = countedSignalWindows.size
@@ -3466,6 +3500,7 @@ function globalActivityCountsFromAgentWindows() {
   let running = 0;
   let ask = 0;
   let blocked = 0;
+  let unavailable = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
@@ -3482,11 +3517,12 @@ function globalActivityCountsFromAgentWindows() {
       if (classification.activity === STATE_KEY.working) running += 1;
       else if (classification.activity === 'ask') ask += 1;
       else if (classification.activity === 'blocked') blocked += 1;
+      else if (classification.activity === 'unavailable') unavailable += 1;
     }
   }
   if (!total) return null;
   const attention = ask + blocked;
-  return {running, ask, blocked, attention, idle: Math.max(0, total - running - attention), total};
+  return {running, ask, blocked, unavailable, attention, idle: Math.max(0, total - running - attention - unavailable), total};
 }
 
 function globalActivityStatusLineHtml() {
@@ -3495,7 +3531,8 @@ function globalActivityStatusLineHtml() {
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
+  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -3534,7 +3571,10 @@ function syncTopbarActivityPlacement() {
 }
 
 function topbarActivityVisibleCount(counts = {}) {
-  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
+  return Math.max(0, Number(counts.running) || 0)
+    + Math.max(0, Number(counts.ask) || 0)
+    + Math.max(0, Number(counts.blocked) || 0)
+    + Math.max(0, Number(counts.unavailable) || 0);
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
@@ -3805,6 +3845,8 @@ function statusIndicatorToneClasses(tone, options = {}) {
   if (tone === STATE_KEY.working) return ['status-indicator--working', pulseEnabled ? 'heartbeat-pulse' : ''];
   if (tone === 'cooldown') return ['status-indicator--cooldown', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
   if (tone === 'attention') return ['status-indicator--attention', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'blocked') return ['status-indicator--blocked', pulseEnabled ? 'heartbeat-pulse' : '', pulseEnabled ? 'attention-pulse' : ''];
+  if (tone === 'unavailable') return ['status-indicator--blocked'];
   if (tone === 'active') return ['status-indicator--active'];
   if (tone === 'settled') return ['status-indicator--settled'];
   if (tone === STATE_KEY.idle) return ['status-indicator--idle'];
@@ -3812,7 +3854,7 @@ function statusIndicatorToneClasses(tone, options = {}) {
 }
 
 function statusIndicatorToneStyle(tone, options = {}) {
-  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
+  return options.pulse !== false && statusPulseAnimationEnabled() && [STATE_KEY.working, 'active', 'attention', 'blocked', 'cooldown'].includes(String(tone || '')) ? ` style="${attentionAnimationStyle()}"` : '';
 }
 
 function statusIndicatorExtractOptions(classes) {
@@ -4634,6 +4676,20 @@ function fileQuickOpenPathQuery(query = commandPaletteState.query) {
   return {active: true, directory: text.slice(0, slash) || '/', filter: text.slice(slash + 1)};
 }
 
+function fileQuickOpenPathDirectory(pathQuery) {
+  return normalizeDirectoryPath(expandUserPath(pathQuery?.directory || '/'));
+}
+
+function fileQuickOpenPathEntries(entries, directory) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
+    .map(entry => ({
+      ...entry,
+      path: entry.path || joinDirectoryPath(directory, entry.name || ''),
+      relative_path: entry.relative_path || entry.name || '',
+    }));
+}
+
 function joinDirectoryPath(directory, name) {
   if (!directory || directory === '/') return `/${name}`;
   if (directory === '~') return `~/${name}`;
@@ -4718,9 +4774,52 @@ function fileQuickOpenItem(path, options = {}) {
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} ${t('editor.mode.split')}`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
+    quickOpenHistory: options.quickOpenHistory === true,
+    staleSearchQuery: String(options.staleSearchQuery || ''),
+    staleSearchItem: options.staleSearchItem === true,
+    disabled: options.staleSearchItem === true,
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
     splitRun: isDir ? null : () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
   };
+}
+
+function rememberQuickOpenFile(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized || normalized === '/') return;
+  const index = quickOpenFileHistory.indexOf(normalized);
+  if (index >= 0) quickOpenFileHistory.splice(index, 1);
+  quickOpenFileHistory.unshift(normalized);
+  quickOpenFileOpenedAt.set(normalized, Date.now() / 1000);
+  if (quickOpenFileHistory.length > quickOpenFileHistoryLimit) quickOpenFileHistory.length = quickOpenFileHistoryLimit;
+  for (const rememberedPath of quickOpenFileOpenedAt.keys()) {
+    if (!quickOpenFileHistory.includes(rememberedPath)) quickOpenFileOpenedAt.delete(rememberedPath);
+  }
+}
+
+function quickOpenFileHistoryItems() {
+  return quickOpenFileHistory
+    .filter(path => !commandPaletteFilePathKnownMissing(path))
+    .map((path, index) => fileQuickOpenItem(path, {
+      group: t('palette.group.recent'),
+      sortBonus: quickOpenFileHistoryLimit - index,
+      mtime: quickOpenFileOpenedAt.get(path) || 0,
+      quickOpenHistory: true,
+    }));
+}
+
+function quickOpenRecentOpenedAtText(timestamp) {
+  return localizedDateTimeFormat(timestamp, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+}
+
+function quickOpenOpenTabPaths() {
+  return new Set(Array.from(fileState.keys()).filter(path => !commandPaletteFilePathKnownMissing(path)));
+}
+
+function quickOpenWorkingDirectory() {
+  const target = currentSessionActionTarget();
+  return target && isTmuxSession(target) && ['claude', 'codex'].includes(sessionAgentKind(target))
+    ? activeTmuxDirectoryPath(target)
+    : '';
 }
 
 function recentFileQuickOpenItems() {
@@ -4760,7 +4859,7 @@ function fileQuickOpenOpenFolderItem() {
   let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
-    const match = fileQuickOpenState.candidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    const match = fileQuickOpenState.candidates.find(entry => entry.staleSearchItem !== true && entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
     if (match?.path) target = match.path;
   }
   if (!target) return null;
@@ -4806,7 +4905,8 @@ function fileQuickOpenItems() {
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
-  for (const file of fileQuickOpenState.candidates) {
+  quickOpenFileHistoryItems().forEach(add);
+  for (const file of dedupeFileSearchResults(fileQuickOpenState.candidates)) {
     const path = file.path || '';
     if (!path) continue;
     if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
@@ -4823,6 +4923,8 @@ function fileQuickOpenItems() {
       group: externalIndexed ? t('common.indexedPath', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
+      staleSearchQuery: file.staleSearchQuery || '',
+      staleSearchItem: file.staleSearchItem === true,
       imageIndex,
       mtime: file.mtime || 0,
       mtimeNs: file.mtime_ns || 0,
@@ -4854,6 +4956,14 @@ function fileQuickOpenItems() {
   return items.map(item => ({...item, category: 'file'}));
 }
 
+function fileQuickOpenEmptyItems() {
+  return quickOpenFileHistoryItems().map(item => ({
+    ...item,
+    detail: `${item.detail} · ${quickOpenRecentOpenedAtText(item.mtime)}`,
+    searchFields: [...item.searchFields, quickOpenRecentOpenedAtText(item.mtime)],
+  }));
+}
+
 function commandPaletteFilePath(item) {
   return item?.path || item?.searchFields?.[1] || fileItemPath(item?.targetItem || '') || item?.detail || item?.label || '';
 }
@@ -4868,6 +4978,8 @@ function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = comm
   const parts = fileQuickOpenQueryParts(rawQuery);
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
   if (parts.symbolMode || fileQuickOpenPathQuery(rawQuery).active) return fileQuickOpenItems(); // `@` / path = files only
+  if (mode === 'files' && !String(rawQuery || '').trim()
+    && !fileQuickOpenState.error && !fileQuickOpenState.loading && !fileQuickOpenState.indexWarming) return fileQuickOpenEmptyItems();
   // Cmd-P is a file chooser, not a broad command search.  Keeping its candidate
   // source file-only means an exact filename cannot be displaced by contextual
   // FILE ACTIONS rows. Shift-Cmd-P remains the mixed command/pane surface.
@@ -4884,7 +4996,22 @@ function commandPaletteItems() {
 
 function commandPaletteRankItems(items, query, options = {}) {
   const ranked = (items || [])
-    .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query, options), sortIndex}))
+    .map((item, sortIndex) => {
+      let score = item.staleSearchItem === true
+        ? Number.NEGATIVE_INFINITY
+        : commandPaletteItemScore(item, query, options);
+      // Keep the last answer visible while a replacement query is in flight. It is explicitly
+      // demoted and remains non-selectable only if the normal result list has current matches.
+      if (!Number.isFinite(score) && item.staleSearchQuery && (fileQuickOpenState.loading || fileQuickOpenState.retainedSearchQuery)) {
+        const staleScore = commandPaletteItemScore(
+          {...item, staleSearchItem: false, staleSearchQuery: ''},
+          item.staleSearchQuery,
+          options,
+        );
+        if (Number.isFinite(staleScore)) score = staleScore - 1e6;
+      }
+      return {...item, score, sortIndex, disabled: item.staleSearchItem === true || item.disabled === true};
+    })
     .filter(item => Number.isFinite(item.score))
     .sort((left, right) => query
       ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
@@ -5004,10 +5131,17 @@ function commandPaletteRepoAffinityBonus(item, options = {}) {
 
 function commandPaletteItemScore(item, query, options = {}) {
   if (item.disabled) return 0;
+  if (item.staleSearchItem === true) return Number.NEGATIVE_INFINITY;
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = commandPaletteDomainPrior(item, options)
+  const path = normalizeDirectoryPath(commandPaletteFilePath(item));
+  const openTabBonus = item?.category === 'file' && quickOpenOpenTabPaths().has(path) ? 1000000 : 0;
+  const historyBonus = item?.category === 'file' && quickOpenFileHistory.includes(path) ? 500000 : 0;
+  const workingPath = quickOpenWorkingDirectory();
+  const workingPathBonus = item?.category === 'file' && workingPath && pathIsInsideDirectory(path, workingPath) ? 100000 : 0;
+  const bonus = openTabBonus + historyBonus + workingPathBonus
+    + commandPaletteDomainPrior(item, options)
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
     + commandPalettePaneExactIdentifierBonus(item, query)
@@ -5188,6 +5322,11 @@ function ensureCommandPalette() {
   input.addEventListener('input', () => {
     commandPaletteState.query = input.value || '';
     commandPaletteState.index = 0;
+    // Retire the previous query before repainting or waiting through the debounce interval. The
+    // requestId remains the correctness fence, while AbortController stops irrelevant network work.
+    abortFileQuickOpenSearch();
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.retainedSearchQuery = '';
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -5229,13 +5368,15 @@ function ensureCommandPalette() {
   return node;
 }
 
-function renderCommandPaletteResults() {
+function renderCommandPaletteResults(options = {}) {
   const node = ensureCommandPalette();
   const dialog = node.querySelector('.command-palette-dialog');
   const input = node.querySelector('.command-palette-input');
   const status = node.querySelector('.command-palette-status');
   const results = node.querySelector('.command-palette-results');
   const query = commandPaletteSearchQuery();
+  const preserveScroll = options.preserveScroll === true;
+  const scrollTop = results?.scrollTop || 0;
   dialog?.setAttribute('aria-label', commandPaletteLabel());
   if (input) {
     input.placeholder = commandPalettePlaceholder();
@@ -5252,14 +5393,15 @@ function renderCommandPaletteResults() {
     status.classList.toggle('stale', Boolean(commandPaletteFreshnessText()));
     status.innerHTML = html;
   }
-  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, fileQuickOpenResultLimit);
   commandPaletteState.index = Math.min(commandPaletteState.index, Math.max(0, commandPaletteState.items.length - 1));
   if (!commandPaletteState.items.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
   results.innerHTML = commandPaletteResultsHtml(commandPaletteState.items, query);
-  results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
+  if (preserveScroll) results.scrollTop = scrollTop;
+  else results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
 function openCommandPalette(options = {}) {
@@ -5280,9 +5422,8 @@ function openCommandPalette(options = {}) {
   fileQuickOpenState.loading = false;
   fileQuickOpenState.freshness = null;
   fileQuickOpenState.error = '';
-  // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
-  // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
-  if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
+  // An empty Cmd-P is a local recent-files view, not a search. The first non-empty keystroke
+  // starts the indexed/path search through the input handler.
   renderCommandPaletteResults();
   input.focus({preventScroll: true});
 }
@@ -5344,6 +5485,16 @@ function abortFileQuickOpenSearch() {
   resetFileQuickOpenDeltaCursors('');
 }
 
+function fileQuickOpenRetainedCandidates(candidates, query) {
+  const retainedQuery = String(query || '');
+  if (!retainedQuery) return [];
+  return (Array.isArray(candidates) ? candidates : []).map(file => ({
+    ...file,
+    staleSearchQuery: retainedQuery,
+    staleSearchItem: true,
+  }));
+}
+
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
 // overlap), or same basename+size (content-mirror copies kept in two repos). Genuinely-different
 // same-name files (different size) both survive; unknown-size hits dedupe by path/realpath only.
@@ -5393,53 +5544,222 @@ function fileQuickOpenWorstFreshness(records) {
       || ((right.ageSeconds === null ? -1 : right.ageSeconds) - (left.ageSeconds === null ? -1 : left.ageSeconds)))[0] || null;
 }
 
+// The indexed-search endpoint is an SSE response. Keep framing state between network reads because a
+// browser can split an event anywhere, including in the middle of a UTF-8-decoded line or JSON value.
+// The server currently sends one JSON object per event, but standard SSE data-line joining keeps this
+// parser correct if a future payload is wrapped across multiple data lines.
+function createFileQuickOpenSseParser(onEvent) {
+  let buffer = '';
+  let eventName = '';
+  let dataLines = [];
+
+  const dispatch = () => {
+    if (!dataLines.length) {
+      eventName = '';
+      return;
+    }
+    const data = dataLines.join('\n');
+    const payload = JSON.parse(data);
+    onEvent(eventName || 'message', payload);
+    eventName = '';
+    dataLines = [];
+  };
+
+  const processLine = line => {
+    if (!line) {
+      dispatch();
+      return;
+    }
+    if (line.startsWith(':')) return;
+    const separator = line.indexOf(':');
+    const field = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
+    if (field === 'event') eventName = value;
+    else if (field === 'data') dataLines.push(value);
+  };
+
+  return {
+    feed(text) {
+      buffer += String(text || '');
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        let line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        processLine(line);
+      }
+    },
+    finish() {
+      if (buffer) processLine(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
+      buffer = '';
+      dispatch();
+    },
+  };
+}
+
+function fileQuickOpenSseStreamOptions(fetchOptions) {
+  return {
+    ...fetchOptions,
+    headers: {...(fetchOptions?.headers || {}), Accept: 'text/event-stream'},
+  };
+}
+
+function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
+  if (requestId !== fileQuickOpenState.requestId) return false;
+  const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot) || String(searchRoot || '');
+  const changes = (Array.isArray(files) ? files : [])
+    .filter(file => {
+      if (!file || typeof file !== 'object') return false;
+      if (!pathIsInsideDirectory(normalizeDirectoryPath(file.path || ''), normalizedRoot)) return false;
+      const query = commandPaletteSearchQuery();
+      const basename = String(file.name || basenameOf(file.path || ''));
+      const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
+      const segments = String(file.relative_path || '').split('/').filter(Boolean);
+      return [basename, stem, ...segments].some(value => Number.isFinite(fuzzySubsequenceScore(query, value)));
+    })
+    .map(file => ({...file, operation: 'upsert'}));
+  if (!changes.length) return true;
+  fileQuickOpenState.candidates = mergeFileQuickOpenChanges(
+    fileQuickOpenState.candidates,
+    changes,
+    normalizedRoot,
+  );
+  fileQuickOpenState.indexWarming = false;
+  renderCommandPaletteResults({preserveScroll: true});
+  return true;
+}
+
+function quickOpenStreamResultSummary(payload) {
+  return {
+    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    freshness: fileIndexFreshnessFromPayload(payload),
+  };
+}
+
+async function consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fetchOptions) {
+  const url = `/api/fs/search-stream?root=${encodeURIComponent(searchRoot)}`
+    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`;
+  const response = await apiFetch(url, fileQuickOpenSseStreamOptions(fetchOptions), {recordDebug: true});
+  if (!response.ok) {
+    const error = new Error(response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    return {legacyPayload: await response.json()};
+  }
+  const decoder = new TextDecoder();
+  const files = [];
+  let streamRoot = searchRoot;
+  let streamError = null;
+  let streamSummary = {};
+  let cancelled = false;
+  const cancelReader = () => {
+    cancelled = true;
+    Promise.resolve(reader.cancel?.()).catch(() => {});
+  };
+  fetchOptions?.signal?.addEventListener?.('abort', cancelReader, {once: true});
+  const parser = createFileQuickOpenSseParser((event, payload) => {
+    if (requestId !== fileQuickOpenState.requestId) return;
+    if (event === 'start') {
+      streamRoot = String(payload?.root || searchRoot);
+    } else if (event === 'chunk') {
+      const chunk = Array.isArray(payload?.files) ? payload.files : [];
+      files.push(...chunk);
+      applyFileQuickOpenSearchChunk(requestId, streamRoot, chunk);
+      streamSummary = quickOpenStreamResultSummary(payload);
+    } else if (event === 'error') {
+      streamError = new Error(String(payload?.error || payload?.reason || 'indexed search stream failed'));
+    }
+  });
+
+  while (true) {
+    const result = await reader.read();
+    if (cancelled) return {stale: true, root: streamRoot, files: []};
+    if (requestId !== fileQuickOpenState.requestId) {
+      cancelReader();
+      return {stale: true, root: streamRoot, files: []};
+    }
+    if (result.done) break;
+    parser.feed(decoder.decode(result.value, {stream: true}));
+  }
+  parser.feed(decoder.decode());
+  parser.finish();
+  fetchOptions?.signal?.removeEventListener?.('abort', cancelReader);
+  if (streamError) throw streamError;
+  return {ok: true, stream: true, root: streamRoot, searchRoot, files, ...streamSummary};
+}
+
+async function fileQuickOpenSearchRootResult(searchRoot, query, requestId, fetchOptions) {
+  const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
+  if (normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot)) {
+    const result = await consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fetchOptions);
+    if (!result.legacyPayload) return result;
+    return {ok: true, ...fileQuickOpenSearchPayloadResult(result.legacyPayload, searchRoot)};
+  }
+  const payload = await apiFetchJson(
+    `/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`,
+    fetchOptions,
+  );
+  return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
+}
+
+async function fetchQuickOpenPathDirectory(directory, fetchOptions) {
+  const entries = await fetchDirectory(directory, {user: true, enrich: false});
+  if (entries !== null) return entries;
+  const error = new Error(currentFileExplorerListError(directory) || t('common.searchFailed'));
+  error.status = 404;
+  throw error;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
-  const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
+  const pathQuery = fileQuickOpenPathQuery(query);
+  // Path mode temporarily stores its containing directory in `root`. Ordinary searches must always
+  // recompute the workspace root, or a later query after `/tmp/...` will search only `/tmp`.
+  const root = pathQuery.active ? (fileQuickOpenState.root || fileQuickOpenRootForSearch()) : fileQuickOpenRootForSearch();
   if (!root) return;
   const searchQuery = commandPaletteSearchQuery(query);
   const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
   const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
+  const previousSearchQuery = fileQuickOpenState.activeSearchQuery;
+  const previousCandidates = fileQuickOpenState.candidates;
+  const retainedCandidates = fileQuickOpenRetainedCandidates(previousCandidates, previousSearchQuery);
   abortFileQuickOpenSearch();
   fileQuickOpenState.candidateQueryIdentity = candidateQueryIdentity;
+  fileQuickOpenState.activeSearchQuery = searchQuery;
   const requestId = ++fileQuickOpenState.requestId;
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
-  // Rows retained across a refresh of the same query are still that query's answer, so they stay
-  // visible while the reread lands. Rows retained across a changed query are not its ranked answer.
-  if (candidateQueryIdentity !== previousCandidateQueryIdentity) fileQuickOpenState.candidates = [];
+  // Keep the previous answer visible while a changed query is waiting on the backend. It is marked
+  // with the query that produced it so ranking can demote it without treating it as a current hit.
+  if (candidateQueryIdentity !== previousCandidateQueryIdentity) {
+    fileQuickOpenState.candidates = retainedCandidates;
+    fileQuickOpenState.retainedSearchQuery = previousSearchQuery;
+  }
   // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
   // mutate this palette, and the roots/query it belonged to may have changed entirely.
   resetFileQuickOpenDeltaCursors(searchQuery);
   renderCommandPaletteResults();
   try {
-    const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`, fetchOptions);
+      // Path-mode queries share the existing direct-directory cache. The first query loads the
+      // parent once; subsequent keystrokes filter the same entries locally instead of rescanning a
+      // large directory for every intermediate prefix.
+      const directory = fileQuickOpenPathDirectory(pathQuery);
+      const entries = await fetchQuickOpenPathDirectory(directory, fetchOptions);
       if (requestId !== fileQuickOpenState.requestId) return;
-      fileQuickOpenState.root = payload.path || pathQuery.directory || root;
-      const filter = String(pathQuery.filter || '').toLowerCase();
-      fileQuickOpenState.candidates = (Array.isArray(payload.entries) ? payload.entries : [])
-        .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
-        .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
-        .map(entry => ({
-          name: entry.name || '',
-          path: joinDirectoryPath(payload.path || pathQuery.directory || '/', entry.name || ''),
-          relative_path: entry.name || '',
-          kind: entry.kind || 'file',
-          size: entry.size,
-          mtime: entry.mtime,
-        }));
+      fileQuickOpenState.root = directory;
+      fileQuickOpenState.candidates = fileQuickOpenPathEntries(entries, directory);
+      fileQuickOpenState.retainedSearchQuery = '';
     } else {
       const searchRoots = fileQuickOpenRootsForSearch(root, commandPaletteSearchQuery(query));
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
-          const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
-          const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
+          return await fileQuickOpenSearchRootResult(searchRoot, commandPaletteSearchQuery(query), requestId, fetchOptions);
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
@@ -5457,14 +5777,16 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
+      fileQuickOpenState.retainedSearchQuery = '';
       // A new or externally indexed root can take a moment to publish its first durable snapshot.
       // The backend explicitly marks that response as warming; it is not a completed empty search.
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
       // Stale rows stay in the list. What changes is that the palette now says they are stale.
       fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
-      // Seed one delta cursor per answering root so a search_progress signal can stream the crawl's
-      // newly-published matches into this list without re-issuing the whole query (steps 6-7).
-      seedFileQuickOpenDeltaCursors(successful, requestId);
+      // The stream has no cursor: it owns the complete indexed crawl for this request. Direct roots
+      // retain their existing cursor metadata for the later progress-signal repair path.
+      const cursorResults = successful.filter(result => result.stream !== true && result.cursor !== undefined);
+      seedFileQuickOpenDeltaCursors(cursorResults, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -5480,7 +5802,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     });
   } finally {
     if (requestId === fileQuickOpenState.requestId) {
-      fileQuickOpenState.abortController = null;
+      if (fileQuickOpenState.deltaRoots.size === 0) fileQuickOpenState.abortController = null;
       fileQuickOpenState.loading = false;
       renderCommandPaletteResults();
     }
@@ -5624,16 +5946,17 @@ function fileQuickOpenDeltasActive() {
 }
 
 // Read ONE bounded committed-delta page for a root through the same authenticated /api/fs/search
-// endpoint, appending `&cursor=`. Deltas deliberately do NOT share the snapshot's AbortController:
-// they outlive the initial fetch and are fenced by requestId inside ingest instead of by abort.
+// endpoint, appending `&cursor=`. The active query controller is also passed here so a replacement
+// query stops an irrelevant delta request; requestId remains the independent stale-result fence.
 async function fetchFileQuickOpenDeltaPage(deltaRoot) {
   const requestId = deltaRoot.requestId;
   const query = fileQuickOpenState.deltaQuery;
   const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
-  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+  const url = `/api/batch/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
     + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
     + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
-  const payload = await apiFetchJson(url);
+  const controller = fileQuickOpenState.abortController;
+  const payload = await apiFetchJson(url, controller ? {signal: controller.signal} : {});
   return ingestFileQuickOpenDeltaPayload(deltaRoot.normalizedRoot, requestId, payload);
 }
 

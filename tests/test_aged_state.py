@@ -105,7 +105,7 @@ def test_aged_state_finder_history_and_rpc_payloads_capture_real_boundaries(aged
 
     below_payload = json.loads(boundaries.paths[0].read_text(encoding="utf-8"))
     above_payload = json.loads(boundaries.paths[1].read_text(encoding="utf-8"))
-    below_size = len(encode_metadata(new_envelope("jobd", "submit", below_payload, timeout_seconds=0.5, trace_id="a" * 32)))
-    above_size = len(encode_metadata(new_envelope("jobd", "submit", above_payload, timeout_seconds=0.5, trace_id="a" * 32)))
+    below_size = len(encode_metadata(new_envelope("batchd", "submit", below_payload, timeout_seconds=0.5, trace_id="a" * 32)))
+    above_size = len(encode_metadata(new_envelope("batchd", "submit", above_payload, timeout_seconds=0.5, trace_id="a" * 32)))
     assert below_size == LOCAL_RPC_MAX_METADATA_BYTES - 1
     assert above_size == LOCAL_RPC_MAX_METADATA_BYTES + 1

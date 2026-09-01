@@ -539,7 +539,7 @@ def first_transition_timeline(bundle: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def retention_root(explicit: str | None = None) -> Path:
-    path = Path(explicit) if explicit else Path("/tmp") / "yolomux-defect2" / f"run-{time.time_ns()}"
+    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yolomux-test-defect2")) / "defect2" / f"run-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("defect2 retention root must be under /tmp")
     return path

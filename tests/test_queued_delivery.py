@@ -8,12 +8,12 @@ import pytest
 
 from yolomux_lib import atomic_file
 import yolomux_lib.observability.queued_delivery as queued_delivery_module
-from yolomux_lib.infra import jobd as jobd_module
+from yolomux_lib.infra import batchd as batchd_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryCompactionOwner
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yolomux_lib.observability.queued_delivery import compact_queued_delivery_journal
-from yolomux_lib.infra.state_services import JobdOperationFlight
+from yolomux_lib.infra.state_services import BatchedOperationFlight
 
 
 def accept_queued_operation(ledger, suffix, **overrides):
@@ -22,7 +22,7 @@ def accept_queued_operation(ledger, suffix, **overrides):
         "route": "GET /api/fs/list",
         "deadline_at": time.time() + 30,
         "progress": {"phase": "waiting_for_product"},
-        "producer": {"service": "jobd", "job_id": f"job-{suffix}"},
+        "producer": {"service": "batchd", "job_id": f"job-{suffix}"},
     }
     options.update(overrides)
     return ledger.accept_operation(**options)
@@ -104,12 +104,12 @@ def test_stale_flight_registration_cannot_overwrite_a_completed_producer(monkeyp
     path = tmp_path / "operations.json"
     ledger = QueuedDeliveryLedger(state_path=path)
     queued_producer = {
-        "service": "jobd",
+        "service": "batchd",
         "chain": [{"stage": "requested", "job_id": "job-race", "state": "queued"}],
     }
     receipt = accept_queued_operation(ledger, "producer-race", producer=queued_producer)
     operation_id = receipt["operation"]["id"]
-    flight = JobdOperationFlight(
+    flight = BatchedOperationFlight(
         lane="bulk",
         key="job-race|replace=0",
         deadline_at=time.time() + 30,
@@ -154,10 +154,10 @@ def test_stale_flight_registration_cannot_overwrite_a_completed_producer(monkeyp
 
 def test_multi_participant_producer_transition_is_one_atomic_journal_record(monkeypatch, tmp_path):
     path = tmp_path / "operations.json"; ledger = QueuedDeliveryLedger(state_path=path)
-    queued_producer = {"service": "jobd", "chain": [{"stage": "requested", "job_id": "job-batch", "state": "queued"}]}
+    queued_producer = {"service": "batchd", "chain": [{"stage": "requested", "job_id": "job-batch", "state": "queued"}]}
     receipts = [accept_queued_operation(ledger, suffix, producer=queued_producer) for suffix in ("producer-batch-a", "producer-batch-b")]
     operation_ids = tuple(receipt["operation"]["id"] for receipt in receipts)
-    completed_producer = {"service": "jobd", "chain": [{"stage": "requested", "job_id": "job-batch", "state": "completed"}]}
+    completed_producer = {"service": "batchd", "chain": [{"stage": "requested", "job_id": "job-batch", "state": "completed"}]}
     original_append = queued_delivery_module.append_fsync_text; operation_transition_appends = 0
 
     def fail_transition(target, text, mode=None):
@@ -444,15 +444,15 @@ def test_compaction_owner_submits_one_fresh_maintenance_job_and_clears_due(monke
         owner.stop()
 
 
-def test_jobd_registered_compactor_replays_current_file_under_the_worker_lock(tmp_path):
+def test_batchd_registered_compactor_replays_current_file_under_the_worker_lock(tmp_path):
     path = tmp_path / "operations.json"
     ledger = QueuedDeliveryLedger(state_path=path)
-    receipt = accept_queued_operation(ledger, "jobd-compact")
+    receipt = accept_queued_operation(ledger, "batchd-compact")
     operation_id = receipt["operation"]["id"]
     terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
     ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"])
 
-    result = json.loads(jobd_module.run_registered_task(
+    result = json.loads(batchd_module.run_registered_task(
         "queued_delivery_compact",
         json.dumps({"state_path": str(path)}).encode("utf-8"),
     ))
@@ -465,13 +465,13 @@ def test_jobd_registered_compactor_replays_current_file_under_the_worker_lock(tm
 def test_app_submits_operation_compaction_as_fresh_maintenance_receipt(tmp_path):
     calls = []
 
-    class JobClient:
+    class BatchClient:
         def produce(self, *args, **kwargs):
             calls.append((args, kwargs))
             return {"ok": True, "job": {"job_id": "compact", "status": "queued"}}, b""
 
     webapp = object.__new__(TmuxWebtermApp)
-    webapp.job_client = JobClient()
+    webapp.job_client = BatchClient()
     path = tmp_path / "operations.json"
 
     response = webapp.submit_queued_delivery_compaction(path, "operation-ledger-compact:test")
@@ -479,8 +479,8 @@ def test_app_submits_operation_compaction_as_fresh_maintenance_receipt(tmp_path)
     assert response["ok"] is True
     assert calls == [(('queued_delivery_compact', {"state_path": str(path)}), {
         "priority": "maintenance",
-        # Maintenance never cold-starts jobd, so the submission carries launch=False.
-        # See `TmuxWebtermApp.submit_queued_delivery_compaction` and `JobClient.submit`.
+        # Maintenance never cold-starts batchd, so the submission carries launch=False.
+        # See `TmuxWebtermApp.submit_queued_delivery_compaction` and `BatchClient.submit`.
         "launch": False,
         "generation": 1,
         "coalesce_key": "operation-ledger-compact:test",

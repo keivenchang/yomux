@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+import threading
 from http import HTTPStatus
 from pathlib import Path
 from types import MethodType
@@ -18,7 +19,7 @@ import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib import web
@@ -1126,7 +1127,7 @@ def test_html_uses_browser_highlight_js_bundle():
     assert web.static_asset_path("vendor/highlight.min.js").is_file()
 
 
-def test_raw_file_response_reads_the_authorized_file_without_jobd(monkeypatch):
+def test_raw_file_response_reads_the_authorized_file_without_batchd(monkeypatch):
     body = b"<svg/>"
     calls = []
     handler = SimpleNamespace(
@@ -1307,7 +1308,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert 'dispatch_http_route(self, "POST")' in post_body
     assert "if parsed.path" not in get_body
     assert "if parsed.path" not in post_body
-    assert set(http_routes.ROUTE_GROUPS) == {"core", "yoagent", "chat", "filesystem", "tmux"}
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "yoagent", "chat", "filesystem", "batch", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert http_routes.route_for_request("GET", "/api/stats-sample") is None
     assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
@@ -1321,11 +1322,27 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/fs/batch").role == "admin"
     assert route_by_path("GET", "/api/fs/fast/list").handler is http_routes.get_fs_fast_list
     assert route_by_path("GET", "/api/fs/fast/list").role == "readonly"
+    search_stream = route_by_path("GET", "/api/fs/search-stream")
+    assert search_stream.handler is http_routes.get_fs_search_stream
+    assert search_stream.role == "readonly"
+    assert search_stream.protocol == http_routes.RESPONSE_SSE
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
-    assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
-    assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
+    assert route_by_path("GET", "/api/batch/zip").handler is http_routes.get_fs_zip
+    assert route_by_path("GET", "/api/batch/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
+
+
+def test_indexed_search_stream_requires_the_registered_authenticated_role():
+    handler, calls, writes = route_handler("/api/fs/search-stream?root=%2Frepo&query=x")
+    handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or False
+    handler.stream_indexed_search = lambda _parsed: writes.append(("stream",))
+    handler.redirect_plaintext_to_https_if_needed = lambda _parsed: False
+
+    http_routes.dispatch_http_route(handler, "GET")
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == []
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -1469,21 +1486,22 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
-
-    handler, calls, writes = route_handler("/api/fs/zip?path=/repo", readonly=True)
+    handler, calls, writes = route_handler("/api/batch/zip?path=/repo", readonly=True)
     handler.handle_fs_zip = lambda parsed: writes.append(("fs-zip", parsed.path))
+    handler.headers = {"Cookie": ""}
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
 
-    handler, calls, writes = route_handler("/api/fs/count?path=/repo", readonly=True)
+    handler, calls, writes = route_handler("/api/batch/count?path=/repo", readonly=True)
     handler.handle_fs_count = lambda parsed: writes.append(("fs-count", parsed.path))
+    handler.headers = {"Cookie": ""}
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
 
 
@@ -1721,7 +1739,7 @@ def test_replacement_stream_replays_large_exact_terminal_until_browser_ack(tmp_p
             route="GET /api/fs/watch-diff",
             deadline_at=4102444800.0,
             progress={"phase": "waiting_for_product"},
-            producer={"service": "jobd", "job_id": f"job-replacement-{suffix}"},
+            producer={"service": "batchd", "job_id": f"job-replacement-{suffix}"},
         )
         terminal = ledger.terminalize_operation(
             receipt["operation"]["id"],
@@ -2045,7 +2063,7 @@ def batch_handler(payload, app=None):
     return handler, writes
 
 
-def test_handle_fs_fast_list_returns_one_level_without_jobd_or_git(monkeypatch, tmp_path):
+def test_handle_fs_fast_list_returns_one_level_without_batchd_or_git(monkeypatch, tmp_path):
     (tmp_path / "first").mkdir()
     (tmp_path / "first" / "nested.txt").write_text("nested\n", encoding="utf-8")
     (tmp_path / "top.txt").write_text("top\n", encoding="utf-8")
@@ -2090,7 +2108,32 @@ def test_handle_fs_list_is_direct(monkeypatch):
     assert writes == [(HTTPStatus.OK, {"path": "/repo", "entries": []})]
 
 
-def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monkeypatch):
+def test_handle_fs_search_uses_direct_owner_only_for_explicit_direct_queries(monkeypatch):
+    calls = []
+    writes = []
+    handler = object.__new__(Handler)
+    handler.submit_filesystem_operation = lambda *args: calls.append(args)
+    handler.write_json = lambda payload, status: writes.append((status, payload))
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "search_files",
+        lambda *args, **kwargs: calls.append(("direct", args, kwargs)) or {"files": []},
+    )
+
+    Handler.handle_fs_search(handler, urlparse("/api/fs/search?root=%2Frepo%2Fsrc&query=hw&limit=500&direct_only=1"))
+    Handler.handle_fs_search(handler, urlparse("/api/fs/search?root=%2Frepo&query=hw&limit=500"))
+
+    assert calls[0] == ("direct", ("/repo/src",), {
+        "query": "hw", "limit": "500", "recursive": False, "direct_only": True,
+        "indexed_only": False, "minimal": False,
+    })
+    assert calls[1] == ("GET /api/batch/search", "search", "/repo", {
+        "query": "hw", "limit": "500", "recursive": False, "cursor": "",
+    })
+    assert writes == [(HTTPStatus.OK, {"files": []})]
+
+
+def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_batchd_path(monkeypatch):
     calls = []
     writes = []
     handler = object.__new__(Handler)
@@ -2108,7 +2151,7 @@ def test_handle_fs_read_is_direct_and_defers_git_to_the_existing_jobd_path(monke
     assert calls == [("GET /api/fs/read", "read", "/repo/slow.txt", {"include_git": True})]
 
 
-def test_handle_fast_git_routes_bypass_jobd(monkeypatch):
+def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
     calls = []
     writes = []
     handler = object.__new__(Handler)
@@ -2187,7 +2230,7 @@ def test_git_history_routes_are_registered_as_readonly_json():
     ("args", "expected_include_repo_info"),
     [({}, True), ({"include_repo_info": False}, False)],
 )
-def test_jobd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
+def test_batchd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
     monkeypatch,
     args,
     expected_include_repo_info,
@@ -2198,10 +2241,10 @@ def test_jobd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_ou
         calls.append((path, include_repo_info))
         return {"path": path, "include_repo_info": include_repo_info}
 
-    monkeypatch.setattr(jobd.filesystem, "list_directory", list_directory)
+    monkeypatch.setattr(batchd.filesystem, "list_directory", list_directory)
 
     descriptor = app_module.filesystem_operation_descriptor("list", "/repo", args=args)
-    result = jobd._filesystem_operation_authorized(descriptor)
+    result = batchd._filesystem_operation_authorized(descriptor)
 
     assert calls == [("/repo", expected_include_repo_info)]
     assert json.loads(result) == {"path": "/repo", "include_repo_info": expected_include_repo_info}
@@ -2504,7 +2547,7 @@ def test_handle_fs_batch_rejects_invalid_shape():
     try:
         Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     status, payload = writes[0]
@@ -2621,6 +2664,102 @@ def test_write_sse_json_formats_event_stream():
     Handler.write_sse_json(handler, "delta", {"text": "hello"})
 
     assert handler.wfile.getvalue() == b'event: delta\ndata: {"text": "hello"}\n\n'
+
+
+def test_indexed_search_stream_emits_typed_chunks_and_closes_authorized_handle(monkeypatch):
+    events = []
+    writes = []
+    root = Path("/repo")
+
+    class RootHandle:
+        resolved = root
+
+        def __enter__(self):
+            events.append("entered")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            events.append("closed")
+            return False
+
+    payloads = iter((
+        {
+            "files": [{"path": "/repo/first.py", "name": "first.py"}],
+            "index_state": "follower-stale",
+            "refresh_pending": True,
+            "complete": False,
+            "progressive_coverage": {"published_depth": 1, "full_coverage": False},
+        },
+        {
+            "files": [{"path": "/repo/second.py", "name": "second.py"}],
+            "index_state": "ready",
+            "refresh_pending": False,
+            "progressive_coverage": {"published_depth": 2, "full_coverage": True},
+        },
+    ))
+    monkeypatch.setattr(server_module.filesystem.paths, "safe_path", lambda *args, **kwargs: RootHandle())
+    def stream_payloads(handle, query, limit, *, skip_paths=None):
+        del skip_paths
+        events.append((handle, query, limit))
+        for payload in (next(payloads),):
+            yield payload
+
+    monkeypatch.setattr(server_module.filesystem, "iter_indexed_search_stream_payload", stream_payloads)
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(persistent_request_stop=threading.Event())
+    handler.headers = {}
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda status: writes.append(("status", status))
+    handler.send_header = lambda name, value: writes.append((name, value))
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: writes.append(("headers",))
+    handler.write_sse_json = lambda event, payload: writes.append((event, payload))
+    handler.client_event_peer_disconnected = lambda: False
+
+    Handler.stream_indexed_search(handler, SimpleNamespace(query="root=%2Frepo&query=py&limit=7"))
+
+    assert events[0] == "entered"
+    assert events[-1] == "closed"
+    assert [(entry[0], entry[1]["files"]) for entry in writes if len(entry) == 2 and entry[0] == "chunk"] == [
+        ("chunk", [{"path": "/repo/first.py", "name": "first.py"}]),
+        ("chunk", [{"path": "/repo/second.py", "name": "second.py"}]),
+    ]
+    assert writes[-1][0] == "done"
+    assert any(event[1:] == ("py", 7) for event in events if isinstance(event, tuple))
+    assert [entry[0] for entry in writes if len(entry) == 2 and entry[0] == "error"] == []
+
+
+def test_indexed_search_stream_stops_before_writing_after_disconnect(monkeypatch):
+    writes = []
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(persistent_request_stop=threading.Event())
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.write_sse_json = lambda event, payload: writes.append((event, payload))
+    handler.client_event_peer_disconnected = lambda: True
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "iter_indexed_search_stream_payload",
+        lambda *_args, **_kwargs: iter(({"files": [{"path": "/repo/target.py"}], "index_state": "ready", "complete": True},)),
+    )
+
+    Handler._stream_indexed_search_handle(handler, SimpleNamespace(resolved=Path("/repo")), "needle", 10)
+
+    assert [event for event, _payload in writes] == ["start"]
+
+
+def test_indexed_search_stream_validates_limit_before_authorizing_root():
+    writes = []
+    handler = object.__new__(Handler)
+    handler.write_json = lambda payload, status=HTTPStatus.OK: writes.append((status, payload))
+
+    Handler.stream_indexed_search(handler, SimpleNamespace(query="root=%2Frepo&query=x&limit=nope"))
+
+    assert writes[0][0] == HTTPStatus.BAD_REQUEST
+    assert writes[0][1]["user_message"]["key"] == "request.error.integer"
 
 
 def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
@@ -2968,7 +3107,7 @@ def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: st
         "error": {
             "code": code,
             "message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
-            "origin": "local_services.jobd",
+            "origin": "local_services.batchd",
             "retryable": False,
             "details": {
                 "status": int(status),
@@ -2978,7 +3117,7 @@ def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: st
             },
             "stack": [
                 {"component": "server.http", "operation": "GET /api/fs/list", "code": "dependency_failed"},
-                {"component": "local_services.jobd", "operation": "jobd.result", "code": code},
+                {"component": "local_services.batchd", "operation": "batchd.result", "code": code},
             ],
         },
     }

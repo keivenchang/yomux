@@ -525,8 +525,49 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
       }
     });
   }
+  const wrappedBody = response.body && typeof response.body.getReader === 'function'
+    ? new Proxy(response.body, {
+      get(target, property) {
+        if (property !== 'getReader') {
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (...args) => {
+          const reader = target.getReader(...args);
+          return new Proxy(reader, {
+            get(readerTarget, readerProperty) {
+              if (readerProperty === 'read') {
+                return async (...readArgs) => {
+                  try {
+                    const result = await readerTarget.read(...readArgs);
+                    if (result.done) noteConsumed();
+                    return result;
+                  } catch (error) {
+                    noteConsumed();
+                    throw error;
+                  }
+                };
+              }
+              if (readerProperty === 'cancel') {
+                return async (...cancelArgs) => {
+                  try {
+                    return await readerTarget.cancel(...cancelArgs);
+                  } finally {
+                    noteConsumed();
+                  }
+                };
+              }
+              const value = Reflect.get(readerTarget, readerProperty, readerTarget);
+              return typeof value === 'function' ? value.bind(readerTarget) : value;
+            },
+          });
+        };
+      },
+    })
+    : response.body;
   return new Proxy(response, {
     get(target, property) {
+      if (property === 'body') return wrappedBody;
       if (wrappedMethods.has(property)) return wrappedMethods.get(property);
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -2551,6 +2592,7 @@ function agentLabel(kind) {
   const key = String(kind || '').toLowerCase();
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
+  if (key === 'opencode') return 'OpenCode';
   return String(kind || '');
 }
 
@@ -3280,7 +3322,14 @@ function readStoredCollapsedPreferenceSections() {
   const raw = storageGet(preferencesCollapsedStorageKey);
   if (!raw) return defaultCollapsedPreferenceSections();
   const parsed = safeJsonParse(raw, null);
-  return Array.isArray(parsed) ? normalizeCollapsedPreferenceSections(parsed) : defaultCollapsedPreferenceSections();
+  if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
+  const migrated = parsed.flatMap(value => {
+    const text = String(value || '');
+    if (text === 'appearance' || text === 'Appearance' || text === 'ui_sizes' || text === 'UI sizes') return ['sizes'];
+    if (text === 'terminal_editor' || text === 'Terminal / Editor' || text === 'editor_general' || text === 'Editor general') return ['editor_options'];
+    return [text];
+  });
+  return normalizeCollapsedPreferenceSections(migrated);
 }
 
 function writeStoredCollapsedPreferenceSections() {
@@ -4965,7 +5014,9 @@ function terminalLineLinks(lineText, y) {
 }
 
 function terminalBufferLineText(line) {
-  return line?.translateToString?.(true) || '';
+  // xterm versions/renderers can return a full-width string even with trimRight requested. Parsing must
+  // ignore those blank cells; terminalRowReachesRightEdge separately uses the physical row length.
+  return (line?.translateToString?.(true) || '').replace(/\s+$/, '');
 }
 
 // did `line` fill the terminal to its right edge? translateToString(true) trims trailing
@@ -4973,9 +5024,18 @@ function terminalBufferLineText(line) {
 // was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
 // hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
 // clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
-function terminalRowReachesRightEdge(line, cols) {
+function terminalRowReachesRightEdge(line, cols, trailingSlack = 1) {
   if (!Number.isFinite(cols) || cols <= 0) return false;
-  return terminalBufferLineText(line).length >= Math.max(1, cols - 1);
+  const physicalLength = Number(line?.length);
+  const rowLength = Number.isFinite(physicalLength) && physicalLength > 0
+    ? physicalLength
+    : terminalBufferLineText(line).length;
+  return rowLength >= Math.max(1, cols - Math.max(1, trailingSlack));
+}
+
+function terminalVisibleRowReachesRightEdge(line, cols, trailingSlack = 1) {
+  if (!Number.isFinite(cols) || cols <= 0) return false;
+  return terminalBufferLineText(line).length >= Math.max(1, cols - Math.max(1, trailingSlack));
 }
 
 // does the joined group text end mid-URL? True when the LAST url token reaches the very end of
@@ -5004,8 +5064,92 @@ function terminalRowHangingShape(buffer, index) {
   const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
   const text = raw.slice(match[1].length);
-  if (!text || terminalRowStartsNewUrlToken(text)) return null;
+  if (!text || /\s/.test(text) || terminalRowStartsNewUrlToken(text)) return null;
   return {indent: match[1].length, text};
+}
+
+function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
+  if (!match || !match[1] || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  const indent = match[1].length;
+  const text = raw.slice(indent);
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {indent, text};
+}
+
+function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
+  const line = buffer.getLine(index);
+  const text = terminalBufferLineText(line);
+  if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  return {text};
+}
+
+function terminalUrlContinuationTextIsStrong(baseText, continuationText, requireSplitDelimiter = false) {
+  const base = String(baseText || '');
+  const continuation = String(continuationText || '');
+  if (!base || !terminalTailIsUnterminatedUrl(base)) return false;
+  if (!continuation || /\s/.test(continuation) || terminalRowStartsNewUrlToken(continuation)) return false;
+  if (!/^[A-Za-z0-9!$'()*+,;=:@/?%#[\]_.~-]+$/.test(continuation)) return false;
+  const delimiter = base.at(-1);
+  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (delimiter === '%') return /^[0-9A-Fa-f]/.test(continuation);
+  if (delimiter === '?' || delimiter === '&' || delimiter === '=') return /^[A-Za-z0-9]/.test(continuation);
+  return /^[A-Za-z0-9]/.test(continuation);
+}
+
+function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
+  if (!shape?.indent || index < 1) return false;
+  // OpenCode reprints its gutter on every hard-wrapped row. Validate the complete adjacent chain from
+  // its original URL row so a shorter middle row cannot make the forward sweep lose its context.
+  let baseIndex = index - 1;
+  while (baseIndex >= 0) {
+    const context = terminalRepeatedGutterUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) {
+      const candidate = terminalRowHangingShape(buffer, baseIndex);
+      if (!candidate || candidate.indent !== shape.indent) return false;
+      baseIndex -= 1;
+      continue;
+    }
+    if (context.indent !== shape.indent) return false;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalRowHangingShape(buffer, rowIndex);
+      if (!continuation || continuation.indent !== context.indent
+        || !terminalUrlContinuationTextIsStrong(joined, continuation.text, rowIndex === baseIndex + 1)) return false;
+      joined += continuation.text;
+    }
+    return true;
+  }
+  return false;
+}
+
+function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
+  if (index < 1) return false;
+  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+    const context = terminalZeroIndentUrlBaseContext(buffer, baseIndex, cols);
+    if (!context) continue;
+    let joined = context.text;
+    for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
+      const continuation = terminalBufferLineText(buffer.getLine(rowIndex));
+      if (!terminalUrlContinuationTextIsStrong(joined, continuation, rowIndex === baseIndex + 1)) {
+        joined = '';
+        break;
+      }
+      joined += continuation;
+    }
+    if (joined) return true;
+  }
+  return false;
+}
+
+function terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) {
+  if (!shape?.indent || index < 1) return false;
+  const previous = terminalBufferLineText(buffer.getLine(index - 1));
+  const previousIndent = (previous.match(/^\s*/) || [''])[0].length;
+  return previousIndent === shape.indent && /^(?:https?:\/\/|file:\/\/|www\.)/i.test(previous.slice(shape.indent));
 }
 
 // row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
@@ -5019,9 +5163,11 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (!shape) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
-  if (!terminalRowReachesRightEdge(prev, cols)) return false;
-  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))
-    || terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
+  if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
+  if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
+  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))) return true;
+  return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
 function terminalWrappedLineGroup(term, y) {
@@ -5038,6 +5184,7 @@ function terminalWrappedLineGroup(term, y) {
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
     if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -5047,6 +5194,8 @@ function terminalWrappedLineGroup(term, y) {
   let offset = 0;
   let joined = '';
   let index = start;
+  const repeatedGutterGroup = Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  const zeroIndentGroup = Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
   for (;;) {
     let text;
     let indent = 0;
@@ -5054,9 +5203,19 @@ function terminalWrappedLineGroup(term, y) {
       text = terminalBufferLineText(buffer.getLine(index));
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined) && terminalRowReachesRightEdge(buffer.getLine(index - 1), cols)) {
+    } else if (terminalTailIsUnterminatedUrl(joined)) {
       const shape = terminalRowHangingShape(buffer, index);
       if (!shape) break;
+      const repeatedContinuation = repeatedGutterGroup
+        && shape.indent > 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const zeroIndentContinuation = zeroIndentGroup
+        && shape.indent === 0
+        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+      const genericContinuation = !repeatedGutterGroup && !zeroIndentGroup
+        && !terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)
+        && terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
+      if (!repeatedContinuation && !zeroIndentContinuation && !genericContinuation) break;
       indent = shape.indent;
       text = shape.text;
     } else {
@@ -5085,7 +5244,23 @@ function terminalWrappedRange(group, startIndex, endIndex) {
   const start = terminalWrappedOffsetPosition(group, startIndex, false);
   const end = terminalWrappedOffsetPosition(group, endIndex, true);
   if (!start || !end) return null;
-  return {start, end};
+  const segments = group.rows
+    .map(row => {
+      const segmentStart = Math.max(startIndex, row.start);
+      const segmentEnd = Math.min(endIndex, row.end);
+      if (segmentEnd <= segmentStart) return null;
+      const indent = row.indent || 0;
+      return {
+        start: {x: indent + segmentStart - row.start + 1, y: row.y},
+        end: {x: indent + segmentEnd - row.start, y: row.y},
+      };
+    })
+    .filter(Boolean);
+  const range = {start, end};
+  // Keep the public logical range stable while giving hit testing the actual painted segment on each
+  // row. The segments are an implementation detail, so they must not change serialized range keys.
+  Object.defineProperty(range, 'segments', {value: segments, enumerable: false});
+  return range;
 }
 
 function terminalWrappedGroupTailMayContinue(term, group) {
@@ -5131,18 +5306,104 @@ function terminalReferenceXtermLink(reference) {
   };
 }
 
-async function terminalReferenceProviderLinks(session, term, y) {
+function terminalReferenceXtermLinkWithOptions(reference, options = {}) {
+  const link = terminalReferenceXtermLink(reference);
+  if (!link) return null;
+  link.decorations = {
+    underline: options.underline !== false,
+    pointerCursor: options.pointerCursor === true,
+  };
+  if (typeof options.hover === 'function') link.hover = options.hover;
+  if (typeof options.leave === 'function') link.leave = options.leave;
+  return link;
+}
+
+function terminalReferenceXtermLinks(reference, options = {}) {
+  if (!reference?.range) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  const physicalRanges = Number.isFinite(options.row)
+    ? ranges.filter(range => range.start?.y === options.row && range.end?.y === options.row)
+    : ranges;
+  return physicalRanges
+    .map(range => terminalReferenceXtermLinkWithOptions({...reference, range}, options))
+    .filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineSegments(term, reference) {
+  if (!reference?.range?.start || !reference.range.end) return [];
+  const ranges = Array.isArray(reference.range.segments) ? reference.range.segments : [reference.range];
+  return ranges.map(range => {
+    const start = range.start || {};
+    const end = range.end || {};
+    const cells = Number(end.x) - Number(start.x) + 1;
+    return cells > 0 && start.y === end.y ? {x: start.x, y: start.y, cells} : null;
+  }).filter(Boolean);
+}
+
+function terminalUrlReferenceUnderlineLayer(container) {
+  if (!container) return null;
+  let layer = container.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'terminal-url-link-underlines';
+    layer.setAttribute('aria-hidden', 'true');
+    container.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearTerminalUrlReferenceUnderlines(container) {
+  const layer = container?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  layer?.replaceChildren?.();
+  return 0;
+}
+
+function renderTerminalUrlReferenceUnderlines(term, container, reference) {
+  const layer = terminalUrlReferenceUnderlineLayer(container);
+  if (!layer) return 0;
+  const cell = terminalCellDimensions(term, container);
+  const screen = terminalScreenElement(container);
+  const screenRect = screen?.getBoundingClientRect?.();
+  const containerRect = container?.getBoundingClientRect?.();
+  const cellWidth = Number(cell.width || 0);
+  const cellHeight = Number(cell.height || 0);
+  if (!screenRect || !containerRect || !(cellWidth > 0) || !(cellHeight > 0)) {
+    return clearTerminalUrlReferenceUnderlines(container);
+  }
+  const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
+  const leftOrigin = screenRect.left - containerRect.left;
+  const topOrigin = screenRect.top - containerRect.top;
+  const nodes = [];
+  for (const segment of terminalUrlReferenceUnderlineSegments(term, reference)) {
+    const screenRow = segment.y - viewportY;
+    if (screenRow < 1 || screenRow > Number(term?.rows || 0)) continue;
+    const line = document.createElement('div');
+    line.className = 'terminal-url-link-underline';
+    line.style.left = `${leftOrigin + ((segment.x - 1) * cellWidth)}px`;
+    line.style.top = `${topOrigin + (screenRow * cellHeight) - 2}px`;
+    line.style.width = `${segment.cells * cellWidth}px`;
+    nodes.push(line);
+  }
+  layer.replaceChildren(...nodes);
+  return nodes.length;
+}
+
+async function terminalReferenceProviderLinks(session, term, y, container = null) {
   const refs = terminalWrappedLineReferences(term, y);
-  const links = refs.filter(ref => ref.type === 'url').map(terminalReferenceXtermLink).filter(Boolean);
+  const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
+    row: y,
+    underline: false,
+    hover: () => renderTerminalUrlReferenceUnderlines(term, container, ref),
+    leave: () => clearTerminalUrlReferenceUnderlines(container),
+  }));
   const fileRefs = refs.filter(ref => ref.type === 'file');
   if (!fileRefs.length) return links;
   // This provider runs once for each visible terminal line. Its output is only a visual underline:
   // right-click determines the syntactic path and the selected editor tab owns the real read/error.
-  // Do not turn terminal repaint into one jobd admission per token merely to decide whether to draw
+  // Do not turn terminal repaint into one batchd admission per token merely to decide whether to draw
   // an underline; on a busy terminal that saturated the point queue and stalled the whole browser.
   for (const ref of fileRefs) {
-    const link = terminalReferenceXtermLink(ref);
-    if (link) links.push(link);
+    links.push(...terminalReferenceXtermLinks(ref));
   }
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
@@ -5508,11 +5769,11 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 }
 
-function installTerminalLinkProvider(session, term) {
+function installTerminalLinkProvider(session, term, container) {
   if (typeof term.registerLinkProvider !== 'function') return;
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
-      terminalReferenceProviderLinks(session, term, y).then(callback).catch(() => callback([]));
+      terminalReferenceProviderLinks(session, term, y, container).then(callback).catch(() => callback([]));
     },
   });
 }
@@ -5606,6 +5867,13 @@ function terminalExtendTouchSelection(term, selection, container, clientX, clien
 
 function terminalRangeContainsPosition(range, position) {
   if (!range || !position) return false;
+  if (Array.isArray(range.segments)) {
+    return range.segments.some(segment => (
+      position.y === segment.start.y
+      && position.x >= segment.start.x
+      && position.x <= segment.end.x
+    ));
+  }
   const start = range.start || {};
   const end = range.end || {};
   if (position.y < start.y || position.y > end.y) return false;
@@ -6867,8 +7135,13 @@ function terminalKeyScrollIntent(event) {
     return null;
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  if (event.key === 'PageUp' || event.code === 'PageUp') return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
-  if (event.key === 'PageDown' || event.code === 'PageDown') return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  const key = String(event.key || '');
+  const code = String(event.code || '');
+  const keyCode = Number(event.keyCode || event.which);
+  const pageUp = key === 'PageUp' || code === 'PageUp' || keyCode === 33;
+  const pageDown = key === 'PageDown' || code === 'PageDown' || keyCode === 34;
+  if (pageUp) return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  if (pageDown) return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
   return null;
 }
 
@@ -6905,6 +7178,10 @@ function installTerminalCopyShortcut(session, term, container = null) {
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
+    // OpenCode owns Ctrl+Alt+B/F as message navigation. Returning true here is important: the
+    // browser/global shortcut layers must not turn the documented native binding into terminal
+    // Meta input before xterm can deliver the original key event to OpenCode.
+    if (terminalOpenCodeNativeShortcut(session, container, event)) return true;
     return (handleTerminalScrollbackKeydown(session, term, container, event)
       || handleTerminalTmuxWindowShortcutKeydown(session, event)
       || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
@@ -6920,7 +7197,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
   // Opening is a user action, not a filesystem verdict.  A terminal token already has a bounded
   // syntactic candidate, so expose Open file at once and let its tab own the asynchronous read and
-  // any typed missing/binary/too-large result.  In particular, do not gate this menu on jobd's
+  // any typed missing/binary/too-large result.  In particular, do not gate this menu on batchd's
   // optional resolver: a queued resolver used to leave the only action disabled indefinitely.
   const optimisticFilePath = terminalReference?.type === 'file'
     ? terminalFileReferenceAbsolutePath(session, terminalReference)
@@ -6983,15 +7260,21 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  const preservesNativeContextMenu = () => terminalContextMenuPreservesNativeBehavior(session, container);
+  const terminalPointReference = event => terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
+  const nativeContextMenuForEvent = event => preservesNativeContextMenu() && !terminalPointReference(event);
   container.addEventListener('pointerdown', event => {
+    if (preservesNativeContextMenu() && !terminalPointReference(event)) return;
     if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
   }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
+    if (nativeContextMenuForEvent(event)) return;
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
     event.stopPropagation();
   }, {capture: true});
   container.addEventListener('contextmenu', event => {
+    if (nativeContextMenuForEvent(event)) return;
     event.preventDefault();
     event.stopPropagation();
     const touchSelection = touchContextMenuSyntheticEvents.has(event)
@@ -7000,7 +7283,7 @@ function installTerminalContextMenu(session, term, container) {
     // The touch-scroll owner observes this same bridged contextmenu after us, so its existing
     // state machine can claim the press and extend this selection without another gesture owner.
     if (touchSelection) event.yolomuxTerminalTouchSelection = touchSelection;
-    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, presetSelection: touchSelection?.text || rightClickSelection});
+    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, reference: terminalPointReference(event), presetSelection: touchSelection?.text || rightClickSelection});
     rightClickSelection = null;
   });
 }

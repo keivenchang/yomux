@@ -16,6 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
 
 
+def startup_cpu_budget() -> int:
+    try:
+        schedulable = max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        schedulable = max(1, os.cpu_count() or 1)
+    return min(schedulable, 8) if platform.system() == "Darwin" else schedulable
+
+
 def printable_command_text(output: str) -> str:
     return output.replace("\\ ", " ")
 
@@ -671,6 +679,7 @@ def test_shared_start_lock_recovers_dead_owner(tmp_path):
 
 
 def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
+    startup_common = STARTUP_COMMON.read_text(encoding="utf-8")
     result = subprocess.run(
         [
             "bash",
@@ -683,14 +692,17 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
         text=True,
         capture_output=True,
     )
-    expected = min(os.cpu_count() or 1, 8) if platform.system() == "Darwin" else max(1, os.cpu_count() or 1)
+    expected = startup_cpu_budget()
 
     assert result.returncode in {0, 1}
     assert f"cpu_budget={expected}" in result.stdout
+    assert f"/{expected:.2f}" in result.stdout
+    assert "effective_load1 <= cpus and effective_load5 <= cpus * 2.0" in startup_common
+    assert "effective_load1 <= cpus * 0.75" not in startup_common
 
 
 def test_startup_capacity_accepts_bounded_operator_load_discount():
-    expected = min(os.cpu_count() or 1, 8) if platform.system() == "Darwin" else max(1, os.cpu_count() or 1)
+    expected = startup_cpu_budget()
     result = subprocess.run(
         [
             "bash",

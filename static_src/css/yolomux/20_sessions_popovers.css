@@ -189,7 +189,15 @@
   --agent-status-ball-fill: var(--bad);
   --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
+.status-indicator--blocked {
+  color: var(--danger-text);
+  --agent-status-ball-fill: var(--bad);
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
+}
 .status-indicator--dot.status-indicator--attention {
+  color: var(--bad);
+}
+.status-indicator--dot.status-indicator--blocked {
   color: var(--bad);
 }
 .status-indicator--dot.status-indicator--cooldown {
@@ -293,6 +301,9 @@
 .agent-window-activity--attention {
   --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
+.agent-window-activity--blocked {
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
+}
 .agent-window-activity--cooldown {
   --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
@@ -301,7 +312,9 @@
    across dock tabs, Tabber parent rows, Tabber child rows, popovers, and Info Bar buttons. */
 .agent-window-activity--working .agent-window-status-dot,
 .agent-window-activity--attention .agent-window-status-dot,
-.agent-window-activity--cooldown .agent-window-status-dot {
+ .agent-window-activity--blocked .agent-window-status-dot,
+ .agent-window-activity--unavailable .agent-window-status-dot,
+ .agent-window-activity--cooldown .agent-window-status-dot {
   font-size: var(--agent-status-ball-size);
   line-height: 1;
 }

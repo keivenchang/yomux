@@ -52,7 +52,8 @@ def _install_fallback_environment() -> None:
         test_root = Path(inherited_test_root)
         test_root.mkdir(parents=True, exist_ok=True)
     else:
-        test_root = Path(tempfile.mkdtemp(prefix="yop-"))
+        test_root = Path(tempfile.mkdtemp(prefix=f"yolomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp"))
+        test_root.chmod(0o700)
         os.environ[test_root_env] = str(test_root)
 
     process_root = test_root / f"p{os.getpid()}"

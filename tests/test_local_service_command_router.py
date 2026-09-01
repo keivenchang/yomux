@@ -12,7 +12,7 @@ import pytest
 from yolomux_lib.approval import approvald
 from yolomux_lib import statusd
 from yolomux_lib import watchd
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.search import search_indexer
 from yolomux_lib.stats_current import service as stats_service
 from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
@@ -36,8 +36,8 @@ def test_router_has_fixed_vocabulary_and_unknown_is_not_dispatched():
 @pytest.mark.parametrize(("router", "actions"), (
     (approvald.APPROVALD_COMMAND_ROUTER, {"ping", "status", "profile", "drain", "lease", "release", "start_worker", "status_target", "status_session", "has_pending_prompt", "alive", "stop_target", "stop_session", "shutdown", "shutdown_if_idle"}),
     (statusd.STATUSD_COMMAND_ROUTER, {"ping", "status", "profile", "snapshot", "inventory", "activity_summary", "wait_generation", "invalidate", "lease", "release", "shutdown", "shutdown_if_idle", "orphan_diagnostics"}),
-    (jobd.JOBD_COMMAND_ROUTER, set(jobd.JOBD_REQUEST_ACTIONS) - set(jobd.JOBD_ARTIFACT_ACTION_METHODS)),
-    (jobd.JOBD_ARTIFACT_COMMAND_ROUTER, set(jobd.JOBD_ARTIFACT_ACTION_METHODS)),
+    (batchd.BATCHD_COMMAND_ROUTER, set(batchd.BATCHD_REQUEST_ACTIONS) - set(batchd.BATCHD_ARTIFACT_ACTION_METHODS)),
+    (batchd.BATCHD_ARTIFACT_COMMAND_ROUTER, set(batchd.BATCHD_ARTIFACT_ACTION_METHODS)),
     (search_indexer.INDEXER_COMMAND_ROUTER, {"ping", "status", "profile", "drain", "lease", "release", "shutdown_if_idle", "enqueue", "search", "drain_search_progress", "unindex", "promote", "shutdown"}),
     (watchd.WATCHD_COMMAND_ROUTER, {"ping", "status", "snapshot", "snapshot_product", "lease", "release", "upsert", "remove", "wait_revision", "shutdown", "shutdown_if_idle"}),
     (stats_service.STATS_COMMAND_ROUTER, set(stats_service.STATS_COMMAND_ACTIONS)),

@@ -2360,7 +2360,7 @@
     const full = String(value || '').trim();
     if (!full) return '';
     const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
     }
     return full;

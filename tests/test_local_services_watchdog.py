@@ -43,23 +43,23 @@ def _gone_supervisor():
     )
 
 
-def _tracked_state(tmp_path, port=8881, web_pid=400, *, socket_name="jobd.sock", payload=None, supervisor=None):
+def _tracked_state(tmp_path, port=8881, web_pid=400, *, socket_name="batchd.sock", payload=None, supervisor=None):
     FixtureLeaseRecordBuilder(pid=web_pid, pgid=web_pid, port=port).write(tmp_path)
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    jobd_socket = service_dir / socket_name
-    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=jobd_socket).build()
+    batchd_socket = service_dir / socket_name
+    record = FixtureLocalServiceRecordBuilder(service="batchd", socket_path=batchd_socket).build()
     if payload is not None:
         record["payload"] = payload
     record["supervisor"] = _gone_supervisor() if supervisor is None else supervisor
-    (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
-    return service_dir, jobd_socket
+    (service_dir / "batchd.service.json").write_text(json.dumps(record), encoding="utf-8")
+    return service_dir, batchd_socket
 
 
-def _rows(jobd_socket, web_cpu, worker_cpu, extra=(), command_payload=""):
+def _rows(batchd_socket, web_cpu, worker_cpu, extra=(), command_payload=""):
     return [
         (400, 1, 400, web_cpu, f"python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev {command_payload}"),
-        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60 {command_payload}"),
+        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60 {command_payload}"),
         (501, 500, 500, worker_cpu, "python3 -c multiprocessing-spawn-worker"),
         # An untracked high-CPU bystander (Defender-shaped): never touched.
         (900, 1, 900, 100000.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon"),
@@ -137,10 +137,10 @@ def _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, *, sustained=3,
 
 
 def test_sustained_overload_terms_leaders_and_kills_only_stilllive_tracked_pids(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     # CPU grows 10 cpu-seconds per 1s clock tick => 1000% >> the 250% limit.
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
     ]
     # After SIGTERM + grace, only the worker survives for the targeted SIGKILL pass.
     survivors = _table([(501, 500, 500, 999.0, "python3 -c multiprocessing-spawn-worker"), (900, 1, 900, 100000.0, "wdavdaemon")])
@@ -161,13 +161,13 @@ def test_sustained_overload_terms_leaders_and_kills_only_stilllive_tracked_pids(
 
 
 def test_watchdog_excludes_foreign_service_and_reports_typed_reason(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
-    record_path = service_dir / "jobd.service.json"
+    service_dir, batchd_socket = _tracked_state(tmp_path)
+    record_path = service_dir / "batchd.service.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["stable_host_id"] = "fixture-foreign-host"
     record_path.write_text(json.dumps(record), encoding="utf-8")
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
     ]
     tables.append(_table([]))
     kills = []
@@ -179,15 +179,15 @@ def test_watchdog_excludes_foreign_service_and_reports_typed_reason(monkeypatch,
     assert kills == [(400, signal.SIGTERM)]
     diagnostics = watchdog.last_snapshot["process_diagnostics"]
     assert [(row["target"], row["pid"], row["diagnostic"]["reason"]) for row in diagnostics] == [
-        ("jobd", 500, "foreign_host")
+        ("batchd", 500, "foreign_host")
     ]
     assert diagnostics[0]["record_path"] == str(record_path)
 
 
 def test_watchdog_refuses_recycled_member_before_sigkill(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
     ]
     tables.append(_table([(501, 500, 500, 999.0, "python3 -c multiprocessing-spawn-worker", 9999)]))
     kills = []
@@ -213,9 +213,9 @@ def test_watchdog_refuses_recycled_member_before_sigkill(monkeypatch, tmp_path):
 
 
 def test_below_threshold_and_fluctuating_load_never_fires(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     # 0.5 cpu-seconds per 1s tick = 100% total: below the 250% limit.
-    tables = [_table(_rows(jobd_socket, web_cpu=0.5 * step, worker_cpu=0.5 * step)) for step in range(10)]
+    tables = [_table(_rows(batchd_socket, web_cpu=0.5 * step, worker_cpu=0.5 * step)) for step in range(10)]
     kills = []
     watchdog = _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, sustained=2)
 
@@ -228,9 +228,9 @@ def test_below_threshold_and_fluctuating_load_never_fires(monkeypatch, tmp_path)
 
 
 def test_short_spike_resets_the_sustained_counter(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     cpu_points = [0.0, 10.0, 10.5, 11.0]  # one 1000% spike, then ~50%
-    tables = [_table(_rows(jobd_socket, web_cpu=cpu, worker_cpu=0.0)) for cpu in cpu_points]
+    tables = [_table(_rows(batchd_socket, web_cpu=cpu, worker_cpu=0.0)) for cpu in cpu_points]
     kills = []
     watchdog = _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, sustained=2)
 
@@ -242,10 +242,10 @@ def test_short_spike_resets_the_sustained_counter(monkeypatch, tmp_path):
 
 
 def test_shared_service_veto_skips_daemons_when_another_web_port_is_live(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     other_port = (950, 1, 950, 5.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8880 --dang")
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step, extra=[other_port]))
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step, extra=[other_port]))
         for step in range(4)
     ]
     tables.append(_table([other_port]))
@@ -256,20 +256,20 @@ def test_shared_service_veto_skips_daemons_when_another_web_port_is_live(monkeyp
         watchdog.sample_once()
 
     assert watchdog.fired is True
-    # Web leader stopped; the shared jobd group is skipped and reported, never signalled.
+    # Web leader stopped; the shared batchd group is skipped and reported, never signalled.
     assert kills == [(400, signal.SIGTERM)]
     # Only the veto rows still carry an "action" key; every row the destructive
     # owner produced is a `TerminationOutcome`, so this must select rather than
     # assume a shape.
     skipped = [action for action in watchdog.last_snapshot["actions"] if action.get("action") == "skipped-shared"]
-    assert [action["target"] for action in skipped] == ["jobd"]
+    assert [action["target"] for action in skipped] == ["batchd"]
 
 
 def test_membership_change_yields_honest_unknown_cpu_sample(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     tables = [
-        _table(_rows(jobd_socket, web_cpu=0.0, worker_cpu=0.0)),
-        _table(_rows(jobd_socket, web_cpu=100.0, worker_cpu=100.0)[:2]),  # worker vanished
+        _table(_rows(batchd_socket, web_cpu=0.0, worker_cpu=0.0)),
+        _table(_rows(batchd_socket, web_cpu=100.0, worker_cpu=100.0)[:2]),  # worker vanished
     ]
     watchdog = _watchdog(monkeypatch, tmp_path, service_dir, tables, [], sustained=2)
 
@@ -281,9 +281,9 @@ def test_membership_change_yields_honest_unknown_cpu_sample(monkeypatch, tmp_pat
 
 
 def test_tracked_child_count_breach_fires_containment(monkeypatch, tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     runaway_children = [(600 + index, 400, 400, 1.0, "python3 -c child") for index in range(40)]
-    tables = [_table(_rows(jobd_socket, web_cpu=0.0, worker_cpu=0.0, extra=runaway_children))]
+    tables = [_table(_rows(batchd_socket, web_cpu=0.0, worker_cpu=0.0, extra=runaway_children))]
     kills = []
     watchdog = _watchdog(monkeypatch, tmp_path, service_dir, tables, kills, sustained=2, max_children=32)
 
@@ -320,9 +320,9 @@ def test_watchdog_refuses_a_target_whose_live_process_group_cannot_be_proven(
     containment, so the two empty kill lists above are the product refusing
     rather than an inert harness.
     """
-    service_dir, jobd_socket = _tracked_state(tmp_path)
+    service_dir, batchd_socket = _tracked_state(tmp_path)
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
     ]
     tables.append(_table([(501, 500, 500, 999.0, "python3 -c multiprocessing-spawn-worker")]))
     kills = []
@@ -441,7 +441,7 @@ def test_preflight_stale_lease_authorizes_signals_only_for_an_exact_recorded_ide
     # A record and a socket artifact that preflight has no authority to remove.
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    (service_dir / "jobd.sock").write_bytes(b"inert-socket-artifact")
+    (service_dir / "batchd.sock").write_bytes(b"inert-socket-artifact")
 
     rows = [(410, 1, 400, 1.0, "tmux -C attach-session -t x", orphan_start_time)]
     if foreign_pgid_member:
@@ -541,17 +541,17 @@ def test_preflight_leaves_a_still_serving_service_alone_when_only_its_launcher_c
     """
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    jobd_socket = service_dir / "jobd.sock"
+    batchd_socket = service_dir / "batchd.sock"
     record = FixtureLocalServiceRecordBuilder(
-        service="jobd",
-        socket_path=jobd_socket,
+        service="batchd",
+        socket_path=batchd_socket,
         pid=500,
         fields={"launcher_pid": 700, "launcher_port": 8881, "protocol_version": 1},
     ).build()
-    (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
+    (service_dir / "batchd.service.json").write_text(json.dumps(record), encoding="utf-8")
     # The launcher (700) is dead -- absent from the table -- but the service
     # (500) itself is alive and, in this case, still serving a client.
-    table = _table([(500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60")])
+    table = _table([(500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60")])
     kills = []
     live, kill, process_group_reader = _wedged_process_view(table, kills)
 
@@ -595,13 +595,13 @@ def test_evidence_summary_is_bounded_and_redacted(monkeypatch, tmp_path):
     command_canary = "command-canary-8f1a3c7d"
     path_canary = "socket-path-canary-4b9e2d6a"
     payload_canary = "payload-canary-6c2f8a1e"
-    service_dir, jobd_socket = _tracked_state(
+    service_dir, batchd_socket = _tracked_state(
         tmp_path,
         socket_name=f"{path_canary}.sock",
         payload=payload_canary,
     )
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step, command_payload=command_canary))
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step, command_payload=command_canary))
         for step in range(4)
     ]
     tables.append(_table([]))
@@ -651,7 +651,7 @@ def test_evidence_summary_is_bounded_and_redacted(monkeypatch, tmp_path):
             "signals": [int(signal.SIGTERM)],
         },
         {
-            "target": "jobd",
+            "target": "batchd",
             "pid": 500,
             "attempted_action": "terminate",
             "result": "confirmed_exited",
@@ -659,7 +659,7 @@ def test_evidence_summary_is_bounded_and_redacted(monkeypatch, tmp_path):
             "confirmed_dead": True,
             "signals": [int(signal.SIGTERM)],
         },
-        # The jobd group's pool child. It is force-only -- its leader already
+        # The batchd group's pool child. It is force-only -- its leader already
         # absorbed the graceful signal -- so it is reported through the force
         # step even though the shared grace window is what observed it gone.
         {
@@ -756,15 +756,15 @@ def test_containment_never_stops_a_service_whose_supervisor_is_still_alive(
     }
     supervisor = supervisors[supervisor_case]
 
-    service_dir, jobd_socket = _tracked_state(tmp_path, supervisor=supervisor)
+    service_dir, batchd_socket = _tracked_state(tmp_path, supervisor=supervisor)
     if supervisor is None:
-        record_path = service_dir / "jobd.service.json"
+        record_path = service_dir / "batchd.service.json"
         record = json.loads(record_path.read_text(encoding="utf-8"))
         del record["supervisor"]
         record_path.write_text(json.dumps(record), encoding="utf-8")
 
     tables = [
-        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+        _table(_rows(batchd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
     ]
     tables.append(_table([]))
     kills = []
@@ -775,12 +775,12 @@ def test_containment_never_stops_a_service_whose_supervisor_is_still_alive(
         watchdog.sample_once()
 
     actions = watchdog.last_snapshot["actions"]
-    jobd_rows = [row for row in actions if row["pid"] in {500, 501}]
+    batchd_rows = [row for row in actions if row["pid"] in {500, 501}]
     assert (400, signal.SIGTERM) in kills, "positive control: the pass really did contain something"
 
     if not expected_reason:
         assert (500, signal.SIGTERM) in kills, "a service whose supervisor is provably gone was not contained"
-        assert all(row["result"] != "retained" for row in jobd_rows)
+        assert all(row["result"] != "retained" for row in batchd_rows)
         return
 
     assert [pid for pid, _signum in kills if pid in {500, 501}] == [], (
@@ -788,8 +788,8 @@ def test_containment_never_stops_a_service_whose_supervisor_is_still_alive(
     )
     # Leader AND pool child: a member's authority is derived from its leader, so
     # a retained leader retains its whole group rather than leaving it half torn.
-    assert sorted(row["pid"] for row in jobd_rows) == [500, 501]
-    for row in jobd_rows:
+    assert sorted(row["pid"] for row in batchd_rows) == [500, 501]
+    for row in batchd_rows:
         assert row["result"] == "retained", f"{supervisor_case}: {row}"
         assert row["reason"] == expected_reason, f"{supervisor_case}: {row}"
         assert row["failed_dimension"] == "surviving_supervisor"

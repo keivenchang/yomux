@@ -40,8 +40,8 @@ CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
     ("yolomux_lib/stats_current/service.py", "StatsCurrentService"),
     ("yolomux_lib/local_services/registry.py", "LocalServiceRegistry"),
     ("yolomux_lib/watchd.py", "PersistentWatchService"),
-    ("yolomux_lib/infra/jobd.py", "PersistentJobBroker"),
-    ("yolomux_lib/infra/jobd.py", "JobProductStore"),
+    ("yolomux_lib/infra/batchd.py", "PersistentJobBroker"),
+    ("yolomux_lib/infra/batchd.py", "JobProductStore"),
     ("yolomux_lib/infra/background_owner.py", "BackgroundOwnerRegistry"),
     ("yolomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
 )

@@ -192,6 +192,7 @@ class StatsCurrentRuntime:
                 usage_atoms=facts.usage_atoms,
                 usage_tombstones=facts.usage_tombstones,
                 coverage_epochs=facts.coverage_epochs,
+                unavailable_spans=facts.unavailable_spans,
             ):
                 self._append_batch(
                     family,

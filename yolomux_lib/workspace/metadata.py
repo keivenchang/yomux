@@ -1645,7 +1645,7 @@ def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
         "truncated": False,
         "profile": {"work": {
             "sessions": warmed_sessions,
-            "jobd_work_graph_rebuild": warmed_sessions,
+            "batchd_work_graph_rebuild": warmed_sessions,
             "provider_metadata_rebuild": int(warmed_sessions > 0),
             **work,
         }},

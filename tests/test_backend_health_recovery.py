@@ -17,7 +17,7 @@ milestone report:
     over `_issue_retry`, the one place a control object is touched.
 
   * A SERVICE WHOSE ABSENCE IS EXPECTED IS NEVER RETRIED. statusd, approvald, indexd and
-    watchd are demand-started and rest absent; jobd carries `scheduler_not_owned` when this
+    watchd are demand-started and rest absent; batchd carries `scheduler_not_owned` when this
     process lost the background-owner election. Retrying either class would start daemons on
     an idle machine or fight the election. Both are fenced twice, by the row's own
     declarations and by the reduced state, and `test_the_row_fence_holds_on_its_own` proves
@@ -63,8 +63,9 @@ from yolomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
 from yolomux_lib.backend_health.store import TRANSITION_ROW_FIELDS
 from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 from yolomux_lib.local_services.rpc import reset_local_service_traffic
-from yolomux_lib.infra.jobd import JobClient
-from yolomux_lib.infra.jobd import JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yolomux_lib.infra import batchd
+from yolomux_lib.infra.batchd import BatchClient
+from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
 from yolomux_lib import app as app_module
 
 
@@ -184,13 +185,13 @@ def test_one_retry_per_backoff_boundary_and_never_one_per_observation(recovery: 
 
 def test_the_ladder_is_bounded_and_then_says_so(recovery: RecoveryHarness):
     recovery.tick()
-    recovery.services["jobd"].down("jobd broker exited")
+    recovery.services["batchd"].down("batchd broker exited")
     recovery.tick(12)
-    assert recovery.control.calls == ["jobd"] * BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
-    assert recovery.observer.recovery.status(recovery.monotonic.value)["resources"]["jobd"]["outcome"] == (
+    assert recovery.control.calls == ["batchd"] * BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
+    assert recovery.observer.recovery.status(recovery.monotonic.value)["resources"]["batchd"]["outcome"] == (
         RECOVERY_EXHAUSTED
     )
-    assert recovery.outcome("jobd") == RECOVERY_EXHAUSTED
+    assert recovery.outcome("batchd") == RECOVERY_EXHAUSTED
     before = len(recovery.control.calls)
     recovery.tick(20)
     assert len(recovery.control.calls) == before, "an exhausted ladder must not resume by itself"
@@ -225,13 +226,13 @@ def test_a_healthy_service_is_never_retried_and_reports_none(recovery: RecoveryH
 def test_zero_destructive_operations_reach_the_control_object(recovery: RecoveryHarness):
     recovery.tick()
     recovery.services["statsd"].down("statsd worker exited")
-    recovery.services["jobd"].down("jobd broker exited")
+    recovery.services["batchd"].down("batchd broker exited")
     recovery.tick(12)
     recovery.services["statsd"].up()
     recovery.tick(4)
 
     assert recovery.control.forbidden == [], recovery.control.forbidden
-    assert set(recovery.control.calls) == {"statsd", "jobd"}
+    assert set(recovery.control.calls) == {"statsd", "batchd"}
 
 
 def test_the_retry_choke_point_names_only_retry():
@@ -277,7 +278,7 @@ def test_a_demand_started_absent_service_is_never_retried(tmp_path: Path, servic
         reset_local_service_traffic()
 
 
-def test_jobd_without_the_scheduler_lease_is_never_retried(tmp_path: Path):
+def test_batchd_without_the_scheduler_lease_is_never_retried(tmp_path: Path):
     """`scheduler_not_owned` is the election, not an outage. Retrying it would fight the winner."""
 
 
@@ -285,16 +286,16 @@ def test_jobd_without_the_scheduler_lease_is_never_retried(tmp_path: Path):
     control = TrapControl()
     harness = RecoveryHarness(tmp_path, control)
     try:
-        client = JobClient(tmp_path / "jobd.sock")
+        client = batchd.BatchClient(tmp_path / "batchd.sock")
         assert client.holds_scheduler_lease is False
         row = client.runtime_status()
-        assert row["absence_expected_reason"] == JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE
+        assert row["absence_expected_reason"] == BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
         assert row["pid"] == 0
 
-        harness.services["jobd"].row = dict(row)
+        harness.services["batchd"].row = dict(row)
         harness.tick(20)
         assert control.calls == [], control.calls
-        assert harness.outcome("jobd") == "retry_blocked_scheduler_not_owned"
+        assert harness.outcome("batchd") == "retry_blocked_scheduler_not_owned"
     finally:
         harness.observer.stop()
         reset_local_service_traffic()

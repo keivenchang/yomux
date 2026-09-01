@@ -1126,6 +1126,10 @@ globalThis.__layoutTestApi = {
   paneTabAriaLabelForTest: paneTabAriaLabel,
   fileQuickOpenItem,
   fileQuickOpenItems,
+  quickOpenFileHistory,
+  rememberQuickOpenFileForTest: rememberQuickOpenFile,
+  quickOpenFileHistoryForTest: () => quickOpenFileHistory.slice(),
+  quickOpenWorkingDirectory,
   movingEllipsisHtml,
   stripTrailingEllipsisText,
   fileQuickOpenExtraRootsForSearchQuery,
@@ -1134,6 +1138,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
   fileQuickOpenSearchPayloadResultForTest: fileQuickOpenSearchPayloadResult,
+  fileQuickOpenSseParserForTest: createFileQuickOpenSseParser,
   fileQuickOpenTargetSlot,
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
@@ -1834,6 +1839,16 @@ globalThis.__layoutTestApi = {
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
   rememberTerminalAppClipboardTextForTest: rememberTerminalAppClipboardText,
   terminalContextMenuSelectionForTest: terminalContextMenuSelection,
+  terminalContextMenuCapabilityForSessionForTest: terminalContextMenuCapabilityForSession,
+  terminalContextMenuPreservesNativeBehaviorForTest(session, container) {
+    return terminalContextMenuCapabilityForSession(session, {
+      paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+    }).preserveNativeContextMenu;
+  },
+  terminalContextMenuPaneTargetForSessionForTest: terminalContextMenuPaneTargetForSession,
+  terminalContextMenuPaneTargetForContainerForTest: terminalContextMenuPaneTargetForContainer,
+  setTerminalContextMenuPaneTargetForTest: setTerminalContextMenuPaneTarget,
+  installTerminalContextMenuForTest: installTerminalContextMenu,
   terminalVisibleSelectionStateForTest: terminalVisibleSelectionState,
   clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
   apiFetchJsonQuietForTest: apiFetchJsonQuiet,
@@ -2145,6 +2160,12 @@ globalThis.__layoutTestApi = {
   dropSuggestionIndexFromKeyEvent,
   rememberDropActionForTest: rememberDropAction,
   dropSuggestionsFor,
+  agentLabel,
+  agentWindowKind,
+  agentWindowStateKey,
+  sessionAgentKind,
+  agentWindowCanonicalLabel,
+  sessionPopoverSortedAgentWindows,
   dropActionDisplayLabel,
   composeDropSuggestion,
   insertedDropActionText,
@@ -2717,7 +2738,7 @@ globalThis.__layoutTestApi = {
   },
   commandPaletteResultsHtmlForTest() {
     const query = commandPaletteSearchQuery();
-    const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+    const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, fileQuickOpenResultLimit);
     return rows.length ? commandPaletteResultsHtml(rows, query) : '';
   },
   commandPaletteEmptyTextForTest: commandPaletteEmptyText,
@@ -2808,6 +2829,8 @@ globalThis.__layoutTestApi = {
   terminalTouchSignedRows,
   terminalTouchAlternateCommand,
   terminalHasMouseTracking,
+  terminalOpenCodeNativeShortcutForTest: terminalOpenCodeNativeShortcut,
+  terminalUsesAppWheelForTest: terminalUsesAppWheel,
   routeTerminalScrollLinesForTest: routeTerminalScrollLines,
   sessionPaneIsAlternateScreen,
   terminalWrappedLineLinks,
@@ -2892,6 +2915,9 @@ globalThis.__layoutTestApi = {
   sessionAgentWindowStatusSummaryForTest: sessionAgentWindowStatusSummary,
   infoTabGroupStatusRecordForTest: infoTabGroupStatusRecord,
   tmuxWindowCanonicalLabelForTest: tmuxWindowCanonicalLabel,
+  tmuxWindowAgentKeyForTest: tmuxWindowAgentKey,
+  sessionFileAgentKindsForTest: sessionFileAgentKinds,
+  tabberWindowIsAgentForTest: tabberWindowIsAgent,
   buildTabberTreeForTest: buildTabberTree,
   tabMenuItems,
   sortTabItemsForMenu,

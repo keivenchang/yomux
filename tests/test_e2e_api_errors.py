@@ -54,7 +54,7 @@ class NormalSessionLocalServiceRoute:
 
 # Keep this inventory at the router boundary.  The browser journey below proves the
 # rendered paths; this list exercises every finite normal-session JSON route whose
-# handler reaches statsd, jobd, or statusd.  SSE routes are excluded because their
+# handler reaches statsd, batchd, or statusd.  SSE routes are excluded because their
 # response is an unbounded event stream rather than one typed response body.
 NORMAL_SESSION_LOCAL_SERVICE_ROUTES = (
     NormalSessionLocalServiceRoute("GET", "/api/stats-capabilities", "get_stats_capabilities"),

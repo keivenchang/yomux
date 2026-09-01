@@ -26,14 +26,14 @@ from tests.helpers.http_routes import capturing_route_request as _capturing_rout
 
 
 class _RefusingFilesystemJob:
-    """Record any jobd traffic a refused request should never have produced."""
+    """Record any batchd traffic a refused request should never have produced."""
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
     def produce(self, task, payload, **kwargs):
         self.calls.append(("produce", task, payload, kwargs))
-        raise AssertionError("a refused filesystem request must not reach jobd")
+        raise AssertionError("a refused filesystem request must not reach batchd")
 
     def product(self, product_key, timeout=0.5):
         self.calls.append(("product", product_key))
@@ -56,7 +56,7 @@ def test_fs_mkdir_route_refuses_an_empty_path_on_the_wire(monkeypatch, tmp_path)
         dispatch()
         log_entries = server_logs.SERVER_LOGS.payload()["logs"]
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert len(writes) == 1, writes
@@ -83,10 +83,10 @@ def test_fs_mkdir_route_refuses_an_empty_path_on_the_wire(monkeypatch, tmp_path)
     request_id = payload["request"]["id"]
     assert re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", request_id), payload
 
-    # 3. Nothing was submitted, reserved or retained: no jobd call, no receipt, no future, no slot.
+    # 3. Nothing was submitted, reserved or retained: no batchd call, no receipt, no future, no slot.
     assert webapp.job_client.calls == []
     assert webapp.queued_delivery_ledger.open_operations() == []
-    assert webapp.jobd_operation_service.futures == set()
+    assert webapp.batchd_operation_service.futures == set()
     assert not (tmp_path / "operations.json").exists(), "a refused request must not persist a receipt"
 
     # 4. The correlated log behaviour the direct call could not observe.  `write_api_response`
@@ -127,7 +127,7 @@ def test_fs_mkdir_route_refuses_every_lexical_shape_with_the_same_typed_400(monk
     try:
         dispatch()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     payload, status = writes[0]
@@ -138,4 +138,4 @@ def test_fs_mkdir_route_refuses_every_lexical_shape_with_the_same_typed_400(monk
     assert payload["error"]["stack"][0]["operation"] == "POST /api/fs/mkdir"
     assert webapp.job_client.calls == []
     assert webapp.queued_delivery_ledger.open_operations() == []
-    assert webapp.jobd_operation_service.futures == set()
+    assert webapp.batchd_operation_service.futures == set()

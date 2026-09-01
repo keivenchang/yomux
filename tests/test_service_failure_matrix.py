@@ -5,7 +5,7 @@ from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 
 from yolomux_lib import approvald
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
 from yolomux_lib.local_services.registry import LocalServiceRegistry
@@ -16,11 +16,11 @@ SERVICE_FAILURE_MATRIX = [
     ("not_started", "registry", "missing socket reports unhealthy without fallback work"),
     ("connect_failure", "registry", "failed spawn records backoff and visible status"),
     ("crash_before_work", "registry", "exited child does not spin restarts"),
-    ("crash_during_work", "jobd", "broken executor marks the job failed"),
-    ("hang", "jobd", "timed-out running work keeps its slot until worker exit"),
-    ("deadline", "jobd", "expired queued work fails before dispatch"),
-    ("queue_full", "jobd", "saturated queue rejects new work"),
-    ("stale_generation", "jobd", "newer generation supersedes stale queued work"),
+    ("crash_during_work", "batchd", "broken executor marks the job failed"),
+    ("hang", "batchd", "timed-out running work keeps its slot until worker exit"),
+    ("deadline", "batchd", "expired queued work fails before dispatch"),
+    ("queue_full", "batchd", "saturated queue rejects new work"),
+    ("stale_generation", "batchd", "newer generation supersedes stale queued work"),
     ("protocol_config_mismatch", "registry", "wrong protocol version stays unhealthy"),
     ("parent_death", "registry", "dead service record is removed before restart"),
     ("sleep_time_jump", "registry", "backoff uses monotonic deadlines"),
@@ -170,15 +170,15 @@ def test_registry_refuses_incompatible_socket_owner_without_sidecar_record(tmp_p
     assert spawned == []
 
 
-def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path, monkeypatch):
-    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+def test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path, monkeypatch):
+    service = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     stale = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")
     service.latest_generation["same"] = 2
     service._supersede_stale_queued("same", 2)
     expired = service._queue_record("text_facts", {"text": "expired"}, "freshness", 1, "expired", deadline_at=time.monotonic() - 1.0)
     # Past the BACKSTOP, not merely past the deadline. This row asserts a RUNNING record is
     # terminalized; a running job now carries its deadline into its worker and owns the terminal
-    # state for JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS, so only work that never answers is
+    # state for BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS, so only work that never answers is
     # terminalized blind. `expired` above stays a bare deadline on purpose: queued expiry is exact.
     running = service._queue_record(
         "text_facts",
@@ -186,7 +186,7 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
         "freshness",
         1,
         "hang",
-        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+        deadline_at=time.monotonic() - batchd.BATCHD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
     )
     running.status = "running"
     running.future = Future()
@@ -205,10 +205,10 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
 
     service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
-    for number in range(jobd.JOBD_MAX_QUEUE):
+    for number in range(batchd.BATCHD_MAX_QUEUE):
         queued = service._queue_record("text_facts", {"text": str(number)}, "freshness", number, f"queue-{number}")
         queued.status = "queued"
-    client = jobd.JobClient(tmp_path / "missing-jobd.sock")
+    client = batchd.BatchClient(tmp_path / "missing-batchd.sock")
     monkeypatch.setattr(client.registry, "ensure_started", lambda: False)
 
     assert stale.status == "superseded"
@@ -217,7 +217,7 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
     assert waiting.status == "queued"
     assert crashed.status == "failed"
     # A crashed WORKER is historical job failure, not a current daemon failure. Publishing it
-    # as `last_failure` pinned a healthy jobd to degraded in the health observer, permanently.
+    # as `last_failure` pinned a healthy batchd to degraded in the health observer, permanently.
     _st = service.common_status()
     assert _st["last_job_failure"] == "worker crashed"
     assert not _st.get("last_failure"), _st.get("last_failure")

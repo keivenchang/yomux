@@ -145,7 +145,7 @@ async function runBackendHealthIndicatorSuite() {
   test('the named resources are bounded: one label plus a count, never a wall of service names', () => {
     const api = loadYolomux();
     const labels = ['File watching', 'Quick Open index', 'Background jobs', 'Session status', 'Usage stats', 'Auto-approval'];
-    const ids = ['watchd', 'indexd', 'jobd', 'statusd', 'statsd', 'approvald'];
+    const ids = ['watchd', 'indexd', 'batchd', 'statusd', 'statsd', 'approvald'];
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: labels.map((label, index) => resource({id: ids[index], label})),
@@ -269,7 +269,7 @@ async function runBackendHealthIndicatorSuite() {
 
   test('the triangle severity is reduced from the same green yellow and red roster rows', () => {
     const api = loadYolomux();
-    const serviceIds = ['indexd', 'statsd', 'jobd', 'statusd', 'watchd', 'approvald'];
+    const serviceIds = ['indexd', 'statsd', 'batchd', 'statusd', 'watchd', 'approvald'];
     const measured = value => ({state: 'measured', value, reason_code: '', reason: ''});
     const payload = (states, revision) => ({
       ok: true,

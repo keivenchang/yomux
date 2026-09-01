@@ -639,11 +639,11 @@ test('there is exactly one roster renderer, one row adapter and one status-tone 
 
 test('the roster row order is the payload inventory, with the web process first and its child nested', () => {
   const fixture = localServices();
-  fixture.inventory = ['indexd', 'statsd', 'jobd', 'statusd', 'watchd', 'approvald'];
+  fixture.inventory = ['indexd', 'statsd', 'batchd', 'statusd', 'watchd', 'approvald'];
   fixture.services = fixture.inventory.map(id => serviceRow(id));
   const html = renderRoster(fixture);
   const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'indexd', 'statsd', 'jobd', 'statusd', 'watchd', 'approvald']);
+  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'indexd', 'statsd', 'batchd', 'statusd', 'watchd', 'approvald']);
   assert.match(html, /data-subsystem-id="tmux-signal-watcher" data-subsystem-kind="child" data-subsystem-state="attached" data-subsystem-parent="web"/);
   // Row position never depends on health: a down service keeps its inventory slot.
   fixture.services[4] = serviceRow('watchd', {state: 'unavailable', reason: 'Status transport failed', pid: 0});
@@ -654,11 +654,11 @@ test('the roster row order is the payload inventory, with the web process first 
 
 test('a service in the inventory with no published row is a visible missing row, not a gap', () => {
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd'];
+  fixture.inventory = ['statsd', 'batchd'];
   const html = renderRoster(fixture);
   const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'statsd', 'jobd']);
-  assert.match(html, /data-subsystem-id="jobd" data-subsystem-kind="service" data-subsystem-state="unavailable"/);
+  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'statsd', 'batchd']);
+  assert.match(html, /data-subsystem-id="batchd" data-subsystem-kind="service" data-subsystem-state="unavailable"/);
   assert.match(html, /<span class="js-debug-roster-reason" data-subsystem-reason>Service status is missing<\/span>/);
 });
 
@@ -687,16 +687,16 @@ test('one row shows what is up, how long, how many starts, errors, requests and 
 
 test('the status cell carries a dot, a word and a machine state -- never colour alone', () => {
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'watchd', 'jobd'];
+  fixture.inventory = ['statsd', 'watchd', 'batchd'];
   fixture.services = [
     serviceRow('statsd'),
     serviceRow('watchd', {state: 'idle', reason: 'Starts on demand', pid: 0}),
-    serviceRow('jobd', {state: 'unavailable', reason: 'Status transport failed', pid: 0}),
+    serviceRow('batchd', {state: 'unavailable', reason: 'Status transport failed', pid: 0}),
   ];
   const html = renderRoster(fixture);
   assert.match(rosterRow(html, 'statsd'), /data-subsystem-tone="good">[\s\S]*?<span data-subsystem-state-label>Ready<\/span>/);
   assert.match(rosterRow(html, 'watchd'), /data-subsystem-tone="muted"><span class="js-debug-roster-dot" aria-hidden="true">○<\/span><span data-subsystem-state-label>Idle<\/span>/);
-  assert.match(rosterRow(html, 'jobd'), /data-subsystem-tone="bad">[\s\S]*?<span data-subsystem-state-label>Unavailable<\/span>/);
+  assert.match(rosterRow(html, 'batchd'), /data-subsystem-tone="bad">[\s\S]*?<span data-subsystem-state-label>Unavailable<\/span>/);
   // An idle service is gray and non-alerting; it is not painted like the down one.
   assert.doesNotMatch(rosterRow(html, 'watchd'), /data-subsystem-tone="bad"/);
   assert.match(rosterRow(html, 'watchd'), /<span class="js-debug-roster-reason" data-subsystem-reason>Starts on demand<\/span>/);
@@ -768,12 +768,12 @@ test('a collapsed row builds no transition list, no coverage note and no sampler
 
 test('the disclosure names the row it controls and every row targets its own detail', () => {
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd'];
-  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
-  const html = renderRoster(fixture, {expanded: ['jobd']});
+  fixture.inventory = ['statsd', 'batchd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('batchd')];
+  const html = renderRoster(fixture, {expanded: ['batchd']});
   assert.match(html, /aria-controls="js-debug-roster-detail-web"/);
   assert.match(html, /aria-label="Show details for statsd · statsd"/);
-  assert.match(html, /aria-label="Hide details for jobd · jobd"/);
+  assert.match(html, /aria-label="Hide details for batchd · batchd"/);
   const controls = [...html.matchAll(/aria-controls="([^"]+)"/g)].map(match => match[1]);
   assert.equal(new Set(controls).size, controls.length, 'every disclosure target is unique');
 });
@@ -1047,9 +1047,9 @@ test('the summary strip total carries the same footnote marker and the same acce
 
 test('counter_scope web_process is spelled out ONCE for the whole table', () => {
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd', 'indexd'];
-  fixture.services = [serviceRow('statsd'), serviceRow('jobd'), serviceRow('indexd')];
-  const html = renderRoster(fixture, {expanded: ['statsd', 'jobd']});
+  fixture.inventory = ['statsd', 'batchd', 'indexd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('batchd'), serviceRow('indexd')];
+  const html = renderRoster(fixture, {expanded: ['statsd', 'batchd']});
   const sentence = /Requests, errors and response times count only what this web process issued \(scope: web_process\) — not everything this service has ever served\./g;
   // The denominator is a property of the aggregate, not of a row or a column. Every row publishes
   // the same scope, so it is stated once.
@@ -1602,14 +1602,14 @@ test('an ongoing outage does not re-announce itself every poll', () => {
 
 test('a live region still announces a change that matters', () => {
   const steady = localServices();
-  steady.inventory = ['statsd', 'jobd'];
-  steady.services = [serviceRow('statsd'), serviceRow('jobd')];
+  steady.inventory = ['statsd', 'batchd'];
+  steady.services = [serviceRow('statsd'), serviceRow('batchd')];
   const healthy = liveRegions(daemonsSurfaces(steady, {nowSeconds: 1902}));
 
   // One service goes down: that IS worth interrupting a reader for.
   const degraded = localServices();
-  degraded.inventory = ['statsd', 'jobd'];
-  degraded.services = [serviceRow('statsd'), serviceRow('jobd', {state: 'unavailable', reason: 'Status transport failed', pid: 0})];
+  degraded.inventory = ['statsd', 'batchd'];
+  degraded.services = [serviceRow('statsd'), serviceRow('batchd', {state: 'unavailable', reason: 'Status transport failed', pid: 0})];
   const announced = liveRegions(daemonsSurfaces(degraded, {nowSeconds: 1902}));
 
   const text = region => region.map(entry => entry.text).join(' | ');
@@ -1732,8 +1732,8 @@ test('the summary counts and its CPU/memory describe the SAME rows', () => {
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd'];
-  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
+  fixture.inventory = ['statsd', 'batchd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('batchd')];
   // A deliberately WRONG backend total: if the strip still reads it, this test says so.
   fixture.totals = {processes: 2, cpu_percent: 999.0, rss_bytes: 1};
   context.fixture = payloadFor(fixture);
@@ -1766,8 +1766,8 @@ test('the summary counts EVERY row the roster renders, nested child included', (
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd'];
-  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
+  fixture.inventory = ['statsd', 'batchd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('batchd')];
   context.fixture = payloadFor(fixture);
   vm.runInContext(
     'result = {summary: debugSystemRosterSummary(debugSystemRosterRows(fixture)),'
@@ -1810,8 +1810,8 @@ test('the summary CPU number is labelled a population sum and carries no single-
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const fixture = localServices();
-  fixture.inventory = ['statsd', 'jobd'];
-  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
+  fixture.inventory = ['statsd', 'batchd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('batchd')];
   context.fixture = payloadFor(fixture, {
     cpu_budget: {status: 'ok', current_percent: 3.0, budget_percent: 30.0, sustained_budget_seconds: 300, sustained_seconds: 0, top_consumers: [], stale: false},
   });

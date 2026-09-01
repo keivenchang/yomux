@@ -341,12 +341,12 @@ class AgedStateRoot:
                 "padding": "",
             },
         }
-        envelope = new_envelope("jobd", "submit", payload, timeout_seconds=0.5, trace_id="a" * 32)
+        envelope = new_envelope("batchd", "submit", payload, timeout_seconds=0.5, trace_id="a" * 32)
         base_size = len(encode_metadata(envelope))
         if base_size > target_size:
             raise AssertionError(f"production-shaped metadata base {base_size} exceeds target {target_size}")
         payload["payload"]["padding"] = "x" * (target_size - base_size)
-        encoded_size = len(encode_metadata(new_envelope("jobd", "submit", payload, timeout_seconds=0.5, trace_id="a" * 32)))
+        encoded_size = len(encode_metadata(new_envelope("batchd", "submit", payload, timeout_seconds=0.5, trace_id="a" * 32)))
         if encoded_size != target_size:
             raise AssertionError(f"metadata recipe produced {encoded_size} bytes, expected {target_size}")
         return payload, encoded_size

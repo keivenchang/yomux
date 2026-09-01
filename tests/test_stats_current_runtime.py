@@ -295,6 +295,33 @@ def test_usage_scan_is_batched_without_repeating_coverage():
     )
 
 
+def test_runtime_appends_unavailable_spans_from_collector_facts():
+    client = FakeClient()
+    current = runtime.StatsCurrentRuntime(
+        client,
+        complete_collectors(lambda _attempt: collectors.CollectorFacts()),
+        owner_generation=lambda: 1,
+        token_cadence_seconds=lambda: 10,
+    )
+    span = storage.UnavailableSpan(
+        "agent_tokens", "opencode-session:ses-a", "epoch", 1, 2, 10,
+        "database-locked", 1,
+    )
+
+    current._append_facts(
+        "agent_tokens",
+        collectors.CollectorFacts(unavailable_spans=(span,)),
+    )
+
+    assert client.appends == [{
+        "observations": (),
+        "usage_atoms": (),
+        "usage_tombstones": (),
+        "coverage_epochs": (),
+        "unavailable_spans": (span,),
+    }]
+
+
 def test_append_failure_preserves_the_service_reason_for_diagnostics():
     client = FakeClient()
     client.append = lambda **_groups: {

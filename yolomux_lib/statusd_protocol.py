@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
@@ -34,6 +35,8 @@ STATUSD_INVENTORY_HEAVY_FIELDS = frozenset({
     "git", "repo", "repos", "transcript", "transcripts", "diff", "content",
     "pull_request", "linear", "branches", "session_files", "activity",
 })
+STATUSD_OPENCODE_FIELDS = frozenset({"session_id", "cwd", "started_at"})
+STATUSD_OPENCODE_FIELD_MAX_BYTES = 256
 
 
 class StatusProtocolError(ValueError):
@@ -283,6 +286,29 @@ def validate_inventory(metadata: object, body: bytes) -> dict[str, Any]:
             raise StatusProtocolError("inventory session carries disallowed field")
         if not isinstance(entry.get("source_signature"), str) or not entry["source_signature"]:
             raise StatusProtocolError("inventory session missing source_signature")
+        agents = entry.get("agents")
+        if not isinstance(agents, list):
+            raise StatusProtocolError("inventory session missing agents")
+        for agent in agents:
+            if not isinstance(agent, dict):
+                raise StatusProtocolError("invalid inventory agent")
+            kind = agent.get("kind")
+            allowed = {"kind", "pane"} | (STATUSD_OPENCODE_FIELDS if kind == "opencode" else set())
+            if any(field not in allowed for field in agent):
+                raise StatusProtocolError("inventory agent carries disallowed field")
+            for field in STATUSD_OPENCODE_FIELDS & set(agent):
+                value = agent[field]
+                if field == "started_at":
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        or value <= 0
+                    ):
+                        raise StatusProtocolError("inventory OpenCode start time is invalid")
+                    continue
+                if not isinstance(value, str) or len(value.encode("utf-8")) > STATUSD_OPENCODE_FIELD_MAX_BYTES:
+                    raise StatusProtocolError("inventory OpenCode field is unbounded")
     return decoded
 
 

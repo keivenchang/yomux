@@ -22,7 +22,7 @@ from yolomux_lib import web
 from yolomux_lib.app import FilesystemOperationHttpResponse
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import filesystem_operation_descriptor
-from yolomux_lib.infra import jobd
+from yolomux_lib.infra import batchd
 from yolomux_lib.server import Handler
 from tests.helpers.fixture_http_server import FixtureArtifactTransfer
 from tests.helpers.fixture_http_server import FixtureHttpServer
@@ -125,7 +125,7 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
 
             def complete():
                 try:
-                    result = jobd.run_registered_task_result(
+                    result = batchd.run_registered_task_result(
                         task,
                         json.dumps(payload).encode("utf-8"),
                     )
@@ -137,7 +137,7 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
                         "warnings": [],
                     }
                     terminal_status = HTTPStatus.OK
-                except jobd.JobdFilesystemOperationFailure as exc:
+                except batchd.BatchedFilesystemOperationFailure as exc:
                     terminal = {
                         "state": "failed",
                         "request": {"id": request_id},
@@ -204,23 +204,23 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
         def filesystem_operation_relay(*, route, operation, path, args=None):
             del route
             try:
-                result = jobd.run_registered_task_result(
+                result = batchd.run_registered_task_result(
                     "filesystem_operation",
                     json.dumps(filesystem_operation_descriptor(operation, path, args or {})).encode("utf-8"),
                 )
-            except jobd.JobdFilesystemOperationFailure as exc:
+            except batchd.BatchedFilesystemOperationFailure as exc:
                 return FilesystemOperationHttpResponse(exc.payload, HTTPStatus(exc.status))
             except filesystem.FilesystemError as exc:
                 return FilesystemOperationHttpResponse(exc.payload(path=path), HTTPStatus(exc.status))
-            if isinstance(result, jobd.JobdArtifactResult):
+            if isinstance(result, batchd.BatchedArtifactResult):
                 return FilesystemOperationHttpResponse(
                     None,
                     HTTPStatus.OK,
                     product=dict(result.product),
                     transfer=FixtureArtifactTransfer.adopt(
-                        jobd.artifact_root() / result.basename,
+                        batchd.artifact_root() / result.basename,
                         result.product,
-                        jobd.JOBD_ARTIFACT_CHUNK_BYTES,
+                        batchd.BATCHD_ARTIFACT_CHUNK_BYTES,
                     ),
                 )
             return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=result.body, product=result.product)
@@ -473,8 +473,8 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         }
 
         # blame reads repository file history, so a readonly identity is forbidden — same as
-        # the rest of the file/repo API (it must NOT bypass the readonly guard at /api/blame).
-        status, headers, body = request(port, "GET", f"/api/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
+        # the rest of the file/repo API (it must NOT bypass the readonly guard at /api/batch/blame).
+        status, headers, body = request(port, "GET", f"/api/batch/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body)["user_message"] == {
             "key": "auth.error.accessRequired",
@@ -522,16 +522,16 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
         headers={},
     )
 
-    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/batch/html-preview?{urlencode({'path': str(target)})}"))
 
     assert written == {
-        "route": "GET /api/fs/html-preview",
+        "route": "GET /api/batch/html-preview",
         "operation": "html_preview",
         "path": str(target),
         "args": {"locale": "en"},
     }
 
-    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(tmp_path / 'plain.txt')})}"))
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/batch/html-preview?{urlencode({'path': str(tmp_path / 'plain.txt')})}"))
 
     assert written["json_status"] == HTTPStatus.BAD_REQUEST
     assert written["json"]["error"] == "path must be an HTML file"
@@ -590,9 +590,9 @@ def test_auxiliary_shells_resolve_system_accept_language(monkeypatch, tmp_path):
         "relay": (route, operation, path, args),
     })
 
-    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/batch/html-preview?{urlencode({'path': str(target)})}"))
     assert written["relay"] == (
-        "GET /api/fs/html-preview",
+        "GET /api/batch/html-preview",
         "html_preview",
         str(target),
         {"locale": "he"},
@@ -625,7 +625,7 @@ def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
         status, _headers, body = request(
             port,
             "GET",
-            f"/api/fs/html-preview?{urlencode({'path': str(target)})}",
+            f"/api/batch/html-preview?{urlencode({'path': str(target)})}",
             headers={"Cookie": cookie},
         )
         assert status == HTTPStatus.OK
@@ -884,8 +884,8 @@ def test_authenticated_png_subresource_above_generic_job_budget_returns_image_by
     target = tmp_path / "preview.png"
     body = b"\x89PNG\r\n\x1a\n" + (b"x" * (1_957_801 - 8))
     target.write_bytes(body)
-    socket_path = tmp_path / "jobd.sock"
-    client = jobd.JobClient(socket_path)
+    socket_path = tmp_path / "batchd.sock"
+    client = batchd.BatchClient(socket_path)
     assert client.ensure_started() is True
     app = TmuxWebtermApp([], status_service_mode=True)
     app.job_client = client
@@ -907,7 +907,7 @@ def test_authenticated_png_subresource_above_generic_job_budget_returns_image_by
         assert returned == body
     finally:
         stop_server(server, thread)
-        app.stop_jobd_operation_service()
+        app.stop_batchd_operation_service()
         assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
 
 
@@ -927,7 +927,7 @@ def test_fs_zip_download_sets_timestamped_attachment_and_contains_folder(monkeyp
         status, headers, body = request(
             port,
             "GET",
-            f"/api/fs/zip?{urlencode({'path': str(folder)})}",
+                f"/api/batch/zip?{urlencode({'path': str(folder)})}",
             headers=auth_header("keivenc", "random-password"),
         )
 
@@ -964,7 +964,7 @@ def test_fs_count_returns_recursive_file_count(monkeypatch, tmp_path):
         status, headers, body = request_operation_terminal(
             server,
             "GET",
-            f"/api/fs/count?{urlencode({'path': str(folder)})}",
+                f"/api/batch/count?{urlencode({'path': str(folder)})}",
             headers=auth_header("keivenc", "random-password"),
         )
         payload = json.loads(body.decode("utf-8"))
@@ -987,7 +987,7 @@ def test_fs_zip_download_rejects_large_folder_with_json_error(monkeypatch, tmp_p
         status, headers, body = request(
             port,
             "GET",
-            f"/api/fs/zip?{urlencode({'path': str(folder)})}",
+                f"/api/batch/zip?{urlencode({'path': str(folder)})}",
             headers=auth_header("keivenc", "random-password"),
         )
         payload = json.loads(body.decode("utf-8"))
@@ -1013,7 +1013,7 @@ def test_fs_zip_download_is_admin_only_and_uses_fs_roots(monkeypatch, tmp_path):
         status, _headers, _body = request(
             port,
             "GET",
-            f"/api/fs/zip?{urlencode({'path': str(allowed)})}",
+            f"/api/batch/zip?{urlencode({'path': str(allowed)})}",
             headers=auth_header("guest", "guest"),
         )
         assert status == HTTPStatus.FORBIDDEN
@@ -1021,7 +1021,7 @@ def test_fs_zip_download_is_admin_only_and_uses_fs_roots(monkeypatch, tmp_path):
         status, _headers, body = request(
             port,
             "GET",
-            f"/api/fs/zip?{urlencode({'path': str(outside)})}",
+            f"/api/batch/zip?{urlencode({'path': str(outside)})}",
             headers=auth_header("keivenc", "random-password"),
         )
         payload = json.loads(body.decode("utf-8"))

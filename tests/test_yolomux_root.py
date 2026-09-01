@@ -127,7 +127,7 @@ def test_root_unset_preserves_existing_default_paths(monkeypatch, tmp_path: Path
     assert paths.state_dir == Path.home() / ".local" / "state" / "yolomux"
     assert paths.cache_dir == Path.home() / ".cache" / "yolomux"
     assert paths.codex_home == Path.home() / ".codex"
-    assert paths.runtime_dir == tmp_path / "tmp" / "yolomux-1000" / "h-host-a" / "b-boot-a"
+    assert paths.runtime_dir == tmp_path / "tmp" / "yolomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
 
 
 def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Path):
@@ -190,6 +190,6 @@ def test_socket_budget_enumerates_product_candidates_not_a_guessed_suffix(tmp_pa
     paths = common.resolve_yolomux_roots({"YOLOMUX_ROOT": "/tmp/yr"}, identity=_identity())
     candidates = common.runtime_socket_candidates(paths)
 
-    assert {path.name for path in candidates} >= {"statusd.sock", "jobd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}
+    assert {path.name for path in candidates} >= {"statusd.sock", "batchd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}
     assert any(path.name.startswith("statsd.p24s7.") for path in candidates)
     assert max(candidates, key=lambda path: len(str(path).encode())) in candidates

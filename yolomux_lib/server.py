@@ -385,7 +385,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     """Composed owner for FilesystemHttpAdapter."""
 
     def handle_fs_fast_list(self, parsed: Any) -> None:
-        """Return one non-recursive directory snapshot without entering jobd."""
+        """Return one non-recursive directory snapshot without entering batchd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "/") or "/")
         try:
@@ -409,12 +409,138 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         recursive = query_bool(qs, "recursive")
-        # Streaming Quick Open (step 4): an opaque delta cursor turns this same route into a bounded,
-        # committed-journal delta read. It rides the existing filesystem-operation descriptor so the
-        # authenticated read path, safe-root containment, and exclusion policy are identical to a
-        # snapshot read. Absent/empty -> a first snapshot read that returns the baseline cursor.
+        direct_only = query_bool(qs, "direct_only")
+        indexed_only = query_bool(qs, "indexed_only")
+        minimal = query_bool(qs, "minimal")
         cursor = str(query_one(qs, "cursor", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor})
+        if direct_only or (indexed_only and not cursor):
+            try:
+                self.write_json(
+                    filesystem.search_files(
+                        raw_root,
+                        query=query,
+                        limit=limit,
+                        recursive=recursive,
+                        direct_only=direct_only,
+                        indexed_only=indexed_only,
+                        minimal=minimal,
+                    ),
+                    status=HTTPStatus.OK,
+                )
+            except filesystem.FilesystemError as error:
+                self.write_json(error.payload(), status=HTTPStatus(error.status))
+            return
+        # Recursive work and cursor deltas are batch work. They use the existing filesystem-operation
+        # descriptor so the authenticated read path, safe-root containment, and exclusion policy are
+        # identical to the other batch operations.
+        self.submit_filesystem_operation(
+            "GET /api/batch/search",
+            "search",
+            raw_root,
+            {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor},
+        )
+
+    def stream_indexed_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", "") or "")
+        query = str(query_one(qs, "query", "") or "")
+        limit, error = parse_query_int(
+            qs,
+            "limit",
+            400,
+            max_value=filesystem.MAX_SEARCH_LIMIT,
+            clamp_min=True,
+        )
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            with filesystem.paths.safe_path(
+                raw_root,
+                flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                operation="indexed_search_stream",
+            ) as handle:
+                self._stream_indexed_search_handle(handle, query, int(limit))
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
+
+    def _stream_indexed_search_handle(self, handle: Any, query: str, limit: int) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+
+        seen_paths: set[str] = set()
+        started_at = time.monotonic()
+        try:
+            self.write_sse_json("start", {"root": str(handle.resolved), "query": query, "limit": limit})
+            while True:
+                produced = False
+                coverage = {}
+                stream_complete = True
+                for payload in filesystem.iter_indexed_search_stream_payload(handle, query, limit, skip_paths=seen_paths):
+                    files = payload.get("files") if isinstance(payload, dict) else None
+                    new_files = [
+                        item for item in files
+                        if isinstance(item, dict)
+                        and str(item.get("path") or "")
+                        and str(item["path"]) not in seen_paths
+                    ] if isinstance(files, list) else []
+                    if new_files:
+                        if self.client_event_peer_disconnected():
+                            return
+                        seen_paths.update(str(item["path"]) for item in new_files)
+                        produced = True
+                        self.write_sse_json("chunk", {"files": new_files, "coverage": payload.get("progressive_coverage", {})})
+                    coverage = payload.get("progressive_coverage") if isinstance(payload, dict) else {}
+                    stream_complete = bool(payload.get("complete", True)) if isinstance(payload, dict) else True
+                    if self.client_event_peer_disconnected():
+                        return
+                if not isinstance(coverage, dict):
+                    coverage = {}
+                complete = stream_complete and not bool(coverage.get("frontier_size"))
+                refresh_pending = bool(coverage.get("frontier_size"))
+                warming = not complete
+                if complete or not (warming or refresh_pending):
+                    self.write_sse_json("done", {"files": len(seen_paths), "coverage": coverage})
+                    return
+                if stream_complete and not produced:
+                    self.write_sse_json("done", {"files": len(seen_paths), "coverage": coverage})
+                    return
+                if self.client_event_peer_disconnected():
+                    return
+                if self.server.persistent_request_stop.wait(0.5 if not produced else 0.05):
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        except Exception as error:
+            logger.exception("indexed Quick Open search stream failed")
+            try:
+                self.write_sse_json("error", {
+                    "error_code": "indexed_search_failed",
+                    "error": str(error),
+                    "reason": error.message_key if isinstance(error, filesystem.FilesystemError) else type(error).__name__,
+                    "elapsed_ms": round((time.monotonic() - started_at) * 1000, 3),
+                })
+            except OSError:
+                return
+
+    def handle_batch_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
+        query = str(query_one(qs, "query", "") or "")
+        limit = str(query_one(qs, "limit", "400") or "400")
+        cursor = str(query_one(qs, "cursor", "") or "")
+        minimal = query_bool(qs, "minimal")
+        self.submit_filesystem_operation(
+            "GET /api/batch/search",
+            "search",
+            raw_root,
+            {"query": query, "limit": limit, "recursive": True, "cursor": cursor, "indexed_only": True, "minimal": minimal},
+        )
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -432,7 +558,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             return
         # A first editor open needs only one authorized descriptor walk, stat, bounded read, and
         # binary check. Keep that small operation in this request thread instead of sending it
-        # through jobd's point queue and receipt polling. Git is explicitly deferred to the
+        # through batchd's point queue and receipt polling. Git is explicitly deferred to the
         # include_git path because repository snapshots can be arbitrarily slow.
         try:
             payload = filesystem.read_file(raw_path, include_git=False)
@@ -506,7 +632,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         ref = query_one(qs, "ref", None)
-        self.submit_filesystem_operation("GET /api/blame", "blame", raw_path, {"ref": ref})
+        self.submit_filesystem_operation("GET /api/batch/blame", "blame", raw_path, {"ref": ref})
 
     def submit_filesystem_operation(
         self,
@@ -534,7 +660,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         self.write_json(response.payload, status=response.status)
 
     def handle_fs_raw(self, parsed: Any) -> None:
-        """Serve one bounded authorized file directly; raw media must not wait behind jobd."""
+        """Serve one bounded authorized file directly; raw media must not wait behind batchd."""
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
@@ -557,7 +683,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         self.submit_filesystem_relay(
-            "GET /api/fs/zip",
+            "GET /api/batch/zip",
             "zip",
             raw_path,
             {"filename": fs_zip_attachment_filename(raw_path), "max_bytes": self.file_transfer_max_bytes()},
@@ -566,7 +692,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_count(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/count", "count", raw_path)
+        self.submit_filesystem_operation("GET /api/batch/count", "count", raw_path)
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -584,7 +710,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             )
             return
         locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        self.submit_filesystem_relay("GET /api/fs/html-preview", "html_preview", raw_path, {"locale": locale})
+        self.submit_filesystem_relay("GET /api/batch/html-preview", "html_preview", raw_path, {"locale": locale})
 
     def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
         """Forward browser-owned filesystem bytes through the shared product writer."""
@@ -2187,6 +2313,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_fs_search(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_search(self, parsed)
 
+    def handle_batch_search(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_batch_search(self, parsed)
+
+    def stream_indexed_search(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.stream_indexed_search(self, parsed)
+
+    def _stream_indexed_search_handle(self, handle: Any, query: str, limit: int) -> None:
+        return FilesystemHttpAdapter._stream_indexed_search_handle(self, handle, query, limit)
+
     def handle_fs_index_status(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_index_status(self, parsed)
 
@@ -3491,8 +3626,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "persistent_request_stop"):
             self.persistent_request_stop.set()
-        if hasattr(self, "app") and hasattr(self.app, "stop_jobd_operation_service"):
-            self.app.stop_jobd_operation_service()
+        if hasattr(self, "app") and hasattr(self.app, "stop_batchd_operation_service"):
+            self.app.stop_batchd_operation_service()
         if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):

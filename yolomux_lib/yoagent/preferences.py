@@ -169,7 +169,7 @@ def direct_setting_path_for_question(question: str, catalog: dict[str, dict[str,
     if re.search(r"\b(?:tab|tabs)\b", text) and (re.search(r"\b(?:wider|narrower|bigger|smaller|larger|width)\b", text) or re.search(r"\d", text)):
         path = "appearance.tab_width"
     elif re.search(r"\b(?:ui|interface|app)\b", text) and re.search(r"\b(?:bigger|smaller|larger|font|size)\b", text):
-        path = "appearance.ui_font_size"
+        path = "appearance.global_font_size"
     elif "terminal" in text and re.search(r"\b(?:font|size|bigger|smaller|larger)\b", text):
         path = "appearance.terminal_font_size"
     elif "terminal" in text and re.search(r"\b(?:light|dark|black|white)\b", text):

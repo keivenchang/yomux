@@ -70,7 +70,7 @@ DETERMINISTIC_OWNER_COUNTER_NAMES = (
     "session_discovery",
     "transcript_tail_scan",
     "session_files_materialization",
-    "jobd_work_graph_rebuild",
+    "batchd_work_graph_rebuild",
     "provider_metadata_rebuild",
     "statsd_unchanged_cell_materialization",
     "statusd_unchanged_pane_capture",
@@ -80,10 +80,10 @@ DETERMINISTIC_OWNER_COUNTER_SOURCES = {
         "session_discovery",
         "transcript_tail_scan",
         "session_files_materialization",
-        "jobd_work_graph_rebuild",
+        "batchd_work_graph_rebuild",
     ),
-    "jobd": (
-        "jobd_work_graph_rebuild",
+    "batchd": (
+        "batchd_work_graph_rebuild",
         "provider_metadata_rebuild",
     ),
     "statsd": ("statsd_unchanged_cell_materialization",),
@@ -284,11 +284,11 @@ def compose_deterministic_owner_counters(
         str(row.get("service") or row.get("id") or ""): row
         for row in service_rows if isinstance(row, dict)
     } if isinstance(service_rows, list) else {}
-    jobd_row = services.get("jobd")
+    batchd_row = services.get("batchd")
     statusd_row = services.get("statusd")
     source_payloads = {
         "watchd_refresh": watchd,
-        "jobd": jobd_row.get("owner_invocations") if isinstance(jobd_row, dict) else None,
+        "batchd": batchd_row.get("owner_invocations") if isinstance(batchd_row, dict) else None,
         "statsd": statsd,
         "statusd": statusd_row.get("owner_invocations") if isinstance(statusd_row, dict) else None,
     }

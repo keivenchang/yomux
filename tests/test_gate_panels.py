@@ -12,7 +12,7 @@ from tests.gate_harness import run_when_browser_ready
 from yolomux_lib import app as app_module
 
 
-SYSTEM_STATUS_SERVICE_IDS = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
+SYSTEM_STATUS_SERVICE_IDS = ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
 SYSTEM_STATUS_METRIC_KEYS = ("cpu_now_percent", "rss_bytes", "uptime_seconds")
 # The Daemons roster puts the web process first and nests its one owned in-process subsystem under
 # it; the six local services follow in the order `LOCAL_SERVICE_INVENTORY` declares. The web row is
@@ -179,7 +179,7 @@ def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
             "resources": {"cpu_percent": 2.0, "rss_bytes": 48 * 1024 * 1024},
         }, raising=False)
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
-            "service": "jobd", "pid": 4103, "started_at": now - 103, "healthy": True,
+            "service": "batchd", "pid": 4103, "started_at": now - 103, "healthy": True,
             "resources": {"cpu_percent": 3.0, "rss_bytes": 96 * 1024 * 1024},
         })
         monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {
@@ -300,7 +300,7 @@ def test_a_degraded_service_renders_the_word_issue_in_the_red_tone(browser, tmp_
             uptime: row.querySelector('[data-subsystem-metric="uptime_seconds"]')?.textContent?.trim() || '',
           };
         };
-        return {issue: statusOf('jobd'), down: statusOf('statusd'), ready: statusOf('statsd'), idle: statusOf('watchd')};
+        return {issue: statusOf('batchd'), down: statusOf('statusd'), ready: statusOf('statsd'), idle: statusOf('watchd')};
         """,
         list(SYSTEM_STATUS_SERVICE_IDS),
         ISSUE_ROSTER_STATES,
@@ -603,16 +603,16 @@ def test_roster_disclosure_opens_by_mouse_enter_and_space_without_opening_anothe
     assert after_click["statsd"]["label"].startswith("Hide details"), after_click
 
     # Enter and Space reach the same one handler because the control is a real button.
-    browser.execute_script("document.querySelector('[data-js-debug-roster-toggle=\"jobd\"]').focus();")
+    browser.execute_script("document.querySelector('[data-js-debug-roster-toggle=\"batchd\"]').focus();")
     browser.switch_to.active_element.send_keys(Keys.ENTER)
     after_enter = {row["id"]: row for row in toggle_state()}
-    assert after_enter["jobd"]["expanded"] == "true", after_enter
+    assert after_enter["batchd"]["expanded"] == "true", after_enter
     assert after_enter["statsd"]["expanded"] == "true", after_enter
 
     browser.switch_to.active_element.send_keys(Keys.SPACE)
     after_space = {row["id"]: row for row in toggle_state()}
-    assert after_space["jobd"]["expanded"] == "false", after_space
-    assert after_space["jobd"]["detailPresent"] is False, after_space
+    assert after_space["batchd"]["expanded"] == "false", after_space
+    assert after_space["batchd"]["detailPresent"] is False, after_space
     assert after_space["statsd"]["expanded"] == "true", after_space
 
     # The open disclosure's own padding, MEASURED. `.js-debug-roster-detailrow > td` tied the plain

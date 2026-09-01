@@ -1018,8 +1018,8 @@ class GitLooseObjectCacheSession:
 def _git_loose_object_cache_root() -> Path:
     """Return the validated boot-local cache root without taking its writer lock."""
 
-    runtime_root = Path(tempfile.gettempdir()) / f"yolomux-{os.geteuid()}"
-    runtime_root.mkdir(mode=0o700, exist_ok=True)
+    runtime_root = Path(tempfile.gettempdir()) / f"yolomux-server-{os.geteuid()}" / "shared" / "git-cache"
+    runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime_info = runtime_root.lstat()
     if not stat.S_ISDIR(runtime_info.st_mode) or stat.S_ISLNK(runtime_info.st_mode) or runtime_info.st_uid != os.geteuid():
         raise _history_error(

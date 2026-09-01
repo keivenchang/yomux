@@ -257,9 +257,9 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
         "tests/test_client_event_broker_backlog_disambiguation.py::test_the_broker_lock_genuinely_serializes_every_concurrent_publisher",
         "tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
         "tests/test_hot_path_owner.py::test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation",
-        "tests/test_jobd.py::test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window",
-        "tests/test_jobd.py::test_jobd_control_plane_is_ready_before_blocked_data_plane_setup",
-        "tests/test_jobd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
+        "tests/test_batchd.py::test_fs_batch_completion_holds_a_batchd_lease_across_the_broker_idle_window",
+        "tests/test_batchd.py::test_batchd_control_plane_is_ready_before_blocked_data_plane_setup",
+        "tests/test_batchd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
         "tests/test_stats_current_service_performance.py::test_batched_recording_holds_the_joint_cost_ceilings",
         "tests/test_stats_current_service_performance.py::test_per_fact_commits_breach_the_ceiling_that_batching_clears",
         "tests/test_stats_current_service_performance.py::test_recording_facts_holds_the_joint_cost_ceilings_on_a_production_store",
@@ -898,7 +898,7 @@ def test_performance_report_path_is_tmp_only(monkeypatch):
     monkeypatch.setattr(check.os, "getpid", lambda: 4321)
     monkeypatch.setattr(check.time, "time_ns", lambda: 123456789)
 
-    assert check.performance_report_path("") == Path("/tmp/yolomux-check-runs/check-123456789-4321.json")
+    assert check.performance_report_path("") == Path(os.environ["YOLOMUX_TEST_ROOT"]) / "check" / "check-123456789.json"
     assert check.performance_report_path("/tmp/yolomux-report.json") == Path("/tmp/yolomux-report.json")
     with pytest.raises(ValueError, match="under /tmp"):
         check.performance_report_path("report.json")
@@ -2117,7 +2117,7 @@ def test_retirement_joins_a_real_owned_child_and_reports_a_survivor_by_deadline(
 def test_certification_evidence_dir_must_stay_under_tmp():
     check = load_check_module()
     assert check.certification_evidence_dir("/tmp/yolomux-certification/explicit") == Path("/tmp/yolomux-certification/explicit")
-    assert str(check.certification_evidence_dir(None)).startswith("/tmp/yolomux-certification/")
+    assert str(check.certification_evidence_dir(None)).startswith(f"{os.environ['YOLOMUX_TEST_ROOT']}/certification/")
     with pytest.raises(ValueError):
         check.certification_evidence_dir(str(REPO_ROOT / "docs"))
 

@@ -24,7 +24,7 @@ DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/refactor_characterization/v1.json
 PYTHON_INPUTS = (
     "yolomux_lib/app.py", "yolomux_lib/server.py", "yolomux_lib/http_routes.py",
     "yolomux_lib/statusd.py", "yolomux_lib/watchd.py", "yolomux_lib/approval/approvald.py",
-    "yolomux_lib/infra/jobd.py", "yolomux_lib/search/search_indexer.py",
+    "yolomux_lib/infra/batchd.py", "yolomux_lib/search/search_indexer.py",
     "yolomux_lib/local_services/rpc.py", "yolomux_lib/workspace/session_files.py",
     "tests/conftest.py", "tests/gate_harness.py", "tools/check.py",
 )

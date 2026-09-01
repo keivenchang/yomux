@@ -214,7 +214,7 @@ def test_deterministic_fanout_contract_freezes_every_step_owner_and_profiler_lim
         "session_discovery",
         "transcript_tail_scan",
         "session_files_materialization",
-        "jobd_work_graph_rebuild",
+        "batchd_work_graph_rebuild",
         "provider_metadata_rebuild",
         "statsd_unchanged_cell_materialization",
         "statusd_unchanged_pane_capture",
@@ -429,12 +429,12 @@ def test_active_browser_window_reads_service_records_without_starting_another_ap
     services = tmp_path / "services"
     services.mkdir()
     (services / "statsd.service.json").write_text('{"service":"statsd","pid":0,"socket":"/tmp/statsd.sock"}\n', encoding="utf-8")
-    (services / "jobd.service.json").write_text('{"service":"jobd","pid":31,"socket":"/tmp/jobd.sock"}\n', encoding="utf-8")
+    (services / "batchd.service.json").write_text('{"service":"batchd","pid":31,"socket":"/tmp/batchd.sock"}\n', encoding="utf-8")
     monkeypatch.setattr(tool, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(tool, "process_is_alive", lambda pid: pid == 31)
     monkeypatch.setattr(tool, "service_pid_for_socket", lambda socket_path: 47 if socket_path == "/tmp/statsd.sock" else 0)
 
-    assert tool.runtime_service_pids() == {"jobd": 31, "statsd": 47}
+    assert tool.runtime_service_pids() == {"batchd": 31, "statsd": 47}
     assert "--print-runtime-report" not in TOOL_PATH.read_text(encoding="utf-8")
 
 
@@ -463,9 +463,9 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
                 "local_services": {
                     "services": [
                         {
-                            "service": "jobd",
+                            "service": "batchd",
                             "owner_invocations": {
-                                "jobd_work_graph_rebuild": 3,
+                                "batchd_work_graph_rebuild": 3,
                                 "provider_metadata_rebuild": 4,
                             },
                         },
@@ -482,7 +482,7 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
                         "session_discovery": 10,
                         "transcript_tail_scan": 11,
                         "session_files_materialization": 12,
-                        "jobd_work_graph_rebuild": 2,
+                        "batchd_work_graph_rebuild": 2,
                     },
                 },
             },
@@ -497,7 +497,7 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
             "session_discovery": 10,
             "transcript_tail_scan": 11,
             "session_files_materialization": 12,
-            "jobd_work_graph_rebuild": 5,
+            "batchd_work_graph_rebuild": 5,
             "provider_metadata_rebuild": 4,
             "statsd_unchanged_cell_materialization": 7,
             "statusd_unchanged_pane_capture": 5,
@@ -507,10 +507,10 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
                 "session_discovery": 10,
                 "transcript_tail_scan": 11,
                 "session_files_materialization": 12,
-                "jobd_work_graph_rebuild": 2,
+                "batchd_work_graph_rebuild": 2,
             },
-            "jobd": {
-                "jobd_work_graph_rebuild": 3,
+            "batchd": {
+                "batchd_work_graph_rebuild": 3,
                 "provider_metadata_rebuild": 4,
             },
             "statsd": {"statsd_unchanged_cell_materialization": 7},
@@ -928,9 +928,9 @@ def test_deterministic_owner_counter_composition_fails_closed_on_each_diagnostic
         "local_services": {
             "services": [
                 {
-                    "service": "jobd",
+                    "service": "batchd",
                     "owner_invocations": {
-                        "jobd_work_graph_rebuild": 3,
+                        "batchd_work_graph_rebuild": 3,
                         "provider_metadata_rebuild": 4,
                     },
                 },
@@ -947,7 +947,7 @@ def test_deterministic_owner_counter_composition_fails_closed_on_each_diagnostic
                 "session_discovery": 10,
                 "transcript_tail_scan": 11,
                 "session_files_materialization": 12,
-                "jobd_work_graph_rebuild": 2,
+                "batchd_work_graph_rebuild": 2,
             },
         },
     }
@@ -961,7 +961,7 @@ def test_deterministic_owner_counter_composition_fails_closed_on_each_diagnostic
             "session_discovery": 10,
             "transcript_tail_scan": 11,
             "session_files_materialization": 12,
-            "jobd_work_graph_rebuild": 5,
+            "batchd_work_graph_rebuild": 5,
             "provider_metadata_rebuild": 4,
             "statsd_unchanged_cell_materialization": 7,
             "statusd_unchanged_pane_capture": 5,
@@ -971,10 +971,10 @@ def test_deterministic_owner_counter_composition_fails_closed_on_each_diagnostic
                 "session_discovery": 10,
                 "transcript_tail_scan": 11,
                 "session_files_materialization": 12,
-                "jobd_work_graph_rebuild": 2,
+                "batchd_work_graph_rebuild": 2,
             },
-            "jobd": {
-                "jobd_work_graph_rebuild": 3,
+            "batchd": {
+                "batchd_work_graph_rebuild": 3,
                 "provider_metadata_rebuild": 4,
             },
             "statsd": {"statsd_unchanged_cell_materialization": 7},
@@ -1065,7 +1065,7 @@ def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owne
             "session_discovery": 10,
             "transcript_tail_scan": 11,
             "session_files_materialization": 12,
-            "jobd_work_graph_rebuild": 13,
+            "batchd_work_graph_rebuild": 13,
             "provider_metadata_rebuild": 14,
             "statsd_unchanged_cell_materialization": 42,
             "statusd_unchanged_pane_capture": 16,
@@ -1075,10 +1075,10 @@ def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owne
                 "session_discovery": 10,
                 "transcript_tail_scan": 11,
                 "session_files_materialization": 12,
-                "jobd_work_graph_rebuild": 5,
+                "batchd_work_graph_rebuild": 5,
             },
-            "jobd": {
-                "jobd_work_graph_rebuild": 8,
+            "batchd": {
+                "batchd_work_graph_rebuild": 8,
                 "provider_metadata_rebuild": 14,
             },
             "statsd": {"statsd_unchanged_cell_materialization": 42},
@@ -1091,7 +1091,7 @@ def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owne
             "session_discovery": 10,
             "transcript_tail_scan": 11,
             "session_files_materialization": 12,
-            "jobd_work_graph_rebuild": 13,
+            "batchd_work_graph_rebuild": 13,
             "provider_metadata_rebuild": 14,
             "statsd_unchanged_cell_materialization": 41,
             "statusd_unchanged_pane_capture": 16,
@@ -1101,10 +1101,10 @@ def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owne
                 "session_discovery": 10,
                 "transcript_tail_scan": 11,
                 "session_files_materialization": 12,
-                "jobd_work_graph_rebuild": 5,
+                "batchd_work_graph_rebuild": 5,
             },
-            "jobd": {
-                "jobd_work_graph_rebuild": 8,
+            "batchd": {
+                "batchd_work_graph_rebuild": 8,
                 "provider_metadata_rebuild": 14,
             },
             "statsd": {"statsd_unchanged_cell_materialization": 41},
@@ -1148,7 +1148,7 @@ def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owne
             "session_discovery": 0,
             "transcript_tail_scan": 0,
             "session_files_materialization": 0,
-            "jobd_work_graph_rebuild": 0,
+            "batchd_work_graph_rebuild": 0,
             "provider_metadata_rebuild": 0,
             "statsd_unchanged_cell_materialization": 1,
             "statusd_unchanged_pane_capture": 0,
@@ -1214,7 +1214,7 @@ def test_deterministic_operation_join_preserves_ten_owned_cycles_inside_a_larger
                 "session_discovery",
                 "transcript_tail_scan",
                 "session_files_materialization",
-                "jobd_work_graph_rebuild",
+                "batchd_work_graph_rebuild",
                 "provider_metadata_rebuild",
                 "statsd_unchanged_cell_materialization",
                 "statusd_unchanged_pane_capture",
@@ -1227,7 +1227,7 @@ def test_deterministic_operation_join_preserves_ten_owned_cycles_inside_a_larger
                 "session_discovery",
                 "transcript_tail_scan",
                 "session_files_materialization",
-                "jobd_work_graph_rebuild",
+                "batchd_work_graph_rebuild",
                 "provider_metadata_rebuild",
                 "statsd_unchanged_cell_materialization",
                 "statusd_unchanged_pane_capture",
@@ -1236,7 +1236,7 @@ def test_deterministic_operation_join_preserves_ten_owned_cycles_inside_a_larger
                 "session_discovery",
                 "transcript_tail_scan",
                 "session_files_materialization",
-                "jobd_work_graph_rebuild",
+                "batchd_work_graph_rebuild",
                 "provider_metadata_rebuild",
                 "statsd_unchanged_cell_materialization",
                 "statusd_unchanged_pane_capture",
@@ -1256,10 +1256,10 @@ def test_deterministic_owner_counter_samples_require_complete_monotonic_before_a
                 "session_discovery": values["session_discovery"],
                 "transcript_tail_scan": values["transcript_tail_scan"],
                 "session_files_materialization": values["session_files_materialization"],
-                "jobd_work_graph_rebuild": 0,
+                "batchd_work_graph_rebuild": 0,
             },
-            "jobd": {
-                "jobd_work_graph_rebuild": values["jobd_work_graph_rebuild"],
+            "batchd": {
+                "batchd_work_graph_rebuild": values["batchd_work_graph_rebuild"],
                 "provider_metadata_rebuild": values["provider_metadata_rebuild"],
             },
             "statsd": {
@@ -1280,25 +1280,25 @@ def test_deterministic_owner_counter_samples_require_complete_monotonic_before_a
 def test_deterministic_owner_counter_samples_reject_a_hidden_component_reset():
     tool = load_tool_module()
     totals = {name: 1 for name in tool.DETERMINISTIC_OWNER_COUNTER_NAMES}
-    totals["jobd_work_graph_rebuild"] = 5
+    totals["batchd_work_graph_rebuild"] = 5
     baseline_sources = {
         "watchd_refresh": {
             "session_discovery": 1,
             "transcript_tail_scan": 1,
             "session_files_materialization": 1,
-            "jobd_work_graph_rebuild": 2,
+            "batchd_work_graph_rebuild": 2,
         },
-        "jobd": {"jobd_work_graph_rebuild": 3, "provider_metadata_rebuild": 1},
+        "batchd": {"batchd_work_graph_rebuild": 3, "provider_metadata_rebuild": 1},
         "statsd": {"statsd_unchanged_cell_materialization": 1},
         "statusd": {"statusd_unchanged_pane_capture": 1},
     }
     after_sources = {
         **baseline_sources,
-        "watchd_refresh": {**baseline_sources["watchd_refresh"], "jobd_work_graph_rebuild": 1},
-        "jobd": {**baseline_sources["jobd"], "jobd_work_graph_rebuild": 4},
+        "watchd_refresh": {**baseline_sources["watchd_refresh"], "batchd_work_graph_rebuild": 1},
+        "batchd": {**baseline_sources["batchd"], "batchd_work_graph_rebuild": 4},
     }
 
-    with pytest.raises(RuntimeError, match=r"watchd_refresh\.jobd_work_graph_rebuild"):
+    with pytest.raises(RuntimeError, match=r"watchd_refresh\.batchd_work_graph_rebuild"):
         tool.deterministic_owner_counter_snapshot(
             {"owner_counters": totals, "owner_counter_sources": after_sources},
             {"owner_counters": totals, "owner_counter_sources": baseline_sources},

@@ -120,7 +120,7 @@ def test_adopted_reaper_handle_is_retained_until_settlement(tmp_path, monkeypatc
 class _ClaimState:
     """The two attributes ``claim_gated_idle_due`` reads and writes.
 
-    Every real service (watchd, jobd, statusd, approvald, search_indexer,
+    Every real service (watchd, batchd, statusd, approvald, search_indexer,
     statsd) drives that one shared owner against its own ``last_client_at`` /
     ``idle_seconds``, so this stand-in is the whole of the state it touches.
     """

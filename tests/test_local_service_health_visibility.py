@@ -106,7 +106,7 @@ def test_healthy_services_raise_no_alert():
     """Negative control: nothing degraded means no row alarms anywhere."""
     rows = [
         {"service": name, "pid": 4321, "healthy": True, "last_failure": "", "resources": {}}
-        for name in ("indexd", "statsd", "jobd", "statusd", "approvald")
+        for name in ("indexd", "statsd", "batchd", "statusd", "approvald")
     ]
     rows.append({"service": "watchd", "pid": 0, "healthy": False, "demand_started": True, "last_failure": "", "resources": {}})
     services = [classify(row) for row in rows]
@@ -122,7 +122,7 @@ def test_a_degraded_service_names_itself_and_its_reason():
     fields, so this pins those fields on the row itself.
     """
     services = [
-        classify({"service": "jobd", "pid": 1, "healthy": True, "last_failure": "", "resources": {}}),
+        classify({"service": "batchd", "pid": 1, "healthy": True, "last_failure": "", "resources": {}}),
         classify({"service": "indexd", "pid": 0, "healthy": False, "last_failure": "indexd exited (1): boom", "resources": {}}),
     ]
     degraded = [service for service in services if service["alerting"] is True]
@@ -189,7 +189,7 @@ def test_live_but_unhealthy_daemon_still_reads_as_issue():
     alone and it classifies "issue" as before.
     """
     row = {
-        "service": "jobd",
+        "service": "batchd",
         "pid": os.getpid(),
         "healthy": False,
         "last_failure": "",

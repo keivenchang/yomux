@@ -600,6 +600,66 @@ fixtures:
   id: working_command_counter__codex-cli-0.141.0_20260620
   scenario: working_command_counter
   source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110659Z.yaml
-purpose: Promoted real Claude/Codex agent_tui captures. Filenames use case_name__client-token_date; source_staging_file records
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: completed_output
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode completed output with its idle composer footer
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: completed_output__opencode-1.18.25_20260828.yaml
+  id: completed_output__opencode-1.18.25_20260828
+  scenario: completed_output
+  source: read-only real OpenCode 1.18.25 capture from an existing completed pane
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: working_coordinator
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode active footer with the working meter
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_coordinator__opencode-1.18.25_20260828.yaml
+  id: working_coordinator__opencode-1.18.25_20260828
+  scenario: working_coordinator
+  source: read-only real OpenCode 1.18.25 capture from the authorized coordinator pane
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: working_tool_wrap
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode active task/tool row with extra-indented wrapped command values
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_tool_wrap__opencode-1.18.25_20260828.yaml
+  id: working_tool_wrap__opencode-1.18.25_20260828
+  scenario: working_tool_wrap
+  source: read-only real OpenCode 1.18.25 capture from an existing working pane
+purpose: Promoted real Claude/Codex/OpenCode agent_tui captures. Filenames use case_name__client-token_date; source_staging_file records
   staging provenance when available.
 schema: 1

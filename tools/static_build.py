@@ -681,6 +681,7 @@ I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
     frozenset({"menu.view.theme", "pref.appearance.editor_cursor_color.theme"}): "theme heading and inherit-theme cursor option are different concepts",
+    frozenset({"pref.section.terminal", "shortcuts.section.terminal"}): "Preferences and shortcut sections need separate locale ownership",
     frozenset({"pr.approved", "pr.review.approvedShort"}): "full review state and compact badge have different display constraints",
     frozenset({"state.blocked", "state.short.blocked"}): "full and compact blocked states have different display constraints",
     frozenset({"summary.state.idle", "yolo.status.idle"}): "summary state and inline worker status need different grammar",

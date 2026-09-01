@@ -1743,7 +1743,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/--subwindow-status-glyph-scale:\s*0\.4/.test(paneTabsCss), false, 'sub-window glyphs never shrink to a stale 40% size');
     assert.ok(/\.agent-window-activity--subwindow \.agent-window-status-dot\.status-indicator--working\s*\{[\s\S]*--subwindow-status-glyph-fill:\s*var\(--pr-status-passing\)/.test(paneTabsCss), 'working/play sub-window glyphs stay vibrant green through the shared 66% scale');
     assert.ok(/agent-window-status-dot--acknowledging[\s\S]*--agent-status-ball-fill:\s*var\(--muted\)/.test(sessionsCss) && /agent-window-status-dot--acknowledging[\s\S]*--subwindow-status-glyph-fill:\s*var\(--muted\) !important/.test(paneTabsCss), 'acknowledging play/pause/stop glyphs and parent balls share the muted gray owner');
-    assert.ok(/const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone\(item\.state\)[\s\S]*`status-indicator--\$\{item\.state\}`[\s\S]*acknowledgementShapeClass/.test(activitySource), 'gray acknowledgement keeps the original play-triangle, stop-square, or pause-bar shape modifier');
+    assert.ok(/const acknowledgementShapeTone = item\.state === 'unavailable' \? 'blocked' : item\.state[\s\S]*const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone\(item\.state\)[\s\S]*`status-indicator--\$\{acknowledgementShapeTone\}`[\s\S]*acknowledgementShapeClass/.test(activitySource), 'gray acknowledgement keeps the original play-triangle, stop-square, or pause-bar shape modifier');
     assert.ok(/function agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*attentionAnimationDurationMs\(agentStatusPulsePeriodMs\)/.test(activitySource) && /const durationMs = agentWindowAcknowledgementVisualDurationMs\(\)[\s\S]*setTimeout\([\s\S]*}, durationMs\)/.test(activitySource), 'gray acknowledgement lifetime comes from the configured status-ball pulse period');
     assert.ok(/@keyframes agent-status-acknowledgement-fade\s*\{[\s\S]*0%\s*\{\s*opacity:\s*1[\s\S]*100%\s*\{\s*opacity:\s*0/.test(sessionsCss) && /agent-window-status-dot--acknowledging[\s\S]*animation-name:\s*agent-status-acknowledgement-fade[\s\S]*animation-duration:\s*var\(--agent-status-acknowledgement-duration, var\(--pulse-duration\)\)/.test(sessionsCss), 'one shared one-way fade retires gray live and preview markers over the pulse period');
     assert.ok(/const agentWindowActivityRecords = new Map\(\)[\s\S]*function createAgentWindowActivityRecord\(\)[\s\S]*activity:\s*null[\s\S]*stoppedRefresh:\s*null[\s\S]*transitionPulseRefresh:\s*null[\s\S]*acknowledgedStoppedAt:\s*0[\s\S]*acknowledgementVisual:\s*null/.test(activitySource), 'one per-window transition record owns activity, both refresh timers, stopped acknowledgement, and acknowledgement visual state');
@@ -1777,12 +1777,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/agent-window-status-dot--attention-cooldown[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--agent-status-cooldown\)/.test(sessionsCss), 'mixed red/yellow parent Tab balls use crisp conic segments instead of an averaged brown');
     assert.ok(/agent-window-status-dot--attention-working[\s\S]*conic-gradient\(var\(--bad\)[\s\S]*var\(--pr-status-passing\)/.test(sessionsCss), 'mixed red/green parent Tab balls use the shared two-tone fill');
     assert.ok(/agent-window-status-dot--attention-cooldown-working[\s\S]*conic-gradient\(var\(--bad\) 0 33\.333%[\s\S]*var\(--agent-status-cooldown\) 33\.333% 66\.666%[\s\S]*var\(--pr-status-passing\) 66\.666% 100%/.test(sessionsCss), 'mixed red/yellow/green parent Tab balls use three equal, crisp segments');
-    assert.ok(/const AGENT_WINDOW_VISIBLE_TONES = Object\.freeze\(\[STATE_KEY\.working, 'attention', 'cooldown'\]\)[\s\S]*function agentWindowVisibleTone\(value\)[\s\S]*AGENT_WINDOW_VISIBLE_TONES\.includes\(value\)[\s\S]*function agentWindowStatusClassification\(item\)[\s\S]*item\?\.acknowledging === true[\s\S]*'acknowledged'[\s\S]*item\?\.acknowledged === true[\s\S]*activity\}[\s\S]*function agentWindowStatusToneForItem\(item\)[\s\S]*agentWindowStatusClassification\(item\)\.tone/.test(activitySource), 'one shared status-tone classifier renders the temporary gray acknowledgement before removing an acknowledged window from every surface');
+    assert.ok(/const AGENT_WINDOW_VISIBLE_TONES = Object\.freeze\(\[STATE_KEY\.working, 'attention', 'blocked', 'unavailable', 'cooldown'\]\)[\s\S]*function agentWindowVisibleTone\(value\)[\s\S]*AGENT_WINDOW_VISIBLE_TONES\.includes\(value\)[\s\S]*function agentWindowStatusClassification\(item\)[\s\S]*item\?\.acknowledging === true[\s\S]*'acknowledged'[\s\S]*item\?\.acknowledged === true[\s\S]*activity\}[\s\S]*function agentWindowStatusToneForItem\(item\)[\s\S]*agentWindowStatusClassification\(item\)\.tone/.test(activitySource), 'one shared status-tone classifier renders blocked, unavailable, and the temporary gray acknowledgement before removing an acknowledged window from every surface');
     assert.equal((activitySource.match(/AGENT_WINDOW_VISIBLE_TONES\.includes/g) || []).length, 1, 'every visible-tone membership check routes through the one shared helper');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(/function acknowledgeTerminalAttentionFromUserAction\(session, windowIndex = null, options = \{\}\) \{[\s\S]*const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;[\s\S]*acknowledgeAgentWindowActivity\(sessionKey, explicitWindowIndex \? windowIndex : null, \{[\s\S]*preferSummary: options\.preferSummary === true \|\| !explicitWindowIndex,[\s\S]*clearPromptAttentionForSession\(sessionKey/.test(coreSource), 'parent-tab acknowledgement targets its visible attention summary while a direct sub-window keeps its exact target');
-    assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*let acknowledging = null;[\s\S]*let acknowledgement = null;[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*if \(tone === 'acknowledged'\) acknowledging = \{agent, item\};[\s\S]*\['attention', 'cooldown'\]\.includes\(tone\)[\s\S]*acknowledgement = \{agent, item\};[\s\S]*if \(acknowledging\) selected = acknowledging;[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains every visible child tone, briefly mirrors a child acknowledgement, and retains the highest-priority acknowledgeable child');
-    assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
+    assert.ok(/const AGENT_WINDOW_AGGREGATE_TONES = Object\.freeze\(\['attention', 'blocked', 'unavailable', 'cooldown', STATE_KEY\.working\]\)[\s\S]*function sessionAgentWindowStatusSummary\(session, info = null, autoPayload = null\)[\s\S]*let acknowledging = null;[\s\S]*let acknowledgement = null;[\s\S]*visibleItems\.push\(\{agent, item, tone\}\)[\s\S]*if \(tone === 'acknowledged'\) acknowledging = \{agent, item\};[\s\S]*\['attention', 'blocked', 'cooldown'\]\.includes\(tone\)[\s\S]*acknowledgement = \{agent, item\};[\s\S]*if \(acknowledging\) selected = acknowledging;[\s\S]*const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES[\s\S]*pulseActive: visibleItems\.some[\s\S]*aggregateTones/.test(activitySource), 'the shared model retains blocked, unavailable, and every other visible child tone, briefly mirrors a child acknowledgement, and retains the highest-priority acknowledgeable child');
+    assert.ok(/\.agent-window-activity--working \.agent-window-status-dot,[\s\S]*\.agent-window-activity--attention \.agent-window-status-dot,[\s\S]*\.agent-window-activity--blocked \.agent-window-status-dot,[\s\S]*\.agent-window-activity--unavailable \.agent-window-status-dot,[\s\S]*\.agent-window-activity--cooldown \.agent-window-status-dot\s*\{[\s\S]*font-size:\s*var\(--agent-status-ball-size\)/.test(sessionsCss), 'agent status dots inherit glyph size from the shared activity wrapper');
     assert.equal(((sessionsCss + paneTabsCss).match(/--agent-status-ball-size:/g) || []).length, 2, 'agent status-ball size has only the base owner and shared sub-window 100% reference owner');
     assert.ok(/function agentWindowActivityIconHtml\(agentKey, state, idleSeconds, options = \{\}\)[\s\S]*const acknowledged = item\?\.acknowledged === true;[\s\S]*if \(acknowledged && statusOnly\) return ''[\s\S]*const markerHtml = acknowledged \? '' : agentWindowStatusDotHtml/.test(activitySource), 'acknowledgement removes the transient ball/play/pause/stop glyph while preserving the stable sub-window agent identity');
     assert.equal(/font-size:\s*calc\(var\(--agent-window-icon-size\)/.test(sessionsCss), false, 'status balls do not size themselves from the surface-specific agent icon token');
@@ -2020,6 +2020,90 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(infoStatus.item?.state, 'working', 'YO!info chooses the same working child through the shared item-rank owner');
   });
 
+  test('OpenCode status keeps blocked and unavailable states visible across shared surfaces', () => {
+    const api = loadYolomux('', ['open']);
+    const sourceInfo = {
+      panes: [{window: '0', window_index: '0', target: '%open', process_label: 'opencode', command: 'opencode', window_active: true, active: true}],
+      agents: [{kind: 'opencode', pane_target: '%open', window_index: 0}],
+    };
+    api.setTranscriptInfoForTest('open', sourceInfo);
+    api.setAutoApproveStateForTest('open', {agent_windows: [{kind: 'opencode', pane_target: '%open', window_index: 0, state: 'blocked', screen_text: 'Permission required'}]});
+    api.setTmuxSignalStateForTest({ok: true, windows: [{session: 'open', window_index: '0', active: true, panes: [{target: '%open', pane_id: '%open', window_index: '0', active: true}]}]});
+    const blockedBar = api.tmuxWindowButtonHtmlForTest({
+      session: 'open', visibleName: '0:opencode', numberLabel: '0', agentKey: 'opencode',
+      agentStatus: {kind: 'opencode', pane_target: '%open', window_index: 0, state: 'blocked', screen_text: 'Permission required'},
+    });
+    assert.match(blockedBar, /status-indicator--blocked/);
+    assert.match(api.sessionPopoverHtml('open', sourceInfo, 'opencode', false), /status-indicator--blocked/);
+
+    api.setAutoApproveStateForTest('open', {screen: {key: 'working'}, agent_windows: []});
+    const unavailableRows = api.sessionAgentWindowStatusPayloadsForTest('open', sourceInfo);
+    assert.equal(unavailableRows[0]?.state, 'unavailable', 'an OpenCode identity without canonical status is explicitly unavailable');
+    assert.equal(api.sessionState('open', sourceInfo).key, 'unavailable', 'unavailable OpenCode status reaches the session state owner');
+    assert.match(api.tmuxWindowButtonHtmlForTest({
+      session: 'open', visibleName: '0:opencode', numberLabel: '0', agentKey: 'opencode',
+      agentStatus: {kind: 'opencode', pane_target: '%open', window_index: 0, state: 'unavailable'},
+    }), /status-indicator--blocked/);
+  });
+
+  test('OpenCode statusd rows render the regular session-tab working marker', () => {
+    const api = loadYolomux('', ['zephyrus-experiment', 'yo7220']);
+    const cases = [
+      {
+        session: 'zephyrus-experiment',
+        windowIndex: 0,
+        info: {
+          panes: [{window: '0', window_index: 0, target: '%4', pane_id: '%4', process_label: 'opencode', command: 'opencode', window_active: true, active: true}],
+          agents: [{kind: 'opencode', window_index: 0, pane_target: '%4', current: true, window_active: true}],
+        },
+        rows: [{kind: 'opencode', window_index: 0, pane_target: '%4', current: true, window_active: true, state: 'working'}],
+      },
+      {
+        session: 'yo7220',
+        windowIndex: 1,
+        info: {
+          panes: [
+            {window: '0', window_index: 0, target: '%0', pane_id: '%0', process_label: 'bash', command: 'bash', window_active: false, active: true},
+            {window: '1', window_index: 1, target: '%1', pane_id: '%1', process_label: 'opencode', command: 'opencode', window_active: true, active: true},
+          ],
+          agents: [{kind: 'opencode', window_index: 1, pane_target: '%1', current: true, window_active: true}],
+        },
+        rows: [
+          {kind: 'opencode', window_index: 0, pane_target: '%0', current: false, window_active: false, state: 'idle'},
+          {kind: 'opencode', window_index: 1, pane_target: '%1', current: true, window_active: true, state: 'working'},
+        ],
+      },
+      {
+        session: 'yo7220',
+        windowIndex: 1,
+        info: {
+          panes: [
+            {window: '0', window_index: 0, target: '%0', pane_id: '%0', process_label: 'bash', command: 'bash', window_active: true, active: true},
+            {window: '1', window_index: 1, target: '%1', pane_id: '%1', process_label: 'opencode', command: 'opencode', window_active: false, active: true},
+          ],
+          agents: [{kind: 'opencode', window_index: 1, pane_target: '%1', current: false, window_active: false}],
+        },
+        rows: [{kind: 'opencode', window_index: 1, pane_target: '%1', current: false, window_active: false, state: 'working'}],
+      },
+    ];
+    for (const {session, windowIndex, info, rows} of cases) {
+      api.setTranscriptInfoForTest(session, info);
+      api.applyAutoApprovePayloadForTest({
+        session_order: ['zephyrus-experiment', 'yo7220'],
+        sessions: {[session]: {agent_windows: rows}},
+      });
+      const summary = api.sessionAgentWindowStatusSummaryForTest(session, info, api.autoApproveStateForTest(session));
+      assert.equal(summary.agent?.kind, 'opencode', `${session} keeps the OpenCode summary owner`);
+      assert.equal(summary.agent?.window_index, windowIndex, `${session} selects the working OpenCode window`);
+      assert.equal(summary.item?.state, 'working', `${session} preserves the working state`);
+      const tab = api.tmuxPaneTabHtml(session, info, null, false);
+      const marker = tab.match(/<span class="session-tab-leading-activity">([\s\S]*?)<\/span><span class="session-button-prefix">/)?.[1] || '';
+      assert.match(marker, /session-agent-activity-marker[\s\S]*status-indicator--working/, `${session} regular session tab renders the green working marker`);
+      assert.equal(marker.includes('session-agent-activity-marker--placeholder'), false, `${session} does not fall back to the empty marker`);
+    }
+  });
+
+
   test('file popover copy uses the shared delegated path action', () => {
     const api = loadYolomux('', ['1']);
     const path = '/repo/app/common.py';
@@ -2208,7 +2292,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'same-tick size changes invalidate retained raw media',
     );
     assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
-    assert.equal(api.zipFileDownloadUrl('/repo/app/a b'), '/api/fs/zip?path=%2Frepo%2Fapp%2Fa%20b');
+    assert.equal(api.zipFileDownloadUrl('/repo/app/a b'), '/api/batch/zip?path=%2Frepo%2Fapp%2Fa%20b');
     assert.equal(api.downloadFilenameFromContentDisposition('attachment; filename="calvin.20261225-120001.zip"', 'fallback.zip'), 'calvin.20261225-120001.zip');
     assert.equal(api.downloadFilenameFromContentDisposition("attachment; filename*=UTF-8''calvin%20space.zip", 'fallback.zip'), 'calvin space.zip');
     assert.deepStrictEqual({...api.markdownPreviewImageTarget('.uploads/pasted image.png', '/repo/docs/note.md')}, {
@@ -2241,7 +2325,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const scrollSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     assert.ok(/function terminalTouchWordSelectionAtClientPoint\(term, container, clientX, clientY\)[\s\S]*terminalPositionFromClientPoint[\s\S]*buffer\?\.active\?\.getLine[\s\S]*term\.select\(start, row, end - start\)[\s\S]*text: selected/.test(coreSource), 'a long press uses the vendored public xterm select(column,row,length) API to select one whitespace-bounded word');
     assert.ok(/function terminalExtendTouchSelection\(term, selection, container, clientX, clientY\)[\s\S]*terminalPositionFromClientPoint[\s\S]*term\.select\(start\.column, start\.row, length\)/.test(coreSource), 'post-long-press movement extends that same xterm selection from the captured word anchor');
-    assert.ok(/function installTerminalContextMenu[\s\S]*touchContextMenuSyntheticEvents\.has\(event\)[\s\S]*terminalTouchWordSelectionAtClientPoint[\s\S]*event\.yolomuxTerminalTouchSelection[\s\S]*showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, presetSelection: touchSelection\?\.text/.test(coreSource), 'only the existing synthetic long-press contextmenu selects a terminal word and passes its captured text to the existing menu owner');
+    assert.ok(/function installTerminalContextMenu[\s\S]*touchContextMenuSyntheticEvents\.has\(event\)[\s\S]*terminalTouchWordSelectionAtClientPoint[\s\S]*event\.yolomuxTerminalTouchSelection[\s\S]*showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, reference: terminalPointReference\(event\), presetSelection: touchSelection\?\.text/.test(coreSource), 'only the existing synthetic long-press contextmenu selects a terminal word and passes its captured text and URL reference to the existing menu owner');
     assert.ok(/container\.addEventListener\('touchmove',[\s\S]*state\.touchSelection[\s\S]*terminalExtendTouchSelection[\s\S]*container\.addEventListener\('contextmenu',[\s\S]*event\.yolomuxTerminalTouchSelection[\s\S]*touchState\.claimed = true/.test(scrollSource), 'the existing touch-scroll owner claims and extends a selected long press instead of opening focus or scrolling');
   });
 
@@ -2308,6 +2392,104 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(pagePrevented, 1, 'Claude Page Up prevents the dead native terminal key');
     assert.equal(wheelEvents.length, 12, 'Claude Page Up emits its 34-line page through the bounded 12-line wheel reporter');
 
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'opencode', pane_target: '%opencode'}]});
+    api.setTmuxSignalStateForTest({windows: [{
+      key: '1:0', session: '1', window_index: '0', active: true,
+      panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%opencode', pane_id: '%opencode', current_command: 'opencode', active: true, alternate_on: false}],
+    }]});
+    const openCodeWheelEvents = [];
+    const openCodeContainer = {
+      dataset: {terminalPaneTarget: '%opencode'},
+      classList: {toggle() {}},
+      querySelector() { return {dispatchEvent(event) { openCodeWheelEvents.push(event); return true; }}; },
+    };
+    const pageFrames = [];
+    const openCodeTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
+    api.registerTerminalForTest('1', openCodeTerm, {readyState: 1, send(frame) { pageFrames.push(JSON.parse(frame)); }}).container = openCodeContainer;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'touch'}), true, 'OpenCode touch pan uses native page navigation even when tmux reports normal screen');
+    assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: '\x1b\x19\x1b\x19\x1b\x19'}, 'OpenCode touch pan sends native one-line-up bindings so the prompt/footer stays fixed');
+    assert.equal(openCodeWheelEvents.length, 0, 'OpenCode touch pan does not synthesize a wheel that can move the prompt');
+
+    openCodeWheelEvents.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', openCodeTerm, openCodeContainer, -3, {source: 'wheel'}), true, 'desktop OpenCode wheel uses the internal app route on normal screen');
+    assert.deepStrictEqual(openCodeWheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', -1, 1], ['wheel', -1, 1], ['wheel', -1, 1]], 'desktop OpenCode wheel emits line-accurate internal-app reports');
+
+    for (const alternateOn of [false, true]) {
+      for (const mouseTrackingMode of ['none', 'any']) {
+        api.setTmuxSignalStateForTest({windows: [{
+          key: '1:0', session: '1', window_index: '0', active: true,
+          panes: [{target: '%opencode', pane_id: '%opencode', current_command: 'opencode', active: true, alternate_on: alternateOn}],
+        }]});
+        openCodeTerm.modes.mouseTrackingMode = mouseTrackingMode;
+        pageFrames.length = 0;
+        openCodeWheelEvents.length = 0;
+        for (const [event, direction] of [
+          [{key: 'PageUp', code: 'PageUp'}, -1],
+          [{key: '', code: '', keyCode: 34, which: 34}, 1],
+        ]) {
+          let pagePrevented = 0;
+          assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', openCodeTerm, {
+            type: 'keydown', ...event, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
+            preventDefault() { pagePrevented += 1; },
+          }), true, `plain OpenCode page event uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.equal(pagePrevented, 1, `plain OpenCode page event is consumed with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~'}, `plain OpenCode page event uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.equal(openCodeWheelEvents.length, 0, `plain OpenCode page event does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          openCodeWheelEvents.length = 0;
+        }
+
+        let shiftPrevented = 0;
+        assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', openCodeTerm, {
+          type: 'keydown', key: 'PageDown', code: 'PageDown', metaKey: false, ctrlKey: false, altKey: false, shiftKey: true,
+          preventDefault() { shiftPrevented += 1; },
+        }), true, `Shift+OpenCode Page Down keeps the explicit tmux override with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.equal(shiftPrevented, 1, `Shift+OpenCode Page Down is consumed by the tmux override with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+        assert.equal(openCodeWheelEvents.length, 0, `Shift+OpenCode Page Down does not synthesize app wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+
+        for (const [action, direction] of [['tmux-scroll-up', -1], ['tmux-scroll-down', 1]]) {
+          assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', action), true, `mobile OpenCode ${action} uses the app route with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.deepStrictEqual(pageFrames.at(-1), {type: 'input', data: direction < 0 ? '\x1b[5~' : '\x1b[6~'}, `mobile OpenCode ${action} uses its native page byte with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          assert.equal(openCodeWheelEvents.length, 0, `mobile OpenCode ${action} does not synthesize wheel reports with alternate_on=${alternateOn}, mouse=${mouseTrackingMode}`);
+          openCodeWheelEvents.length = 0;
+        }
+      }
+    }
+
+    assert.equal(api.terminalUsesAppWheelForTest('1', openCodeContainer), true, 'the exact OpenCode pane owns app scrolling independent of screen mode and mouse tracking');
+    for (const event of [
+      {type: 'keydown', key: 'b', code: 'KeyB', keyCode: 66, ctrlKey: true, altKey: true, metaKey: false, shiftKey: false},
+      {type: 'keydown', key: 'f', code: 'KeyF', keyCode: 70, ctrlKey: true, altKey: true, metaKey: false, shiftKey: false},
+      {type: 'keydown', key: '', code: '', keyCode: 66, which: 66, ctrlKey: true, altKey: true, metaKey: false, shiftKey: false},
+    ]) {
+      assert.equal(api.terminalOpenCodeNativeShortcutForTest('1', openCodeContainer, event), true, 'OpenCode preserves its documented Ctrl+Alt navigation binding across browser event shapes');
+    }
+    assert.equal(api.terminalOpenCodeNativeShortcutForTest('1', openCodeContainer, {type: 'keydown', key: 'b', code: 'KeyB', ctrlKey: true, altKey: true, metaKey: true, shiftKey: false}), false, 'Cmd+Ctrl+Alt does not become an OpenCode native binding');
+    assert.equal(api.terminalOpenCodeNativeShortcutForTest('1', {dataset: {}}, {type: 'keydown', key: 'b', code: 'KeyB', ctrlKey: true, altKey: true, metaKey: false, shiftKey: false}), false, 'unknown pane identity does not claim OpenCode native bindings');
+    const customKeyHandlers = [];
+    const customTerm = {attachCustomKeyEventHandler(handler) { customKeyHandlers.push(handler); }};
+    const customContainer = api.testElementForId('terminal-pane-opencode-custom');
+    api.setTranscriptInfoForTest('opencode-custom', {agents: [{kind: 'opencode', pane_target: '%custom'}]});
+    api.setTerminalContextMenuPaneTargetForTest(customContainer, '%custom');
+    api.installTerminalCopyShortcutForTest('opencode-custom', customTerm, customContainer);
+    assert.equal(customKeyHandlers.length, 1, 'the terminal installs one xterm custom-key owner');
+    assert.equal(customKeyHandlers[0]({type: 'keydown', key: 'f', code: 'KeyF', keyCode: 70, ctrlKey: true, altKey: true, metaKey: false, shiftKey: false}), true, 'exact OpenCode Ctrl+Alt+F is passed through xterm unchanged');
+    api.setTerminalContextMenuPaneTargetForTest(customContainer, '%missing');
+    assert.equal(customKeyHandlers[0]({type: 'keydown', key: 'f', code: 'KeyF', keyCode: 70, ctrlKey: true, altKey: true, metaKey: false, shiftKey: false}), true, 'unknown pane identity does not claim the OpenCode custom-key passthrough');
+    assert.equal(api.terminalUsesAppWheelForTest('1', {dataset: {terminalPaneTarget: '%missing'}}), false, 'unknown pane identity fails closed for app scrolling');
+    assert.equal(api.terminalUsesAppWheelForTest('1', {dataset: {}}), false, 'missing pane identity fails closed for app scrolling');
+
+    api.setTranscriptInfoForTest('1', {agents: [{kind: 'codex', pane_target: '%codex'}]});
+    assert.equal(api.terminalUsesAppWheelForTest('1', {dataset: {terminalPaneTarget: '%codex'}}), false, 'Codex does not inherit OpenCode app scrolling');
+
+    api.setTmuxSignalStateForTest(signal);
+    api.setTmuxSignalStateForTest(null);
+    api.setTranscriptInfoForTest('1', {
+      panes: [{target: '%opencode', pane_id: '%opencode', window: '0', pane: '0', window_active: true, active: true}],
+      selected_pane: {target: '%opencode', pane_id: '%opencode', window: '0', pane: '0'},
+      agents: [{kind: 'opencode', pane_target: '%opencode'}],
+    });
+    assert.equal(api.terminalContextMenuPaneTargetForSessionForTest('1'), '%opencode', 'the selected metadata pane preserves OpenCode identity before the first signal snapshot');
+    api.setTmuxSignalStateForTest(signal);
     const frames = [];
     const vimTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
     api.registerTerminalForTest('1', vimTerm, {readyState: 1, send(frame) { frames.push(JSON.parse(frame)); }});
@@ -2609,17 +2791,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {kind: 'codex', state: 'idle', window_index: 2, last_active_ts: nowSeconds - 120, idle_since: nowSeconds - 120, window_label: '2:codex'},
     ]});
     const visibleAgentTones = canonical(api.agentWindowVisibleTonesForTest());
-    assert.deepStrictEqual(visibleAgentTones, ['working', 'attention', 'cooldown'], 'one ordered definition owns every visible agent status tone');
-    assert.deepStrictEqual(canonical(api.agentWindowAggregateTonesForTest()), ['attention', 'cooldown', 'working'], 'aggregate status tones keep their one severity-ordered owner');
+    assert.deepStrictEqual(visibleAgentTones, ['working', 'attention', 'blocked', 'unavailable', 'cooldown'], 'one ordered definition owns every visible agent status tone');
+    assert.deepStrictEqual(canonical(api.agentWindowAggregateTonesForTest()), ['attention', 'blocked', 'unavailable', 'cooldown', 'working'], 'aggregate status tones keep their one severity-ordered owner');
     for (const tone of visibleAgentTones) {
       const item = {state: tone, icon: '●', pulseActive: true};
       assert.equal(api.agentWindowVisibleToneForTest(tone), true, `${tone} belongs to the shared visible-tone set`);
       assert.equal(api.agentWindowStatusToneForItemForTest(item), tone, `${tone} reaches the shared item classifier`);
       assert.ok(api.agentWindowActivityToneWrapperClassForTest(tone).endsWith(`--${tone}`), `${tone} reaches the shared wrapper classifier`);
-      assert.ok(api.agentWindowStatusDotHtmlForTest(item).includes(`status-indicator--${tone}`), `${tone} reaches the shared status-dot renderer`);
+      const renderedTone = tone === 'unavailable' ? 'blocked' : tone;
+      assert.ok(api.agentWindowStatusDotHtmlForTest(item).includes(`status-indicator--${renderedTone}`), `${tone} reaches the shared status-dot renderer`);
       assert.ok(api.agentWindowActivityStyleAttributeForTest(tone, item, {subwindowGlyphPulse: true}).startsWith(' style='), `${tone} reaches the shared animation-style renderer`);
     }
     assert.equal(api.agentWindowVisibleToneForTest('active'), false, 'active is not silently added to the visible status-tone set');
+    assert.equal(api.agentWindowStatusToneForItemForTest({state: 'unavailable', icon: '?'}), 'unavailable', 'unavailable reaches the shared status classifier');
+    assert.equal(api.agentWindowStatusItemVisualRankForTest({state: 'unavailable', icon: '?'}), 0, 'unavailable is ranked as red attention rather than settled idle');
+    assert.ok(api.agentWindowStatusDotHtmlForTest({state: 'unavailable', icon: '?'}).includes('status-indicator--blocked'), 'unavailable renders with the blocked red tone');
     assert.equal(api.agentWindowStatusToneForItemForTest({state: 'active', icon: '●'}), '', 'non-status tones are rejected by the item classifier');
     assert.equal(api.agentWindowStatusDotHtmlForTest({state: 'active', icon: '●'}), '', 'non-status tones are rejected by the status-dot renderer');
     const acknowledgingToneItem = {state: 'working', icon: '●', pulseActive: false, acknowledging: true};
@@ -4775,7 +4961,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'searching #10289 matches the session');
     assert.ok(api.tabSearchScore('4', 'ABC-2193') >= 0, 'searching the Linear ID matches the session');
     api.setCommandPaletteStateForTest('command', 'cut over');
-    const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 60);
+    const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 500);
     assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Shift-Cmd-P searching cut over shows the matching pane');
   });
 
@@ -6270,6 +6456,405 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(promptRow.length, 0, 'the prompt row after the URL is not merged into the link');
   });
 
+  test('repeated OpenCode gutters join two- and three-line URLs without joining prose', () => {
+    const api = loadYolomux();
+    const gutter = '     ';
+    const parts = [
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ec/The_Earth_seen_from_Apollo_17.jpg/1200px-',
+      'The_Earth_seen_from_Apollo_17.jpg',
+    ];
+    const twoLine = [gutter + parts[0], gutter + parts[1]];
+    const twoLineTerm = {cols: twoLine[0].length + 2, buffer: {active: {getLine: index => terminalLine(twoLine[index] || '', false)}}};
+    const twoLineRefs = api.terminalWrappedLineLinks(twoLineTerm, 2);
+    assert.equal(twoLineRefs.length, 1, 'the two-line OpenCode URL is one logical reference');
+    assert.equal(twoLineRefs[0].text, parts.join(''), 'the two-line URL drops only the repeated gutter');
+    assert.deepStrictEqual(canonical(twoLineRefs[0].range), {start: {x: gutter.length + 1, y: 1}, end: {x: gutter.length + parts[1].length, y: 2}});
+
+    const threeLineParts = [
+      `https://example.test/${'a'.repeat(27)}-`,
+      `${'b'.repeat(43)}-`,
+      'c'.repeat(43),
+    ];
+    const threeLine = threeLineParts.map(part => gutter + part);
+    assert.deepStrictEqual(threeLine.map(line => line.length), [54, 49, 48], 'the regression uses the reported physical row lengths');
+    const threeLineTerm = {cols: 56, buffer: {active: {getLine: index => terminalLine(threeLine[index] || '', false)}}};
+    const expected = threeLineParts.join('');
+    for (const row of [1, 2, 3]) {
+      const refs = api.terminalWrappedLineLinks(threeLineTerm, row);
+      assert.equal(refs.length, 1, `the three-line OpenCode URL is one reference from row ${row}`);
+      assert.equal(refs[0].text, expected, `the three-line OpenCode URL is complete from row ${row}`);
+    }
+    const prose = [gutter + 'https://example.test/complete', gutter + 'next step'];
+    const proseTerm = {cols: prose[0].length + 2, buffer: {active: {getLine: index => terminalLine(prose[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(proseTerm, 1)[0].text, 'https://example.test/complete', 'a complete URL remains unchanged');
+    assert.equal(api.terminalWrappedLineLinks(proseTerm, 2).some(ref => ref.text.includes('next step')), false, 'same-gutter prose is not joined to a URL');
+    const completeAtEdge = [gutter + 'https://example.test/complete', gutter + 'next-part'];
+    const completeAtEdgeTerm = {cols: 34, buffer: {active: {getLine: index => terminalLine(completeAtEdge[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].text, 'https://example.test/complete', 'a complete same-gutter URL at the terminal edge remains independent');
+    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].range.end.y, 1, 'a complete same-gutter URL does not underline the next row');
+    assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 2).length, 0, 'the adjacent same-gutter text is not promoted into a URL');
+    const punctuation = [gutter + 'https://example.test/a_(b)?x=1&y=2-', gutter + 'tail.json).'];
+    const punctuationTerm = {cols: punctuation[0].length + 2, buffer: {active: {getLine: index => terminalLine(punctuation[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(punctuationTerm, 2)[0].text, 'https://example.test/a_(b)?x=1&y=2-tail.json', 'URL punctuation is trimmed only at the logical URL end');
+
+    for (const delimiter of ['/', '-', '?', '&', '=', '#', '%']) {
+      const continuation = delimiter === '%' ? 'a-next-part' : 'next-part';
+      const wrapped = [gutter + `https://example.test/path${delimiter}`, gutter + continuation];
+      const wrappedTerm = {cols: wrapped[0].length + 2, buffer: {active: {getLine: index => terminalLine(wrapped[index] || '', false)}}};
+      const links = api.terminalWrappedLineLinks(wrappedTerm, 1);
+      assert.equal(links.length, 1, `${delimiter} split keeps an adjacent URL token together`);
+      assert.equal(links[0].text, `https://example.test/path${delimiter}${continuation}`, `${delimiter} split preserves the URL text`);
+      assert.equal(api.terminalWrappedLineLinks(wrappedTerm, 2)[0].range.end.y, 2, `${delimiter} split resolves from the continuation row`);
+    }
+
+    const separated = [gutter + 'https://example.test/path/', gutter + 'unrelated token', gutter + 'next-part'];
+    const separatedTerm = {cols: separated[0].length + 2, buffer: {active: {getLine: index => terminalLine(separated[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(separatedTerm, 1)[0].text, 'https://example.test/path/', 'intervening prose ends the URL group');
+    assert.equal(api.terminalWrappedLineLinks(separatedTerm, 2).some(ref => ref.text.includes('unrelated')), false, 'intervening prose is not promoted to a URL');
+    assert.equal(api.terminalWrappedLineLinks(separatedTerm, 3).length, 0, 'a token after intervening prose cannot join the earlier URL');
+
+    const adjacent = [gutter + 'https://example.test/first/', gutter + 'first-tail', gutter + 'https://example.test/second/', gutter + 'second-tail'];
+    const adjacentTerm = {cols: adjacent[0].length + 2, buffer: {active: {getLine: index => terminalLine(adjacent[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(adjacentTerm, 1)[0].text, 'https://example.test/first/first-tail', 'first adjacent URL block stays separate');
+    assert.equal(api.terminalWrappedLineLinks(adjacentTerm, 3)[0].text, 'https://example.test/second/second-tail', 'second adjacent URL block stays separate');
+  });
+
+  test('padded xterm rows preserve OpenCode URL grouping and hit coordinates', () => {
+    const api = loadYolomux();
+    const gutter = '     ';
+    const parts = [
+      'https://upload.wikimedia.org/wikipedia/commons/',
+      'thumb/e/ec/The_Earth_seen_from_Apollo_17.jpg/1200px-',
+      'The_Earth_seen_from_Apollo_17.jpg',
+    ];
+    const width = 59;
+    const lines = parts.map(part => ({
+      isWrapped: false,
+      length: width,
+      translateToString: () => (gutter + part).padEnd(width, ' '),
+    }));
+    const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+    const expected = parts.join('');
+    for (const row of [1, 2, 3]) {
+      const links = api.terminalWrappedLineLinks(term, row);
+      assert.equal(links.length, 1, `padded live-style row ${row} exposes one URL reference`);
+      assert.equal(links[0].text, expected, `padded live-style row ${row} preserves the complete URL`);
+    }
+    const reference = api.terminalWrappedLineReferences(term, 2).find(ref => ref.type === 'url');
+    assert.deepStrictEqual(canonical(reference.range), {
+      start: {x: gutter.length + 1, y: 1},
+      end: {x: gutter.length + parts[2].length, y: 3},
+    }, 'padded live-style rows retain the painted URL endpoints');
+    for (const y of [1, 2, 3]) {
+      for (let x = 1; x <= gutter.length; x += 1) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x, y}), null, `padded live-style gutter column ${x} on row ${y} is not a URL hit`);
+      }
+    }
+    assert.equal(api.terminalReferenceAtPosition(term, {x: gutter.length + 1, y: 2})?.type, 'url', 'a URL continuation character is a hit in the padded live-style buffer');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: width, y: 2}), null, 'the padded blank tail is not treated as a URL hit');
+  });
+
+  test('OpenCode repeated-gutter URL hit testing excludes every gutter cell', () => {
+    const api = loadYolomux();
+    const gutter = '     ';
+    const parts = ['https://example.test/path/', 'continuation?x=1'];
+    const lines = parts.map(part => terminalLine(gutter + part, false));
+    const term = {cols: lines[0].translateToString(true).length + 2, buffer: {active: {getLine: index => lines[index] || null}}};
+    const reference = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'url');
+    assert.deepStrictEqual(canonical(reference.range), {start: {x: gutter.length + 1, y: 1}, end: {x: gutter.length + parts[1].length, y: 2}}, 'logical URL range retains the real first and final columns');
+    for (const y of [1, 2]) {
+      for (let x = 1; x <= gutter.length; x += 1) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x, y}), null, `gutter column ${x} on row ${y} is not a URL hit`);
+      }
+    }
+    for (let x = gutter.length + 1; x <= gutter.length + parts[0].length; x += 1) {
+      assert.equal(api.terminalReferenceAtPosition(term, {x, y: 1})?.type, 'url', `first-row URL column ${x} is a hit`);
+    }
+    for (let x = gutter.length + 1; x <= gutter.length + parts[1].length; x += 1) {
+      assert.equal(api.terminalReferenceAtPosition(term, {x, y: 2})?.type, 'url', `continuation URL column ${x} is a hit`);
+    }
+    assert.equal(api.terminalReferenceAtPosition(term, {x: gutter.length + parts[0].length + 1, y: 1}), null, 'the first-row column after the URL is not a hit');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: gutter.length + parts[1].length + 1, y: 2}), null, 'the final-row column after the URL is not a hit');
+  });
+
+  test('captured OpenCode image URLs remain continuous with physical xterm padding', () => {
+    const api = loadYolomux();
+    const gutter = '     ';
+    const cases = [
+      {
+        name: 'URL 1',
+        parts: [
+          'https://huggingface.co/datasets/huggingface/',
+          'documentation-images/resolve/main/p-blog/candy.',
+          'JPG',
+        ],
+        expected: 'https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/p-blog/candy.JPG',
+      },
+      {
+        name: 'URL 2',
+        parts: [
+          'https://cdn.britannica.com/61/93061-050-',
+          '99147DCE/Statue-of-Liberty-Island-New-York-Bay.',
+          'jpg',
+        ],
+        expected: 'https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg',
+      },
+      {
+        name: 'URL 3',
+        parts: [
+          'https://qianwen-res.oss-accelerate.aliyuncs.com/',
+          'Lark3.5/demo/RealWorld/RealWorld-04.png',
+        ],
+        expected: 'https://qianwen-res.oss-accelerate.aliyuncs.com/Lark3.5/demo/RealWorld/RealWorld-04.png',
+      },
+    ];
+
+    for (const item of cases) {
+      const width = 55;
+      const lines = item.parts.map(part => ({
+        isWrapped: false,
+        length: width,
+        translateToString: () => (gutter + part).padEnd(width, ' '),
+      }));
+      const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+      const references = api.terminalWrappedLineReferences(term, 1).filter(ref => ref.type === 'url');
+      assert.equal(references.length, 1, `${item.name} is one URL reference`);
+      assert.equal(references[0].text, item.expected, `${item.name} keeps every wrapped URL character`);
+      for (let row = 1; row <= item.parts.length; row += 1) {
+        const part = item.parts[row - 1];
+        for (let x = gutter.length + 1; x <= gutter.length + part.length; x += 1) {
+          assert.equal(api.terminalReferenceAtPosition(term, {x, y: row})?.text, item.expected, `${item.name} URL character row ${row}, column ${x} is clickable`);
+        }
+        for (let x = 1; x <= gutter.length; x += 1) {
+          assert.equal(api.terminalReferenceAtPosition(term, {x, y: row}), null, `${item.name} gutter row ${row}, column ${x} is not clickable`);
+        }
+        assert.equal(api.terminalReferenceAtPosition(term, {x: width, y: row}), null, `${item.name} padded tail row ${row} is not clickable`);
+      }
+    }
+  });
+
+  await testAsync('screenshot URL exposes every physical character to xterm and context menus', async () => {
+    const api = loadYolomux('', ['zephyrus-experiment']);
+    const gutter = '     ';
+    const parts = [
+      'https://huggingface.co/datasets/huggingface/',
+      'documentation-images/resolve/main/p-blog/candy.',
+      'JPG',
+    ];
+    const expected = parts.join('');
+    const width = 55;
+    const lines = parts.map(part => ({
+      isWrapped: false,
+      length: width,
+      translateToString: trimRight => (trimRight ? (gutter + part).padEnd(width, ' ') : gutter + part),
+    }));
+    const term = {cols: width, rows: 3, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+
+    for (const y of [1, 2, 3]) {
+      const references = api.terminalWrappedLineReferences(term, y).filter(ref => ref.type === 'url');
+      assert.equal(references.length, 1, `screenshot URL has one reference from physical row ${y}`);
+      assert.equal(references[0].text, expected, `screenshot URL is complete from physical row ${y}`);
+      assert.equal(references[0].range.segments.length, 3, `screenshot URL has one painted segment per physical row from row ${y}`);
+      const providerLinks = await api.terminalReferenceProviderLinks('zephyrus-experiment', term, y);
+      assert.equal(providerLinks.length, 1, `xterm provider returns the physical link segment for row ${y}`);
+      assert.deepStrictEqual(canonical(providerLinks.map(link => ({text: link.text, range: link.range}))), parts.map((part, index) => ({
+        text: expected,
+        range: {start: {x: gutter.length + 1, y: index + 1}, end: {x: gutter.length + part.length, y: index + 1}},
+      })).filter(item => item.range.start.y === y), `xterm provider retains the complete URL text and exact physical range for row ${y}`);
+      assert.deepStrictEqual(canonical(providerLinks.map(link => link.decorations)), [{underline: false, pointerCursor: false}], 'the physical URL link defers underline painting to the shared all-segment hover owner');
+      assert.equal(providerLinks.every(link => typeof link.hover === 'function' && typeof link.leave === 'function'), true, 'the physical URL link has the shared hover/leave decoration callbacks');
+    }
+
+    const oneLineTerm = {cols: 120, buffer: {active: {getLine: () => terminalLine(expected, false)}}};
+    const oneLineProviderLinks = await api.terminalReferenceProviderLinks('zephyrus-experiment', oneLineTerm, 1);
+    assert.equal(oneLineProviderLinks.length, 1, 'a one-line URL remains one xterm link');
+    assert.deepStrictEqual(canonical(oneLineProviderLinks[0].range), {start: {x: 1, y: 1}, end: {x: expected.length, y: 1}}, 'a one-line URL keeps its exact range');
+
+    const softWrapParts = ['https://example.test/soft-wrap/', 'continuation/path', 'final.json'];
+    const softWrapLines = softWrapParts.map((part, index) => terminalLine(part, index > 0));
+    const softWrapTerm = {cols: 120, buffer: {active: {getLine: index => softWrapLines[index] || null}}};
+    for (const [index, part] of softWrapParts.entries()) {
+      const softWrapProviderLinks = await api.terminalReferenceProviderLinks('zephyrus-experiment', softWrapTerm, index + 1);
+      assert.equal(softWrapProviderLinks.length, 1, `a soft-wrapped URL emits one xterm link for physical row ${index + 1}`);
+      assert.deepStrictEqual(canonical(softWrapProviderLinks[0].range), {
+        start: {x: 1, y: index + 1},
+        end: {x: part.length, y: index + 1},
+      }, `soft-wrapped URL link ${index + 1} covers only that row's URL characters`);
+    }
+
+    const reference = api.terminalWrappedLineReferences(term, 2)[0];
+    assert.deepStrictEqual(canonical(reference.range), {
+      start: {x: gutter.length + 1, y: 1},
+      end: {x: gutter.length + parts[2].length, y: 3},
+    }, 'logical range retains the screenshot URL endpoints');
+    assert.deepStrictEqual(canonical(reference.range.segments), parts.map((part, index) => ({
+      start: {x: gutter.length + 1, y: index + 1},
+      end: {x: gutter.length + part.length, y: index + 1},
+    })), 'physical segments retain URL columns and exclude the repeated gutter');
+    for (let row = 1; row <= parts.length; row += 1) {
+      const part = parts[row - 1];
+      for (let x = gutter.length + 1; x <= gutter.length + part.length; x += 1) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x, y: row})?.text, expected, `screenshot URL character row ${row}, column ${x} is clickable`);
+      }
+      for (let x = 1; x <= gutter.length; x += 1) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x, y: row}), null, `screenshot repeated gutter row ${row}, column ${x} is not clickable`);
+      }
+      for (let x = gutter.length + part.length + 1; x <= width; x += 1) {
+        assert.equal(api.terminalReferenceAtPosition(term, {x, y: row}), null, `screenshot padded tail row ${row}, column ${x} is not clickable`);
+      }
+    }
+
+    const container = api.testElementForId('terminal-pane-zephyrus-experiment');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: width * 10, height: 60, right: width * 10, bottom: 60};
+    api.setTranscriptInfoForTest('zephyrus-experiment', {agents: [{kind: 'opencode', pane_target: '%zephyrus'}]});
+    api.setTerminalContextMenuPaneTargetForTest(container, '%zephyrus');
+    api.installTerminalContextMenuForTest('zephyrus-experiment', {
+      ...term,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      getSelection: () => '',
+    }, container);
+    const providerContainer = api.testElementForId('terminal-pane-zephyrus-experiment');
+    providerContainer.rect = container.rect;
+    const providerTerm = {
+      ...term,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+    };
+    const hoveredLinks = await api.terminalReferenceProviderLinks('zephyrus-experiment', providerTerm, 2, providerContainer);
+    hoveredLinks[0].hover({}, expected);
+    const urlUnderlineLayer = providerContainer.querySelector(':scope > .terminal-url-link-underlines');
+    assert.equal(urlUnderlineLayer.children.length, 3, 'hovering one URL row paints one exact underline segment on every physical URL row');
+    assert.deepStrictEqual(canonical(Array.from(urlUnderlineLayer.children).map(node => ({left: node.style.left, width: node.style.width}))), [
+      {left: '50px', width: `${parts[0].length * 10}px`},
+      {left: '50px', width: `${parts[1].length * 10}px`},
+      {left: '50px', width: `${parts[2].length * 10}px`},
+    ], 'hover underlines preserve each row start and URL-only width');
+    hoveredLinks[0].leave({}, expected);
+    assert.equal(urlUnderlineLayer.children.length, 0, 'leaving the URL removes every shared physical underline segment');
+    const contextmenu = container.listeners.get('contextmenu')[0];
+    let prevented = 0;
+    const continuationEvent = {
+      clientX: (gutter.length + 1) * 10,
+      clientY: 30,
+      preventDefault() { prevented += 1; },
+      stopPropagation() {},
+    };
+    contextmenu(continuationEvent);
+    assert.equal(prevented, 1, 'continuation-row right-click is claimed by the shared URL context-menu owner');
+    const menu = api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+    assert.deepStrictEqual(Array.from(menu.children).map(child => child.textContent).filter(Boolean).slice(0, 2), ['Open URL in a new tab', 'Copy URL'], 'continuation-row context menu exposes full URL actions');
+  });
+
+  test('screenshot-shaped unindented padded image URLs stay continuous', () => {
+    const api = loadYolomux();
+    const cases = [
+      {
+        name: 'URL 1 candy.JPG',
+        parts: [
+          'https://huggingface.co/datasets/huggingface/',
+          'documentation-images/resolve/main/p-blog/candy.',
+          'JPG',
+        ],
+        expected: 'https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/p-blog/candy.JPG',
+      },
+      {
+        name: 'URL 2 Statue of Liberty',
+        parts: [
+          'https://cdn.britannica.com/61/93061-050-',
+          '99147DCE/Statue-of-Liberty-Island-New-York-Bay.',
+          'jpg',
+        ],
+        expected: 'https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg',
+      },
+      {
+        name: 'URL 3 RealWorld-04.png',
+        parts: [
+          'https://qianwen-res.oss-accelerate.aliyuncs.com/',
+          'Lark3.5/demo/RealWorld/RealWorld-04.png',
+        ],
+        expected: 'https://qianwen-res.oss-accelerate.aliyuncs.com/Lark3.5/demo/RealWorld/RealWorld-04.png',
+      },
+    ];
+
+    for (const item of cases) {
+      const width = 55;
+      const lines = item.parts.map(part => ({
+        isWrapped: false,
+        length: width,
+        translateToString: () => part.padEnd(width, ' '),
+      }));
+      const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+      for (const row of item.parts.map((_, index) => index + 1)) {
+        const references = api.terminalWrappedLineReferences(term, row).filter(ref => ref.type === 'url');
+        assert.equal(references.length, 1, `${item.name} is one URL reference from row ${row}`);
+        assert.equal(references[0].text, item.expected, `${item.name} preserves every URL character from row ${row}`);
+        const part = item.parts[row - 1];
+        for (let x = 1; x <= part.length; x += 1) {
+          assert.equal(api.terminalReferenceAtPosition(term, {x, y: row})?.text, item.expected, `${item.name} URL character row ${row}, column ${x} is clickable`);
+        }
+        assert.equal(api.terminalReferenceAtPosition(term, {x: width, y: row}), null, `${item.name} padded tail row ${row} is not clickable`);
+      }
+    }
+  });
+
+  test('padded ordinary hanging URLs do not absorb indented prose', () => {
+    const api = loadYolomux();
+    const lines = [
+      {isWrapped: false, length: 55, translateToString: () => 'https://example.test/complete'.padEnd(55, ' ')},
+      {isWrapped: false, length: 55, translateToString: () => '    next step'.padEnd(55, ' ')},
+    ];
+    const term = {cols: 55, buffer: {active: {getLine: index => lines[index] || null}}};
+    const reference = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'url');
+    assert.equal(reference?.text, 'https://example.test/complete', 'the complete URL remains a single visible token');
+    assert.equal(reference?.range.end.y, 1, 'physical xterm padding does not license a prose continuation');
+    assert.equal(api.terminalWrappedLineReferences(term, 2).length, 0, 'the indented prose row is not promoted into the URL');
+  });
+
+  test('OpenCode question status uses the shared attention highlight owner', () => {
+    const api = loadYolomux('', ['open']);
+    const container = api.testElementForId('terminal-pane-open');
+    container.className = 'terminal';
+    container.rect = {left: 0, top: 0, width: 1200, height: 100, right: 1200, bottom: 100};
+    const rows = new TestElement('opencode-question-rows');
+    rows.className = 'xterm-rows';
+    rows.rect = container.rect;
+    const question = 'Which image should I inspect?';
+    const visibleRows = [`     ${question}`, '     1. NASA', '     2. Lenna'].map((text, index) => {
+      const row = new TestElement(`opencode-question-row-${index}`);
+      row.textContent = text;
+      row.rect = {left: 0, top: index * 20, width: 1200, height: 20, right: 1200, bottom: (index + 1) * 20};
+      rows.appendChild(row);
+      return row;
+    });
+    container.appendChild(rows);
+    api.registerTerminalForTest('open', {
+      cols: 120,
+      rows: 5,
+      _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+      buffer: {active: {length: visibleRows.length, viewportY: 0, getLine: index => terminalLine(visibleRows[index]?.textContent || '')}},
+    });
+    api.setTranscriptInfoForTest('open', {agents: [{kind: 'opencode', pane_target: '%open'}], panes: []});
+    api.setAutoApproveStateForTest('open', {
+      enabled: true,
+      screen: {key: 'needs-input', text: question, question_text: question},
+      agent_windows: [{kind: 'opencode', pane_target: '%open', window_index: 0, state: 'needs-input', screen_text: question}],
+    });
+    assert.equal(api.syncTerminalAttentionHighlightForTest('open'), true, 'OpenCode needs-input reaches the shared question highlighter');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), true, 'the OpenCode question row receives the shared highlight class');
+    const overlay = container.querySelector('.terminal-attention-question-overlay[data-session="open"]');
+    assert.equal(overlay.style.left, '50px', 'the shared overlay preserves OpenCode leading gutter columns');
+    assert.equal(overlay.style.width, `${question.length * 10}px`, 'the shared overlay covers only the question text');
+
+    api.setAutoApproveStateForTest('open', {
+      enabled: true,
+      screen: {key: 'blocked', text: 'Permission denied', question_text: question},
+      agent_windows: [{kind: 'opencode', pane_target: '%open', window_index: 0, state: 'blocked', screen_text: 'Permission denied', question_text: question}],
+    });
+    assert.equal(api.syncTerminalAttentionHighlightForTest('open'), false, 'blocked OpenCode permission state does not retain a question overlay');
+    assert.equal(visibleRows[0].classList.contains('terminal-attention-question-row'), false, 'blocked OpenCode permission state clears the question row');
+    assert.equal(container.querySelector('.terminal-attention-question-overlay[data-session="open"]'), null, 'blocked OpenCode permission state leaves only the blocked marker owner');
+  });
+
   // Some TUIs hard-wrap long URLs as separate, flush-left rows at width-1 to avoid xterm auto-wrap.
   // The shared reference detector still needs to stitch those rows into one URL for the context menu.
   test('terminal link decorations share subtle file underline styling', () => {
@@ -7748,17 +8333,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
   test('preview and editor font preferences render and apply', () => {
-    // Preview font size is independent from the editor font size and defaults one px larger.
+    // Preview font size is independently configurable when global synchronization is disabled.
     const api = loadYolomux('', ['1']);
     api.setActiveLocaleForTest('en');
     api.setClientSettingsPayloadPatchForTest({localeKeyOverrides: {'appearance.preview_font_size': {label: 'common.previewFontSize'}}});
+    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
     const html = api.preferencesPanelHtmlForTest('');
-    assert.ok(/data-preference-section="terminal_editor"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Terminal / Editor preferences');
+    assert.ok(/data-preference-section="sizes"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Sizes preferences');
     assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);"), 'preview font size defaults one larger than editor font during bootstrap');
+    assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', 14);"), 'preview font size defaults to 14px during bootstrap');
     assert.ok(source.includes("root.setProperty('--editor-preview-font-size'"), 'preview font size writes its own CSS variable');
-    assert.ok(source.includes("numberSetting('appearance.preview_font_size', editorFontSize + 1)"), 'preview font size reload preserves the editor+1 fallback');
+    assert.ok(source.includes("numberSetting('appearance.preview_font_size', 14)"), 'preview font size reload preserves the 14px fallback');
     assert.ok(source.includes('class="file-editor-preview-font-panel"'), 'preview toolbar includes a font-size control group');
     assert.ok(source.includes('data-editor-preview-font-step="-1"'), 'preview toolbar includes a decrease button');
     assert.ok(source.includes('data-editor-preview-font-step="1"'), 'preview toolbar includes an increase button');
@@ -8234,8 +8820,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.commandPaletteItems().some(item => String(item.detail || '').includes('raw English filesystem error')), false, 'the raw filesystem diagnostic does not replace the localized command-palette error');
 
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/list?path='), 'command-palette path listing preserves shared filesystem error descriptors');
-    assert.ok(layoutSource.includes('apiFetchJson(`/api/fs/search?root='), 'command-palette indexed search preserves shared filesystem error descriptors');
+    assert.ok(layoutSource.includes('/api/fs/search?root=') && layoutSource.includes('/api/fs/search-stream?root='), 'command-palette search preserves direct and streamed filesystem error descriptors');
+    assert.ok(layoutSource.includes('fileQuickOpenSearchRootResult') && layoutSource.includes('search-stream'), 'command-palette search splits direct and indexed filesystem paths');
 
     assert.deepStrictEqual(
       canonical(api.TAB_TYPES.filter(type => typeof type.relocalize === 'function').map(type => type.key)),
@@ -8276,7 +8862,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
     for (const key of [
       'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
-      'pref.appearance.date_time_hour_cycle.label', 'pref.appearance.font_sizes.note',
+      'pref.appearance.date_time_hour_cycle.label',
       'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
       'pref.performance.server_event_poll_ms.label', 'pref.performance.server_background_file_event_poll_ms.label',
       'pref.performance.server_directory_event_poll_ms.label',
@@ -8293,7 +8879,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.ok(html.includes(enXA[key]), `pseudo-locale renders ${key}`);
     }
     for (const englishLeak of [
-      'Global appearance', 'Editor/Terminal font sizes are in Terminal / Editor.', 'Client pull: latency ping', 'Notification throttle',
+      'Global appearance', 'Client pull: latency ping', 'Notification throttle',
       'Terminal scrollback', 'File transfer size cap', 'YO!agent backend', 'Dry run',
     ]) {
       assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
@@ -8478,7 +9064,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setClientSettingsPatchForTest({file_explorer: {index_exclude_dir_names: ['node_modules', 'backup'], index_exclude_paths: ['glob:**/.uploads/**']}});
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
+    const expectedOrder = ['general', 'colors', 'sizes', 'terminal', 'editor_options', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
     assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
@@ -8514,13 +9100,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }, 'the combined Quick Open control splits exact directory names from advanced path rules without duplicates');
     const excludeItem = {path: 'file_explorer.index_exclude_paths', label: 'Quick Open exclusions', help: 'Exclude generated files with glob or regex patterns.'};
     assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
-    const appearanceHtml = sectionHtml('appearance');
-    assert.ok(appearanceHtml.includes('Global appearance'), 'Appearance shows the renamed Global appearance field');
-    assert.ok(appearanceHtml.includes('Theme color'), 'Appearance shows the renamed Theme color field');
-    assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
-    assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');
-    assert.ok(appearanceHtml.includes('Single pane') && appearanceHtml.includes('Split') && appearanceHtml.includes('Grid'), 'Default layout labels match View layout labels');
-    assert.equal(appearanceHtml.includes('Wall'), false, 'Wall is no longer offered as a default layout choice');
+    const appearanceHtml = sectionHtml('colors');
+    assert.ok(appearanceHtml.includes('Global appearance'), 'Colors shows the renamed Global appearance field');
+    assert.ok(appearanceHtml.includes('Theme color'), 'Colors shows the renamed Theme color field');
     assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
     assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
     assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
@@ -8539,8 +9121,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
     assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
-    assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Appearance');
-    assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.date_time_hour_cycle"/.test(appearanceHtml), 'Separator and Cursor color sit immediately after Active color in Appearance, with no YO rotation row between them');
+    assert.equal(appearanceHtml.includes('data-setting-path="appearance.yolo_rotate_ms"'), false, 'Active YO rotation is removed from Colors');
+    assert.ok(/data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.separator_color"/.test(appearanceHtml), 'Separator and Cursor color stay with the other Colors settings');
     assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
     const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
@@ -8549,18 +9131,31 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*clientSettingsPayload\?\.choices\?\.\['appearance\.editor_cursor_color'\][\s\S]*CURSOR_COLOR_CHOICES[\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices sync to the backend allowlist with a local fallback');
     assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*preset\?\.cursorLabelKey \? t\(preset\.cursorLabelKey\) : preferenceChoiceLabel\(value\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
     assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:#3b82f6[\\s\\S]*--preferences-radio-swatch:${UI_PINS.textSelectionBg}`).test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
-    assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
-    assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
     assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
     assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
     assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
-    const appearancePaths = [...appearanceHtml.matchAll(/data-setting-path="([^"]+)"/g)].map(match => match[1]);
-    assert.equal(appearancePaths.at(-1), 'appearance.date_time_hour_cycle', '12-hour / 24-hour Date/time clock is the last Appearance item');
-    const terminalEditorHtml = sectionHtml('terminal_editor');
-    assert.ok(terminalEditorHtml.includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
-    assert.equal(terminalEditorHtml.includes('data-setting-path="appearance.editor_cursor_color"'), false, 'Cursor color moved out of Terminal / Editor into Appearance');
-    assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
-    assert.equal(sectionHtml('general').includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
+    const terminalHtml = sectionHtml('terminal');
+    assert.ok(terminalHtml.includes('data-setting-path="appearance.tmux_status_bar"'), 'Terminal owns tmux status-bar placement');
+    assert.ok(terminalHtml.includes('data-setting-path="terminal_editor.scrollback"'), 'Terminal owns scrollback');
+    const sizesHtml = sectionHtml('sizes');
+    assert.ok(/data-setting-path="appearance\.sync_font_sizes"[\s\S]*data-setting-path="appearance\.global_font_size"/.test(sizesHtml), 'Sizes starts with sync control and global font size');
+    assert.equal(sizesHtml.includes('data-setting-path="appearance.ui_font_size"'), false, 'separate UI font size is hidden while synchronization is enabled');
+    assert.equal(sizesHtml.includes('data-setting-path="appearance.terminal_font_size"'), false, 'separate terminal font size is hidden while synchronization is enabled');
+    assert.ok(sizesHtml.includes('Global font size'), 'global font size renders in Sizes');
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(source.includes("'appearance.global_font_size': 14"), 'global font size defaults to 14px');
+    assert.ok(sizesHtml.includes('Sync all font sizes'), 'font-size synchronization control renders');
+    api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
+    const separateSizesHtml = api.preferencesPanelHtmlForTest('');
+    const separateAppearanceHtml = separateSizesHtml.slice(separateSizesHtml.indexOf('data-preference-section="sizes"'), separateSizesHtml.indexOf('data-preference-section="terminal"'));
+    assert.equal(separateAppearanceHtml.includes('data-setting-path="appearance.global_font_size"'), false, 'global font size is hidden when synchronization is disabled');
+    assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.ui_font_size"'), 'unchecking synchronization reveals the separate UI font size');
+    assert.ok(separateAppearanceHtml.includes('data-setting-path="appearance.terminal_font_size"'), 'unchecking synchronization reveals the separate terminal font size');
+    assert.ok(/data-setting-path="appearance\.tab_width"[\s\S]*data-setting-path="appearance\.pane_spacing"/.test(sizesHtml), 'Sizes contains layout dimensions');
+    const editorOptionsHtml = sectionHtml('editor_options');
+    assert.ok(/data-setting-path="terminal_editor\.word_wrap"[\s\S]*data-setting-path="editor\.autosave"/.test(editorOptionsHtml), 'Editor options groups editor behavior settings');
+    assert.ok(sectionHtml('general').includes('data-setting-path="general.default_layout"'), 'Default layout lives in General');
+    assert.ok(sectionHtml('general').includes('data-setting-path="appearance.date_time_hour_cycle"'), 'Date/time clock lives in General');
     assert.equal(sectionHtml('general').includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
     // the GitHub section carries the watched-PRs list field.
     assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'the GitHub section has the watched_prs list field');

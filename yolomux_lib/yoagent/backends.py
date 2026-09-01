@@ -544,7 +544,7 @@ class YoagentBackendsMixin:
             search=enable_search and not (resume and session_id),
         )
         try:
-            schema_dir = tempfile.TemporaryDirectory(prefix="yolomux-codex-schema-") if output_schema is not None else None
+            schema_dir = tempfile.TemporaryDirectory(prefix="schema-", dir=os.environ.get("TMPDIR")) if output_schema is not None else None
             if schema_dir is not None:
                 schema_path = os.path.join(schema_dir.name, "output-schema.json")
                 with open(schema_path, "w", encoding="utf-8") as handle:

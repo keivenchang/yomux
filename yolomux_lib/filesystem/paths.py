@@ -185,7 +185,7 @@ def validate_request_path_lexical(raw: str) -> str:
     These three refusals read only the request string: no descriptor, no authorization, no
     filesystem access and no name service.  That is what makes them safe on the web thread, which
     applies them before it accepts an operation, so a request the worker would refuse can never be
-    accepted as a 202 receipt.  This is the only implementation of the rule; the jobd worker
+    accepted as a 202 receipt.  This is the only implementation of the rule; the batchd worker
     reaches it through ``parsed_request_path``.
 
     Expansion is deliberately NOT part of it.  ``os.path.expanduser`` on a ``~user/...`` path is an
@@ -271,7 +271,7 @@ def _configured_fs_roots_for_value(generation: int, raw: str, default_roots: tup
 # One filesystem access policy, captured by the server that ACCEPTS a request and enforced by
 # whatever process finally executes it.
 #
-# `jobd` and `watchd` are shared per-user daemons: the first server to need one launches it, and
+# `batchd` and `watchd` are shared per-user daemons: the first server to need one launches it, and
 # every other server on every other port then reuses that same process.  A filesystem job
 # descriptor used to carry only `op`, `path` and `args`, so the worker authorized the path against
 # `YOLOMUX_FS_ROOTS` in its OWN environment -- the environment of whichever server launched it
@@ -401,7 +401,7 @@ def active_access_policy() -> FilesystemAccessPolicy:
 
     In-process callers (the web process answering its own request, watchd building its own product)
     have no descriptor and no other server's authority to borrow, so their policy is their own
-    environment.  Descriptor-carried execution never reaches this fallback: the jobd task entry
+    environment.  Descriptor-carried execution never reaches this fallback: the batchd task entry
     points refuse a descriptor without a parsable policy before any path is touched.
     """
     bound = _ACTIVE_ACCESS_POLICY.get()

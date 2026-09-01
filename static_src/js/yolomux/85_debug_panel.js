@@ -2026,7 +2026,24 @@ function jsDebugHistoryCoverageIntervalsForFamily(family) {
   return jsDebugHistoryReadiness.coverageIntervals;
 }
 
-function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = []) {
+function debugGraphSeriesDataRanges(groupSeries, domain) {
+  const ranges = [];
+  for (const series of groupSeries || []) {
+    const values = debugGraphSeriesPlotValues(series);
+    const hasData = debugGraphSeriesPlotHasDataValues(series);
+    const times = Array.isArray(series.times) ? series.times : [];
+    const durations = Array.isArray(series.durations) ? series.durations : [];
+    for (let index = 0; index < values.length; index += 1) {
+      if (hasData && hasData[index] !== true) continue;
+      const startMs = Number(times[index]);
+      const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+      if (Number.isFinite(startMs)) ranges.push({startMs, endMs: startMs + durationMs});
+    }
+  }
+  return debugGraphMergeTimeRanges(ranges, domain);
+}
+
+function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
   if (!family) return [];
   const requestedRanges = (jsDebugHistoryReadiness.requestCoverageIntervals || []).map(interval => ({
@@ -2042,12 +2059,14 @@ function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = 
     gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
   }
   const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
-  const trimmedGaps = !alreadyPaintedRanges.length
+  const dataRanges = debugGraphSeriesDataRanges(groupSeries, domain);
+  const paintedRanges = [...alreadyPaintedRanges, ...dataRanges];
+  const trimmedGaps = !paintedRanges.length
     ? mergedGaps
     : debugGraphMergeTimeRanges(
-      mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
-      domain,
-    );
+       mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(paintedRanges, gap)),
+       domain,
+     );
   return debugGraphMeaningfulCoverageGaps(trimmedGaps, domain);
 }
 
@@ -2066,9 +2085,9 @@ function debugGraphMeaningfulCoverageGaps(ranges, domain) {
   });
 }
 
-function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
+function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = [], groupSeries = []) {
   const family = jsDebugHistoryCoverageFamilyForGroup(group);
-  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges).map((range, index) => {
+  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges, groupSeries).map((range, index) => {
     const x1 = debugGraphXForTime(range.startMs, domain);
     const x2 = debugGraphXForTime(range.endMs, domain);
     return `<g data-js-debug-history-coverage-family="${esc(family)}">${debugGraphPlotOverlayRectHtml(
@@ -2089,7 +2108,7 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
 function debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries) {
   const ranges = [];
   const statusRuns = group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [];
-  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns));
+  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns, groupSeries));
   ranges.push(...statusRuns);
   if (group.noDataOverlay === true) {
     ranges.push(...debugGraphNoDataRuns(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)));
@@ -3040,7 +3059,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
-          ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
+           ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [], groupSeries)}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
@@ -4679,11 +4698,12 @@ function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
   return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
 }
 
-function jsDebugCurrentCpuProjectionValue(series, averageName, maximumName, duration) {
+function jsDebugCurrentCpuProjectionValue(series, averageName) {
   const average = jsDebugCurrentSeriesValue(series, averageName);
-  if (average === null) return null;
-  const maximum = jsDebugCurrentSeriesValue(series, maximumName);
-  return duration >= 60 && maximum !== null ? maximum : average;
+  // CPU charts show utilization over the bucket, not its instantaneous peak. Using the
+  // maximum for coarse buckets made a 60s/300s view disagree with the 1s view and could
+  // display an invalid host percentage above 100% when a legacy maximum was malformed.
+  return average;
 }
 
 function jsDebugCurrentServiceLoadItem(record, source) {

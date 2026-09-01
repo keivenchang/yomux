@@ -183,7 +183,7 @@ def list_directory(
 
 
 def validated_batch_requests(payload: dict[str, Any]) -> list[Any]:
-    """Return the one bounded request list accepted by HTTP and jobd."""
+    """Return the one bounded request list accepted by HTTP and batchd."""
     requests = payload.get("requests", [])
     if not isinstance(requests, list):
         raise ValueError("requests must be a list")
@@ -375,9 +375,22 @@ def search_files(
     limit: int | str | None = 400,
     recursive: bool = False,
     cursor: str | None = None,
+    direct_only: bool = False,
+    indexed_only: bool = False,
+    minimal: bool = False,
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor)
+    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor, direct_only=direct_only, indexed_only=indexed_only, minimal=minimal)
+
+
+def indexed_search_stream_payload(handle: Any, query: str, limit: int | str | None = 400) -> dict[str, Any]:
+    _sync_package_overrides()
+    return search.indexed_search_stream_payload(handle, query, limit)
+
+
+def iter_indexed_search_stream_payload(handle: Any, query: str, limit: int | str | None = 400, *, skip_paths: set[str] | None = None):
+    _sync_package_overrides()
+    return search.iter_indexed_search_stream_payload(handle, query, limit, skip_paths=skip_paths)
 
 
 @normalize_os_errors
@@ -500,9 +513,9 @@ def _reindex_after_mutation(mutated_paths: list[Any], reason: str) -> list[str]:
     it must reach the index in seconds instead of waiting for the 1800s safety TTL. It goes through
     the same `search.reindex_roots_for_paths` owner watchd and the persistent indexer already use --
     which coalesces by indexed root and either promotes the pending frontier or runs one bounded
-    subtree repair -- so `write`/`delete`/`mkdir`/upload stop bypassing the index. In an HTTP or jobd
+    subtree repair -- so `write`/`delete`/`mkdir`/upload stop bypassing the index. In an HTTP or batchd
     process (not the elected owner) this only marks paths dirty and dispatches a bounded RPC; the
-    crawl runs in indexd, never on jobd's single interactive worker.
+    crawl runs in indexd, never on batchd's single interactive worker.
     """
     candidates = [str(path) for path in mutated_paths if path]
     if not candidates:
@@ -670,6 +683,7 @@ __all__ = [
     "git_root_for_path",
     "git_tracks_path",
     "index_status",
+    "indexed_search_stream_payload",
     "is_text_path",
     "filesystem_batch_request_summary",
     "filesystem_batch_result",

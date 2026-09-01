@@ -96,9 +96,9 @@ class StatusClient(LocalServiceClient):
             timeout=STATUSD_GENERATION_PROBE_TRANSPORT_TIMEOUT_SECONDS,
         )
 
-    def acquire_generation_lease(self) -> dict[str, Any]:
+    def acquire_generation_lease(self, existing_lease_id: str = "") -> dict[str, Any]:
         """Keep statusd's demand-scoped generation refresher alive for one web process."""
-        return self.registry.acquire_lease()
+        return self.registry.acquire_lease(existing_lease_id)
 
     def release_generation_lease(self, lease_id: str) -> dict[str, Any]:
         return self.registry.release_lease(lease_id)
@@ -115,12 +115,10 @@ class StatusClient(LocalServiceClient):
         and that lease is released the moment the last subscriber leaves (`app.py:7146-7156`),
         after which statusd retires itself on STATUSD_DEFAULT_IDLE_SECONDS.
 
-        The one background caller is not a keep-alive and must not be mistaken for one. The
-        `agent_status`/`agent_tokens` collectors reach statusd through
-        `status_snapshot_payload()` (`app.py:2366-2371`), which returns before issuing any RPC
-        when there are no sessions, and whose idle cadence (60s, `families.py:135-139`) is the
-        same 60s as statusd's own idle timeout -- it cannot hold the service up between ticks.
-        So a browser-less machine legitimately runs without statusd for as long as it likes.
+        The recurring `agent_status`/`agent_tokens` collectors use the same registry lease
+        mechanism while the elected owner has sessions, so their 60-second idle cadence cannot
+        collide with statusd's 60-second idle timeout. With no sessions, no collector lease is
+        acquired and a browser-less machine legitimately runs without statusd.
 
         This is safe in the other direction because `demand_started` is read LAST by the health
         reducer: a statusd that fails a demand still records a failure through the registry

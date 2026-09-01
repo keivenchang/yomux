@@ -175,7 +175,7 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
     "tests/helpers/fixture_http_server.py",
     "tests/subsystems/app_darwin_memory.py",
-    "tests/subsystems/app_jobd_product.py",
+    "tests/subsystems/app_batchd_product.py",
     "tests/subsystems/browser_harness_lifecycle.py",
     "tests/subsystems/stats_24h_http.py",
 )

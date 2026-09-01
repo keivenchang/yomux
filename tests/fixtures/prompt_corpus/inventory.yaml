@@ -862,6 +862,19 @@ required_families:
 - bypass-mode-no-approval
 - generic-warning
 parity_groups:
+- id: opencode-visible-states
+  status: product-specific
+  contract: OpenCode 1.18.25 uses the shared visible screen-state path; its bounded composer/footer distinguishes idle from current working meter or tool rows.
+  fixtures:
+  - agent: opencode
+    case_name: completed_output
+    file: captures/completed_output__opencode-1.18.25_20260828.yaml
+  - agent: opencode
+    case_name: working_coordinator
+    file: captures/working_coordinator__opencode-1.18.25_20260828.yaml
+  - agent: opencode
+    case_name: working_tool_wrap
+    file: captures/working_tool_wrap__opencode-1.18.25_20260828.yaml
 - id: visible-working-counter
   status: covered-by-both
   contract: Both clients are working/busy and must render as Working without raising needs-input or YOLO?.

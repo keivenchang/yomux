@@ -1,8 +1,0 @@
-# E5: instant file open and bounded jobd
-
-- [x] Open terminal-selected files without waiting for Git enrichment. DONE: the terminal action creates the tab immediately, the tab owns a descriptor-authorized direct base read, and Git, Blame, and Diff remain deferred. The direct-open and restore Node regressions passed in the canonical functional gate.
-- [x] Preserve an already-open file tab's explicit mode. DONE: reopening a canonical path or resolved alias retains Edit, Preview, or Diff; only an explicit mode action changes it. The layout async and restore regressions cover the reopen path.
-- [x] Bound executor replacement after a running-deadline backstop. DONE: each jobd lane now owns one-worker slots, a timed-out stuck slot is quarantined and generation-fenced, and the broker retains at most two unreaped predecessors across all lanes. Broken executor completion and submit failures retire only their affected slot, so a healthy point sibling keeps its product.
-- [x] Verify the changed source. DONE: `python3 -m pytest -q tests/test_jobd.py` completed successfully on the final source, and `python3 tools/static_build.py`, `python3 tools/static_build.py --check`, and `git diff --check` passed. The earlier canonical gate passed all functional lanes. Its certification phase returned `NOT CERTIFIABLE: host_unqualified_preflight`; that refusal is release evidence, not a green certificate. A later isolated boot-lane recovery attempt ended without a readable terminal verdict and is not counted as a pass.
-
-The active queue file named by this record was absent from the worktree and its `HEAD` when this archive was prepared. This archive preserves the completed E5 scope without manufacturing a deleted queue's checkbox history.

@@ -123,7 +123,7 @@ class ExclusionPolicy:
     """The configured exclusion policy as DATA: serializable, root-independent, signed.
 
     Two consumers need the same policy in two processes.  The Finder index compiles it against an
-    index root in the web process; Differ has to ship it to the ``jobd`` worker, which has no
+    index root in the web process; Differ has to ship it to the ``batchd`` worker, which has no
     access to settings and must not look any up.  Keeping the policy as raw names and raw rule
     text -- never compiled matchers or closures -- is what lets it cross that boundary unchanged,
     and ``signature`` is what lets a cache identity notice that it changed.  Reading settings is

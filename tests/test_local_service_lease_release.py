@@ -7,7 +7,7 @@ import time
 from tests.helpers.external_lease_client import assert_daemon_refuses_a_self_lease
 from tests.helpers.external_lease_client import external_lease_client
 from yolomux_lib import app as app_module
-from yolomux_lib import jobd
+from yolomux_lib import batchd
 from yolomux_lib.local_services import client as local_service_client
 from yolomux_lib.local_services import registry as local_service_registry
 from yolomux_lib.local_services import rpc
@@ -127,16 +127,16 @@ def test_status_generation_release_timeout_retries_until_statusd_acknowledges(mo
     assert record.status_generation_worker is None
 
 
-def test_jobd_interaction_release_timeout_retries_until_the_broker_unpins(tmp_path, monkeypatch):
+def test_batchd_interaction_release_timeout_retries_until_the_broker_unpins(tmp_path, monkeypatch):
     """A timed-out interaction-lease release retries until the broker is actually unpinned.
 
     The client has to be a REAL separate process. A harness naming ``os.getpid()``
     IS the daemon, and the one shared lease fence in ``runtime.acquire_client_lease``
     correctly refuses a daemon the lease that keeps itself alive. Production is not
-    shaped like that: the web server holds this interaction lease on a separate jobd
+    shaped like that: the web server holds this interaction lease on a separate batchd
     process, so the fence sees a different pid whose start identity it can verify.
     """
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", idle_seconds=5.0, workers=1)
     release_calls = []
 
     with external_lease_client() as client_pid:
@@ -155,7 +155,7 @@ def test_jobd_interaction_release_timeout_retries_until_the_broker_unpins(tmp_pa
                 return broker.handle({"action": "release", "lease_id": lease_id})[0]
 
         monkeypatch.setattr(local_service_client, "LOCAL_SERVICE_LEASE_RELEASE_RETRY_SECONDS", 0.01)
-        lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": BrokerLeaseRegistry()})())
+        lease = app_module.BatchedInteractionLease(type("batchd.BatchClient", (), {"registry": BrokerLeaseRegistry()})())
 
         # NEGATIVE CONTROL, asserted first: the external stand-in is not a way
         # around the fence. A true self-lease stays refused and never reaches the

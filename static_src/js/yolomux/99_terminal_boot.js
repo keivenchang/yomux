@@ -4211,6 +4211,10 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
   const info = transcriptMetadataState.payload.sessions?.[session];
+  setTerminalContextMenuPaneTarget(
+    document.getElementById(terminalDomId(session)),
+    terminalContextMenuPaneTargetForWindow(windowRecord),
+  );
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -5073,6 +5077,7 @@ function bindTerminalContainerForSession(session, term, container) {
   normalizeAppOwnedControls(container);
   installTerminalMobileAccessoryResizeSync();
   installTerminalMobileAccessorySurfaceSync();
+  setTerminalContextMenuPaneTarget(container, terminalContextMenuPaneTargetForSession(session));
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -5176,7 +5181,7 @@ function startTerminal(session) {
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
   applyTerminalContainerTheme(container, displayTheme);
-  installTerminalLinkProvider(session, term);
+  installTerminalLinkProvider(session, term, container);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {

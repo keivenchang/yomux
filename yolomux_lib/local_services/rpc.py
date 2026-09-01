@@ -123,7 +123,7 @@ def retry_local_service_prehandler_busy(
 
 # --- Retained per-service request/error/latency accounting -------------------------------
 #
-# One owner for all six services, chosen over normalizing statsd's and jobd's bespoke
+# One owner for all six services, chosen over normalizing statsd's and batchd's bespoke
 # in-service metrics.  See `LocalServiceTrafficLedger` for the recorded reason.
 LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION = 1
 LOCAL_SERVICE_TRAFFIC_WORK = "work"
@@ -300,7 +300,7 @@ class LocalServiceTrafficLedger:
     """The one retained request/error/latency aggregate for one local service.
 
     Decision (M6): one common aggregator for all six services, not a normalized projection
-    over the bespoke metrics statsd and jobd already keep.  Three reasons.  First, uniform
+    over the bespoke metrics statsd and batchd already keep.  Three reasons.  First, uniform
     accepted/completed/error/latency exit criteria are required, and statusd, watchd, indexd
     and approvald expose no RPC ledger at all -- a projection would have to invent four of the
     six rows.  Second, an in-service counter is destroyed by the service restart the monitor
@@ -568,7 +568,8 @@ class LocalRpcEnvelope:
 def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | None = None) -> Path:
     """Keep Unix-domain paths portable without leaking a long state directory.
 
-    The fallback always nests inside its own `{prefix}-{uid}-{digest}/` directory,
+    The fallback always nests inside the server-owned `yolomux-server-<uid>/shared/s/`
+    directory with a bounded digest path,
     never a bare file directly under `/tmp` -- a caller deriving sibling paths from
     this one (e.g. `.with_suffix(".service.json")` for a record path) must still get
     a `.parent` that is a private, owned directory, not the shared `/tmp` root itself.
@@ -589,7 +590,23 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
         return candidate
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
-    return Path("/tmp") / f"{prefix}-{uid}-{digest}" / (fallback_name or candidate.name)
+    fallback_leaf = fallback_name or candidate.name
+    bounded_name = hashlib.sha256(os.fsencode(fallback_leaf)).hexdigest()[:16]
+    configured_root = os.environ.get("YOLOMUX_ROOT", "").strip()
+    configured_runtime = os.environ.get("YOLOMUX_RUNTIME_DIR", "").strip()
+    if configured_root:
+        fallback_base = Path(configured_root).expanduser() / "runtime" / "s"
+    elif configured_runtime:
+        fallback_base = Path(configured_runtime).expanduser() / "yolomux" / "s"
+    else:
+        fallback_base = Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s"
+    fallback = fallback_base / digest[:8] / bounded_name
+    if len(os.fsencode(str(fallback))) <= LOCAL_RPC_SOCKET_PATH_BYTES:
+        return fallback
+    # Test and rooted runtime directories can themselves be long enough to make a
+    # bounded child exceed sockaddr_un's limit. Keep the digest identity, but
+    # move only the socket transport to the fixed private server root.
+    return Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s" / digest[:8] / bounded_name
 
 
 def new_envelope(

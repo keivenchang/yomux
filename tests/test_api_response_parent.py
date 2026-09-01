@@ -575,7 +575,7 @@ def test_warm_filesystem_response_writes_canonical_bytes_without_a_qualified_pro
         diagnostics = webapp.queued_delivery_ledger.diagnostics()
         operations = webapp.queued_delivery_ledger.open_operations()
     finally:
-        webapp.stop_jobd_operation_service()
+        webapp.stop_batchd_operation_service()
         webapp.control_server.stop()
 
     assert writes == [({
@@ -773,7 +773,7 @@ def test_accepted_receipt_is_not_claimed_exposed_when_the_flush_fails() -> None:
         route="GET /api/fs/read",
         deadline_at=0.0,
         progress={"phase": "waiting_for_product"},
-        producer={"service": "jobd", "job_id": "job-broken-pipe"},
+        producer={"service": "batchd", "job_id": "job-broken-pipe"},
     )
     operation_id = receipt["operation"]["id"]
 

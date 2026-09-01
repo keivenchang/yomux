@@ -680,7 +680,8 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
     activity_heartbeats_path = state_dir / "activity-heartbeats.jsonl"
     watch_index_path = state_dir / "watch-index.json"
     auto_approve_lock_dir = state_dir / "locks"
-    control_socket_dir = Path("/tmp") / f"ycs-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    control_socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "browser" / f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    control_socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     control_socket_dir.mkdir(mode=0o700)
     for module in (common,):
         monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
@@ -791,10 +792,10 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
         GateLiveServerOptions(
             tls_context=tls_context,
             label="isolated browser",
-            # Browser fixtures also serve small HTTP-only app doubles.  Pin jobd only when the
+            # Browser fixtures also serve small HTTP-only app doubles.  Pin batchd only when the
             # app actually owns that scheduler seam; otherwise the fixture has no producer to
-            # protect and must not manufacture a jobd dependency.
-            pin_jobd_scheduler=hasattr(app, "job_client"),
+            # protect and must not manufacture a batchd dependency.
+            pin_batchd_scheduler=hasattr(app, "job_client"),
         ),
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
@@ -2644,7 +2645,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
         emitFixtureClientEvent('settings_changed', {data: window.__settingsPayload});
       }
-      function fixtureSettingAnswer(path, before, after, where = 'Preferences -> Appearance') {
+      function fixtureSettingAnswer(path, before, after, where = 'Preferences -> Colors') {
         return [
           'Updated this Preference:',
           '',
@@ -2672,11 +2673,11 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         }
         if (lower.includes('tab width')) {
           applyFixtureSettingsPatch({appearance: {tab_width: 220}});
-          return fixtureSettingAnswer('appearance.tab_width', '172', '220');
+          return fixtureSettingAnswer('appearance.tab_width', '172', '220', 'Preferences -> UI sizes');
         }
         if (lower.includes('font size')) {
           applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});
-          return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> Terminal and Editor');
+          return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> UI sizes');
         }
         if (lower.includes('notification level') || lower.includes('notify level')) {
           applyFixtureSettingsPatch({updates: {notify_level: 'none'}});
