@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.28"
+YOLOMUX_VERSION = "0.7.29"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -305,8 +305,59 @@ WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
 AUTO_APPROVE_LOCK_DIR = RUNTIME_DIR / "locks"
 CONTROL_SOCKET_DIR = RUNTIME_DIR / "control"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-AGENT_COMMANDS = {"claude", "codex", "term"}
-VISIBLE_AGENT_KINDS = frozenset({"claude", "codex", "opencode"})
+@dataclass(frozen=True, slots=True)
+class AgentClientSpec:
+    """Capabilities shared by every supported interactive client."""
+
+    label: str
+    visible: bool = False
+    native_context_menu: bool = False
+    restart: bool = False
+    managed_chat: bool = False
+    auto_approve: bool = False
+    prompt_transport: bool = False
+    jsonl_transcript: bool = False
+
+
+AGENT_CLIENTS = {
+    "claude": AgentClientSpec(
+        label="Claude",
+        visible=True,
+        restart=True,
+        managed_chat=True,
+        auto_approve=True,
+        prompt_transport=True,
+        jsonl_transcript=True,
+    ),
+    "codex": AgentClientSpec(
+        label="Codex",
+        visible=True,
+        restart=True,
+        managed_chat=True,
+        auto_approve=True,
+        prompt_transport=True,
+        jsonl_transcript=True,
+    ),
+    # TODO(OpenCode): enable managed_chat, auto_approve, and prompt_transport after their contracts exist.
+    "opencode": AgentClientSpec(label="OpenCode", visible=True, native_context_menu=True),
+}
+
+
+def agent_client_kinds(capability: str | None = None) -> frozenset[str]:
+    if capability is None:
+        return frozenset(AGENT_CLIENTS)
+    return frozenset(
+        kind for kind, spec in AGENT_CLIENTS.items() if getattr(spec, capability) is True
+    )
+
+
+AGENT_COMMANDS = agent_client_kinds() | {"term"}
+VISIBLE_AGENT_KINDS = agent_client_kinds("visible")
+MANAGED_CHAT_AGENT_KINDS = agent_client_kinds("managed_chat")
+AUTO_APPROVE_AGENT_KINDS = agent_client_kinds("auto_approve")
+PROMPT_TRANSPORT_AGENT_KINDS = agent_client_kinds("prompt_transport")
+JSONL_TRANSCRIPT_AGENT_KINDS = agent_client_kinds("jsonl_transcript")
+RESTART_AGENT_KINDS = agent_client_kinds("restart")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = PROJECT_ROOT / "static"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")

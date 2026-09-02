@@ -1641,7 +1641,7 @@ function debugGraphSeriesData(buckets) {
 function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
-  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
+  const resolutionSeconds = debugGraphRenderedResolutionSeconds(nowMs);
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
   const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
@@ -2539,7 +2539,7 @@ function debugGraphXAxisHtml(domain) {
   // range's span. Coarser resolutions (10s/60s/300s) show HH:MM because a seconds digit
   // there is fake precision. Keyed off the same effective-resolution owner the Resolution
   // label reads, not a span proxy.
-  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, Date.now()) / 1000;
+  const resolutionSeconds = debugGraphRenderedResolutionSeconds(Date.now());
   const includeSeconds = !includeDate && resolutionSeconds <= 1;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
     ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
@@ -2717,6 +2717,15 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
     return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
   }
   return defaultBuckets;
+}
+
+function debugGraphRenderedResolutionSeconds(nowMs = Date.now()) {
+  const defaultBuckets = debugGraphDisplayBuckets(nowMs);
+  const resolutions = jsDebugGraphChartGroups
+    .filter(group => group?.key === 'agentTokens' || group?.key === 'modelTokens')
+    .flatMap(group => debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs).map(bucket => Number(bucket?.durationMs) / 1000))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return Math.max(debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs) / 1000, ...resolutions);
 }
 
 function debugGraphHoverBucketIndex(buckets, timestamp) {

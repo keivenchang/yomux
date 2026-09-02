@@ -921,7 +921,7 @@ function yoagentRecentAgentSignalBadgesHtml(signal) {
 function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
-  if (!tmuxSignalAgentCommands.has(kind)) return '';
+  if (!agentClientKindsWithCapability('restart').includes(kind)) return '';
   return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
@@ -1111,7 +1111,8 @@ function yoagentBackendKey() {
   return String(initialSetting('yoagent.backend', 'auto') || 'auto').trim().toLowerCase();
 }
 
-const YOAGENT_CHAT_BACKENDS = ['codex', 'claude'];
+// TODO(OpenCode): add OpenCode after a managed chat transport and login lifecycle exist.
+const YOAGENT_CHAT_BACKENDS = agentClientKindsWithCapability('managedChat');
 
 function yoagentBackendInstalled(agent) {
   return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent);

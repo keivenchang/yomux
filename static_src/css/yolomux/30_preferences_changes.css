@@ -3628,6 +3628,9 @@ body.theme-light .js-debug-line--moving-average {
 .agent-icon.claude {
   color: var(--30-preferences-changes-agent-icon-fg-80);
 }
+.agent-icon.opencode {
+  color: var(--accent);
+}
 
 /* Theme-token consumers without a pre-existing local owner. */
 .preferences-setting-advisory .preferences-inline-action {

@@ -2268,7 +2268,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function applyAgentAvailabilityPayload[\s\S]*payload\.agentAuth[\s\S]*payload\.availableAgents/.test(source) && source.includes('applyAgentAvailabilityPayload(transcriptMetadataState.payload)'), '#39: the metadata poll refreshes agent login and installed-agent status');
     // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
     // so the chat input enables to match what the backend will run, and defaults to auto.
-    assert.ok(/const YOAGENT_CHAT_BACKENDS = \['codex', 'claude'\]/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
+    assert.ok(/const YOAGENT_CHAT_BACKENDS = agentClientKindsWithCapability\('managedChat'\)/.test(source) && /function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of YOAGENT_CHAT_BACKENDS\)[\s\S]*?yoagentBackendUsable\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers configured managed chat clients');
     assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
     assert.ok(/function yoagentChatEnabled\(\)[\s\S]*YOAGENT_CHAT_BACKENDS\.includes\(yoagentResolvedBackend\(\)\)/.test(source), '#41/#72: chat-enabled tracks only usable model-backed chat');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*normalizedServerVersion !== bootVersion[\s\S]*updateNotificationAllowsVersion\(bootVersion, normalizedServerVersion\)/.test(source), 'server/client-version reload is gated on the boot version and the reload_on_update threshold');
@@ -2508,7 +2508,7 @@ async function runLayoutRestoreSuite() {
     const idleHtml = api.globalActivityStatusLineHtml();
     assert.ok(/topbar-activity-working[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--working/.test(idleHtml), 'status line shows explicit zero working count with a green ball');
     assert.ok(/topbar-activity-ask[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--attention/.test(idleHtml), 'status line shows explicit zero attention count with a red ball');
-    assert.ok(/topbar-activity-blocked[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--blocked/.test(idleHtml), 'status line shows explicit zero blocked count with a red blocked ball');
+    assert.ok(/topbar-activity-blocked[\s\S]*topbar-activity-count-number">0<[\s\S]*status-indicator--cooldown/.test(idleHtml), 'status line shows explicit zero blocked count with a yellow blocked ball');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     api.setAutoApproveStateForTest('2', {enabled: true, screen: {key: 'needs-input'}});
     api.setAutoApproveStateForTest('3', {enabled: true, screen: {key: 'blocked'}});
@@ -2550,8 +2550,8 @@ async function runLayoutRestoreSuite() {
     tabberCountsApi.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'idle'}, agent_windows: [{kind: 'codex', state: 'idle', window: '0', window_index: 0, window_label: '0:codex'}]});
     const tabberCounts = tabberCountsApi.globalActivityCounts();
     assert.deepStrictEqual(
-      {running: tabberCounts.running, ask: tabberCounts.ask, blocked: tabberCounts.blocked, idle: tabberCounts.idle, total: tabberCounts.total},
-      {running: 1, ask: 1, blocked: 1, idle: 1, total: 4},
+      {running: tabberCounts.running, ask: tabberCounts.ask, blocked: tabberCounts.blocked, unavailable: tabberCounts.unavailable, idle: tabberCounts.idle, total: tabberCounts.total},
+      {running: 1, ask: 1, blocked: 1, unavailable: 0, idle: 1, total: 4},
       'topbar counts reflect the same per-window states displayed by Tabber instead of stale session-level screen keys',
     );
     const signalApi = loadYolomux('', ['1', '2']);
@@ -2728,6 +2728,32 @@ async function runLayoutRestoreSuite() {
     const rosteredOpenCodeCounts = openCodeSignalApi.globalActivityCounts();
     assert.equal(rosteredOpenCodeCounts.total, 1, 'authoritative OpenCode roster admits the signal pane as one agent');
     assert.equal(rosteredOpenCodeCounts.running, 1, 'an authoritative OpenCode roster may admit matching signal activity');
+    const threeToneApi = loadYolomux('', ['working', 'attention', 'blocked', 'unavailable']);
+    for (const [session, state] of [['working', 'working'], ['attention', 'needs-input'], ['blocked', 'blocked']]) {
+      threeToneApi.setTranscriptInfoForTest(session, {
+        panes: [{window: '0', window_index: 0, target: `%${session}`, process_label: 'opencode'}],
+        agents: [{kind: 'opencode', pane_target: `%${session}`, window_index: 0}],
+      });
+      threeToneApi.setAutoApproveStateForTest(session, {
+        enabled: true,
+        agent_windows: [{kind: 'opencode', pane_target: `%${session}`, window_index: 0, state}],
+      });
+    }
+    threeToneApi.setTranscriptInfoForTest('unavailable', {
+      panes: [{window: '0', window_index: 0, target: '%unavailable', process_label: 'opencode'}],
+      agents: [{kind: 'opencode', pane_target: '%unavailable', window_index: 0}],
+    });
+    threeToneApi.setAutoApproveStateForTest('unavailable', {enabled: true, agent_windows: []});
+    const threeToneCounts = threeToneApi.globalActivityCounts();
+    assert.deepStrictEqual(
+      {running: threeToneCounts.running, ask: threeToneCounts.ask, blocked: threeToneCounts.blocked, unavailable: threeToneCounts.unavailable, idle: threeToneCounts.idle, total: threeToneCounts.total},
+      {running: 1, ask: 1, blocked: 1, unavailable: 1, idle: 0, total: 4},
+      'unavailable status remains separately counted without changing the three visible activity categories',
+    );
+    const threeToneHtml = threeToneApi.globalActivityStatusLineHtml();
+    assert.equal((threeToneHtml.match(/topbar-activity-count[^\"]* active/g) || []).length, 3, 'topbar renders one ball per established status tone');
+    assert.match(threeToneHtml, /topbar-activity-ask active[\s\S]*topbar-activity-count-number">2</, 'unavailable rows join the red attention count');
+    assert.equal(threeToneHtml.includes('topbar-activity-unavailable'), false, 'topbar does not render a fourth unavailable ball');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes('ctx.fillStyle = faviconAccent.bg') && source.includes("getPropertyValue('--active-accent')") && source.includes("'#99d441'"), 'favicon fills the icon with the active-accent tile (theme/active-color driven, legacy lime as fallback) instead of a dark border');
     assert.ok(source.includes('ctx.fillStyle = faviconAccent.text') && source.includes("getPropertyValue('--active-accent-text')"), 'favicon Y uses the theme-aware contrast color (dark on light accents, light on dark accents like blue)');
@@ -2736,7 +2762,7 @@ async function runLayoutRestoreSuite() {
     const html = api.globalActivityStatusLineHtml();
     assert.ok(/topbar-activity-working active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--working/.test(html), 'status line shows running count with the shared green ball');
     assert.ok(/topbar-activity-ask active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--attention/.test(html), 'status line shows attention count with the shared red ball');
-     assert.ok(/topbar-activity-blocked active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--blocked/.test(html), 'status line shows blocked count with the shared red blocked ball');
+     assert.ok(/topbar-activity-blocked active[\s\S]*topbar-activity-count-number">1<[\s\S]*status-indicator--cooldown/.test(html), 'status line shows blocked count with the shared yellow ball');
     assert.equal(/status-indicator[^"]*topbar-activity-ask[^"]*attention-pulse/.test(html), false, 'topbar attention count stays static when continuous status pulsing is disabled');
     assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');

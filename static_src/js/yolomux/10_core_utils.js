@@ -2596,6 +2596,26 @@ function agentLabel(kind) {
   return String(kind || '');
 }
 
+const AGENT_CLIENT_SPECS = Object.freeze({
+  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  // TODO(OpenCode): enable these capabilities only after their transport and safety contracts are implemented.
+  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}),
+});
+
+function agentClientSpec(kind) {
+  return AGENT_CLIENT_SPECS[String(kind || '').toLowerCase()] || null;
+}
+
+function visibleAgentClient(kind) {
+  const spec = agentClientSpec(kind);
+  return spec?.visible === true ? String(kind || '').toLowerCase() : '';
+}
+
+function agentClientKindsWithCapability(capability) {
+  return Object.keys(AGENT_CLIENT_SPECS).filter(kind => AGENT_CLIENT_SPECS[kind][capability] === true);
+}
+
 const sessionFileLookbackDefaultHours = 24;
 const sessionFileLookbackHourValues = Object.freeze([
   0.5, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336,

@@ -1,6 +1,8 @@
 agent: opencode
 capture_date: '2026-08-28'
 capture_mode: converted_real_text_capture
+capture_formats: [raw_capture, styled_capture, visible_text]
+normalization: tmux_capture_pane -J
 case_name: working_coordinator
 client_name: OpenCode
 client_version: 1.18.25

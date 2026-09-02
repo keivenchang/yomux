@@ -945,7 +945,8 @@ def new_stats_current_transcript_scan_state(kind: str) -> dict[str, Any]:
     """Create one usage scanner state inside the existing durable scan parent."""
 
     normalized = str(kind or "").strip().lower()
-    if normalized not in {"claude", "codex"}:
+    # TODO(OpenCode): use the native SQLite usage scanner, not this JSONL transcript state parent.
+    if normalized not in common.JSONL_TRANSCRIPT_AGENT_KINDS:
         raise ValueError("stats transcript kind must be claude or codex")
     parser_state = ClaudeUsageAtomState() if normalized == "claude" else CodexUsageAtomState()
     return {

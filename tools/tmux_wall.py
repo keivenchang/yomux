@@ -53,6 +53,7 @@ DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
 DEFAULT_SLOTS = 6
 DEFAULT_LINES = 90
 DEFAULT_CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_project_containers.py"
+# TODO(OpenCode): consume the shared visible-client registry instead of this local wall-only list.
 AGENT_COMMANDS = {"claude", "codex"}
 STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 STATIC_CONTENT_TYPES = {

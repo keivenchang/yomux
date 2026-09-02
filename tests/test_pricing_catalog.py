@@ -1,6 +1,7 @@
 import json
 import threading
 import gzip
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -439,6 +440,43 @@ def test_conservative_family_inference_is_labeled_and_ranked_between_official_an
     assert inferred is not None and inferred.source_kind == "inferred" and str(inferred.usd) == "4.00"
     assert exact_seed_displaced is not None and exact_seed_displaced.source_kind == "inferred"
     assert catalog.resolve_rate(provider="openai", model="gpt-5.6-unrelated", direction="input") is None
+
+
+def test_switchyard_model_uses_average_of_nonzero_equivalent_provider_rates(tmp_path):
+    catalog = PricingCatalog(tmp_path)
+    payload = load_packaged_seed()
+    payload["models"] = [
+        {
+            "provider": "GPU",
+            "model": "openai/gpt-5.6-luna",
+            "aliases": ["openai/gpt-5.6-luna"],
+            "rates": [
+                {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": "0.14", "effective_from": "2026-01-01T00:00:00Z"},
+                {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": "0.84", "effective_from": "2026-01-01T00:00:00Z"},
+            ],
+            "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official"},
+        },
+        {
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+            "aliases": ["gpt-5.6-luna"],
+            "rates": [
+                {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": "0.20", "effective_from": "2026-01-01T00:00:00Z"},
+                {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": "1.20", "effective_from": "2026-01-01T00:00:00Z"},
+            ],
+            "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official"},
+        },
+    ]
+    catalog.refresh([
+        PricingSourceAdapter("fixture", "https://developers.openai.com/api/docs/pricing", "official", lambda _body: payload),
+    ], fetch=lambda *_args: (200, {}, b"fixture"))
+
+    input_rate = catalog.resolve_rate(provider="inferencehub", model="switchyard/openai/gpt-5.6-luna", direction="input")
+    output_rate = catalog.resolve_rate(provider="inferencehub", model="switchyard/openai/gpt-5.6-luna", direction="output")
+
+    assert input_rate is not None and input_rate.usd == Decimal("0.57")
+    assert output_rate is not None and output_rate.usd == Decimal("3.42")
+    assert input_rate.source_kind == output_rate.source_kind == "inferred"
 
 
 def test_refresh_coalesces_cross_server_equivalent_followup(tmp_path):

@@ -738,6 +738,12 @@ test('model output chart is fixed to generated output without a dimension picker
   assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
 });
 
+test('AUTO resolution label reports the coarsest resolution actually rendered by token charts', () => {
+  assert.match(sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml'), /debugGraphRenderedResolutionSeconds\(nowMs\)/);
+  assert.match(sourceFunction('debugGraphRenderedResolutionSeconds', 'debugGraphHoverBucketIndex'), /group\?\.key === 'agentTokens' \|\| group\?\.key === 'modelTokens'/);
+  assert.match(sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml'), /data-js-debug-resolution-seconds/);
+});
+
 test('token chart groups different agent windows from one tmux session into one summed series', () => {
   assert.match(
     sourceFunction('debugGraphSessionTokenKey', 'debugGraphCostModelAgentKind'),

@@ -43,6 +43,29 @@ def test_opencode_visible_states_do_not_enter_approval_detection():
         assert prompt_detector.detect_prompt(data["raw_capture"]) is None
 
 
+@pytest.mark.parametrize("text", [
+    "Ask anything...\nctrl+p commands",
+    "tab agents\nctrl+p commands",
+    "▣ Build · switchyard/openai/gpt-5.6-luna",
+])
+def test_infer_agent_recognizes_opencode_identity(text):
+    assert prompt_detector._infer_agent(text) == "opencode"
+
+
+def test_opencode_capture_preserves_tmux_rejoined_unbroken_values():
+    capture = "┃  https://example.test/a/very/long/path?token=abc123\n┃  1. Continue\n┃  2. Stop"
+    normalized = prompt_detector.normalize_capture_text(capture)
+    assert "https://example.test/a/very/long/path?token=abc123" in normalized
+    assert "1. Continue\n┃  2. Stop" in normalized
+
+
+def test_opencode_capture_keeps_real_footer_and_choice_boundaries():
+    capture = "┃  https://example.test/long/path/without/wrap\n┃  Build · model-a\n┃  1. Continue\n┃  2. Stop\n  ctrl+p commands"
+    normalized = prompt_detector.normalize_capture_text(capture)
+    assert "without/wrap\n┃  Build" in normalized
+    assert "1. Continue\n┃  2. Stop\n  ctrl+p commands" in normalized
+
+
 @pytest.mark.parametrize(
     ("visible_text", "expected_key"),
     [
@@ -69,6 +92,40 @@ def test_opencode_meter_only_with_capture_padding_is_native_activity_ambiguity()
     assert state["key"] == "idle"
     assert state["activity_source"] == "opencode-meter-ambiguous"
     assert state["evidence_lines"] == ["⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt  301.3K  ctrl+p commands"]
+
+
+def test_opencode_meter_only_with_footer_context_is_working():
+    visible_text = "\n".join([
+        "unrelated terminal output",
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00-$0.00/1M",
+        "  ╹" + "▀" * 72,
+        "   ⬝⬝⬝■■■■■  esc interrupt  301.3K  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
+
+
+def test_opencode_interrupt_footer_without_meter_glyph_is_working_with_footer_context():
+    visible_text = "\n".join([
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00-$0.00/1M",
+        "  ╹" + "▀" * 72,
+        "   Esc to interrupt  301.3K  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text,
+        pane_target="%opencode",
+        agent_kind="opencode",
+        opencode_session_id="ses-current",
+    )
+
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
 
 
 def test_opencode_plain_thinking_row_and_split_footer_are_working():
@@ -235,8 +292,8 @@ def test_opencode_old_thinking_row_outside_split_footer_bound_is_idle():
         visible_text, pane_target="%4", agent_kind="opencode",
     )
 
-    assert state["key"] == "idle"
-    assert state["activity_source"] == "opencode-meter-ambiguous"
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
 
 
 def test_opencode_old_thinking_row_beyond_current_response_block_is_idle():
@@ -255,8 +312,8 @@ def test_opencode_old_thinking_row_beyond_current_response_block_is_idle():
         visible_text, pane_target="%4", agent_kind="opencode",
     )
 
-    assert state["key"] == "idle"
-    assert state["activity_source"] == "opencode-meter-ambiguous"
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
 
 
 def test_opencode_explicit_session_complete_footer_meter_is_working():
@@ -271,6 +328,21 @@ def test_opencode_explicit_session_complete_footer_meter_is_working():
         pane_target="%1",
         agent_kind="opencode",
         opencode_session_id="ses_fb51b242dffeU7jSyiesbuvk75",
+    )
+
+    assert state["key"] == "working"
+    assert state["activity_source"] == "opencode-visible"
+
+
+def test_opencode_esc_to_interrupt_footer_is_working():
+    visible_text = "\n".join([
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00-$0.00/1M",
+        "  ╹" + "▀" * 72,
+        "   ⬝⬝■■■■■■  Esc to interrupt  444.3K  ctrl+p commands",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
     )
 
     assert state["key"] == "working"

@@ -19,6 +19,7 @@ from ..common import STATE_DIR
 from ..common import tail_file_lines
 from ..common import truncate_text
 from ..filesystem.io_ops import read_json_file
+from ..infra.common import MANAGED_CHAT_AGENT_KINDS
 from ..infra.host_partition import host_partitioned_state_dir
 from ..locales import message_descriptor
 
@@ -43,7 +44,7 @@ YOAGENT_STREAM_ITEMS_LIMIT = 1_000
 YOAGENT_STREAM_ITEMS_TOTAL_LIMIT = 120_000
 YOAGENT_DETAIL_ROWS_LIMIT = 24
 YOAGENT_ACTIONS_LIMIT = 8
-YOAGENT_BACKENDS = {"claude", "codex"}
+YOAGENT_BACKENDS = MANAGED_CHAT_AGENT_KINDS
 YOAGENT_MESSAGE_KINDS = {"agent_result"}
 
 

@@ -1,4 +1,22 @@
 filename_convention: case_name__client-token_date
+capture_library:
+  client: OpenCode
+  client_version: 1.18.25
+  formats:
+  - raw_capture: plain tmux text after capture-pane -J
+  - styled_capture: tmux text after capture-pane -e -J, retaining SGR attributes
+  - visible_text: normalized plain text used by the detector
+  normalization_owner: yolomux_lib/tmux/tmux_utils.py:tmux_capture_pane
+  wrap_contract: capture-pane -J rejoins visual wraps; parser preserves logical values and real choice/footer boundaries
+  private_live_samples:
+  - pane: yo7220:0.0
+    shape: idle completed output
+    size: 146x63
+    title_shape: OC | <session title>
+  - pane: yo7220:1.0
+    shape: working Build footer with esc interrupt and tool rows
+    size: 142x63
+    title_shape: OC | "<session title>..."
 fixtures:
 - agent: claude
   capture_date: '2026-06-20'

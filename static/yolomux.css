@@ -3422,6 +3422,9 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .agent-window-agent-icon--active.agent-icon.claude {
   --agent-working-glow-rgb: 207 117 84;
 }
+.agent-window-agent-icon--active.agent-icon.opencode {
+  --agent-working-glow-rgb: 126 220 193;
+}
 @keyframes agent-symbol-glow-cadence {
   0%, 30% {
     opacity: 1;
@@ -7770,6 +7773,9 @@ body.theme-light .js-debug-line--moving-average {
 }
 .agent-icon.claude {
   color: var(--30-preferences-changes-agent-icon-fg-80);
+}
+.agent-icon.opencode {
+  color: var(--accent);
 }
 
 /* Theme-token consumers without a pre-existing local owner. */

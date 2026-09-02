@@ -160,6 +160,14 @@ def _inferred_family_aliases(model: str) -> tuple[str, ...]:
     return tuple(candidates)
 
 
+def _switchyard_equivalent_model(model: str) -> str | None:
+    value = str(model or "").strip()
+    if not value.startswith("switchyard/"):
+        return None
+    equivalent = value.rsplit("/", 1)[-1]
+    return equivalent if equivalent else None
+
+
 def _canonical_text(value: object, field: str) -> str:
     result = str(value or "").strip()
     if not result:
@@ -471,6 +479,35 @@ class PricingCatalog:
             row = find(model, ("override", "official"))
             source_kind = str(row["source_kind"]) if row is not None else ""
             if row is None:
+                equivalent_model = _switchyard_equivalent_model(model)
+                if str(provider).strip().lower() == "inferencehub" and equivalent_model:
+                    candidates = connection.execute(
+                        "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1 AND (model = ? OR model LIKE ?) ORDER BY effective_from DESC, revision DESC",
+                        (direction, modality, cache_role, unit, profile, service_tier, timestamp, equivalent_model, f"%/{equivalent_model}"),
+                    ).fetchall()
+                    latest: dict[tuple[str, str], sqlite3.Row] = {}
+                    for candidate in candidates:
+                        if Decimal(str(candidate["usd"])) <= 0:
+                            continue
+                        latest.setdefault((str(candidate["provider"]), str(candidate["model"])), candidate)
+                    if latest:
+                        rates = [Decimal(str(candidate["usd"])) for candidate in latest.values()]
+                        first = next(iter(latest.values()))
+                        return ResolvedRate(
+                            provider,
+                            equivalent_model,
+                            model,
+                            direction,
+                            modality,
+                            cache_role,
+                            unit,
+                            int(first["scale"]),
+                            sum(rates, Decimal(0)) / Decimal(len(rates)),
+                            str(first["effective_from"]),
+                            "inferred",
+                            str(first["source_url"]),
+                            int(first["revision"]),
+                        )
                 # Only reviewed, deterministic family forms are inferred.  The
                 # evidence is visibly labelled rather than masquerading as an
                 # exact provider match.

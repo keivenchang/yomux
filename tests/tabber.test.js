@@ -1592,14 +1592,15 @@ async function runTabberSuite() {
     assert.equal(stopped, 1, 'the exact Claude container binding retains YOLOmux right-click selection capture');
   });
 
-  test('OpenCode is a visible Tabber owner and blocked top-bar counts use the blocked tone', () => {
+  test('OpenCode is a visible Tabber owner and top-bar counts retain the three status tones', () => {
     const tabberSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     assert.match(tabberSource, /function tabberWindowIsAgent\(name\)[\s\S]*key === 'claude' \|\| key === 'codex' \|\| key === 'opencode'/, 'OpenCode is included in the shared visible Tabber owner');
-    assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'blocked', 'topbar-activity-blocked'\)/, 'blocked top-bar counts use the blocked red tone');
+    assert.match(layoutSource, /const attentionCount = \(Number\(counts\.ask\) \|\| 0\) \+ \(Number\(counts\.unavailable\) \|\| 0\)/, 'unavailable counts share the red attention slot');
+    assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'cooldown', 'topbar-activity-blocked'\)/, 'blocked top-bar counts retain the yellow tone');
     const api = loadYolomux('', ['1']);
     assert.equal(api.tabberWindowIsAgentForTest('opencode'), true, 'OpenCode is recognized by the shared tmux-window agent owner');
-    assert.match(api.topbarActivityCountBallHtmlForTest(1, 'blocked', 'topbar-activity-blocked'), /status-indicator--blocked/, 'blocked count renders the blocked status class');
+    assert.match(api.topbarActivityCountBallHtmlForTest(1, 'cooldown', 'topbar-activity-blocked'), /status-indicator--cooldown/, 'blocked count renders the yellow status class');
   });
 
   test('OpenCode green and red balls share one renderer across pane tabs, Tabber, popovers, and topbar', () => {

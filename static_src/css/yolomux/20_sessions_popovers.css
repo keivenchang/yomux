@@ -335,6 +335,9 @@
 .agent-window-agent-icon--active.agent-icon.claude {
   --agent-working-glow-rgb: 207 117 84;
 }
+.agent-window-agent-icon--active.agent-icon.opencode {
+  --agent-working-glow-rgb: 126 220 193;
+}
 @keyframes agent-symbol-glow-cadence {
   0%, 30% {
     opacity: 1;

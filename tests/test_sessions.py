@@ -106,6 +106,20 @@ def test_opencode_session_id_rejects_unbounded_or_control_values():
     assert sessions.agent_session_id_from_command("opencode -s " + "x" * 257) is None
 
 
+def test_select_pane_agent_uses_unique_database_session_when_title_is_unavailable(monkeypatch, tmp_path):
+    executable = tmp_path / "opencode"
+    executable.touch()
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: str(executable))
+    monkeypatch.setattr(sessions, "process_cwd", lambda _pid: "/repo")
+    monkeypatch.setattr(sessions, "process_started_at", lambda _pid: 12.0)
+    monkeypatch.setattr(sessions, "agent_session_id_from_database", lambda directory, *, started_at: "ses-unique")
+    pane = _pane(100)
+    processes = [ProcessInfo(pid=100, ppid=1, command="bash"), ProcessInfo(pid=101, ppid=100, command="opencode", executable=str(executable))]
+    agent = sessions.select_pane_agent("1", pane, processes)
+    assert agent is not None
+    assert agent.session_id == "ses-unique"
+
+
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
