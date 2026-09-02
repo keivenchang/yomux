@@ -3528,11 +3528,14 @@ function globalActivityCountsFromAgentWindows() {
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
+  // Keep the compact control to its established three status tones. Unavailable status is still
+  // counted separately in the data model, but belongs in the red attention slot rather than
+  // creating a fourth red ball.
+  const attentionCount = (Number(counts.ask) || 0) + (Number(counts.unavailable) || 0);
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
-  parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
-  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
+  parts.push(topbarActivityCountBallHtml(attentionCount, 'attention', 'topbar-activity-ask'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -4817,7 +4820,7 @@ function quickOpenOpenTabPaths() {
 
 function quickOpenWorkingDirectory() {
   const target = currentSessionActionTarget();
-  return target && isTmuxSession(target) && ['claude', 'codex'].includes(sessionAgentKind(target))
+  return target && isTmuxSession(target) && Boolean(visibleAgentClient(sessionAgentKind(target)))
     ? activeTmuxDirectoryPath(target)
     : '';
 }

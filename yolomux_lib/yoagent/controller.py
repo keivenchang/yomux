@@ -44,6 +44,7 @@ from ..session_files import scan_claude_transcript
 from ..session_files import scan_codex_transcript
 from ..statusd_protocol import activity_summary_disabled_payload
 from ..statusd_protocol import activity_summary_enabled
+from ..infra.common import PROMPT_TRANSPORT_AGENT_KINDS
 from ..approval.prompt_detector import selected_prompt_option
 from ..tmux.tmux_utils import cmd_error
 from ..tmux.tmux_utils import tmux_move_to_option
@@ -86,7 +87,7 @@ YOAGENT_ACTION_TEXT_LIMIT = 4000
 YOAGENT_ACTION_RESULT_WAIT_SECONDS = 180.0
 YOAGENT_ACTION_RESULT_POLL_SECONDS = 1.0
 YOAGENT_ACTION_RESULT_MAX_CHARS = 6000
-YOAGENT_ACTION_AGENT_KINDS = {"claude", "codex"}
+YOAGENT_ACTION_AGENT_KINDS = PROMPT_TRANSPORT_AGENT_KINDS
 YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS = {"idle", "done", "input-draft"}
 YOAGENT_JOB_NEEDS_INPUT_SCREEN_KEYS = {"needs-input"}
 YOAGENT_JOB_BLOCKED_SCREEN_KEYS = {"approval", "needs-approval", "yolo-approval", "error", "disconnected"}

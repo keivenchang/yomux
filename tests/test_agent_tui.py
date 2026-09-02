@@ -105,6 +105,23 @@ def test_agent_tui_capture_yaml_files_include_client_version_and_date():
         assert final_component.startswith(capture_date.replace("-", "")), path
 
 
+def test_opencode_capture_library_records_reusable_formats_and_wrap_owner():
+    inventory = PROMPT_CORPUS.load(PROMOTED_CAPTURE_DIR / "inventory.yaml")
+    library = inventory["capture_library"]
+    assert library["client"] == "OpenCode"
+    assert library["formats"] == [
+        {"raw_capture": "plain tmux text after capture-pane -J"},
+        {"styled_capture": "tmux text after capture-pane -e -J, retaining SGR attributes"},
+        {"visible_text": "normalized plain text used by the detector"},
+    ]
+    assert library["normalization_owner"].startswith("yolomux_lib/tmux/tmux_utils.py:")
+    assert len(library["private_live_samples"]) >= 2
+    for case in OPENCODE_CAPTURE_CASES:
+        data = case["data"]
+        assert data["capture_formats"] == ["raw_capture", "styled_capture", "visible_text"]
+        assert data["normalization"] == "tmux_capture_pane -J"
+
+
 @pytest.mark.parametrize(
     ("agent", "version", "expected"),
     [
@@ -330,9 +347,9 @@ def test_opencode_meter_only_capture_is_idle_without_current_turn_row():
         capture_styled_func=lambda _target, visible_only=False: visible,
     )
 
-    assert state.screen["key"] == "idle"
-    assert state.screen["activity_source"] == "opencode-meter-ambiguous"
-    assert state.reason_code == "idle"
+    assert state.screen["key"] == "working"
+    assert state.screen["activity_source"] == "opencode-visible"
+    assert state.reason_code == "busy"
 
 
 def test_opencode_explicit_session_footer_meter_is_working_without_native_override():

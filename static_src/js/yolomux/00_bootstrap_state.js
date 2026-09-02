@@ -918,13 +918,13 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-// The history panel paints one bounded page, with a small local reserve so the first
-// "Load older" action does not wait on another Git walk. Keep all consumers on these
-// one-source limits: Git history includes numstat work and must never expand with the
-// repository's complete history just because a directory has many commits.
-const gitDiffHistoryVisiblePageSize = 30;
-const gitDiffHistoryPrefetchSize = 10;
-const gitDiffHistoryFetchSize = gitDiffHistoryVisiblePageSize + gitDiffHistoryPrefetchSize;
+// The history panel paints the rows that fit its viewport, with two additional viewport-sized pages
+// reserved so the first downward scrolls do not wait on another Git walk. Keep all consumers on these
+// one-source limits: Git history includes numstat work and must never expand with the repository's
+// complete history just because a directory has many commits.
+const gitDiffHistoryPagesPrefetched = 2;
+const gitDiffHistoryMinimumPageSize = 1;
+const gitDiffHistoryStateLimit = 32;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;

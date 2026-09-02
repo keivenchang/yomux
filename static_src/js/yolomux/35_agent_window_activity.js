@@ -461,22 +461,28 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
   };
 }
 
-function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
+function windowViewModel(session, windowIndex, info = null, autoPayload = null, paneTarget = '', agentKind = '') {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (indexKey === null) return null;
-  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
-    .find(agent => agentWindowIndex(agent) === indexKey) || null;
+  const candidates = sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .filter(agent => agentWindowIndex(agent) === indexKey);
+  const target = String(paneTarget || '').trim();
+  if (!target) return candidates.length === 1 ? candidates[0] : candidates[0] || null;
+  const exact = candidates.find(agent => String(agent?.pane_target || agent?.pane || '').trim() === target);
+  if (exact) return exact;
+  const kind = agentWindowKind(agentKind);
+  const sameKind = kind ? candidates.filter(agent => agentWindowKind(agent?.kind) === kind) : candidates;
+  return sameKind.length === 1 ? sameKind[0] : null;
 }
 
 function agentWindowStatusForRecord(session, record, info = null) {
   const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
   if (indexKey === null) return null;
-  const rows = sessionAgentWindowStatusPayloads(session, info);
-  return rows.find(agent => agentWindowIndex(agent) === indexKey) || null;
+  return windowViewModel(session, indexKey, info, null, record?.pane_target || record?.target || '', record?.agent_kind || record?.kind || '');
 }
 
-function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null) {
-  return windowViewModel(session, windowIndex, info, autoPayload);
+function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null, paneTarget = '', agentKind = '') {
+  return windowViewModel(session, windowIndex, info, autoPayload, paneTarget, agentKind);
 }
 
 function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {

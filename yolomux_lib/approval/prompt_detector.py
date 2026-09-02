@@ -31,7 +31,7 @@ _OPENCODE_FOOTER_BUILD_START_RE = re.compile(r"^\s*[│┃▣]?\s*(?:Build|Bui)(
 _OPENCODE_RESPONSE_BUILD_RE = re.compile(r"^\s*▣\s+Build(?:\s|$)", re.IGNORECASE)
 _OPENCODE_FOOTER_SEPARATOR_RE = re.compile(r"^\s*[╹╰└][▀─━═]+", re.IGNORECASE)
 _OPENCODE_METER_ACTIVITY_RE = re.compile(
-    r"(?:[⬝■●◼]{2,}|⬝⬝\.{3,})\s+esc\s+interrupt(?:\s+.*)?$",
+    r"(?:[⬝■●◼]{2,}|⬝⬝\.{3,})?\s*esc(?:\s+to)?\s+interrupt(?:\s+.*)?$",
     re.IGNORECASE,
 )
 _OPENCODE_CURRENT_TURN_ROW_RE = re.compile(
@@ -730,6 +730,12 @@ def _prompt_options(visible_text: str) -> list[dict[str, object]]:
 def _infer_agent(visible_text: str, prompt_type: str | None = None) -> str:
     text = normalize_capture_text(visible_text)
     lowered = text.lower()
+    if (
+        "ask anything" in lowered
+        or "tab agents" in lowered
+        or re.search(r"^\s*[│┃▣]?\s*build(?:\s|[·•]|$)", text, re.IGNORECASE | re.MULTILINE)
+    ):
+        return "opencode"
     if (
         "codex wants to run a shell command" in lowered
         or "codex wants to use an mcp tool" in lowered
@@ -1766,18 +1772,23 @@ def _opencode_split_footer_bounds(lines: list[str]) -> tuple[int, int, int] | No
     nonempty = [index for index, line in enumerate(lines) if line.strip()]
     if not nonempty:
         return None
-    meter_index = nonempty[-1]
-    meter = lines[meter_index]
-    if not _OPENCODE_METER_ACTIVITY_RE.search(meter):
+    meter_index = next(
+        (
+            index for index in reversed(nonempty[-8:])
+            if _OPENCODE_METER_ACTIVITY_RE.search(lines[index])
+        ),
+        -1,
+    )
+    if meter_index < 0:
         return None
     separator_index = next(
         (
             index for index in reversed(nonempty[:-1])
-            if _OPENCODE_FOOTER_SEPARATOR_RE.match(lines[index])
+            if index < meter_index and _OPENCODE_FOOTER_SEPARATOR_RE.match(lines[index])
         ),
         -1,
     )
-    if separator_index < 0:
+    if separator_index < 0 or meter_index - separator_index > 3:
         return None
     build_index = _opencode_footer_build_index(lines, separator_index)
     if build_index < 0:
@@ -1839,8 +1850,10 @@ def _opencode_current_working_line(
             line = lines[index]
             if _OPENCODE_CURRENT_TURN_ROW_RE.match(line):
                 return line
-        if explicit_session:
-            return lines[meter_index]
+        # A complete split footer is current OpenCode activity. The `esc to interrupt` affordance
+        # is emitted while the request can still be cancelled, even when the capture lands between
+        # response-row redraws; treating that frame as idle creates a false yellow completion.
+        return lines[meter_index]
 
     nonempty = [index for index, line in enumerate(lines) if line.strip()]
     if not nonempty:

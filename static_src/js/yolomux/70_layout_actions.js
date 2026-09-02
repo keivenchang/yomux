@@ -1367,7 +1367,7 @@ function sessionAgentKind(session) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
-  return kind === 'claude' || kind === 'codex' || kind === 'opencode' ? kind : '';
+  return visibleAgentClient(kind);
 }
 
 function terminalContextMenuPaneTargetForSession(session) {
@@ -1462,7 +1462,7 @@ function agentIcon(kind, options = {}) {
     return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
   }
   if (kind === 'opencode') {
-    return `<span class="${esc(classes('opencode'))}"${labelAttr}>OC</span>`;
+    return `<span class="${esc(classes('opencode'))}"${labelAttr}>${opencodeIcon()}</span>`;
   }
   return '';
 }
@@ -1488,6 +1488,13 @@ function claudeIcon() {
       <path d="m3.8 7.2 1.1-1.4 6.7 4.3-1.3 2.1-6.5-5z"/>
       <circle cx="12" cy="12" r="2.2"/>
     </g>
+  </svg>`;
+}
+
+function opencodeIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="9" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+    <path d="M20 7.5a6 6 0 1 0 0 9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
   </svg>`;
 }
 

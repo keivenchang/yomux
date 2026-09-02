@@ -919,13 +919,13 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-// The history panel paints one bounded page, with a small local reserve so the first
-// "Load older" action does not wait on another Git walk. Keep all consumers on these
-// one-source limits: Git history includes numstat work and must never expand with the
-// repository's complete history just because a directory has many commits.
-const gitDiffHistoryVisiblePageSize = 30;
-const gitDiffHistoryPrefetchSize = 10;
-const gitDiffHistoryFetchSize = gitDiffHistoryVisiblePageSize + gitDiffHistoryPrefetchSize;
+// The history panel paints the rows that fit its viewport, with two additional viewport-sized pages
+// reserved so the first downward scrolls do not wait on another Git walk. Keep all consumers on these
+// one-source limits: Git history includes numstat work and must never expand with the repository's
+// complete history just because a directory has many commits.
+const gitDiffHistoryPagesPrefetched = 2;
+const gitDiffHistoryMinimumPageSize = 1;
+const gitDiffHistoryStateLimit = 32;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -5120,6 +5120,26 @@ function agentLabel(kind) {
   if (key === 'claude') return 'Claude';
   if (key === 'opencode') return 'OpenCode';
   return String(kind || '');
+}
+
+const AGENT_CLIENT_SPECS = Object.freeze({
+  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  // TODO(OpenCode): enable these capabilities only after their transport and safety contracts are implemented.
+  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}),
+});
+
+function agentClientSpec(kind) {
+  return AGENT_CLIENT_SPECS[String(kind || '').toLowerCase()] || null;
+}
+
+function visibleAgentClient(kind) {
+  const spec = agentClientSpec(kind);
+  return spec?.visible === true ? String(kind || '').toLowerCase() : '';
+}
+
+function agentClientKindsWithCapability(capability) {
+  return Object.keys(AGENT_CLIENT_SPECS).filter(kind => AGENT_CLIENT_SPECS[kind][capability] === true);
 }
 
 const sessionFileLookbackDefaultHours = 24;
@@ -13858,11 +13878,14 @@ function globalActivityCountsFromAgentWindows() {
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
+  // Keep the compact control to its established three status tones. Unavailable status is still
+  // counted separately in the data model, but belongs in the red attention slot rather than
+  // creating a fourth red ball.
+  const attentionCount = (Number(counts.ask) || 0) + (Number(counts.unavailable) || 0);
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
-  parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
-  parts.push(topbarActivityCountBallHtml(counts.blocked, 'blocked', 'topbar-activity-blocked'));
-  parts.push(topbarActivityCountBallHtml(counts.unavailable, 'blocked', 'topbar-activity-unavailable'));
+  parts.push(topbarActivityCountBallHtml(attentionCount, 'attention', 'topbar-activity-ask'));
+  parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
   parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
 }
@@ -15147,7 +15170,7 @@ function quickOpenOpenTabPaths() {
 
 function quickOpenWorkingDirectory() {
   const target = currentSessionActionTarget();
-  return target && isTmuxSession(target) && ['claude', 'codex'].includes(sessionAgentKind(target))
+  return target && isTmuxSession(target) && Boolean(visibleAgentClient(sessionAgentKind(target)))
     ? activeTmuxDirectoryPath(target)
     : '';
 }
@@ -20182,22 +20205,28 @@ function sessionAgentWindowStatusSummary(session, info = null, autoPayload = nul
   };
 }
 
-function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
+function windowViewModel(session, windowIndex, info = null, autoPayload = null, paneTarget = '', agentKind = '') {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (indexKey === null) return null;
-  return sessionAgentWindowStatusPayloads(session, info, autoPayload)
-    .find(agent => agentWindowIndex(agent) === indexKey) || null;
+  const candidates = sessionAgentWindowStatusPayloads(session, info, autoPayload)
+    .filter(agent => agentWindowIndex(agent) === indexKey);
+  const target = String(paneTarget || '').trim();
+  if (!target) return candidates.length === 1 ? candidates[0] : candidates[0] || null;
+  const exact = candidates.find(agent => String(agent?.pane_target || agent?.pane || '').trim() === target);
+  if (exact) return exact;
+  const kind = agentWindowKind(agentKind);
+  const sameKind = kind ? candidates.filter(agent => agentWindowKind(agent?.kind) === kind) : candidates;
+  return sameKind.length === 1 ? sameKind[0] : null;
 }
 
 function agentWindowStatusForRecord(session, record, info = null) {
   const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
   if (indexKey === null) return null;
-  const rows = sessionAgentWindowStatusPayloads(session, info);
-  return rows.find(agent => agentWindowIndex(agent) === indexKey) || null;
+  return windowViewModel(session, indexKey, info, null, record?.pane_target || record?.target || '', record?.agent_kind || record?.kind || '');
 }
 
-function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null) {
-  return windowViewModel(session, windowIndex, info, autoPayload);
+function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null, paneTarget = '', agentKind = '') {
+  return windowViewModel(session, windowIndex, info, autoPayload, paneTarget, agentKind);
 }
 
 function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
@@ -36934,7 +36963,7 @@ function sessionAgentKind(session) {
   const info = transcriptMetadataState.payload.sessions?.[session];
   const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
   const kind = String(agent?.kind || '').toLowerCase();
-  return kind === 'claude' || kind === 'codex' || kind === 'opencode' ? kind : '';
+  return visibleAgentClient(kind);
 }
 
 function terminalContextMenuPaneTargetForSession(session) {
@@ -37029,7 +37058,7 @@ function agentIcon(kind, options = {}) {
     return `<span class="${esc(classes('claude'))}"${labelAttr}>${claudeIcon()}</span>`;
   }
   if (kind === 'opencode') {
-    return `<span class="${esc(classes('opencode'))}"${labelAttr}>OC</span>`;
+    return `<span class="${esc(classes('opencode'))}"${labelAttr}>${opencodeIcon()}</span>`;
   }
   return '';
 }
@@ -37055,6 +37084,13 @@ function claudeIcon() {
       <path d="m3.8 7.2 1.1-1.4 6.7 4.3-1.3 2.1-6.5-5z"/>
       <circle cx="12" cy="12" r="2.2"/>
     </g>
+  </svg>`;
+}
+
+function opencodeIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="9" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+    <path d="M20 7.5a6 6 0 1 0 0 9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
   </svg>`;
 }
 
@@ -46556,7 +46592,7 @@ function yoagentRecentAgentSignalBadgesHtml(signal) {
 function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
-  if (!tmuxSignalAgentCommands.has(kind)) return '';
+  if (!agentClientKindsWithCapability('restart').includes(kind)) return '';
   return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
@@ -46746,7 +46782,8 @@ function yoagentBackendKey() {
   return String(initialSetting('yoagent.backend', 'auto') || 'auto').trim().toLowerCase();
 }
 
-const YOAGENT_CHAT_BACKENDS = ['codex', 'claude'];
+// TODO(OpenCode): add OpenCode after a managed chat transport and login lifecycle exist.
+const YOAGENT_CHAT_BACKENDS = agentClientKindsWithCapability('managedChat');
 
 function yoagentBackendInstalled(agent) {
   return YOAGENT_CHAT_BACKENDS.includes(agent) && availableAgents.has(agent);
@@ -57686,7 +57723,7 @@ function debugGraphSeriesData(buckets) {
 function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
-  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
+  const resolutionSeconds = debugGraphRenderedResolutionSeconds(nowMs);
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
   const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
@@ -58584,7 +58621,7 @@ function debugGraphXAxisHtml(domain) {
   // range's span. Coarser resolutions (10s/60s/300s) show HH:MM because a seconds digit
   // there is fake precision. Keyed off the same effective-resolution owner the Resolution
   // label reads, not a span proxy.
-  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, Date.now()) / 1000;
+  const resolutionSeconds = debugGraphRenderedResolutionSeconds(Date.now());
   const includeSeconds = !includeDate && resolutionSeconds <= 1;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
     ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
@@ -58762,6 +58799,15 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
     return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
   }
   return defaultBuckets;
+}
+
+function debugGraphRenderedResolutionSeconds(nowMs = Date.now()) {
+  const defaultBuckets = debugGraphDisplayBuckets(nowMs);
+  const resolutions = jsDebugGraphChartGroups
+    .filter(group => group?.key === 'agentTokens' || group?.key === 'modelTokens')
+    .flatMap(group => debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs).map(bucket => Number(bucket?.durationMs) / 1000))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return Math.max(debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs) / 1000, ...resolutions);
 }
 
 function debugGraphHoverBucketIndex(buckets, timestamp) {
@@ -64590,9 +64636,17 @@ function cleanupGitDiffTab(item) {
   gitDiffTabState.delete(item);
 }
 
-function gitDiffHistoryUrl(path, cursor = '') {
+function gitDiffHistoryPageSize(body) {
+  const row = body?.querySelector?.('.git-diff-commit-row');
+  const rowHeight = row?.getBoundingClientRect?.().height || 24;
+  const availableHeight = body?.clientHeight || 0;
+  if (!rowHeight || !availableHeight) return gitDiffHistoryMinimumPageSize;
+  return Math.max(gitDiffHistoryMinimumPageSize, Math.ceil(availableHeight / rowHeight));
+}
+
+function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize) {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryFetchSize}${suffix}`;
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head) {
@@ -64679,7 +64733,10 @@ async function refreshGitDiffHistory(item, options = {}) {
   state.error = null;
   renderGitDiffPanel(item);
   try {
-    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor), {
+    const panel = panelNodes.get(item);
+    const body = panel?.querySelector?.('.git-diff-panel-body');
+    const pageSize = gitDiffHistoryPageSize(body);
+    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize * (gitDiffHistoryPagesPrefetched + 1)), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
     });
@@ -64696,8 +64753,8 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
-    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
-    else state.visibleCommitCount = Math.min(state.commits.length, gitDiffHistoryVisiblePageSize);
+    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
+    else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
@@ -64736,10 +64793,10 @@ async function refreshGitDiffHistory(item, options = {}) {
 function loadOlderGitDiffHistory(item) {
   const state = ensureGitDiffTabState(item);
   if (!state) return false;
-  // Expose the bounded reserve synchronously. Only after it is exhausted do we submit
-  // the next 30-visible-plus-10-reserve Git history walk.
+  const pageSize = gitDiffHistoryPageSize(panelNodes.get(item)?.querySelector?.('.git-diff-panel-body'));
+  // Expose the bounded reserve synchronously. Only after it is exhausted do we submit the next page walk.
   if (state.visibleCommitCount < state.commits.length) {
-    state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + gitDiffHistoryVisiblePageSize);
+    state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
     renderGitDiffPanel(item);
     return true;
   }
@@ -65245,7 +65302,7 @@ function renderGitDiffPanel(item, options = {}) {
   const meta = panel.querySelector?.('.git-diff-meta');
   if (meta) {
     const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
-    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryVisiblePageSize})}`;
+    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryMinimumPageSize})}`;
   }
   const body = panel.querySelector?.('.git-diff-panel-body');
   if (!body) return state;
@@ -65291,10 +65348,10 @@ function layoutUrlGitDiffStateSnapshot() {
       item,
       head: state.head,
       snapshotCursor: state.snapshotCursor,
-      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryVisiblePageSize),
+      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryStateLimit),
       focusedSha: state.focusedSha || '',
-      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryVisiblePageSize),
-      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryVisiblePageSize),
+      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryStateLimit),
+      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryStateLimit),
     });
     if (result.length >= 32) break;
   }
@@ -65322,16 +65379,16 @@ function applyLayoutUrlGitDiffState(entries) {
     state.loaded = false;
     state.loadAttempted = false;
     state.error = null;
-    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryVisiblePageSize));
+    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryStateLimit));
     state.focusedSha = gitDiffLayoutOid(entry.focusedSha);
     state.details.clear();
     state.detailErrors.clear();
-    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
+    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryStateLimit).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const paths = Array.isArray(pair?.[1]) ? pair[1].map(path => normalizeDirectoryPath(String(path || ''))).filter(Boolean).slice(0, 500) : [];
       return sha ? [[sha, new Set(paths)]] : [];
     }));
-    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryVisiblePageSize).flatMap(pair => {
+    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryStateLimit).flatMap(pair => {
       const sha = gitDiffLayoutOid(pair?.[0]);
       const path = normalizeDirectoryPath(String(pair?.[1] || ''));
       return sha && path ? [[sha, path]] : [];
@@ -78076,7 +78133,8 @@ function infoRecordAiAgentLabel(record = {}) {
 }
 
 function infoRecordTmuxWindowIndex(record = {}) {
-  return String(record?.aiWindowIndex ?? record?.aiWindow ?? '').trim();
+  const value = record?.aiWindowIndex ?? record?.aiWindow;
+  return typeof tmuxWindowIndexKey === 'function' ? tmuxWindowIndexKey(value) : String(value ?? '').trim();
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
@@ -78773,9 +78831,16 @@ function infoRecordAgentPayload(record) {
 function infoRecordCanonicalAgent(record) {
   const session = String(record?.tabSession || '').trim();
   const windowIndex = infoRecordTmuxWindowIndex(record);
-  if (!session || !windowIndex || typeof agentWindowStatusForSessionWindow !== 'function') return null;
+  if (!session || windowIndex === null || typeof agentWindowStatusForSessionWindow !== 'function') return null;
   const info = transcriptMetadataState.payload.sessions?.[session] || null;
-  return agentWindowStatusForSessionWindow(session, windowIndex, info, autoApproveStates.get(session));
+  return agentWindowStatusForSessionWindow(
+    session,
+    windowIndex,
+    info,
+    autoApproveStates.get(session),
+    record?.aiPaneTarget || record?.tmuxPaneTarget || '',
+    record?.aiKind || record?.aiAgentKey || '',
+  );
 }
 
 function infoRecordDisplayAgent(record) {

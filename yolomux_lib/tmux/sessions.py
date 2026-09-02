@@ -19,6 +19,7 @@ from ..common import TmuxPaneInfo
 from ..common import ProcessInfo
 from ..common import SessionInfo
 from ..common import VISIBLE_AGENT_KINDS
+from ..common import agent_client_kinds
 from ..cache import TtlCache
 from ..common import _CACHE_MISS
 from ..common import tail_file_lines
@@ -321,6 +322,20 @@ def agent_session_id_from_title(title: str, directory: str) -> str | None:
     )
 
 
+def agent_session_id_from_database(
+    directory: str,
+    *,
+    started_at: float | None = None,
+) -> str | None:
+    """Return a database session only when the bounded matcher finds exactly one."""
+    result = stats_current_opencode.read_usage(
+        directory=directory,
+        started_at=started_at,
+        max_parts=1,
+    )
+    return result.session_id if isinstance(result, stats_current_opencode.OpenCodeReadSuccess) else None
+
+
 def process_started_at(pid: int) -> float | None:
     """Return a process birth time only when the platform exposes an exact value."""
     identity = process_start_identity(pid)
@@ -379,8 +394,8 @@ def pane_process_label(pane: TmuxPaneInfo, candidates: list[ProcessInfo]) -> tup
 def classify_agent(command: str, executable: str | None = None) -> str | None:
     tokens = command_tokens(command)
     label = process_display_label(command).lower()
-    if label in {"claude", "codex"}:
-        return label
+    # TODO(OpenCode): replace this identity split with the shared client registry while preserving
+    # executable-path validation for native OpenCode processes.
     if label == "opencode":
         # The display label is derived from argv and is not identity evidence: an interpreter,
         # wrapper, or child tool can mention ``opencode`` in its arguments. list_processes supplies
@@ -397,6 +412,8 @@ def classify_agent(command: str, executable: str | None = None) -> str | None:
         if command_path.is_absolute() and command_path.resolve(strict=False) != executable_path:
             return None
         return "opencode"
+    if label in agent_client_kinds():
+        return label
     # Pane descendants include every search, test, and shell command launched by the agent. Only
     # classify an actual mock entry point here; an argument or commit message that merely mentions
     # "claude" or "codex" must not become a second agent for the same pane.
@@ -1229,22 +1246,26 @@ def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessI
         return select_claude_agent(session, pane, processes, enrich_paths=False)
     if kinds[0] == "opencode":
         process = next(process for process in processes if classify_agent(process.command, process.executable) == "opencode")
+        cwd = (process_cwd(process.pid) or pane.current_path) if enrich_paths else pane.current_path
+        started_at = process_started_at(process.pid)
+        session_id = (
+            agent_session_id_from_command(process.command)
+            or agent_session_id_from_title(pane.title, cwd)
+            or (agent_session_id_from_database(cwd, started_at=started_at) if enrich_paths else None)
+        )
         return AgentInfo(
             session=session,
             kind="opencode",
             pid=process.pid,
             pane_target=pane.target,
             command=process.command,
-            cwd=(process_cwd(process.pid) or pane.current_path) if enrich_paths else pane.current_path,
+            cwd=cwd,
             status=None,
-            session_id=(
-                agent_session_id_from_command(process.command)
-                or agent_session_id_from_title(pane.title, pane.current_path)
-            ),
+            session_id=session_id,
             transcript=None,
             error=None,
             model=agent_model_from_command(process.command),
-            started_at=process_started_at(process.pid),
+            started_at=started_at,
         )
     if enrich_paths:
         return select_codex_agent(session, pane, processes)

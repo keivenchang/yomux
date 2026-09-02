@@ -12,6 +12,7 @@ from .filesystem.io_ops import read_json_file
 from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import MANAGED_CHAT_AGENT_KINDS
 from .common import path_mtime_or_zero
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
@@ -446,7 +447,7 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
     # (or none are installed — a terminal-only host needs no agent login).
     status = agent_auth_status()
-    installed = [agent for agent in ("claude", "codex") if status.get(agent, {}).get("installed")]
+    installed = [agent for agent in MANAGED_CHAT_AGENT_KINDS if status.get(agent, {}).get("installed")]
     logged_out = [agent for agent in installed if not agent_auth_entry_available(status[agent])]
     if not installed or not logged_out:
         return ""

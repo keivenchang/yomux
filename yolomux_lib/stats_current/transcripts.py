@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import session_files
 from ..atomic_file import atomic_write_text
+from ..infra.common import JSONL_TRANSCRIPT_AGENT_KINDS
 
 
 _PREFIX_BYTES = 64 * 1024
@@ -727,7 +728,8 @@ class StatsCurrentTranscriptUsageScanner:
         for row in rows:
             kind = str(row.get("kind") or "").strip().lower()
             transcript = str(row.get("transcript") or "").strip()
-            if kind not in {"claude", "codex"} or not transcript:
+            # TODO(OpenCode): route native SQLite rows through the OpenCode reader instead of this JSONL scanner.
+            if kind not in JSONL_TRANSCRIPT_AGENT_KINDS or not transcript:
                 continue
             path = Path(transcript).expanduser().resolve(strict=False)
             key = str(row.get("key") or "unknown").strip() or "unknown"

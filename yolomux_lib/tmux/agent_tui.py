@@ -15,6 +15,7 @@ from typing import Callable
 from ..approval.approvals import blank_prompt_state
 from ..approval.approvals import hybrid_approval_prompt_state
 from ..common import SessionInfo
+from ..infra.common import PROMPT_TRANSPORT_AGENT_KINDS
 from ..approval.prompt_detector import agent_screen_state
 from ..approval.prompt_detector import approval_prompt_state
 from .tmux_utils import cmd_error
@@ -814,7 +815,8 @@ def send_prompt(
             cursor_func=cursor_func,
         )
         agent_kind = _agent_kind_for_state(tui_target, state.prompt, state.screen)
-        if agent_kind not in {"claude", "codex"}:
+        # TODO(OpenCode): add OpenCode when its native composer can be safely cleared, pasted, and submitted.
+        if agent_kind not in PROMPT_TRANSPORT_AGENT_KINDS:
             reason_code = "unsupported-agent" if agent_kind == "opencode" else "not-agent"
             error = "target pane does not support the YOLOmux prompt transport" if agent_kind == "opencode" else "target pane does not have a detected Claude or Codex agent"
             return AgentTuiSendResult(ok=False, sent=False, reason_code=reason_code, error=error)

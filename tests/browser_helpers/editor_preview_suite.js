@@ -2046,6 +2046,58 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }), /status-indicator--blocked/);
   });
 
+  test('YO!info resolves a working window by its exact pane target', () => {
+    const api = loadYolomux('', ['yo7220']);
+    const info = {
+      panes: [
+        {window: '1', window_index: 1, target: '%idle', process_label: 'opencode', command: 'opencode', window_active: false, active: true},
+        {window: '1', window_index: 1, target: '%working', process_label: 'opencode', command: 'opencode', window_active: true, active: true},
+      ],
+      agents: [
+        {kind: 'opencode', pane_target: '%idle', window_index: 1},
+        {kind: 'opencode', pane_target: '%working', window_index: 1},
+      ],
+    };
+    api.setTranscriptInfoForTest('yo7220', info);
+    api.setAutoApproveStateForTest('yo7220', {agent_windows: [
+      {kind: 'opencode', pane_target: '%idle', window_index: 1, state: 'idle'},
+      {kind: 'opencode', pane_target: '%working', window_index: 1, state: 'working'},
+    ]});
+    const record = {
+      tabKey: 'yo7220', tabLabel: 'yo7220', tabSession: 'yo7220',
+      aiKey: '1:opencode:%working', aiLabel: '1:opencode', aiKind: 'opencode',
+      aiWindow: '1', aiWindowIndex: '1', aiPaneTarget: '%working', aiState: 'working',
+    };
+    const html = api.infoRecordHtmlForTest(record);
+    assert.match(html, /info-tree-ai-window-token[\s\S]*data-info-open-ai-window="1"[\s\S]*status-indicator--working/, 'YO!info keeps the exact working pane green instead of selecting the idle sibling');
+  });
+
+  test('YO!info does not guess between ambiguous same-window agents', () => {
+    const api = loadYolomux('', ['yo7220']);
+    const info = {
+      panes: [
+        {window: '1', window_index: 1, target: '%idle', process_label: 'opencode', command: 'opencode'},
+        {window: '1', window_index: 1, target: '%working', process_label: 'opencode', command: 'opencode'},
+      ],
+      agents: [
+        {kind: 'opencode', pane_target: '%idle', window_index: 1},
+        {kind: 'opencode', pane_target: '%working', window_index: 1},
+      ],
+    };
+    api.setTranscriptInfoForTest('yo7220', info);
+    api.setAutoApproveStateForTest('yo7220', {agent_windows: [
+      {kind: 'opencode', pane_target: '%idle', window_index: 1, state: 'idle'},
+      {kind: 'opencode', pane_target: '%working', window_index: 1, state: 'working'},
+    ]});
+    const record = {
+      tabKey: 'yo7220', tabLabel: 'yo7220', tabSession: 'yo7220',
+      aiKey: '1:opencode', aiLabel: '1:opencode', aiKind: 'opencode', aiWindow: '1', aiWindowIndex: '1',
+      aiPaneTarget: '%unknown', aiState: 'working',
+    };
+    const html = api.infoRecordHtmlForTest(record);
+    assert.equal(/data-info-open-ai-window="1"[\s\S]*status-indicator--working/.test(html), false, 'YO!info omits an unverified status rather than borrowing a same-window status');
+  });
+
   test('OpenCode statusd rows render the regular session-tab working marker', () => {
     const api = loadYolomux('', ['nemotron-experiment', 'yo7220']);
     const cases = [
@@ -2782,6 +2834,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/class="tab tmux-window-button active"[^>]*data-window-index="3"[^>]*aria-pressed="true"/.test(windowBarHtml), 'P5: active tmux sub-window button is highlighted and pressed');
     assert.ok(windowBarHtml.includes('<span class="tmux-window-name-label"><span class="tmux-window-name-text">1:bash</span></span>'), 'tmux sub-window buttons show index:name without pid');
     assert.ok(/agent-icon codex[\s\S]*tmux-window-name-text">2:codex</.test(windowBarHtml), 'AI tmux sub-window buttons lead their stable labels with the matching agent icon');
+    const opencodeHtml = api.agentIcon('opencode');
+    assert.ok(opencodeHtml.includes('agent-icon opencode') && opencodeHtml.includes('<svg'), 'OpenCode uses a real peer icon instead of a text abbreviation');
+    assert.ok(opencodeHtml.includes('cx="9" cy="12"') && opencodeHtml.includes('M20 7.5'), 'OpenCode icon renders crossed O and C strokes');
+    assert.deepStrictEqual({...api.agentClientSpec('opencode')}, {label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}, 'OpenCode is represented by the shared visible-client capability owner');
+    assert.equal(api.visibleAgentClient('opencode'), 'opencode', 'visible-client selection accepts OpenCode through the shared capability owner');
     assert.equal(windowBarHtml.includes('(pid='), false, 'tmux sub-window button labels do not show process pids');
     assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux sub-window names like node');
     assert.equal(windowBarHtml.includes('data-window-agent'), false, 'tmux sub-window buttons no longer carry per-agent color tags');

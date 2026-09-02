@@ -101,6 +101,7 @@ from .observability.activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
 from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
+from .common import AUTO_APPROVE_AGENT_KINDS
 from .common import VISIBLE_AGENT_KINDS
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
@@ -16820,7 +16821,7 @@ class TmuxWebtermApp:
             info = discovered.get(session)
         if info is not None:
             for agent in info.agents:
-                if str(agent.kind or "").lower() not in {"claude", "codex"}:
+                if str(agent.kind or "").lower() not in AUTO_APPROVE_AGENT_KINDS:
                     continue
                 add_target(agent.pane_target)
 
@@ -16833,7 +16834,7 @@ class TmuxWebtermApp:
                 continue
             if str(agent.get("session") or "") != session or agent.get("dead") is True:
                 continue
-            if str(agent.get("agent") or "").lower() not in {"claude", "codex"}:
+            if str(agent.get("agent") or "").lower() not in AUTO_APPROVE_AGENT_KINDS:
                 continue
             add_target(agent.get("target") or agent.get("pane_id"))
         return targets

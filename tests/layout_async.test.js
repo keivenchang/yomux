@@ -396,7 +396,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(refreshed.detailCollapsedDirectories.has(oldSha), false, 'Refresh retires stale per-SHA folder state');
   });
 
-  await testAsync('Git history paints 30 rows and exposes its 10-row reserve without another Git request', async () => {
+  await testAsync('Git history fills the viewport and exposes two viewport pages without another Git request', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 40}, (_, index) => ({
@@ -409,11 +409,12 @@ async function runLayoutAsyncSuite() {
     });
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
+    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 30, 'the first paint is the visible 30-row page');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=40'], 'one request carries exactly the 30-row page plus its 10-row reserve');
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=6'], 'one request carries the viewport page plus two prefetched pages');
     assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
-    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 40, 'Load older paints the retained reserve immediately');
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
     assert.equal(requests.length, 1, 'the retained reserve does not submit another Git history request');
   });
 
@@ -439,7 +440,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=40$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=3$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -476,8 +477,8 @@ async function runLayoutAsyncSuite() {
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
     assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
     assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=40&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=40',
+      '/api/fs/git-history?path=%2Frepo&limit=3&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=3',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });

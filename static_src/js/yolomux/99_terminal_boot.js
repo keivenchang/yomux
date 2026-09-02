@@ -1670,7 +1670,8 @@ function infoRecordAiAgentLabel(record = {}) {
 }
 
 function infoRecordTmuxWindowIndex(record = {}) {
-  return String(record?.aiWindowIndex ?? record?.aiWindow ?? '').trim();
+  const value = record?.aiWindowIndex ?? record?.aiWindow;
+  return typeof tmuxWindowIndexKey === 'function' ? tmuxWindowIndexKey(value) : String(value ?? '').trim();
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
@@ -2367,9 +2368,16 @@ function infoRecordAgentPayload(record) {
 function infoRecordCanonicalAgent(record) {
   const session = String(record?.tabSession || '').trim();
   const windowIndex = infoRecordTmuxWindowIndex(record);
-  if (!session || !windowIndex || typeof agentWindowStatusForSessionWindow !== 'function') return null;
+  if (!session || windowIndex === null || typeof agentWindowStatusForSessionWindow !== 'function') return null;
   const info = transcriptMetadataState.payload.sessions?.[session] || null;
-  return agentWindowStatusForSessionWindow(session, windowIndex, info, autoApproveStates.get(session));
+  return agentWindowStatusForSessionWindow(
+    session,
+    windowIndex,
+    info,
+    autoApproveStates.get(session),
+    record?.aiPaneTarget || record?.tmuxPaneTarget || '',
+    record?.aiKind || record?.aiAgentKey || '',
+  );
 }
 
 function infoRecordDisplayAgent(record) {
