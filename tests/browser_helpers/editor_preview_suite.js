@@ -9198,10 +9198,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-setting-path="appearance\.sync_font_sizes"[\s\S]*data-setting-path="appearance\.global_font_size"/.test(sizesHtml), 'Sizes starts with sync control and global font size');
     assert.equal(sizesHtml.includes('data-setting-path="appearance.ui_font_size"'), false, 'separate UI font size is hidden while synchronization is enabled');
     assert.equal(sizesHtml.includes('data-setting-path="appearance.terminal_font_size"'), false, 'separate terminal font size is hidden while synchronization is enabled');
-    assert.ok(sizesHtml.includes('Global font size'), 'global font size renders in Sizes');
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+     assert.ok(sizesHtml.includes('Global font size'), 'global font size renders in Sizes');
+     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("'appearance.global_font_size': 14"), 'global font size defaults to 14px');
-    assert.ok(sizesHtml.includes('Sync all font sizes'), 'font-size synchronization control renders');
+     assert.ok(sizesHtml.includes('Sync all font sizes'), 'font-size synchronization control renders');
+     assert.ok(source.includes("file_explorer_font_size: syncedFinderFontSize(size)"), 'enabling sync derives Finder size through the shared size helper');
+     assert.ok(source.includes("function syncedFinderFontSize(globalSize)") && source.includes("Math.round(size * 0.12)"), 'synced runtime keeps Finder at least one pixel and at most 12% smaller');
+     assert.ok(/if \(path === 'appearance\.sync_font_sizes' && value === true\)[\s\S]*file_explorer_font_size: syncedFinderFontSize\(size\)/.test(source), 'clicking sync sends every derived size in one settings update');
+     assert.ok(/forcePreferences: path === 'appearance\.sync_font_sizes'/.test(source), 'clicking sync forces the Preferences panel to reconcile its dependent controls');
+     assert.ok(/forcePreferences: options\.forcePreferences === true/.test(source), 'the settings response preserves the sync-control force-render request');
     api.setClientSettingsPatchForTest({appearance: {sync_font_sizes: false}});
     const separateSizesHtml = api.preferencesPanelHtmlForTest('');
     const separateAppearanceHtml = separateSizesHtml.slice(separateSizesHtml.indexOf('data-preference-section="sizes"'), separateSizesHtml.indexOf('data-preference-section="terminal"'));

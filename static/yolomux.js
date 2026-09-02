@@ -919,11 +919,12 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-// The history panel paints the rows that fit its viewport, with two additional viewport-sized pages
+// The history panel fetches five viewport-sized pages per request, then fetches the next batch when
+// the user reaches the second visible page.
 // reserved so the first downward scrolls do not wait on another Git walk. Keep all consumers on these
 // one-source limits: Git history includes numstat work and must never expand with the repository's
 // complete history just because a directory has many commits.
-const gitDiffHistoryPagesPrefetched = 2;
+const gitDiffHistoryPagesPrefetched = 4;
 const gitDiffHistoryMinimumPageSize = 1;
 const gitDiffHistoryStateLimit = 32;
 const imageViewerItemPrefix = 'image:';
@@ -33127,6 +33128,11 @@ function applyStatusPulseModeClass() {
   document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
 }
 
+function syncedFinderFontSize(globalSize) {
+  const size = Math.round(Number(globalSize));
+  return Math.max(1, size - Math.max(1, Math.round(size * 0.12)));
+}
+
 function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
@@ -33138,7 +33144,7 @@ function applyCssSettings() {
     terminalFontSize = globalFontSize;
     editorFontSize = globalFontSize;
     editorPreviewFontSize = globalFontSize;
-    fileExplorerFontSize = globalFontSize;
+    fileExplorerFontSize = syncedFinderFontSize(globalFontSize);
   }
   root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
   root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
@@ -33344,7 +33350,7 @@ function applySettingsPayload(payload, options = {}) {
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
   refreshMetaButtonChrome();
-  renderPreferencesPanels();
+   renderPreferencesPanels({force: options.forcePreferences === true});
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
@@ -33554,7 +33560,7 @@ function installRuntimeIntervals() {
 }
 
 function yolomuxFontSpecsForCurrentSettings() {
-  const uiSize = Math.max(6, Math.round(numberSetting('appearance.ui_font_size', 13)));
+  const uiSize = Math.max(6, Math.min(30, Math.round(numberSetting('appearance.ui_font_size', 13))));
   const monoSizes = [
     uiSize,
     terminalFontSize,
@@ -49040,9 +49046,9 @@ function preferenceSections() {
     {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
       preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
       preferenceSettingItem('appearance.global_font_size', {type: 'number', min: 6, max: 25, step: 1, suffix: 'px', whenSyncFontSizes: true}),
-      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 30, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
-      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 1, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
@@ -64734,7 +64740,7 @@ async function refreshGitDiffHistory(item, options = {}) {
   try {
     const panel = panelNodes.get(item);
     const body = panel?.querySelector?.('.git-diff-panel-body');
-    const pageSize = gitDiffHistoryPageSize(body);
+       const pageSize = gitDiffHistoryPageSize(body);
     const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize * (gitDiffHistoryPagesPrefetched + 1)), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
@@ -64752,8 +64758,8 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
-    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
-    else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
+       if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
+       else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
@@ -64797,6 +64803,9 @@ function loadOlderGitDiffHistory(item) {
   if (state.visibleCommitCount < state.commits.length) {
     state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
     renderGitDiffPanel(item);
+    if (state.visibleCommitCount >= pageSize * 2 && state.nextCursor) {
+      void refreshGitDiffHistory(item, {append: true});
+    }
     return true;
   }
   return refreshGitDiffHistory(item, {append: true});
@@ -64814,6 +64823,18 @@ function bindGitDiffHistoryInfiniteScroll(item, body) {
       void loadOlderGitDiffHistory(item);
     }, {passive: true});
   });
+}
+
+function scheduleGitDiffHistoryInfiniteScroll(item, body) {
+  if (!body || body.dataset.gitDiffAutoLoadScheduled === 'true') return;
+  body.dataset.gitDiffAutoLoadScheduled = 'true';
+  const run = () => {
+    delete body.dataset.gitDiffAutoLoadScheduled;
+    if (!body.isConnected || !body.clientHeight || !body.scrollHeight || body.scrollHeight > body.clientHeight) return;
+    void loadOlderGitDiffHistory(item);
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
 }
 
 function gitDiffDetailGuard(state, sha) {
@@ -65320,6 +65341,7 @@ function renderGitDiffPanel(item, options = {}) {
     nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
   }
   body.replaceChildren(...nodes);
+  scheduleGitDiffHistoryInfiniteScroll(item, body);
   if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
   if (!state.loadAttempted) void refreshGitDiffHistory(item);
   return state;
@@ -68269,7 +68291,7 @@ function settingPatchForPath(path, value) {
       terminal_font_size: value,
       editor_font_size: value,
       preview_font_size: value,
-      file_explorer_font_size: value,
+      file_explorer_font_size: syncedFinderFontSize(value),
       ui_font_size: value,
     };
   }
@@ -68280,7 +68302,7 @@ function settingPatchForPath(path, value) {
       terminal_font_size: size,
       editor_font_size: size,
       preview_font_size: size,
-      file_explorer_font_size: size,
+      file_explorer_font_size: syncedFinderFontSize(size),
       ui_font_size: size,
     };
   }
@@ -68321,7 +68343,11 @@ async function saveSettingsPatch(patch, options = {}) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({settings: patch}),
   });
-  applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
+   applySettingsPayload(payload, {
+     force: true,
+     applyEditorDefaults: options.applyEditorDefaults === true,
+     forcePreferences: options.forcePreferences === true,
+   });
   if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
     applyLayoutSlots(preservedLayout, {
       focusSession: preservedFocus && itemInLayout(preservedFocus, preservedLayout) ? preservedFocus : undefined,
@@ -68380,6 +68406,7 @@ function savePreferenceControl(control) {
   }
   saveSettingsPatch(settingPatchForPath(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+    forcePreferences: path === 'appearance.sync_font_sizes',
   })
     .then(() => {
       const scheme = activeEditorScheme();

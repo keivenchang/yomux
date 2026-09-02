@@ -1025,6 +1025,11 @@ function applyStatusPulseModeClass() {
   document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
 }
 
+function syncedFinderFontSize(globalSize) {
+  const size = Math.round(Number(globalSize));
+  return Math.max(1, size - Math.max(1, Math.round(size * 0.12)));
+}
+
 function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
@@ -1036,7 +1041,7 @@ function applyCssSettings() {
     terminalFontSize = globalFontSize;
     editorFontSize = globalFontSize;
     editorPreviewFontSize = globalFontSize;
-    fileExplorerFontSize = globalFontSize;
+    fileExplorerFontSize = syncedFinderFontSize(globalFontSize);
   }
   root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
   root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
@@ -1242,7 +1247,7 @@ function applySettingsPayload(payload, options = {}) {
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
   refreshMetaButtonChrome();
-  renderPreferencesPanels();
+   renderPreferencesPanels({force: options.forcePreferences === true});
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
@@ -1452,7 +1457,7 @@ function installRuntimeIntervals() {
 }
 
 function yolomuxFontSpecsForCurrentSettings() {
-  const uiSize = Math.max(6, Math.round(numberSetting('appearance.ui_font_size', 13)));
+  const uiSize = Math.max(6, Math.min(30, Math.round(numberSetting('appearance.ui_font_size', 13))));
   const monoSizes = [
     uiSize,
     terminalFontSize,

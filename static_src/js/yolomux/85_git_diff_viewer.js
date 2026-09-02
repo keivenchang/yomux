@@ -173,7 +173,7 @@ async function refreshGitDiffHistory(item, options = {}) {
   try {
     const panel = panelNodes.get(item);
     const body = panel?.querySelector?.('.git-diff-panel-body');
-    const pageSize = gitDiffHistoryPageSize(body);
+       const pageSize = gitDiffHistoryPageSize(body);
     const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize * (gitDiffHistoryPagesPrefetched + 1)), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
@@ -191,8 +191,8 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.hostedRemote = payload.hosted_remote || null;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
-    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
-    else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
+       if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
+       else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
@@ -236,6 +236,9 @@ function loadOlderGitDiffHistory(item) {
   if (state.visibleCommitCount < state.commits.length) {
     state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
     renderGitDiffPanel(item);
+    if (state.visibleCommitCount >= pageSize * 2 && state.nextCursor) {
+      void refreshGitDiffHistory(item, {append: true});
+    }
     return true;
   }
   return refreshGitDiffHistory(item, {append: true});
@@ -253,6 +256,18 @@ function bindGitDiffHistoryInfiniteScroll(item, body) {
       void loadOlderGitDiffHistory(item);
     }, {passive: true});
   });
+}
+
+function scheduleGitDiffHistoryInfiniteScroll(item, body) {
+  if (!body || body.dataset.gitDiffAutoLoadScheduled === 'true') return;
+  body.dataset.gitDiffAutoLoadScheduled = 'true';
+  const run = () => {
+    delete body.dataset.gitDiffAutoLoadScheduled;
+    if (!body.isConnected || !body.clientHeight || !body.scrollHeight || body.scrollHeight > body.clientHeight) return;
+    void loadOlderGitDiffHistory(item);
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
 }
 
 function gitDiffDetailGuard(state, sha) {
@@ -759,6 +774,7 @@ function renderGitDiffPanel(item, options = {}) {
     nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
   }
   body.replaceChildren(...nodes);
+  scheduleGitDiffHistoryInfiniteScroll(item, body);
   if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
   if (!state.loadAttempted) void refreshGitDiffHistory(item);
   return state;

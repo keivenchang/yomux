@@ -2862,7 +2862,7 @@ function settingPatchForPath(path, value) {
       terminal_font_size: value,
       editor_font_size: value,
       preview_font_size: value,
-      file_explorer_font_size: value,
+      file_explorer_font_size: syncedFinderFontSize(value),
       ui_font_size: value,
     };
   }
@@ -2873,7 +2873,7 @@ function settingPatchForPath(path, value) {
       terminal_font_size: size,
       editor_font_size: size,
       preview_font_size: size,
-      file_explorer_font_size: size,
+      file_explorer_font_size: syncedFinderFontSize(size),
       ui_font_size: size,
     };
   }
@@ -2914,7 +2914,11 @@ async function saveSettingsPatch(patch, options = {}) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({settings: patch}),
   });
-  applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
+   applySettingsPayload(payload, {
+     force: true,
+     applyEditorDefaults: options.applyEditorDefaults === true,
+     forcePreferences: options.forcePreferences === true,
+   });
   if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
     applyLayoutSlots(preservedLayout, {
       focusSession: preservedFocus && itemInLayout(preservedFocus, preservedLayout) ? preservedFocus : undefined,
@@ -2973,6 +2977,7 @@ function savePreferenceControl(control) {
   }
   saveSettingsPatch(settingPatchForPath(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+    forcePreferences: path === 'appearance.sync_font_sizes',
   })
     .then(() => {
       const scheme = activeEditorScheme();

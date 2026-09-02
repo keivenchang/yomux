@@ -412,10 +412,35 @@ async function runLayoutAsyncSuite() {
     Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=6'], 'one request carries the viewport page plus two prefetched pages');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=10'], 'one request carries five viewport pages');
     assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
-    assert.equal(requests.length, 1, 'the retained reserve does not submit another Git history request');
+    assert.equal(requests.length, 2, 'reaching the second visible page starts the next five-page fetch');
+  });
+
+  await testAsync('Git history auto-loads when the initial rows do not create a scrollbar', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 8}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: requests.length === 1 ? 'next-page' : '', truncated: false}));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    const body = panel.querySelector('.git-diff-panel-body');
+    Object.defineProperties(body, {
+      clientHeight: {configurable: true, value: 480},
+      scrollHeight: {configurable: true, get: () => Math.max(1, body.querySelectorAll('.git-diff-commit-row').length * 24)},
+    });
+    await api.refreshGitDiffHistoryForTest(item, {refresh: true});
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(requests.length, 2, 'a short initial list requests its next page without waiting for an impossible scroll event');
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 8, 'auto-loaded history renders the complete available result');
   });
 
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
@@ -440,7 +465,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=3$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=5$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -477,8 +502,8 @@ async function runLayoutAsyncSuite() {
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
     assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
     assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=3&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=3',
+      '/api/fs/git-history?path=%2Frepo&limit=5&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=5',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });

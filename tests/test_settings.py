@@ -235,7 +235,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
     assert settings["appearance"]["separator_color"] == "theme"
     assert sanitize_settings({"appearance": {"separator_color": "purple"}})["appearance"]["separator_color"] == "purple"
-    assert settings["appearance"]["file_explorer_font_size"] == 6
+    assert settings["appearance"]["file_explorer_font_size"] == 1
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
     assert settings["appearance"]["pane_ring_opacity"] == 5
@@ -638,7 +638,7 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     save_settings(default_settings(), path)
     result = save_settings({"appearance": {"ui_font_size": 999}}, path)
     assert "appearance.ui_font_size" in result["coerced"]
-    assert result["settings"]["appearance"]["ui_font_size"] == 20  # clamped to the max
+    assert result["settings"]["appearance"]["ui_font_size"] == 30  # clamped to the max
     ok = save_settings({"appearance": {"ui_font_size": 14}}, path)
     assert ok["coerced"] == []
     ring = save_settings({"appearance": {"pane_ring_opacity": 20}}, path)
@@ -656,6 +656,26 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     clamped_opacity = save_settings({"appearance": {"inactive_pane_opacity": 500}}, path)
     assert "appearance.inactive_pane_opacity" in clamped_opacity["coerced"]
     assert clamped_opacity["settings"]["appearance"]["inactive_pane_opacity"] == 100
+
+
+def test_save_settings_derives_smaller_finder_size_when_font_sizes_are_synced(tmp_path):
+    path = tmp_path / "settings.yaml"
+    save_settings(default_settings(), path)
+
+    saved = save_settings({"appearance": {"sync_font_sizes": True, "global_font_size": 14}}, path)
+
+    appearance = saved["settings"]["appearance"]
+    assert appearance["ui_font_size"] == 14
+    assert appearance["terminal_font_size"] == 14
+    assert appearance["editor_font_size"] == 14
+    assert appearance["preview_font_size"] == 14
+    assert appearance["file_explorer_font_size"] == 12
+
+    minimum = save_settings({"appearance": {"global_font_size": 6}}, path)["settings"]["appearance"]
+    assert minimum["file_explorer_font_size"] == 5
+
+    independent = save_settings({"appearance": {"sync_font_sizes": False, "file_explorer_font_size": 3}}, path)["settings"]["appearance"]
+    assert independent["file_explorer_font_size"] == 3
 
 
 def test_login_locale_picker_writes_general_language():
