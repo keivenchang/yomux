@@ -2375,24 +2375,66 @@ function applyFileEditorSaveHygiene(path) {
   return true;
 }
 
-async function saveFileEditor(path, panel, options = {}) {
+function fileEditorSaveRequest(path, panel, options, resolve = null) {
+  return {
+    path,
+    panel,
+    options: {
+      ...options,
+      autosave: options.autosave === true,
+      closing: options.closing === true,
+      force: options.force === true,
+    },
+    resolvers: resolve ? [resolve] : [],
+  };
+}
+
+function mergeFileEditorSaveRequest(request, panel, options, resolve) {
+  if (panel) request.panel = panel;
+  if (options.item) request.options.item = options.item;
+  request.options.force = request.options.force || options.force === true;
+  request.options.closing = request.options.closing || options.closing === true;
+  request.options.autosave = request.options.autosave && options.autosave === true;
+  request.resolvers.push(resolve);
+}
+
+function resolveFileEditorSaveRequest(request, result) {
+  for (const resolve of request?.resolvers || []) resolve(result);
+}
+
+function queueFileEditorSave(path, owner, panel, options) {
+  return new Promise(resolve => {
+    if (owner.active || owner.conflict) {
+      if (owner.pending) mergeFileEditorSaveRequest(owner.pending, panel, options, resolve);
+      else owner.pending = fileEditorSaveRequest(path, panel, options, resolve);
+      return;
+    }
+    owner.active = fileEditorSaveRequest(path, panel, options, resolve);
+    runFileEditorSaveOwner(path, owner);
+  });
+}
+
+async function performFileEditorSave(path, panel, options = {}) {
   if (readOnlyMode) return false;
+  const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
-  const state = fileEditorStateForItem(path, item);
+  const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
-  syncOpenFileContentFromPanels(path, panel);
+  const contentPanel = panel || state.contentOwnerPanel || null;
+  syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
-    return showFileSaveConflictDialog(path, panel);
+    return {conflict: true, message: ''};
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
-  setFileEditorPanelStatus(panel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
+  const savedContent = state.content;
+  setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   try {
     const body = {
       path,
-      content: state.content,
+      content: savedContent,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
     const payload = await apiFetchJson('/api/fs/write', {
@@ -2400,22 +2442,26 @@ async function saveFileEditor(path, panel, options = {}) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
+    const currentStatePath = options.statePath || statePath;
     applyFileIdentityMetadata(state, payload);
-    registerFileIdentityForPath(path, state);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
-    state.original = state.content;
-    state.dirty = false;
-    state.lastCleanAt = Date.now();
-    clearFileAutosaveTimer(path);
+    state.original = savedContent;
+    state.dirty = state.content !== savedContent;
+    if (state.dirty) delete state.lastCleanAt;
+    else state.lastCleanAt = Date.now();
+    clearFileAutosaveTimer(currentStatePath);
     clearOpenFileExternalState(state);
     if (payload.yolo_rules) {
       yoloRulesPayload = payload.yolo_rules;
       renderPreferencesPanels();
     }
     for (const openPanel of fileEditorPanelsForPath(path)) {
-      updateFileEditorPanelChrome(openPanel, path);
-      setFileEditorPanelStatus(openPanel, t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), 'ok');
+      updateFileEditorPanelChrome(openPanel, currentStatePath);
+      const status = state.dirty
+        ? openFileStatus(state)
+        : {message: t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), level: 'ok'};
+      setFileEditorPanelStatus(openPanel, status.message, status.level);
     }
     renderSessionButtons();
     renderPaneTabStrips();
@@ -2423,9 +2469,80 @@ async function saveFileEditor(path, panel, options = {}) {
   } catch (err) {
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
-      return showFileSaveConflictDialog(path, panel, {message: userMessageText(err, err.message)});
+      return {conflict: true, message: userMessageText(err, err.message)};
     }
     setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }
+}
+
+async function runFileEditorSaveOwner(path, owner) {
+  while (owner.active) {
+    const request = owner.active;
+    const requestPath = request.path || owner.path || path;
+    const result = await performFileEditorSave(requestPath, request.panel, request.options);
+    if (result?.conflict === true) {
+      owner.active = null;
+      owner.conflict = true;
+      const conflictPath = owner.path || requestPath;
+      const conflict = await showFileSaveConflictDialog(conflictPath, request.panel, {
+        message: result.message,
+        returnAction: true,
+        deferSave: true,
+      });
+      owner.conflict = false;
+      const pending = owner.pending;
+      owner.pending = null;
+      const overwriteSelected = (
+        conflict?.action === 'overwrite' || conflict?.nestedAction === 'overwrite'
+      ) && conflict?.result === true;
+      if (overwriteSelected) {
+        request.options.force = true;
+        request.path = owner.path || requestPath;
+        if (pending) {
+          request.panel = pending.panel || request.panel;
+          if (pending.options.item) request.options.item = pending.options.item;
+          request.options.closing = request.options.closing || pending.options.closing;
+          request.resolvers.push(...pending.resolvers);
+        }
+        const contentOwner = fileState.get(conflictPath)?.contentOwnerPanel;
+        if (contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === fileState.get(conflictPath)) {
+          request.panel = contentOwner;
+        }
+        owner.active = request;
+        continue;
+      }
+      resolveFileEditorSaveRequest(request, conflict?.result === true);
+      resolveFileEditorSaveRequest(pending, false);
+      if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+      return;
+    }
+    resolveFileEditorSaveRequest(request, result);
+    owner.active = owner.pending;
+    owner.pending = null;
+    const currentPath = owner.path || requestPath;
+    const state = fileState.get(currentPath);
+    if (!owner.active && result === true && openFileAutosaveReady(currentPath, state)) {
+      clearFileAutosaveTimer(currentPath);
+      const contentOwner = state.contentOwnerPanel;
+      const trailingPanel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+        ? contentOwner
+        : request.panel;
+      owner.active = fileEditorSaveRequest(currentPath, trailingPanel, {autosave: true});
+    }
+  }
+  if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+}
+
+function saveFileEditor(path, panel, options = {}) {
+  if (readOnlyMode) return Promise.resolve(false);
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return Promise.resolve(false);
+  let owner = fileEditorSaveOwners.get(path);
+  if (!owner) {
+    owner = {active: null, pending: null, path};
+    fileEditorSaveOwners.set(path, owner);
+  }
+  return queueFileEditorSave(path, owner, panel, options);
 }

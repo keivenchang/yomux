@@ -472,6 +472,7 @@ let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the edi
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
+const fileEditorSaveOwners = new Map();
 const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
@@ -28548,8 +28549,11 @@ function openFilePathHasOwner(path) {
 }
 
 function removeFilePanelOwner(path, item) {
+  const state = fileStateFor(path);
+  const panel = panelNodes.get(item);
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (state && state.contentOwnerPanel === panel) reassignFileContentOwnerPanel(path, panel);
   if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
@@ -28557,7 +28561,7 @@ function removeFilePanelOwner(path, item) {
   fileEditorViewState.delete(item);
   fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
-  if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
+  if (!openFilePathHasOwner(path)) state?.ownerSessions.clear();
 }
 
 function normalizedOpenFileOwnerSession(value) {
@@ -28580,9 +28584,24 @@ function openFileOwnerSessionsForPath(path) {
 function removePanelForItem(item) {
   const panel = panelNodes.get(item);
   if (!panel) return;
+  reassignFileContentOwnerPanel(fileEditorPanelPath(panel), panel);
   tabTypeForItem(item)?.cleanup?.(item, panel);
   panel.remove();
   panelNodes.delete(item);
+}
+
+function reassignFileContentOwnerPanel(path, panel) {
+  const state = path ? fileState.get(path) : null;
+  if (!state || state.contentOwnerPanel !== panel) return;
+  const replacement = Array.from(state.editorTabItems || [])
+    .map(item => panelNodes.get(item))
+    .find(candidate => (
+      candidate !== panel
+      && candidate?.isConnected !== false
+      && fileEditorPanelState(candidate)?.historical !== true
+    ));
+  if (replacement) state.contentOwnerPanel = replacement;
+  else delete state.contentOwnerPanel;
 }
 
 // A language switch must repaint the Finder's toolbar chrome (root/dates/sort/new-file… labels), which
@@ -28865,7 +28884,10 @@ function rescheduleAllFileAutosaves() {
 async function autoSaveFileEditor(path) {
   const state = fileState.get(path);
   if (!openFileAutosaveReady(path, state)) return false;
-  const panel = fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
+  const contentOwner = state.contentOwnerPanel;
+  const panel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+    ? contentOwner
+    : fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
   syncOpenFileContentFromPanels(path, panel);
   if (!openFileAutosaveReady(path, state)) return false;
   return saveFileEditor(path, panel, {autosave: true});
@@ -29009,7 +29031,7 @@ function showFileEditorDecisionDialog(options = {}) {
   });
 }
 
-async function showFileConflictCompareDialog(path, panel = null) {
+async function showFileConflictCompareDialog(path, panel = null, options = {}) {
   const state = fileState.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
@@ -29025,9 +29047,12 @@ async function showFileConflictCompareDialog(path, panel = null) {
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
   });
-  if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-  if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-  return false;
+  const result = action === 'overwrite'
+    ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+    : action === 'reload'
+      ? await reloadOpenFileFromDisk(path, {force: true})
+      : false;
+  return options.returnAction === true ? {action, result} : result;
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
@@ -29053,10 +29078,16 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
       ],
       className: 'file-editor-conflict-dialog',
     });
-    if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-    if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-    if (action === 'compare') return showFileConflictCompareDialog(path, panel);
-    return false;
+    const result = action === 'overwrite'
+      ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+      : action === 'reload'
+        ? await reloadOpenFileFromDisk(path, {force: true})
+        : action === 'compare'
+          ? await showFileConflictCompareDialog(path, panel, {returnAction: true, deferSave: options.deferSave === true})
+          : false;
+    return options.returnAction === true
+      ? {action, nestedAction: action === 'compare' ? result?.action || '' : '', result: action === 'compare' ? result?.result : result}
+      : result;
   } finally {
     setFileConflictDialogOpen(path, false);
   }
@@ -31493,6 +31524,14 @@ function layoutWithReplacedItems(replacements) {
 
 function renameOpenFilePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !fileState.has(oldPath)) return;
+  const saveOwner = fileEditorSaveOwners.get(oldPath);
+  if (saveOwner) {
+    fileEditorSaveOwners.delete(oldPath);
+    fileEditorSaveOwners.set(newPath, saveOwner);
+    saveOwner.path = newPath;
+    if (saveOwner.active) saveOwner.active.options.statePath = newPath;
+    if (saveOwner.pending) saveOwner.pending.path = newPath;
+  }
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
   const state = fileStateFor(oldPath);
@@ -37034,8 +37073,20 @@ function terminalContextMenuPreservesNativeBehavior(session, container) {
 }
 
 function terminalUsesAppWheel(session, container) {
+  const containerTarget = terminalContextMenuPaneTargetForContainer(container);
+  if (containerTarget) {
+    return terminalContextMenuCapabilityForSession(session, {
+      paneTarget: () => containerTarget,
+    }).clientKind === 'opencode';
+  }
+  // A live terminal may receive the signal snapshot before its cheap DOM target handoff runs. Only
+  // real terminal elements may use this narrow fallback; plain test/data objects with no identity
+  // must remain fail-closed.
+  if (container?.nodeType !== 1) return false;
+  const signalWindow = activeTmuxSignalWindowForSession(session);
+  const signalTarget = terminalContextMenuPaneTargetForWindow(signalWindow);
   return terminalContextMenuCapabilityForSession(session, {
-    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+    paneTarget: () => signalTarget,
   }).clientKind === 'opencode';
 }
 
@@ -68735,6 +68786,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
   if (!state || state.kind !== 'text' || state.historical === true) return;
   state.content = String(content ?? '');
+  state.contentOwnerPanel = panel;
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
   state.dirty = dirty;
@@ -76266,24 +76318,66 @@ function applyFileEditorSaveHygiene(path) {
   return true;
 }
 
-async function saveFileEditor(path, panel, options = {}) {
+function fileEditorSaveRequest(path, panel, options, resolve = null) {
+  return {
+    path,
+    panel,
+    options: {
+      ...options,
+      autosave: options.autosave === true,
+      closing: options.closing === true,
+      force: options.force === true,
+    },
+    resolvers: resolve ? [resolve] : [],
+  };
+}
+
+function mergeFileEditorSaveRequest(request, panel, options, resolve) {
+  if (panel) request.panel = panel;
+  if (options.item) request.options.item = options.item;
+  request.options.force = request.options.force || options.force === true;
+  request.options.closing = request.options.closing || options.closing === true;
+  request.options.autosave = request.options.autosave && options.autosave === true;
+  request.resolvers.push(resolve);
+}
+
+function resolveFileEditorSaveRequest(request, result) {
+  for (const resolve of request?.resolvers || []) resolve(result);
+}
+
+function queueFileEditorSave(path, owner, panel, options) {
+  return new Promise(resolve => {
+    if (owner.active || owner.conflict) {
+      if (owner.pending) mergeFileEditorSaveRequest(owner.pending, panel, options, resolve);
+      else owner.pending = fileEditorSaveRequest(path, panel, options, resolve);
+      return;
+    }
+    owner.active = fileEditorSaveRequest(path, panel, options, resolve);
+    runFileEditorSaveOwner(path, owner);
+  });
+}
+
+async function performFileEditorSave(path, panel, options = {}) {
   if (readOnlyMode) return false;
+  const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
-  const state = fileEditorStateForItem(path, item);
+  const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
-  syncOpenFileContentFromPanels(path, panel);
+  const contentPanel = panel || state.contentOwnerPanel || null;
+  syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
-    return showFileSaveConflictDialog(path, panel);
+    return {conflict: true, message: ''};
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
-  setFileEditorPanelStatus(panel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
+  const savedContent = state.content;
+  setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   try {
     const body = {
       path,
-      content: state.content,
+      content: savedContent,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
     const payload = await apiFetchJson('/api/fs/write', {
@@ -76291,22 +76385,26 @@ async function saveFileEditor(path, panel, options = {}) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
+    const currentStatePath = options.statePath || statePath;
     applyFileIdentityMetadata(state, payload);
-    registerFileIdentityForPath(path, state);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
-    state.original = state.content;
-    state.dirty = false;
-    state.lastCleanAt = Date.now();
-    clearFileAutosaveTimer(path);
+    state.original = savedContent;
+    state.dirty = state.content !== savedContent;
+    if (state.dirty) delete state.lastCleanAt;
+    else state.lastCleanAt = Date.now();
+    clearFileAutosaveTimer(currentStatePath);
     clearOpenFileExternalState(state);
     if (payload.yolo_rules) {
       yoloRulesPayload = payload.yolo_rules;
       renderPreferencesPanels();
     }
     for (const openPanel of fileEditorPanelsForPath(path)) {
-      updateFileEditorPanelChrome(openPanel, path);
-      setFileEditorPanelStatus(openPanel, t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), 'ok');
+      updateFileEditorPanelChrome(openPanel, currentStatePath);
+      const status = state.dirty
+        ? openFileStatus(state)
+        : {message: t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), level: 'ok'};
+      setFileEditorPanelStatus(openPanel, status.message, status.level);
     }
     renderSessionButtons();
     renderPaneTabStrips();
@@ -76314,11 +76412,82 @@ async function saveFileEditor(path, panel, options = {}) {
   } catch (err) {
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
-      return showFileSaveConflictDialog(path, panel, {message: userMessageText(err, err.message)});
+      return {conflict: true, message: userMessageText(err, err.message)};
     }
     setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }
+}
+
+async function runFileEditorSaveOwner(path, owner) {
+  while (owner.active) {
+    const request = owner.active;
+    const requestPath = request.path || owner.path || path;
+    const result = await performFileEditorSave(requestPath, request.panel, request.options);
+    if (result?.conflict === true) {
+      owner.active = null;
+      owner.conflict = true;
+      const conflictPath = owner.path || requestPath;
+      const conflict = await showFileSaveConflictDialog(conflictPath, request.panel, {
+        message: result.message,
+        returnAction: true,
+        deferSave: true,
+      });
+      owner.conflict = false;
+      const pending = owner.pending;
+      owner.pending = null;
+      const overwriteSelected = (
+        conflict?.action === 'overwrite' || conflict?.nestedAction === 'overwrite'
+      ) && conflict?.result === true;
+      if (overwriteSelected) {
+        request.options.force = true;
+        request.path = owner.path || requestPath;
+        if (pending) {
+          request.panel = pending.panel || request.panel;
+          if (pending.options.item) request.options.item = pending.options.item;
+          request.options.closing = request.options.closing || pending.options.closing;
+          request.resolvers.push(...pending.resolvers);
+        }
+        const contentOwner = fileState.get(conflictPath)?.contentOwnerPanel;
+        if (contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === fileState.get(conflictPath)) {
+          request.panel = contentOwner;
+        }
+        owner.active = request;
+        continue;
+      }
+      resolveFileEditorSaveRequest(request, conflict?.result === true);
+      resolveFileEditorSaveRequest(pending, false);
+      if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+      return;
+    }
+    resolveFileEditorSaveRequest(request, result);
+    owner.active = owner.pending;
+    owner.pending = null;
+    const currentPath = owner.path || requestPath;
+    const state = fileState.get(currentPath);
+    if (!owner.active && result === true && openFileAutosaveReady(currentPath, state)) {
+      clearFileAutosaveTimer(currentPath);
+      const contentOwner = state.contentOwnerPanel;
+      const trailingPanel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+        ? contentOwner
+        : request.panel;
+      owner.active = fileEditorSaveRequest(currentPath, trailingPanel, {autosave: true});
+    }
+  }
+  if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+}
+
+function saveFileEditor(path, panel, options = {}) {
+  if (readOnlyMode) return Promise.resolve(false);
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return Promise.resolve(false);
+  let owner = fileEditorSaveOwners.get(path);
+  if (!owner) {
+    owner = {active: null, pending: null, path};
+    fileEditorSaveOwners.set(path, owner);
+  }
+  return queueFileEditorSave(path, owner, panel, options);
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -80708,12 +80877,13 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
   const info = transcriptMetadataState.payload.sessions?.[session];
+  const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  const signalTarget = terminalContextMenuPaneTargetForWindow({...windowRecord, panes: signalPanes});
   setTerminalContextMenuPaneTarget(
     document.getElementById(terminalDomId(session)),
-    terminalContextMenuPaneTargetForWindow(windowRecord),
+    signalTarget,
   );
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
-  const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
   const panes = info.panes.map(pane => {
     const signalPane = signalPanes.find(item => transcriptPaneMatchesSignalPane(pane, item)) || null;

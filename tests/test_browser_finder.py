@@ -1885,10 +1885,10 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
     assert metrics["historyRequests"] == [
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40&cursor=page-2",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40&cursor=snapshot-zero",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=40",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66&cursor=snapshot-zero",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=66",
     ], metrics
     assert len(metrics["detailRequests"]) == 4, metrics
     assert metrics["diffRequests"] == [

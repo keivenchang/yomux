@@ -307,6 +307,21 @@ function testElementFromTmuxWindowBarHtml(html) {
   return bar;
 }
 
+function testElementsFromFileEditorDialogHtml(html) {
+  const source = String(html || '');
+  if (!source.includes('file-editor-dialog')) return [];
+  const nodes = [];
+  for (const buttonMatch of source.matchAll(/<button\b([^>]*)>/g)) {
+    const attrs = buttonMatch[1] || '';
+    if (!attrs.includes('data-dialog-action=')) continue;
+    const button = new TestElement('', 'button');
+    button.className = testHtmlAttributeValue(attrs, 'class');
+    populateTestDatasetFromHtmlAttrs(button, attrs);
+    nodes.push(button);
+  }
+  return nodes;
+}
+
 class TestElement {
   constructor(id = '', tagName = 'div') {
     this.id = id;
@@ -342,6 +357,7 @@ class TestElement {
     this.children = [];
     const tmuxWindowBar = testElementFromTmuxWindowBarHtml(this._innerHTML);
     if (tmuxWindowBar) this.appendChild(tmuxWindowBar);
+    for (const node of testElementsFromFileEditorDialogHtml(this._innerHTML)) this.appendChild(node);
   }
 
   addEventListener(type, listener) {
@@ -442,6 +458,11 @@ class TestElement {
     if (selector === '[data-window-dir]') return this.dataset.windowDir !== undefined;
     if (selector === '[data-window-index]') return this.dataset.windowIndex !== undefined;
     if (selector === '[data-detail-toggle]') return this.dataset.detailToggle !== undefined;
+    const dataNotClassMatch = selector.match(/^\[data-([A-Za-z0-9_-]+)\]:not\(\.([A-Za-z0-9_-]+)\)$/);
+    if (dataNotClassMatch) {
+      const [, attrName, className] = dataNotClassMatch;
+      return this.dataset[testDatasetKeyForAttribute(attrName)] !== undefined && !this.classList.contains(className);
+    }
     const dataDetailToggleMatch = selector.match(/^\[data-detail-toggle="([^"]+)"\]$/);
     if (dataDetailToggleMatch) return this.dataset.detailToggle === dataDetailToggleMatch[1];
     const classDataMatch = selector.match(/^\.([A-Za-z0-9_-]+)\[data-([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
@@ -2496,6 +2517,8 @@ globalThis.__layoutTestApi = {
   renderLinkedFilePreviewPanelsForTest: renderLinkedFilePreviewPanels,
   refreshEditorPreviewsForTest: refreshEditorPreviews,
   setPanelNodeForTest(item, panel) { panelNodes.set(item, panel); },
+  removeFilePanelOwnerForTest: removeFilePanelOwner,
+  renameOpenFilePathForTest: renameOpenFilePath,
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
   fileEditorPreviewScrollSyncSourceForTest: fileEditorPreviewScrollSyncSource,
@@ -2534,6 +2557,7 @@ globalThis.__layoutTestApi = {
   },
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
+  patchOpenFileStateForTest(path, patch) { Object.assign(fileStateFor(path), patch); },
   setHistoricalFileStateForTest(item, state) { return setHistoricalFileState(item, state); },
   fileEditorStateForItemForTest: fileEditorStateForItem,
   openPathForPhysicalFileForTest: openPathForPhysicalFile,

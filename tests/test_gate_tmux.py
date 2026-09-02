@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 import shlex
 import shutil
 import statistics
@@ -107,8 +108,9 @@ def _request(port: int, path: str) -> tuple[int, bytes]:
 def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_one = tmp_path / "socket-one"
-    socket_two = tmp_path / "socket-two"
+    socket_root = Path(os.environ["YOLOMUX_TEST_ROOT"])
+    socket_one = socket_root / "d5-one.sock"
+    socket_two = socket_root / "d5-two.sock"
     session = f"yt-{uuid.uuid4().hex[:12]}"
     for socket_path in (socket_one, socket_two):
         created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
@@ -154,7 +156,7 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
 def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_path = tmp_path / "socket"
+    socket_path = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "d7.sock"
     session = f"yt-{uuid.uuid4().hex[:12]}"
     created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
     assert created.returncode == 0, created.stderr or created.stdout

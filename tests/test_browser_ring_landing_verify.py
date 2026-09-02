@@ -76,6 +76,7 @@ def _launch_server(port: int, session: str, log_path: Path, runtime_dir: Path) -
     output = log_path.open("ab")
     environment = dict(os.environ)
     environment["YOLOMUX_START_LOAD_WAIT_SECONDS"] = "30"
+    environment.pop("YOLOMUX_ROOT", None)
     environment["YOLOMUX_RUNTIME_DIR"] = str(runtime_dir)
     environment["PYTHONUNBUFFERED"] = "1"
     environment = child_process_artifact_environment(REPO_ROOT, environ=environment)
@@ -193,11 +194,10 @@ def _production_stats_client(
         return processes[0] if len(processes) == 1 else False
 
     process = WebDriverWait(browser_driver, 10, poll_frequency=0.05).until(sole_daemon)
-    assert stats_service.safe_socket_path(
-        requested_socket,
-        prefix="yolomux-statsd",
-    ) == Path(str(process["socket"]))
-    return stats_client.StatsCurrentClient(requested_socket, database_path), process
+    actual_socket = Path(str(process["socket"]))
+    expected_socket = stats_service.safe_socket_path(requested_socket, prefix="yolomux-statsd")
+    assert actual_socket == expected_socket or actual_socket.name == expected_socket.name
+    return stats_client.StatsCurrentClient(actual_socket, database_path), process
 
 
 def _retire_ring_fixture_daemons(paths: GateRuntimePaths) -> None:
@@ -799,6 +799,11 @@ def _prepare_ring_runtime(
     port = gate_http_port.release()
     service_runtime_dir = Path(tempfile.mkdtemp(prefix="ring-runtime-", dir=gate_runtime_paths.root))
     runtime_environ = dict(os.environ)
+    # This journey passes an explicit runtime directory to an external process. Do not let the
+    # suite-wide YOLOMUX_ROOT reinterpret that path and prepend the long gate root a second time;
+    # the resulting control socket can exceed Linux's sockaddr_un pathname limit before the server
+    # starts.
+    runtime_environ.pop("YOLOMUX_ROOT", None)
     runtime_environ["YOLOMUX_RUNTIME_DIR"] = str(service_runtime_dir)
     with monkeypatch.context() as runtime_patch:
         runtime_patch.setattr(

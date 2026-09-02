@@ -152,9 +152,17 @@ class QueuedDeliveryLedger:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
-                if index == len(lines) - 1:
+                entry = self._recover_journal_record_after_truncated_prefix(
+                    line,
+                    expected_epoch=self._operation_epoch,
+                )
+                if entry is None and index == len(lines) - 1:
                     return
-                raise ValueError("malformed queued-operation journal record") from None
+                if entry is None:
+                    raise ValueError("malformed queued-operation journal record") from None
+                logger.warning(
+                    "recovered queued-operation journal record after a truncated append prefix",
+                )
             if not isinstance(entry, dict):
                 raise ValueError("unsupported queued-operation journal record")
             version = int(entry.get("version") or 0)
@@ -201,6 +209,127 @@ class QueuedDeliveryLedger:
             self._ack_generation = pending_ack_records
             self._latest_ack_at = now
             self._pending_ack_since = now
+
+    @staticmethod
+    def _recover_journal_record_after_truncated_prefix(
+        line: str,
+        *,
+        expected_epoch: str,
+    ) -> dict[str, Any] | None:
+        """Recover one complete append concatenated after an interrupted JSON record.
+
+        ``append_fsync_text`` rolls a partial write back to its original byte boundary. If both the
+        append and that rollback are interrupted, however, the next durable append begins directly
+        after the partial bytes. The complete later record is still committed and ends at the line
+        boundary, so retain that suffix; the incomplete prefix never reached the journal commit
+        point. Sorted v2 records begin with ``epoch`` and sorted v3 acknowledgements with ``acks``.
+        """
+
+        decoder = json.JSONDecoder()
+        if not line.startswith(('{"epoch":', '{"acks":')):
+            return None
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        for marker in ('{"epoch":', '{"acks":'):
+            offset = line.find(marker, 1)
+            while offset >= 0:
+                escaped = 0
+                cursor = offset - 1
+                while cursor >= 0 and line[cursor] == "\\":
+                    escaped += 1
+                    cursor -= 1
+                if escaped % 2:
+                    offset = line.find(marker, offset + len(marker))
+                    continue
+                try:
+                    value, end = decoder.raw_decode(line, offset)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if (
+                        end == len(line)
+                        and QueuedDeliveryLedger._is_truncated_prefix(line[:offset])
+                        and str(value.get("epoch") or "") == expected_epoch
+                        and QueuedDeliveryLedger._valid_recovered_journal_entry(value)
+                    ):
+                        candidates.append((offset, value))
+                offset = line.find(marker, offset + len(marker))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])[1]
+
+    @staticmethod
+    def _is_truncated_prefix(prefix: str) -> bool:
+        """Accept only the interrupted string prefix produced by the journal writer."""
+
+        marker = '{"epoch":"' if prefix.startswith('{"epoch":"') else '{"acks":"'
+        if not prefix.startswith(marker):
+            return False
+        value = prefix[len(marker):]
+        escaped = False
+        for character in value:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                return False
+        return not escaped
+
+    @staticmethod
+    def _valid_recovered_journal_entry(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        version = value.get("version")
+        kind = str(value.get("type") or "")
+        if version == QUEUED_OPERATION_JOURNAL_VERSION and kind == "operation":
+            record = value.get("record")
+            return QueuedDeliveryLedger._valid_recovered_operation_record(record)
+        if version == QUEUED_OPERATION_JOURNAL_VERSION and kind == "operations":
+            records = value.get("operations")
+            return isinstance(records, list) and all(
+                QueuedDeliveryLedger._valid_recovered_operation_record(record)
+                for record in records
+            )
+        if version == QUEUED_OPERATION_JOURNAL_VERSION and kind == "snapshot":
+            records = value.get("operations")
+            return isinstance(records, list) and all(
+                QueuedDeliveryLedger._valid_recovered_operation_record(record)
+                for record in records
+            )
+        if version == QUEUED_OPERATION_ACK_JOURNAL_VERSION and kind == "ack":
+            acknowledgments = value.get("acks")
+            return isinstance(acknowledgments, list) and all(
+                isinstance(item, dict)
+                and str(item.get("id") or "").startswith("op-")
+                and isinstance(item.get("cursor"), dict)
+                for item in acknowledgments
+            )
+        return False
+
+    @staticmethod
+    def _valid_recovered_operation_record(value: object) -> bool:
+        if not isinstance(value, dict) or not str(value.get("id") or "").startswith("op-"):
+            return False
+        if any(not isinstance(value.get(key), str) for key in ("request_id", "route", "kind")):
+            return False
+        states = QUEUED_DELIVERY_OPEN_STATES | QUEUED_DELIVERY_DONE_STATES | QUEUED_DELIVERY_ERROR_STATES
+        if str(value.get("state") or "") not in states:
+            return False
+        for key in ("created_at", "deadline_at"):
+            number = value.get(key)
+            if not isinstance(number, (int, float)) or isinstance(number, bool):
+                return False
+        cursor = value.get("cursor")
+        sequence = cursor.get("seq") if isinstance(cursor, dict) else None
+        return (
+            isinstance(cursor, dict)
+            and isinstance(cursor.get("epoch"), str)
+            and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence >= 0
+            and isinstance(value.get("producer"), dict)
+            and isinstance(value.get("receipt"), dict)
+        )
 
     def _prune_operations_locked(self) -> None:
         now = self.clock()

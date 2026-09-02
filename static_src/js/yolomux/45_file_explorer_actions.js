@@ -1343,8 +1343,11 @@ function openFilePathHasOwner(path) {
 }
 
 function removeFilePanelOwner(path, item) {
+  const state = fileStateFor(path);
+  const panel = panelNodes.get(item);
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (state && state.contentOwnerPanel === panel) reassignFileContentOwnerPanel(path, panel);
   if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
@@ -1352,7 +1355,7 @@ function removeFilePanelOwner(path, item) {
   fileEditorViewState.delete(item);
   fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
-  if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
+  if (!openFilePathHasOwner(path)) state?.ownerSessions.clear();
 }
 
 function normalizedOpenFileOwnerSession(value) {
@@ -1375,9 +1378,24 @@ function openFileOwnerSessionsForPath(path) {
 function removePanelForItem(item) {
   const panel = panelNodes.get(item);
   if (!panel) return;
+  reassignFileContentOwnerPanel(fileEditorPanelPath(panel), panel);
   tabTypeForItem(item)?.cleanup?.(item, panel);
   panel.remove();
   panelNodes.delete(item);
+}
+
+function reassignFileContentOwnerPanel(path, panel) {
+  const state = path ? fileState.get(path) : null;
+  if (!state || state.contentOwnerPanel !== panel) return;
+  const replacement = Array.from(state.editorTabItems || [])
+    .map(item => panelNodes.get(item))
+    .find(candidate => (
+      candidate !== panel
+      && candidate?.isConnected !== false
+      && fileEditorPanelState(candidate)?.historical !== true
+    ));
+  if (replacement) state.contentOwnerPanel = replacement;
+  else delete state.contentOwnerPanel;
 }
 
 // A language switch must repaint the Finder's toolbar chrome (root/dates/sort/new-file… labels), which
@@ -1660,7 +1678,10 @@ function rescheduleAllFileAutosaves() {
 async function autoSaveFileEditor(path) {
   const state = fileState.get(path);
   if (!openFileAutosaveReady(path, state)) return false;
-  const panel = fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
+  const contentOwner = state.contentOwnerPanel;
+  const panel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+    ? contentOwner
+    : fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
   syncOpenFileContentFromPanels(path, panel);
   if (!openFileAutosaveReady(path, state)) return false;
   return saveFileEditor(path, panel, {autosave: true});
@@ -1804,7 +1825,7 @@ function showFileEditorDecisionDialog(options = {}) {
   });
 }
 
-async function showFileConflictCompareDialog(path, panel = null) {
+async function showFileConflictCompareDialog(path, panel = null, options = {}) {
   const state = fileState.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
@@ -1820,9 +1841,12 @@ async function showFileConflictCompareDialog(path, panel = null) {
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
   });
-  if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-  if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-  return false;
+  const result = action === 'overwrite'
+    ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+    : action === 'reload'
+      ? await reloadOpenFileFromDisk(path, {force: true})
+      : false;
+  return options.returnAction === true ? {action, result} : result;
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
@@ -1848,10 +1872,16 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
       ],
       className: 'file-editor-conflict-dialog',
     });
-    if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-    if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-    if (action === 'compare') return showFileConflictCompareDialog(path, panel);
-    return false;
+    const result = action === 'overwrite'
+      ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+      : action === 'reload'
+        ? await reloadOpenFileFromDisk(path, {force: true})
+        : action === 'compare'
+          ? await showFileConflictCompareDialog(path, panel, {returnAction: true, deferSave: options.deferSave === true})
+          : false;
+    return options.returnAction === true
+      ? {action, nestedAction: action === 'compare' ? result?.action || '' : '', result: action === 'compare' ? result?.result : result}
+      : result;
   } finally {
     setFileConflictDialogOpen(path, false);
   }
@@ -4288,6 +4318,14 @@ function layoutWithReplacedItems(replacements) {
 
 function renameOpenFilePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !fileState.has(oldPath)) return;
+  const saveOwner = fileEditorSaveOwners.get(oldPath);
+  if (saveOwner) {
+    fileEditorSaveOwners.delete(oldPath);
+    fileEditorSaveOwners.set(newPath, saveOwner);
+    saveOwner.path = newPath;
+    if (saveOwner.active) saveOwner.active.options.statePath = newPath;
+    if (saveOwner.pending) saveOwner.pending.path = newPath;
+  }
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
   const state = fileStateFor(oldPath);

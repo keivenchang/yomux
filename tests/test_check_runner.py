@@ -732,6 +732,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     check = load_check_module()
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
     monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(check, "run_serial", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
     monkeypatch.setattr(
         check,
         "run_certification_phase",
@@ -759,6 +760,7 @@ def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeyp
     check = load_check_module()
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
     monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(check, "run_serial", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
     monkeypatch.setattr(
         check,
         "run_certification_phase",

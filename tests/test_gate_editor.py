@@ -491,6 +491,132 @@ def test_a4_dirty_buffer_survives_external_rewrite_and_surfaces_conflict(gate_br
 
 
 @pytest.mark.browser
+def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(gate_browser_runtime, tmp_path):
+    """Two live editor panels must save the latest panel content in order."""
+    target = tmp_path / "multi-panel-autosave.md"
+    original = "base content\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const writes = [];
+        const operations = [];
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/info') {
+            return Promise.resolve(new Response(JSON.stringify({
+              path,
+              kind: 'file',
+              size: 12,
+              mtime: 10,
+              mtime_ns: 10,
+              realpath: path,
+              file_id: 'dev:1:ino:2',
+              git_root: '',
+              git_tracked: false,
+              git_history: [],
+              git_has_history: false,
+            }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          if (url.pathname === '/api/stats-observations') {
+            return Promise.resolve(new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          if (url.pathname !== '/api/fs/write') return nativeFetch(input, options);
+          const body = JSON.parse(options.body || '{}');
+          writes.push(body);
+          const sequence = writes.length;
+          const operationId = `op-browser-autosave-${sequence}`;
+          const epoch = `browser-autosave-${sequence}`;
+          operations.push({operationId, epoch, body});
+          return Promise.resolve(new Response(JSON.stringify({
+            state: 'queued',
+            request: {id: `r-${operationId}`},
+            operation: {
+              id: operationId,
+              kind: 'filesystem_operation',
+              status_url: `/api/operations/${operationId}`,
+              events_url: `/api/client-events?operation_id=${operationId}`,
+              cursor: {epoch, seq: 0},
+              context: {operation: 'write', path},
+            },
+          }), {status: 202, headers: {'Content-Type': 'application/json'}}));
+        };
+        const replaceDocument = (panel, text) => {
+          const view = panel?._cmView;
+          if (!view) throw new Error('CodeMirror panel is not mounted');
+          view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: text}});
+        };
+        (async () => {
+          try {
+            const secondItem = fileEditorCopyItemFor(path);
+            addFileEditorTabItem(path, secondItem);
+            await showFileEditorPaneForPath(path, {
+              item: secondItem,
+              viewMode: 'edit',
+              forceNewTab: true,
+              userInitiated: true,
+              targetSlot: slotForSession(fileEditorItemFor(path)),
+              targetZone: 'right',
+            });
+            await window.__yolomuxTestWaitFor(() => fileEditorPanelsForPath(path).length === 2, {timeoutMs: 10000, description: 'two editor panels'});
+            const panels = fileEditorPanelsForPath(path);
+            const firstPanel = panels.find(panel => panel.dataset.layoutItem !== secondItem);
+            const secondPanel = panels.find(panel => panel.dataset.layoutItem === secondItem);
+            replaceDocument(firstPanel, 'first panel\\n');
+            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
+            fileEditorAutosaveEnabled = true;
+            fileEditorAutosaveDelaySeconds = 0.5;
+            await window.__yolomuxTestWaitFor(() => writes.length === 1, {timeoutMs: 5000, description: 'first autosave timer request'});
+            replaceDocument(secondPanel, 'second panel\\n');
+            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'second panel\\n', {timeoutMs: 5000, description: 'second panel edit'});
+            await new Promise(resolve => setTimeout(resolve, 250));
+            const queuedBeforeRelease = writes.slice();
+            const settle = operation => handleClientPushEventNow('operation_terminal', {
+              operation: {id: operation.operationId, kind: 'filesystem_operation', cursor: {epoch: operation.epoch, seq: 1}},
+              result: {
+                state: 'ready',
+                request: {id: `r-${operation.operationId}`},
+                data: {path, size: operation.body.content.length, mtime: 10 + operations.indexOf(operation), mtime_ns: 10 + operations.indexOf(operation), realpath: path, file_id: 'dev:1:ino:2'},
+              },
+            });
+            settle(operations[0]);
+            await window.__yolomuxTestWaitFor(() => writes.length === 2, {timeoutMs: 5000, description: 'second autosave after first terminal'});
+            settle(operations[1]);
+            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.dirty === false, {timeoutMs: 10000, description: 'serialized autosaves'});
+            done({
+              writes,
+              queuedBeforeRelease,
+              content: fileState.get(path)?.content || '',
+              original: fileState.get(path)?.original || '',
+              dirty: fileState.get(path)?.dirty === true,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), writes});
+          } finally {
+            window.fetch = nativeFetch;
+            fileEditorAutosaveEnabled = false;
+          }
+        })();
+        """,
+        str(target),
+    )
+    assert not metrics.get("error"), metrics
+    assert len(metrics["queuedBeforeRelease"]) == 1, metrics
+    assert metrics["queuedBeforeRelease"][0]["path"] == str(target), metrics
+    assert metrics["queuedBeforeRelease"][0]["content"] == "first panel\n", metrics
+    assert [write["path"] for write in metrics["writes"]] == [str(target), str(target)], metrics
+    assert [write["content"] for write in metrics["writes"]] == ["first panel\n", "second panel\n"], metrics
+    assert metrics["content"] == metrics["original"] == "second panel\n", metrics
+    assert metrics["dirty"] is False, metrics
+    assert metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
 def test_a5_subsecond_replace_keeps_editor_path_tab_and_content_state(gate_browser_runtime, tmp_path):
     """A5: across 10 cp-or-mv replacements completed in under one second at varying sub-second intervals, the editor must retain the same path and tab, never render File not found, and show either new clean content or the preserved dirty buffer with a visible conflict notice."""
     target = tmp_path / "a5-replaced.txt"

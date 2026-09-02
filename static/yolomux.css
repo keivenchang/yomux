@@ -7380,6 +7380,7 @@ body.theme-light .js-debug-line--moving-average {
 }
 .keyboard-shortcuts-dialog {
   width: min(var(--dialog-wide-inline-size), var(--popover-max-inline-size));
+  min-inline-size: 0;
   max-height: min(92vh, 900px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -7422,6 +7423,7 @@ body.theme-light .js-debug-line--moving-average {
 }
 .keyboard-shortcuts-body {
   min-height: 0;
+  min-inline-size: 0;
   overflow: auto;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
@@ -7431,12 +7433,14 @@ body.theme-light .js-debug-line--moving-average {
 }
 .keyboard-shortcuts-column {
   min-width: 0;
+  min-inline-size: 0;
   display: grid;
   align-content: start;
   gap: var(--space-8);
 }
 .keyboard-shortcuts-section {
   min-width: 0;
+  min-inline-size: 0;
 }
 .keyboard-shortcuts-section h3 {
   margin: 0 0 var(--space-4);
@@ -7445,6 +7449,7 @@ body.theme-light .js-debug-line--moving-average {
   text-transform: uppercase;
 }
 .keyboard-shortcuts-list {
+  min-inline-size: 0;
   display: grid;
   gap: var(--space-1);
 }
@@ -7458,12 +7463,17 @@ body.theme-light .js-debug-line--moving-average {
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
 }
 .keyboard-shortcut-row {
+  min-inline-size: 0;
   grid-template-columns: minmax(0, 1fr) auto;
 
 
   border-bottom-color: var(--30-preferences-changes-keyboard-shortcut-row-border-bottom-59);
 }
 .keyboard-shortcut-row kbd {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: var(--space-1) var(--space-4);
   color: var(--30-preferences-changes-keyboard-shortcut-row-fg-61);
   background: var(--30-preferences-changes-keyboard-shortcut-row-bg-62);
@@ -7516,6 +7526,8 @@ body.theme-light .js-debug-line--moving-average {
     font-size: var(--ui-font-size-sm);
   }
   .keyboard-shortcuts-body {
+    min-inline-size: 0;
+    overflow-x: hidden;
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-7);
     padding: var(--space-7);

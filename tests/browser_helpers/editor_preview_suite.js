@@ -6996,6 +6996,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/TERMINAL_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
     assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), true, 'file references are visually marked for right-click open/copy actions');
     assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/TERMINAL_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
+    const passDownText = 'PASS-DOWN.editor-save-conflict-journal.md';
+    const passDownTerm = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => index === 0 ? terminalLine(passDownText) : null}}};
+    const passDownRef = api.terminalWrappedLineReferences(passDownTerm, 1).find(ref => ref.type === 'file');
+    assert.deepStrictEqual(canonical({text: passDownRef?.text, range: passDownRef?.range}), {
+      text: passDownText,
+      range: {start: {x: 1, y: 1}, end: {x: passDownText.length, y: 1}},
+    }, 'the pass-down filename underline covers its full rendered range, including the prefix');
     const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
     assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
     assert.equal(urlRef.href, 'https://example.com/guide');

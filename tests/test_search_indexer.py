@@ -241,8 +241,8 @@ def test_http_search_descriptor_threads_cursor_through_the_batchd_executor(monke
     # the bounded committed-journal delta read.
     calls = []
 
-    def _capture(path, query, limit, *, recursive, cursor):
-        calls.append((path, query, limit, recursive, cursor))
+    def _capture(path, query, limit, *, recursive, cursor, minimal=False):
+        calls.append((path, query, limit, recursive, cursor, minimal))
         return {"root": path, "query": query, "changes": [], "cursor": "C2", "more": False}
 
     monkeypatch.setattr(batchd.filesystem, "search_files", _capture)
@@ -250,7 +250,7 @@ def test_http_search_descriptor_threads_cursor_through_the_batchd_executor(monke
     batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})
     batchd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})
 
-    assert calls == [("/repo", "t5t", 25, True, "C1"), ("/repo", "t5t", 400, True, None)]
+    assert calls == [("/repo", "t5t", 25, True, "C1", False), ("/repo", "t5t", 400, True, None, False)]
 
 
 def test_search_client_deadline_is_typed_and_uses_the_bounded_search_timeout(tmp_path, monkeypatch):

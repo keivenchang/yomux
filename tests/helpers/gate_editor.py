@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy

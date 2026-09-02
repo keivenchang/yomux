@@ -3944,7 +3944,7 @@ def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypat
         else:
             payload, status = getattr(webapp, method_name)("new")
     finally:
-        webapp.control_server.stop()
+        stop_fixture_app_runtime(webapp, label="session-scoped endpoint refresh")
 
     assert status == HTTPStatus.OK
     assert payload["session" if method_name != "build_auto_approve_status" else "target"] == "new"

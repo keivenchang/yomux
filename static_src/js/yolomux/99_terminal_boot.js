@@ -4219,12 +4219,13 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
   const info = transcriptMetadataState.payload.sessions?.[session];
+  const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
+  const signalTarget = terminalContextMenuPaneTargetForWindow({...windowRecord, panes: signalPanes});
   setTerminalContextMenuPaneTarget(
     document.getElementById(terminalDomId(session)),
-    terminalContextMenuPaneTargetForWindow(windowRecord),
+    signalTarget,
   );
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
-  const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
   const panes = info.panes.map(pane => {
     const signalPane = signalPanes.find(item => transcriptPaneMatchesSignalPane(pane, item)) || null;

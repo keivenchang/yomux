@@ -3359,7 +3359,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
         browser,
         tmp_path,
         "?sessions=1",
-        settings={"appearance": {"preview_font_size": 16}},
+        settings={"appearance": {"preview_font_size": 16, "sync_font_sizes": False}},
         sessions=["1"],
     )
     metrics = browser.execute_async_script(

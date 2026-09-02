@@ -447,7 +447,7 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
     # (or none are installed — a terminal-only host needs no agent login).
     status = agent_auth_status()
-    installed = [agent for agent in MANAGED_CHAT_AGENT_KINDS if status.get(agent, {}).get("installed")]
+    installed = [agent for agent in AGENT_LOGIN_COMMANDS if agent in MANAGED_CHAT_AGENT_KINDS and status.get(agent, {}).get("installed")]
     logged_out = [agent for agent in installed if not agent_auth_entry_available(status[agent])]
     if not installed or not logged_out:
         return ""
@@ -457,7 +457,7 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
         lead = server_string(locale, "login.agent.loginTo", names=names)
     else:
         lead = server_string(locale, "login.agent.login", names=", ".join(logged_out))
-    notice = server_string(locale, "login.agent.run", lead=html.escape(lead), commands=commands)
+    notice = server_string(locale, "login.agent.run", lead=lead, commands=commands)
     return f'<div class="{html.escape(css_class)}">{notice}</div>'
 
 

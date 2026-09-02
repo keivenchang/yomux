@@ -3306,6 +3306,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
   if (!state || state.kind !== 'text' || state.historical === true) return;
   state.content = String(content ?? '');
+  state.contentOwnerPanel = panel;
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
   state.dirty = dirty;

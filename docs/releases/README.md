@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.30 | `v0.7.30` | `v0.7.30^{commit}` | [v0.7.30-evidence.md](v0.7.30-evidence.md) | serialized editor saves, journal recovery hardening, OpenCode live token attribution, and terminal touch routing |
 | 0.7.29 | `v0.7.29` | `v0.7.29^{commit}` | [v0.7.29-evidence.md](v0.7.29-evidence.md) | first-class OpenCode support, shared client capabilities, usage attribution, native terminal behavior, and Directory Diff paging |
 | 0.7.28 | `v0.7.28` | `v0.7.28^{commit}` | [v0.7.28-evidence.md](v0.7.28-evidence.md) | OpenCode attribution, smooth touch scrolling, startup capacity checks, Preferences reorganization, and test isolation fixes |
 | 0.7.26 | `v0.7.26` | `v0.7.26^{commit}` | [v0.7.26-evidence.md](v0.7.26-evidence.md) | OpenCode visible status, native terminal navigation, URL handling, and read-only usage statistics |

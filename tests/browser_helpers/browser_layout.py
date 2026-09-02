@@ -659,6 +659,10 @@ class BrowserFakeTlsContext:
 
 
 def isolate_browser_runtime_paths(monkeypatch, tmp_path):
+    # This helper supplies explicit per-app roots below tmp_path. Keeping the suite-wide rooted-run
+    # override active makes common.runtime_root() rebuild a longer <test-root>/runtime path and can
+    # push the local-service socket beyond Linux's sockaddr_un limit.
+    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
     config_dir = tmp_path / "yolomux-config"
     state_dir = tmp_path / "yolomux-state"
     runtime_base_dir = tmp_path / "yolomux-runtime"
@@ -2676,7 +2680,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           return fixtureSettingAnswer('appearance.tab_width', '172', '220', 'Preferences -> UI sizes');
         }
         if (lower.includes('font size')) {
-          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});
+          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18, sync_font_sizes: false}});
           return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> UI sizes');
         }
         if (lower.includes('notification level') || lower.includes('notify level')) {

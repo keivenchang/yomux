@@ -475,7 +475,9 @@ def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> d
         agent_states_by_identity = {
             (str(session), str(item.get("pane_target") or ""), str(item.get("kind") or "").lower()): {
                 "key": str(item.get("state") or "idle"),
-                "text": str(item.get("screen_text") or ""),
+                # Raw terminal text belongs only to the agent-window diagnostic row. Recent-agent
+                # summaries are a separate surface and must not duplicate live prompts or commands.
+                "text": "",
             }
             for item in gathered_agents if isinstance(item, dict)
         } if isinstance(gathered_agents, list) else {}

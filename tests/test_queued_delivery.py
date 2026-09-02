@@ -87,6 +87,154 @@ def test_queued_operation_ledger_ignores_truncated_trailing_journal_record(tmp_p
     assert recovered.operation_status(operation_id) == (receipt, HTTPStatus.ACCEPTED)
 
 
+def test_queued_operation_ledger_recovers_complete_record_after_truncated_append_prefix(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    first = accept_queued_operation(ledger, "first")
+    path.write_text(path.read_text(encoding="utf-8") + '{"epoch":"interrupted', encoding="utf-8")
+    second = accept_queued_operation(ledger, "second")
+
+    malformed_lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(malformed_lines) == 2
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(malformed_lines[-1])
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+    assert recovered.operation_status(first["operation"]["id"])[1] == HTTPStatus.ACCEPTED
+    assert recovered.operation_status(second["operation"]["id"])[1] == HTTPStatus.ACCEPTED
+    recovered.compact_operations()
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+    compacted = QueuedDeliveryLedger(state_path=path)
+    assert compacted.operation_status(first["operation"]["id"])[1] == HTTPStatus.ACCEPTED
+    assert compacted.operation_status(second["operation"]["id"])[1] == HTTPStatus.ACCEPTED
+
+
+def test_queued_operation_ledger_recovers_complete_v3_ack_after_truncated_append_prefix(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = accept_queued_operation(ledger, "v3-prefix")
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(
+        operation_id,
+        {"state": "ready", "request": receipt["request"], "data": {"blob": "a" * (512 * 1024)}},
+        HTTPStatus.OK,
+    )
+    before_ack = path.read_text(encoding="utf-8")
+    ack = {
+        "version": 3,
+        "type": "ack",
+        "epoch": terminal["operation"]["cursor"]["epoch"],
+        "acks": [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}],
+    }
+    path.write_text(
+        before_ack + '{"acks":"interrupted' + json.dumps(ack, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    assert recovered._operations[operation_id]["delivery_acknowledged"] is True
+    replay, status = recovered.operation_status(operation_id)
+    assert status == HTTPStatus.GONE
+    assert replay["error"]["code"] == "operation_replay_evicted"
+    assert recovered._operations[operation_id]["terminal_event"]["result"]["error"]["code"] == "operation_replay_evicted"
+
+
+def test_queued_operation_ledger_recovers_v3_ack_for_a_small_replay(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = accept_queued_operation(ledger, "v3-small")
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(
+        operation_id,
+        {"state": "ready", "request": receipt["request"], "data": {"value": "preserve"}},
+        HTTPStatus.OK,
+    )
+    prefix = path.read_text(encoding="utf-8") + '{"acks":"partial'
+    ack = {
+        "version": 3,
+        "type": "ack",
+        "epoch": terminal["operation"]["cursor"]["epoch"],
+        "acks": [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}],
+    }
+    path.write_text(prefix + json.dumps(ack, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    assert recovered._operations[operation_id]["delivery_acknowledged"] is True
+    assert recovered.operation_status(operation_id) == (
+        {"state": "ready", "request": receipt["request"], "data": {"value": "preserve"}},
+        HTTPStatus.OK,
+    )
+
+
+def test_queued_operation_ledger_does_not_recover_embedded_invalid_journal_objects(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = accept_queued_operation(ledger, "invalid-embedded")
+    operation_id = receipt["operation"]["id"]
+    ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+    path.write_text(
+        path.read_text(encoding="utf-8") + 'corrupt {"version":2,"type":"operation","record":{}}\n',
+        encoding="utf-8",
+    )
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    replay, status = recovered.operation_status(operation_id)
+    assert status == HTTPStatus.OK
+    assert replay["state"] == "ready"
+
+
+def test_queued_operation_ledger_does_not_recover_valid_json_embedded_in_a_string(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = accept_queued_operation(ledger, "valid-embedded")
+    operation_id = receipt["operation"]["id"]
+    ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+    embedded = json.dumps({
+        "version": 2,
+        "type": "operation",
+        "epoch": "embedded",
+        "record": {"id": "op-fabricated"},
+    }, sort_keys=True, separators=(",", ":"))[1:-1]
+    path.write_text(
+        path.read_text(encoding="utf-8") + '{"epoch":"corrupt {\\"epoch\\":\\"embedded\\",' + embedded + '}"}\n',
+        encoding="utf-8",
+    )
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    assert "op-fabricated" not in recovered._operations
+    assert recovered.operation_status(operation_id)[1] == HTTPStatus.OK
+
+
+def test_queued_operation_ledger_does_not_recover_after_an_unrelated_object_prefix(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = accept_queued_operation(ledger, "unrelated-prefix")
+    operation_id = receipt["operation"]["id"]
+    ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+    embedded = json.dumps({
+        "version": 2,
+        "type": "operation",
+        "epoch": "embedded",
+        "record": {"id": "op-fabricated"},
+    }, sort_keys=True, separators=(",", ":"))
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '{"epoch":"unrelated-prefix","payload":"broken '
+        + embedded
+        + "}\n",
+        encoding="utf-8",
+    )
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    assert "op-fabricated" not in recovered._operations
+    assert recovered.operation_status(operation_id)[1] == HTTPStatus.OK
+
+
 def test_queued_operation_ledger_compacts_only_when_called_out_of_band(tmp_path):
     path = tmp_path / "operations.json"
     ledger = QueuedDeliveryLedger(state_path=path)

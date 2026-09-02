@@ -236,9 +236,13 @@ def process_executable(pid: int) -> str | None:
     """Read executable identity from the operating system, not from argv."""
     if platform.system() == "Linux":
         try:
-            return str(Path(f"/proc/{pid}/exe").resolve(strict=True))
+            executable = os.readlink(f"/proc/{pid}/exe")
         except OSError:
             return None
+        # Linux keeps the original /proc link target after an in-use binary is replaced, but marks
+        # it as deleted. The installed executable is still the same identity for our native-client
+        # check, and its replacement path is what `shutil.which()` resolves to.
+        return executable.removesuffix(" (deleted)") or None
     result = run_cmd(["ps", "-p", str(pid), "-o", "comm="], timeout=1.0)
     if result.returncode != 0:
         return None
@@ -402,11 +406,14 @@ def classify_agent(command: str, executable: str | None = None) -> str | None:
         # the operating-system executable separately for this native process.
         if not tokens or Path(tokens[0]).name.lower() != "opencode" or not executable:
             return None
-        executable_path = Path(executable).expanduser().resolve(strict=False)
-        if executable_path.name.lower() != "opencode" or not executable_path.is_file():
+        executable_path = Path(str(executable).removesuffix(" (deleted)")).expanduser().resolve(strict=False)
+        if executable_path.name.lower() != "opencode":
             return None
         installed_path = shutil.which("opencode")
-        if installed_path is None or executable_path != Path(installed_path).expanduser().resolve(strict=False):
+        installed = Path(installed_path).expanduser().resolve(strict=False) if installed_path else None
+        if installed is None or executable_path != installed:
+            return None
+        if not executable_path.is_file():
             return None
         command_path = Path(tokens[0]).expanduser()
         if command_path.is_absolute() and command_path.resolve(strict=False) != executable_path:

@@ -1433,8 +1433,20 @@ function terminalContextMenuPreservesNativeBehavior(session, container) {
 }
 
 function terminalUsesAppWheel(session, container) {
+  const containerTarget = terminalContextMenuPaneTargetForContainer(container);
+  if (containerTarget) {
+    return terminalContextMenuCapabilityForSession(session, {
+      paneTarget: () => containerTarget,
+    }).clientKind === 'opencode';
+  }
+  // A live terminal may receive the signal snapshot before its cheap DOM target handoff runs. Only
+  // real terminal elements may use this narrow fallback; plain test/data objects with no identity
+  // must remain fail-closed.
+  if (container?.nodeType !== 1) return false;
+  const signalWindow = activeTmuxSignalWindowForSession(session);
+  const signalTarget = terminalContextMenuPaneTargetForWindow(signalWindow);
   return terminalContextMenuCapabilityForSession(session, {
-    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+    paneTarget: () => signalTarget,
   }).clientKind === 'opencode';
 }
 
