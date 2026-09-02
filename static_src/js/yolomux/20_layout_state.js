@@ -3528,10 +3528,9 @@ function globalActivityCountsFromAgentWindows() {
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
-  // Keep the compact control to its established three status tones. Unavailable status is still
-  // counted separately in the data model, but belongs in the red attention slot rather than
-  // creating a fourth red ball.
-  const attentionCount = (Number(counts.ask) || 0) + (Number(counts.unavailable) || 0);
+  // Keep the compact control to its established three status tones. An unavailable row is not
+  // user attention: it has no actionable status ball and must not turn a healthy working row red.
+  const attentionCount = Number(counts.ask) || 0;
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(attentionCount, 'attention', 'topbar-activity-ask'));

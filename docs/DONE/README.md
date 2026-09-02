@@ -4,13 +4,21 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-204 entries, 2026-06-02 to 2026-08-28.
+205 entries, 2026-06-02 to 2026-09-01.
 
 | month | entries |
 | --- | ---: |
+| [2026-09](2026-09/) | 2 |
 | [2026-08](2026-08/) | 47 |
 | [2026-07](2026-07/) | 55 |
 | [2026-06](2026-06/) | 102 |
+
+## 2026-09
+
+| date | completed work |
+| --- | --- |
+| 2026-09-01 | [OpenCode agent detection](2026-09/DONE.p0.opencode-agent-detection.md) |
+| 2026-09-01 | [Archived stale v0.7.17 release-composition queue](2026-09/DONE.p2.e2.v0717-port-0716-gaps.md) |
 
 ## 2026-08
 

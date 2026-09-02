@@ -1596,7 +1596,7 @@ async function runTabberSuite() {
     const tabberSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     assert.match(tabberSource, /function tabberWindowIsAgent\(name\)[\s\S]*key === 'claude' \|\| key === 'codex' \|\| key === 'opencode'/, 'OpenCode is included in the shared visible Tabber owner');
-    assert.match(layoutSource, /const attentionCount = \(Number\(counts\.ask\) \|\| 0\) \+ \(Number\(counts\.unavailable\) \|\| 0\)/, 'unavailable counts share the red attention slot');
+    assert.match(layoutSource, /const attentionCount = Number\(counts\.ask\) \|\| 0/, 'unavailable counts do not share the red attention slot');
     assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'cooldown', 'topbar-activity-blocked'\)/, 'blocked top-bar counts retain the yellow tone');
     const api = loadYolomux('', ['1']);
     assert.equal(api.tabberWindowIsAgentForTest('opencode'), true, 'OpenCode is recognized by the shared tmux-window agent owner');

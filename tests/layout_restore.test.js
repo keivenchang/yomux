@@ -2752,8 +2752,8 @@ async function runLayoutRestoreSuite() {
     );
     const threeToneHtml = threeToneApi.globalActivityStatusLineHtml();
     assert.equal((threeToneHtml.match(/topbar-activity-count[^\"]* active/g) || []).length, 3, 'topbar renders one ball per established status tone');
-    assert.match(threeToneHtml, /topbar-activity-ask active[\s\S]*topbar-activity-count-number">2</, 'unavailable rows join the red attention count');
-    assert.equal(threeToneHtml.includes('topbar-activity-unavailable'), false, 'topbar does not render a fourth unavailable ball');
+    assert.match(threeToneHtml, /topbar-activity-ask active[\s\S]*topbar-activity-count-number">1</, 'unavailable rows do not join the red attention count');
+    assert.equal(threeToneHtml.includes('topbar-activity-unavailable'), false, 'topbar does not render an unavailable ball');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes('ctx.fillStyle = faviconAccent.bg') && source.includes("getPropertyValue('--active-accent')") && source.includes("'#99d441'"), 'favicon fills the icon with the active-accent tile (theme/active-color driven, legacy lime as fallback) instead of a dark border');
     assert.ok(source.includes('ctx.fillStyle = faviconAccent.text') && source.includes("getPropertyValue('--active-accent-text')"), 'favicon Y uses the theme-aware contrast color (dark on light accents, light on dark accents like blue)');
