@@ -559,7 +559,7 @@ def test_old_or_mismatched_protocol_is_terminal_before_dispatch_or_mutation(tmp_
     response, binary = service.handle_with_binary(request)
 
     assert response["status"] == "upgrade_required"
-    assert response["required_protocol_version"] == 24
+    assert response["required_protocol_version"] == storage.MIN_WRITER_PROTOCOL
     assert response["required_schema_generation"] == storage.SCHEMA_VERSION
     assert binary == b""
     assert store.appends == 0
@@ -3870,7 +3870,7 @@ def test_changed_no_data_cell_selection_matches_full_index_differential():
         expected_starts = set(direct_starts)
         expected_starts.update(
             carrier_start
-            for range_seconds, carrier_start in service_module._ring_view_carriers(candidate_layer)
+            for range_seconds, carrier_start in ()
             if any(candidate_layer.end - range_seconds <= start < candidate_layer.end for start in direct_starts)
         )
 

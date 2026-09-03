@@ -5125,11 +5125,19 @@ function agentLabel(kind) {
 }
 
 const AGENT_CLIENT_SPECS = Object.freeze({
-  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
-  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent'])}),
+  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent'])}),
   // TODO(OpenCode): enable these capabilities only after their transport and safety contracts are implemented.
-  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}),
+  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent', 'repeated-gutter', 'quote-gutter'])}),
 });
+
+function agentUrlContinuationLayouts(kind) {
+  // Terminal metadata can arrive after xterm has been opened. Preserve the generic legacy parser until
+  // the client kind is known; once known, the client registry is the only source of enabled layouts.
+  const normalized = String(kind || '').toLowerCase();
+  return agentClientSpec(normalized)?.urlContinuationLayouts
+    || (normalized ? ['xterm-soft-wrap'] : ['xterm-soft-wrap', 'hanging-indent']);
+}
 
 function agentClientSpec(kind) {
   return AGENT_CLIENT_SPECS[String(kind || '').toLowerCase()] || null;
@@ -7393,6 +7401,23 @@ function keyedScrollAnchor(selector) {
   };
 }
 
+function keyedDetailsOpenAnchor(selector) {
+  return {
+    capture: body => new Set(
+      [...body.querySelectorAll?.(selector) || []]
+        .filter(element => element.open)
+        .map(element => String(element.dataset.jsDebugCostAgentKey || '').trim())
+        .filter(Boolean),
+    ),
+    restore: (body, keys) => {
+      if (!(keys instanceof Set)) return;
+      for (const element of body.querySelectorAll?.(selector) || []) {
+        element.open = keys.has(String(element.dataset.jsDebugCostAgentKey || '').trim());
+      }
+    },
+  };
+}
+
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams({session, client: browserClientId});
@@ -7598,6 +7623,11 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
+function terminalTailHasUrlSplitBoundary(text) {
+  const value = String(text || '');
+  return terminalTailIsUnterminatedUrl(value) && /[-/?&=#%]$/.test(value);
+}
+
 function terminalRowStartsNewUrlToken(text) {
   return /^(?:https?:\/\/|file:\/\/|www\.)/i.test(String(text || ''));
 }
@@ -7612,18 +7642,33 @@ function terminalRowHangingShape(buffer, index) {
   const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
   const text = raw.slice(match[1].length);
-  if (!text || /\s/.test(text) || terminalRowStartsNewUrlToken(text)) return null;
+  if (!text || terminalRowStartsNewUrlToken(text)) return null;
   return {indent: match[1].length, text};
+}
+
+function terminalQuoteGutterShape(buffer, index) {
+  const line = buffer.getLine(index);
+  if (!line || line.isWrapped === true) return null;
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s*[│┃|]\s+)([^\s<>'"`].*)$/.exec(raw);
+  return match ? {prefix: match[1], indent: match[1].length, text: match[2]} : null;
+}
+
+function terminalQuoteGutterUrlBaseContext(buffer, index, cols) {
+  const shape = terminalQuoteGutterShape(buffer, index);
+  if (!shape || !/^(?:https?:\/\/|file:\/\/|www\.)/i.test(shape.text)) return null;
+  return shape;
 }
 
 function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
   const line = buffer.getLine(index);
   const raw = terminalBufferLineText(line);
   const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
-  if (!match || !match[1] || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  if (!match || !match[1]) return null;
   const indent = match[1].length;
   const text = raw.slice(indent);
   if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
   return {indent, text};
 }
 
@@ -7639,13 +7684,27 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   const base = String(baseText || '');
   const continuation = String(continuationText || '');
   if (!base || !terminalTailIsUnterminatedUrl(base)) return false;
-  if (!continuation || /\s/.test(continuation) || terminalRowStartsNewUrlToken(continuation)) return false;
-  if (!/^[A-Za-z0-9!$'()*+,;=:@/?%#[\]_.~-]+$/.test(continuation)) return false;
+  if (!continuation || terminalRowStartsNewUrlToken(continuation)) return false;
+  if (/\s/.test(continuation)) return false;
+  if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
   const delimiter = base.at(-1);
   if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
-  if (delimiter === '%') return /^[0-9A-Fa-f]/.test(continuation);
-  if (delimiter === '?' || delimiter === '&' || delimiter === '=') return /^[A-Za-z0-9]/.test(continuation);
-  return /^[A-Za-z0-9]/.test(continuation);
+  if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
+  return true;
+}
+
+function terminalUrlContinuationCharactersAreValid(text) {
+  const continuation = String(text || '');
+  return Boolean(continuation)
+    && !/^[>$#%]$/.test(continuation)
+    && !terminalRowStartsNewUrlToken(continuation)
+    && !/\s/.test(continuation)
+    && /^[^<>'"`\s]+$/.test(continuation);
+}
+
+function terminalUrlCanContinueAtBoundary(text) {
+  const value = String(text || '');
+  return terminalTailIsUnterminatedUrl(value) && /[A-Za-z0-9/_.~%-]$/.test(value);
 }
 
 function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
@@ -7674,6 +7733,18 @@ function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, sha
   return false;
 }
 
+
+function terminalQuoteGutterUrlBaseBefore(buffer, index, cols, shape) {
+  if (!shape?.prefix || index < 1) return null;
+  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+    const context = terminalQuoteGutterUrlBaseContext(buffer, baseIndex, cols);
+    if (context) return context.prefix === shape.prefix ? {index: baseIndex, context} : null;
+    const candidate = terminalQuoteGutterShape(buffer, baseIndex);
+    if (!candidate || candidate.prefix !== shape.prefix || !terminalUrlContinuationCharactersAreValid(candidate.text)) return null;
+  }
+  return null;
+}
+
 function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
   if (index < 1) return false;
   for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
@@ -7682,7 +7753,7 @@ function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
     let joined = context.text;
     for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
       const continuation = terminalBufferLineText(buffer.getLine(rowIndex));
-      if (!terminalUrlContinuationTextIsStrong(joined, continuation, rowIndex === baseIndex + 1)) {
+      if (!terminalUrlContinuationTextIsStrong(joined, continuation)) {
         joined = '';
         break;
       }
@@ -7714,7 +7785,12 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
   if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
   if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
-  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))) return true;
+  const previousText = terminalBufferLineText(prev);
+  // The OpenCode mock uses four-space markdown output indentation and wraps at slash/word boundaries.
+  // Its short query-key fragments can end before the terminal edge, e.g. `?au` then `to=format`.
+  if (shape.indent === 4 && terminalUrlContinuationTextIsStrong(previousText, shape.text)) return true;
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)) return true;
+  if (terminalTailHasUrlSplitBoundary(previousText) && terminalUrlContinuationCharactersAreValid(shape.text)) return true;
   return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
@@ -7723,6 +7799,10 @@ function terminalWrappedLineGroup(term, y) {
   if (!buffer?.getLine) return null;
   // terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
   const cols = Number(term.cols) || 0;
+  const layouts = agentUrlContinuationLayouts(term.yolomuxAgentKind);
+  const allowsRepeatedGutter = layouts.includes('repeated-gutter');
+  const allowsQuoteGutter = layouts.includes('quote-gutter');
+  const allowsHangingIndent = layouts.includes('hanging-indent');
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
@@ -7731,8 +7811,12 @@ function terminalWrappedLineGroup(term, y) {
   let start = requested;
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
-    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
-    if (start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (allowsHangingIndent && start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (allowsQuoteGutter && start > 0) {
+      const quoteShape = terminalQuoteGutterShape(buffer, start);
+      if (terminalQuoteGutterUrlBaseBefore(buffer, start, cols, quoteShape)) { start -= 1; continue; }
+    }
+    if (allowsRepeatedGutter && start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -7742,30 +7826,47 @@ function terminalWrappedLineGroup(term, y) {
   let offset = 0;
   let joined = '';
   let index = start;
-  const repeatedGutterGroup = Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
-  const zeroIndentGroup = Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
+  const repeatedGutterGroup = allowsRepeatedGutter && Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  const zeroIndentGroup = allowsRepeatedGutter && Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
+  const quoteGutterBase = allowsQuoteGutter ? terminalQuoteGutterUrlBaseContext(buffer, start, cols) : null;
   for (;;) {
     let text;
     let indent = 0;
     if (index === start) {
-      text = terminalBufferLineText(buffer.getLine(index));
+      text = quoteGutterBase ? quoteGutterBase.text : terminalBufferLineText(buffer.getLine(index));
+      indent = quoteGutterBase ? quoteGutterBase.indent : 0;
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined)) {
+    } else if (repeatedGutterGroup || zeroIndentGroup || quoteGutterBase || terminalUrlCanContinueAtBoundary(joined)) {
       const shape = terminalRowHangingShape(buffer, index);
-      if (!shape) break;
+      const quoteShape = allowsQuoteGutter ? terminalQuoteGutterShape(buffer, index) : null;
+      if (!shape && !quoteShape) break;
+      const rowShape = quoteShape || shape;
+      const continuationAllowed = terminalUrlContinuationCharactersAreValid(rowShape.text);
       const repeatedContinuation = repeatedGutterGroup
-        && shape.indent > 0
-        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+        && rowShape.indent > 0
+        && continuationAllowed
+        && (index > start + 1 || /[-/?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
       const zeroIndentContinuation = zeroIndentGroup
-        && shape.indent === 0
-        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
-      const genericContinuation = !repeatedGutterGroup && !zeroIndentGroup
-        && !terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)
-        && terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      if (!repeatedContinuation && !zeroIndentContinuation && !genericContinuation) break;
-      indent = shape.indent;
-      text = shape.text;
+        && rowShape.indent === 0
+        && continuationAllowed;
+      const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
+      const quoteGutterSplitBoundary = /[-/?&=#%]$/.test(joined);
+      const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
+        && quoteShape.prefix === quoteGutterBase.prefix
+        && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
+        && terminalUrlContinuationTextIsStrong(joined, quoteShape.text, !quoteGutterReachedEdge));
+      const genericContinuation = allowsHangingIndent && !repeatedGutterGroup
+        && (!terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) || shape.indent === 4)
+        && terminalUrlContinuationTextIsStrong(
+          joined,
+          shape.text,
+          !(shape.indent === 4)
+            && !terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols),
+        );
+      if (!repeatedContinuation && !zeroIndentContinuation && !quoteGutterContinuation && !genericContinuation) break;
+      indent = rowShape.indent;
+      text = rowShape.text;
     } else {
       break;
     }
@@ -7776,7 +7877,7 @@ function terminalWrappedLineGroup(term, y) {
     if (rows.length >= terminalWrappedUrlMaxRows) break;
     if (!buffer.getLine(index)) break;
   }
-  return {text: joined, rows};
+  return {text: joined, rows, term};
 }
 
 function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
@@ -7786,6 +7887,23 @@ function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
   // terminal column is shifted right by that indent.
   return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
+}
+
+function terminalTextCellWidth(term, text) {
+  const value = String(text || '');
+  const unicodeService = term?.unicode;
+  if (typeof unicodeService?.wcwidth === 'function') {
+    let width = 0;
+    for (const char of value) width += Math.max(0, Number(unicodeService.wcwidth(char.codePointAt(0))) || 0);
+    return width;
+  }
+  let width = 0;
+  for (const char of value) width += /[\u1100-\u115f\u2329\u232a\u2e80-\u303e\u3040-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(char) ? 2 : 1;
+  return width;
+}
+
+function terminalRowCellOffset(term, text, offset) {
+  return terminalTextCellWidth(term, String(text || '').slice(0, Math.max(0, offset)));
 }
 
 function terminalWrappedRange(group, startIndex, endIndex) {
@@ -7798,9 +7916,11 @@ function terminalWrappedRange(group, startIndex, endIndex) {
       const segmentEnd = Math.min(endIndex, row.end);
       if (segmentEnd <= segmentStart) return null;
       const indent = row.indent || 0;
+      const rowStart = terminalRowCellOffset(group.term, row.text, segmentStart - row.start);
+      const rowEnd = terminalRowCellOffset(group.term, row.text, segmentEnd - row.start);
       return {
-        start: {x: indent + segmentStart - row.start + 1, y: row.y},
-        end: {x: indent + segmentEnd - row.start, y: row.y},
+        start: {x: indent + rowStart + 1, y: row.y},
+        end: {x: indent + Math.max(rowStart, rowEnd), y: row.y},
       };
     })
     .filter(Boolean);
@@ -7835,7 +7955,7 @@ function terminalWrappedLineLinks(term, y) {
 function terminalWrappedLineReferences(term, y) {
   const group = terminalWrappedLineGroup(term, y);
   if (!group) return [];
-  const references = group.rows.length === 1
+  const references = group.rows.length === 1 && !group.rows[0].indent
     ? terminalTextReferences(group.text, (startIndex, endIndex) => ({
       start: {x: startIndex + 1, y},
       end: {x: endIndex, y},
@@ -7890,18 +8010,20 @@ function terminalUrlReferenceUnderlineSegments(term, reference) {
 
 function terminalUrlReferenceUnderlineLayer(container) {
   if (!container) return null;
-  let layer = container.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  const coordinateParent = container.querySelector?.('.xterm-screen') || container;
+  let layer = coordinateParent.querySelector?.(':scope > .terminal-url-link-underlines') || null;
   if (!layer) {
     layer = document.createElement('div');
     layer.className = 'terminal-url-link-underlines';
     layer.setAttribute('aria-hidden', 'true');
-    container.appendChild(layer);
+    coordinateParent.appendChild(layer);
   }
   return layer;
 }
 
 function clearTerminalUrlReferenceUnderlines(container) {
-  const layer = container?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  const coordinateParent = container?.querySelector?.('.xterm-screen') || container;
+  const layer = coordinateParent?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
   layer?.replaceChildren?.();
   return 0;
 }
@@ -7919,8 +8041,10 @@ function renderTerminalUrlReferenceUnderlines(term, container, reference) {
     return clearTerminalUrlReferenceUnderlines(container);
   }
   const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
-  const leftOrigin = screenRect.left - containerRect.left;
-  const topOrigin = screenRect.top - containerRect.top;
+  const coordinateParent = layer.parentElement;
+  const layerInsideScreen = coordinateParent === screen;
+  const leftOrigin = layerInsideScreen ? 0 : screenRect.left - containerRect.left;
+  const topOrigin = layerInsideScreen ? 0 : screenRect.top - containerRect.top;
   const nodes = [];
   for (const segment of terminalUrlReferenceUnderlineSegments(term, reference)) {
     const screenRow = segment.y - viewportY;
@@ -7937,10 +8061,11 @@ function renderTerminalUrlReferenceUnderlines(term, container, reference) {
 }
 
 async function terminalReferenceProviderLinks(session, term, y, container = null) {
+  if (!term.yolomuxAgentKind && typeof sessionAgentKind === 'function') term.yolomuxAgentKind = sessionAgentKind(session);
   const refs = terminalWrappedLineReferences(term, y);
   const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
     row: y,
-    underline: false,
+    underline: true,
     hover: () => renderTerminalUrlReferenceUnderlines(term, container, ref),
     leave: () => clearTerminalUrlReferenceUnderlines(container),
   }));
@@ -8425,6 +8550,7 @@ function terminalRangeContainsPosition(range, position) {
   const start = range.start || {};
   const end = range.end || {};
   if (position.y < start.y || position.y > end.y) return false;
+  if (position.y > start.y && position.y < end.y) return false;
   if (start.y === end.y) return position.x >= start.x && position.x <= end.x;
   if (position.y === start.y) return position.x >= start.x;
   if (position.y === end.y) return position.x <= end.x;
@@ -49888,7 +50014,7 @@ function bindPreferencesPanel(panel) {
   const STATS_MIGRATION_FIELDS = ['state', 'result', 'issue_kinds'];
   const CURRENT_RESOLUTIONS = Object.freeze([1, 10, 60, 300]);
   const CURRENT_STATS_WIRE_PROTOCOL_VERSION = 2;
-  const CURRENT_COST_REPORT_SCHEMA_VERSION = 3;
+  const CURRENT_COST_REPORT_SCHEMA_VERSION = 4;
   const CURRENT_COST_DIMENSIONS = Object.freeze(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
   const CURRENT_COST_REPORT_FIELDS = Object.freeze([
     'schema_version', 'total_micro_usd', 'total_api_list_micro_usd', 'total_tokens',
@@ -49903,7 +50029,10 @@ function bindPreferencesPanel(panel) {
   ]);
   const CURRENT_COST_AGENT_FIELDS = Object.freeze([
     'key', 'source', 'label', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd',
-    'dimensions', 'priced', 'unpriced',
+    'dimensions', 'priced', 'unpriced', 'sources',
+  ]);
+  const CURRENT_COST_SOURCE_FIELDS = Object.freeze([
+    'source', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd', 'dimensions', 'priced', 'unpriced',
   ]);
   const CURRENT_COST_EVIDENCE_FIELDS = Object.freeze([
     'key', 'provider', 'model', 'dimension', 'direction', 'modality', 'cache_role', 'unit',
@@ -51884,8 +52013,8 @@ function bindPreferencesPanel(panel) {
       '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
       dimensions,
       '</tbody></table></div></section>',
-      currentCostAttributionTable('Cost by Model', report.models, 'model'),
-      currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
+       currentCostAttributionTable('Cost by Model', report.models, 'model'),
+       currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
       '<section><h3>Pricing attribution</h3>',
       evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
       '</section>',
@@ -51895,7 +52024,7 @@ function bindPreferencesPanel(panel) {
   }
 
   function currentCostAttributionTable(title, rows, kind) {
-    const displayedRows = kind === 'agent' ? currentCostConsolidatedAgentRows(rows) : rows;
+    const displayedRows = rows;
     const body = displayedRows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
@@ -51903,7 +52032,14 @@ function bindPreferencesPanel(panel) {
       const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
         `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
       )).join('');
-      return `<tr><th scope="row">${identity}</th><td>${currentStatsEscape(currentStatsMetric(row.total_tokens, 'usage'))}<small>${currentCostPriceHtml(row.total_micro_usd, row.total_api_list_micro_usd)}</small></td>${dimensions}<td>${currentStatsEscape(currentStatsMetric(row.priced.tokens, 'usage'))}<small>${row.priced.atoms} atoms</small></td><td>${currentStatsEscape(currentStatsMetric(row.unpriced.tokens, 'usage'))}<small>${row.unpriced.atoms} atoms</small></td></tr>`;
+       const sourceRows = kind === 'agent' && Array.isArray(row.sources) ? row.sources : [];
+        const sourceDetails = sourceRows.length
+          ? `<details class="yo-cost-current-agent-sources"><summary>Source attribution (${sourceRows.length})</summary><ul>${sourceRows.map(source => `<li><strong>${currentStatsEscape(source.source)}</strong><span>${currentStatsEscape(currentStatsMetric(source.total_tokens, 'usage'))} tokens · ${currentCostPriceHtml(source.total_micro_usd, source.total_api_list_micro_usd)}</span></li>`).join('')}</ul></details>`
+          : '';
+        const agentIdentity = kind === 'agent' && sourceDetails
+          ? `<details class="yo-cost-current-agent-row" data-stats-current-cost-agent-key="${currentStatsEscape(row.key || row.label || row.source)}"><summary>${identity}</summary>${sourceDetails}</details>`
+          : identity;
+        return `<tr><th scope="row">${agentIdentity}</th><td>${currentStatsEscape(currentStatsMetric(row.total_tokens, 'usage'))}<small>${currentCostPriceHtml(row.total_micro_usd, row.total_api_list_micro_usd)}</small></td>${dimensions}<td>${currentStatsEscape(currentStatsMetric(row.priced.tokens, 'usage'))}<small>${row.priced.atoms} atoms</small></td><td>${currentStatsEscape(currentStatsMetric(row.unpriced.tokens, 'usage'))}<small>${row.unpriced.atoms} atoms</small></td></tr>`;
     }).join('');
     return [
       `<section><h3>${currentStatsEscape(title)}</h3>`,
@@ -51912,35 +52048,6 @@ function bindPreferencesPanel(panel) {
         : '<p>No attributed usage in this range.</p>',
       '</section>',
     ].join('');
-  }
-
-  function currentCostConsolidatedAgentRows(rows) {
-    const consolidated = new Map();
-    for (const row of rows) {
-      const label = currentStatsCanonicalAgentLabel(row.label || row.source);
-      const existing = consolidated.get(label);
-      if (!existing) {
-        consolidated.set(label, {
-          ...row,
-          label,
-          dimensions: Object.fromEntries(CURRENT_COST_DIMENSIONS.map(dimension => [dimension, {...row.dimensions[dimension]}])),
-          priced: {...row.priced},
-          unpriced: {...row.unpriced},
-        });
-        continue;
-      }
-      for (const field of ['total_tokens', 'total_micro_usd', 'total_api_list_micro_usd']) existing[field] += row[field];
-      for (const dimension of CURRENT_COST_DIMENSIONS) {
-        for (const field of ['tokens', 'micro_usd', 'api_list_micro_usd']) {
-          existing.dimensions[dimension][field] += row.dimensions[dimension][field];
-        }
-      }
-      for (const coverage of ['priced', 'unpriced']) {
-        existing[coverage].atoms += row[coverage].atoms;
-        existing[coverage].tokens += row[coverage].tokens;
-      }
-    }
-    return [...consolidated.values()];
   }
 
   function currentCostDimensionCell(value) {
@@ -52722,6 +52829,7 @@ function bindPreferencesPanel(panel) {
       } else {
         identityText(row.source, `${rowName}.source`);
         identityText(row.label, `${rowName}.label`);
+        validateCostSources(row.sources, `${rowName}.sources`, row);
       }
       const totalTokens = costInteger(row.total_tokens, `${rowName}.total_tokens`);
       const totalMicroUsd = costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`);
@@ -52743,6 +52851,40 @@ function bindPreferencesPanel(panel) {
       previous = rank;
     }
     return value;
+  }
+
+  function validateCostSources(value, name, parent) {
+    const kinds = ['claude', 'codex', 'opencode', 'yoagent', 'summary', 'images', 'responses', 'legacy', 'unknown'];
+    if (!Array.isArray(value) || value.length > kinds.length) throw new Error(`${name} is not bounded`);
+    const seen = new Set();
+    let previous = null;
+    const totals = [0, 0, 0];
+    for (const [index, row] of value.entries()) {
+      const rowName = `${name}[${index}]`;
+      exactFields(row, CURRENT_COST_SOURCE_FIELDS, rowName);
+      identityText(row.source, `${rowName}.source`);
+      if (!kinds.includes(row.source) || seen.has(row.source)) throw new Error(`${rowName}.source is unsupported or duplicated`);
+      seen.add(row.source);
+      const rowTotals = [
+        costInteger(row.total_tokens, `${rowName}.total_tokens`),
+        costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`),
+        costInteger(row.total_api_list_micro_usd, `${rowName}.total_api_list_micro_usd`),
+      ];
+      const dimensions = validateCostDimensions(row.dimensions, `${rowName}.dimensions`);
+      const dimensionTotals = CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => {
+        const value = dimensions[dimension];
+        return sum.map((total, field) => total + [value.tokens, value.micro_usd, value.api_list_micro_usd][field]);
+      }, [0, 0, 0]);
+      if (rowTotals.some((total, field) => total !== dimensionTotals[field])) throw new Error(`${rowName} totals disagree with dimensions`);
+      const priced = validateCostCoverage(row.priced, `${rowName}.priced`);
+      const unpriced = validateCostCoverage(row.unpriced, `${rowName}.unpriced`);
+      if (priced.tokens + unpriced.tokens !== rowTotals[0]) throw new Error(`${rowName} coverage disagrees with total`);
+      const rank = [-rowTotals[0], -rowTotals[2], -rowTotals[1], row.source];
+      if (previous && compareCostRank(rank, previous) <= 0) throw new Error(`${name} rank order is invalid`);
+      previous = rank;
+      rowTotals.forEach((total, field) => { totals[field] += total; });
+    }
+    if (totals.some((total, field) => total !== [parent.total_tokens, parent.total_micro_usd, parent.total_api_list_micro_usd][field])) throw new Error(`${name} totals disagree with parent attribution`);
   }
 
   function validateCostEvidence(value) {
@@ -53396,7 +53538,7 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
@@ -53612,9 +53754,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
-const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
-  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
-  : [group]));
+const jsDebugGraphChartControlItems = jsDebugGraphChartGroups;
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
@@ -54687,7 +54827,6 @@ function debugGraphNewBucket(startMs, durationMs) {
     tokensPerAgentTotal: 0,
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
-    costSummary: null,
     hostMetrics: debugGraphNewHostMetrics(),
     clients: new Map(),
     servers: new Map(),
@@ -54988,51 +55127,6 @@ function debugGraphMergeAgentTokenRates(target, source, multiplier = 1) {
   }
 }
 
-function debugGraphMergeCostSummary(target, source, multiplier = 1) {
-  if (!source?.costSummary) return;
-  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
-  if (!scale) return;
-  const current = target.costSummary || {
-    totalMicroUsd: 0, apiListMicroUsd: null, totalTokenQuantity: 0, dimensionTotals: null, rangeReport: false, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
-    components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
-  };
-  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd) * scale;
-  const sourceApiListMicroUsd = debugGraphCostApiListMicroUsd(source.costSummary);
-  if (sourceApiListMicroUsd !== null) current.apiListMicroUsd = (current.apiListMicroUsd ?? 0) + sourceApiListMicroUsd * scale;
-  current.totalTokenQuantity += Math.max(0, Number(source.costSummary.totalTokenQuantity) || 0) * scale;
-  if (source.costSummary.dimensionTotals) {
-    current.dimensionTotals ||= {};
-    for (const field of [...DEBUG_GRAPH_COST_TOKEN_FIELDS, ...DEBUG_GRAPH_COST_SUBTOTAL_FIELDS]) {
-      if (source.costSummary.dimensionTotals[field] === undefined) continue;
-      current.dimensionTotals[field] = (Number(current.dimensionTotals[field]) || 0) + Math.max(0, Number(source.costSummary.dimensionTotals[field]) || 0) * scale;
-    }
-  }
-  current.rangeReport = current.rangeReport || source.costSummary.rangeReport === true;
-  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd) * scale;
-  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
-  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
-  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount) * scale;
-  current.complete = current.complete && source.costSummary.complete === true;
-  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount) * scale;
-  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0) * scale;
-  const scaledRows = value => debugGraphCostRows(value).map(row => {
-    if (scale === 1) return row;
-    const scaled = {...row};
-    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'api_list_micro_usd', 'total_api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
-      if (Number.isFinite(Number(scaled[key]))) scaled[key] = Number(scaled[key]) * scale;
-    }
-    return scaled;
-  });
-  current.components.push(...scaledRows(source.costSummary.components));
-  current.models.push(...scaledRows(source.costSummary.models));
-  current.sources.push(...scaledRows(source.costSummary.sources));
-  current.tmuxWindows.push(...scaledRows(source.costSummary.tmuxWindows));
-  current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
-  current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
-  current.freshness = source.costSummary.freshness || current.freshness;
-  target.costSummary = current;
-}
-
 function debugGraphMergeBucket(target, source, multiplier = 1) {
   const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
   if (!scale) return;
@@ -55057,7 +55151,6 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.tokensPerAgentTotal += (source.tokensPerAgentTotal || 0) * scale;
   target.agentTokenSamples += (source.agentTokenSamples || 0) * scale;
   debugGraphMergeAgentTokenRates(target, source, scale);
-  debugGraphMergeCostSummary(target, source, scale);
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());
@@ -56165,6 +56258,7 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 function clearJsDebugGraphData() {
   jsDebugGraphBuckets.clear();
   jsDebugGraphPendingServerBuckets.clear();
+  jsDebugCurrentCostReport = null;
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
   // the cache we just cleared (kept the reload-idempotency of the rendered history).
   jsDebugHistoryPrefetchState.generation += 1;
@@ -56201,7 +56295,7 @@ function debugGraphApplyServerRecord(record) {
   bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
   bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
-  debugGraphApplyServerCostSummary(bucket, record.cost_summary);
+  if (record.cost_report) jsDebugCurrentCostReport = record.cost_report;
 }
 
 function debugGraphDeleteServerRecord(startSeconds, durationSeconds) {
@@ -56211,9 +56305,7 @@ function debugGraphDeleteServerRecord(startSeconds, durationSeconds) {
   return jsDebugGraphBuckets.delete(`${startMs}:${durationMs}`);
 }
 
-// Cost projection stays attached to the existing stats bucket. The pricing owner supplies
-// integer micro-USD amounts, so this view never introduces a float-based cost cache or a
-// second time-range selection path.
+// Cost values are forwarded from the exact server generation and formatted only at render time.
 function debugGraphCostInteger(value) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : 0;
@@ -56227,38 +56319,7 @@ function debugGraphCostRows(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
 }
 
-function debugGraphApplyServerCostSummary(bucket, source) {
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return;
-  bucket.costSummary = {
-    totalMicroUsd: debugGraphCostInteger(source.total_micro_usd),
-    apiListMicroUsd: debugGraphCostApiListMicroUsd(source),
-    totalTokenQuantity: Math.max(0, Number(source.total_token_quantity) || 0),
-    dimensionTotals: source.dimension_totals && typeof source.dimension_totals === 'object' && !Array.isArray(source.dimension_totals) ? {...source.dimension_totals} : null,
-    rangeReport: source.range_report === true,
-    knownMicroUsd: debugGraphCostInteger(source.known_micro_usd),
-    lowerMicroUsd: debugGraphCostInteger(source.lower_micro_usd ?? source.known_micro_usd),
-    upperMicroUsd: debugGraphCostInteger(source.upper_micro_usd ?? source.total_micro_usd ?? source.known_micro_usd),
-    pricedCount: debugGraphCostInteger(source.priced_count),
-    complete: source.complete === true,
-    unpricedCount: debugGraphCostInteger(source.unpriced_count),
-    unpricedTokenQuantity: Math.max(0, Number(source.unpriced_token_quantity) || 0),
-    components: debugGraphCostRows(source.components),
-    models: debugGraphCostRows(source.models),
-    sources: debugGraphCostRows(source.sources),
-    tmuxWindows: debugGraphCostRows(source.tmux_windows),
-    catalogRevision: String(source.catalog_revision || '').slice(0, 160),
-    activeCatalogRevision: String(source.active_catalog_revision || '').slice(0, 160),
-    freshness: String(source.freshness || '').slice(0, 80),
-  };
-  // own_components is this bucket's true per-tick local cost breakdown, set ONLY when the
-  // bucket is genuinely touched by a real tick (jsDebugCurrentBucketRecord) -- never by the
-  // range-cost reconcile patch, which reads this field back out but must never overwrite it.
-  // Without this separate, stable field, a bucket that stays latest-and-untouched across many
-  // rounds would either lose its own components (patched with range-only data) or accumulate a
-  // new copy of the range components every round (patched on top of its own last patched
-  // result) -- both real bugs found by independent audits.
-  if (Array.isArray(source.own_components)) bucket.ownCostComponents = debugGraphCostRows(source.own_components);
-}
+let jsDebugCurrentCostReport = null;
 
 function debugGraphApplyHostMetricProcesses(target, source, valueKey = 'totalPercent') {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return;
@@ -59311,29 +59372,6 @@ function debugGraphCostUsdText(microUsd) {
   return `$${usd.toFixed(6)}`;
 }
 
-function debugGraphCostRangeUsdText(summary) {
-  const lower = debugGraphCostInteger(summary?.lowerMicroUsd ?? summary?.knownMicroUsd);
-  const upper = Math.max(lower, debugGraphCostInteger(summary?.upperMicroUsd ?? summary?.totalMicroUsd ?? summary?.knownMicroUsd));
-  if (lower === upper) return debugGraphCostUsdText(lower);
-  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
-}
-
-function debugGraphCostKind(item) {
-  return String(item?.key || item?.kind || item?.direction || item?.label || '').toLowerCase();
-}
-
-function debugGraphCostClass(item) {
-  const unit = String(item?.unit || 'tokens').toLowerCase();
-  const modality = String(item?.modality || 'text').toLowerCase();
-  if (unit !== 'tokens' || modality !== 'text') return 'other';
-  const cacheRole = String(item?.cache_role || '').toLowerCase();
-  if (['read', 'write', 'write_5m', 'write_1h'].includes(cacheRole)) return 'cache';
-  const direction = String(item?.direction || debugGraphCostKind(item)).toLowerCase();
-  if (direction.includes('input') || direction.includes('uncached')) return 'input';
-  if (direction.includes('output')) return 'output';
-  return 'other';
-}
-
 // One copy owner for the visible usage columns. Cached deliberately bundles cache
 // reads and writes, and every concise legend entry derives from this same key set.
 const debugGraphCostUsageColumnCopy = Object.freeze({
@@ -59388,178 +59426,6 @@ function debugGraphCostUsageColumnLegendHtml() {
 
 function debugGraphCostUsageColumnHeaderAttrs(key, label) {
   return debugGraphExplainAttrs(label, `debug.cost.${key === 'cache' ? 'cached' : key}.desc`, {attribute: 'data-js-debug-cost-column-desc', desc: debugGraphCostUsageColumnDescription(key)});
-}
-
-function debugGraphCostCompactTotals(summary) {
-  if (summary.dimensionTotals) return {
-    input: debugGraphCostInteger(summary.dimensionTotals.input_micro_usd),
-    cache: debugGraphCostInteger(summary.dimensionTotals.cache_micro_usd),
-    output: debugGraphCostInteger(summary.dimensionTotals.output_micro_usd) + debugGraphCostInteger(summary.dimensionTotals.other_micro_usd),
-  };
-  const totals = {input: 0, cache: 0, output: 0};
-  for (const item of summary.components) {
-    const value = debugGraphCostMicroUsd(item);
-    const itemClass = debugGraphCostClass(item);
-    if (itemClass === 'input') totals.input += value;
-    else if (itemClass === 'cache') totals.cache += value;
-    else totals.output += value;
-  }
-  return totals;
-}
-
-function debugGraphCostCompactApiListTotals(summary) {
-  if (summary.dimensionTotals) return {
-    input: debugGraphCostApiListMicroUsd({api_list_micro_usd: summary.dimensionTotals.input_api_list_micro_usd}),
-    cache: debugGraphCostApiListMicroUsd({api_list_micro_usd: summary.dimensionTotals.cache_api_list_micro_usd}),
-    output: debugGraphCostInteger(summary.dimensionTotals.output_api_list_micro_usd) + debugGraphCostInteger(summary.dimensionTotals.other_api_list_micro_usd),
-  };
-  const totals = {input: null, cache: null, output: null};
-  for (const item of summary.components) {
-    const value = debugGraphCostApiListMicroUsd(item);
-    if (value === null) continue;
-    const itemClass = debugGraphCostClass(item);
-    const key = itemClass === 'input' ? 'input' : itemClass === 'cache' ? 'cache' : 'output';
-    totals[key] = (totals[key] ?? 0) + value;
-  }
-  return totals;
-}
-
-function debugGraphCostTokenTotals(summary) {
-  if (summary.dimensionTotals) return {
-    input: Math.max(0, Number(summary.dimensionTotals.input_tokens) || 0),
-    cache: Math.max(0, Number(summary.dimensionTotals.cache_tokens) || 0),
-    output: Math.max(0, Number(summary.dimensionTotals.output_tokens) || 0),
-    other: Math.max(0, Number(summary.dimensionTotals.other_tokens) || 0),
-    total: Math.max(0, Number(summary.totalTokenQuantity) || 0),
-  };
-  const totals = {input: 0, cache: 0, output: 0, other: 0, total: 0};
-  for (const item of summary.components) {
-    if (String(item?.unit || 'tokens').toLowerCase() !== 'tokens') continue;
-    const quantity = Math.max(0, Number(item?.quantity) || 0);
-    const itemClass = debugGraphCostClass(item);
-    totals[itemClass] += quantity;
-    totals.total += quantity;
-  }
-  return totals;
-}
-
-const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'cache_read_micro_usd', 'cache_write_micro_usd', 'cache_write_5m_micro_usd', 'cache_write_1h_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'cache_read_api_list_micro_usd', 'cache_write_api_list_micro_usd', 'cache_write_5m_api_list_micro_usd', 'cache_write_1h_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'cache_read_lower_micro_usd', 'cache_write_lower_micro_usd', 'cache_write_5m_lower_micro_usd', 'cache_write_1h_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'cache_read_upper_micro_usd', 'cache_write_upper_micro_usd', 'cache_write_5m_upper_micro_usd', 'cache_write_1h_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
-const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'priced_token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens', 'other_tokens']);
-const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
-const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
-const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
-const DEBUG_GRAPH_COST_TMUX_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind']);
-let jsDebugCostSummaryCache = {signature: '', summary: null};
-
-function debugGraphCostAggregateRowInto(grouped, row, keyFields) {
-  if (!row || typeof row !== 'object') return;
-  let key = '';
-  for (let index = 0; index < keyFields.length; index += 1) {
-    if (index) key += '\u0000';
-    key += String(row[keyFields[index]] || '');
-  }
-  key ||= 'unknown';
-  const current = grouped.get(key) || {...row};
-  if (!grouped.has(key)) {
-    for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) {
-      if (!field.includes('api_list') || row?.[field] !== undefined) current[field] = 0;
-    }
-    for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] = 0;
-    grouped.set(key, current);
-  }
-  for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) {
-    if (field.includes('api_list') && row?.[field] === undefined) continue;
-    current[field] = debugGraphCostInteger(current[field]) + debugGraphCostInteger(row?.[field]);
-  }
-  for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] += Math.max(0, Number(row?.[field]) || 0);
-}
-
-function debugGraphCostAggregateValues(grouped) {
-  return [...grouped.values()].sort((left, right) => debugGraphCostMicroUsd(right) - debugGraphCostMicroUsd(left)
-    || String(left?.model || left?.label || left?.key || '').localeCompare(String(right?.model || right?.label || right?.key || '')));
-}
-
-function debugGraphCostAggregateRows(rows, keyFields) {
-  const grouped = new Map();
-  for (const row of rows || []) {
-    debugGraphCostAggregateRowInto(grouped, row, keyFields);
-  }
-  return debugGraphCostAggregateValues(grouped);
-}
-
-function debugGraphCostSummarySignature(buckets) {
-  if (!Array.isArray(buckets) || !buckets.length) {
-    return `0:${jsDebugStatsServerSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
-  }
-  const first = buckets[0] || {};
-  const last = buckets[buckets.length - 1] || {};
-  return [
-    buckets.length,
-    Number(first.startMs ?? first.start ?? 0) || 0,
-    Number(first.durationMs ?? first.duration ?? 0) || 0,
-    Number(first.sequence ?? 0) || 0,
-    Number(last.startMs ?? last.start ?? 0) || 0,
-    Number(last.durationMs ?? last.duration ?? 0) || 0,
-    Number(last.sequence ?? 0) || 0,
-    jsDebugStatsServerSequence,
-    jsDebugUsageAtomBackfill.state || '',
-    jsDebugUsageAtomBackfill.sources || 0,
-    jsDebugUsageAtomBackfill.missing || 0,
-  ].join(':');
-}
-
-function debugGraphCostSummaryForBuckets(buckets) {
-  const signature = debugGraphCostSummarySignature(buckets);
-  if (signature && jsDebugCostSummaryCache.signature === signature && jsDebugCostSummaryCache.summary) return jsDebugCostSummaryCache.summary;
-  const allSummaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
-  const rangeSummaries = allSummaries.filter(summary => summary.rangeReport === true);
-  const summaries = rangeSummaries.length ? rangeSummaries : allSummaries;
-  const componentRows = new Map();
-  const modelRows = new Map();
-  const sourceRows = new Map();
-  const tmuxRows = new Map();
-  const result = {
-    totalMicroUsd: 0, apiListMicroUsd: null, totalTokenQuantity: 0, dimensionTotals: null, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
-    unpricedCount: 0, unpricedTokenQuantity: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
-    backfill: {...jsDebugUsageAtomBackfill},
-  };
-  for (const summary of summaries) {
-    result.totalMicroUsd += debugGraphCostInteger(summary.totalMicroUsd);
-    const apiListMicroUsd = debugGraphCostApiListMicroUsd(summary);
-    if (apiListMicroUsd !== null) result.apiListMicroUsd = (result.apiListMicroUsd ?? 0) + apiListMicroUsd;
-    result.totalTokenQuantity += Math.max(0, Number(summary.totalTokenQuantity) || 0);
-    if (summary.dimensionTotals) {
-      result.dimensionTotals ||= {};
-      for (const field of [...DEBUG_GRAPH_COST_TOKEN_FIELDS, ...DEBUG_GRAPH_COST_SUBTOTAL_FIELDS]) {
-        if (summary.dimensionTotals[field] === undefined) continue;
-        result.dimensionTotals[field] = (Number(result.dimensionTotals[field]) || 0) + Math.max(0, Number(summary.dimensionTotals[field]) || 0);
-      }
-    }
-    result.knownMicroUsd += debugGraphCostInteger(summary.knownMicroUsd);
-    result.lowerMicroUsd += debugGraphCostInteger(summary.lowerMicroUsd ?? summary.knownMicroUsd);
-    result.upperMicroUsd += debugGraphCostInteger(summary.upperMicroUsd ?? summary.totalMicroUsd ?? summary.knownMicroUsd);
-    result.pricedCount += debugGraphCostInteger(summary.pricedCount);
-    result.complete = result.complete && summary.complete === true;
-    result.unpricedCount += debugGraphCostInteger(summary.unpricedCount);
-    result.unpricedTokenQuantity += Math.max(0, Number(summary.unpricedTokenQuantity) || 0);
-    for (const row of debugGraphCostRows(summary.components)) debugGraphCostAggregateRowInto(componentRows, row, DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS);
-    for (const row of debugGraphCostRows(summary.models)) debugGraphCostAggregateRowInto(modelRows, row, DEBUG_GRAPH_COST_MODEL_KEY_FIELDS);
-    for (const row of debugGraphCostRows(summary.sources)) debugGraphCostAggregateRowInto(sourceRows, row, DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS);
-    for (const row of debugGraphCostRows(summary.tmuxWindows)) debugGraphCostAggregateRowInto(tmuxRows, row, DEBUG_GRAPH_COST_TMUX_KEY_FIELDS);
-    result.catalogRevision = summary.catalogRevision || result.catalogRevision;
-    result.activeCatalogRevision = summary.activeCatalogRevision || result.activeCatalogRevision;
-    result.freshness = summary.freshness || result.freshness;
-  }
-  // Effective price/source evidence is part of a billable component identity:
-  // retaining it prevents a displayed-range reprice boundary from being
-  // misleadingly collapsed into one synthetic rate row.
-  result.components = debugGraphCostAggregateValues(componentRows);
-  result.models = debugGraphCostAggregateValues(modelRows);
-  result.sources = debugGraphCostAggregateValues(sourceRows);
-  result.tmuxWindows = debugGraphCostAggregateValues(tmuxRows);
-  if (result.backfill.state !== 'complete') result.complete = false;
-  jsDebugCostSummaryCache = {signature, summary: result};
-  return result;
 }
 
 function debugGraphCostRangeText(domain) {
@@ -59718,45 +59584,43 @@ function debugGraphCostBreakdownItems(row, {kind = '', total = false} = {}) {
   return [value('input'), value('cache_read'), ...cacheWrites, value('output'), value('other')];
 }
 
-function debugGraphCostPricingSourceEntries(components, modelRow = null) {
-  const provider = String(modelRow?.provider || '').trim();
-  const model = String(modelRow?.model || '').trim();
-  const links = new Map();
-  for (const row of components || []) {
-    if (provider && String(row?.provider || '').trim() !== provider) continue;
-    if (model && String(row?.model || '').trim() !== model) continue;
-    const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-    if (!url || links.has(url)) continue;
-    const sourceLabel = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ')
-      || debugGraphCostText('debug.cost.source', 'Pricing source');
-    links.set(url, sourceLabel);
-  }
-  return [...links].map(([url, label]) => ({url, label}));
+function debugGraphCostReportRow(row) {
+  const sources = Array.isArray(row.sources) ? row.sources.map(source => ({
+    ...source,
+    label: source.source,
+    token_quantity: source.total_tokens,
+    micro_usd: source.total_micro_usd,
+    api_list_micro_usd: source.total_api_list_micro_usd,
+    ...debugGraphCostDimensionRows(source.dimensions),
+    priced_token_quantity: source.priced?.tokens || 0,
+    unpriced_token_quantity: source.unpriced?.tokens || 0,
+  })) : [];
+  return {
+    ...row,
+    label: row.model || row.label || row.source || row.key,
+    token_quantity: row.total_tokens,
+    micro_usd: row.total_micro_usd,
+    api_list_micro_usd: row.total_api_list_micro_usd,
+    priced_token_quantity: row.priced?.tokens || 0,
+    unpriced_token_quantity: row.unpriced?.tokens || 0,
+    ...debugGraphCostDimensionRows(row.dimensions),
+    sources,
+  };
 }
 
-function debugGraphCostPricingLinksHtml(components, modelRow = null, {compact = false} = {}) {
-  const links = debugGraphCostPricingSourceEntries(components, modelRow);
-  if (!links.length) return '';
-  return `<span class="js-debug-cost-pricing-links${compact ? ' js-debug-cost-pricing-links--compact' : ''}">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}" title="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? '$' : label)}</a>`).join(' · ')}</span>`;
-}
-
-function debugGraphCostAllPricingSourcesHtml(components) {
-  const links = debugGraphCostPricingSourceEntries(components);
-  if (!links.length) return '';
-  return `<section class="js-debug-cost-details-section js-debug-cost-pricing-sources">
-    <h2>${esc(debugGraphCostText('debug.cost.pricingSources', 'Pricing sources'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="pricing-sources"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</th><th scope="col">URL</th></tr></thead><tbody>${links.map(({url, label}) => `<tr><th scope="row">${esc(label)}</th><td><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></td></tr>`).join('')}</tbody></table></div>
-  </section>`;
+function debugGraphCostDimensionRows(dimensions = {}) {
+  return Object.fromEntries(Object.entries(dimensions).flatMap(([key, value]) => value ? [
+    [`${key}_tokens`, Math.max(0, Number(value.tokens) || 0)],
+    [`${key}_micro_usd`, debugGraphCostInteger(value.micro_usd)],
+    [`${key}_api_list_micro_usd`, debugGraphCostInteger(value.api_list_micro_usd)],
+  ] : []));
 }
 
 function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false, notApplicable = false} = {}) {
   if (notApplicable) return '<span class="js-debug-cost-not-applicable" aria-label="Not applicable">—</span>';
   if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}" aria-label="Unreported cache write; total is a lower bound">unreported</span>`;
   const unpricedTokens = Math.max(0, Number(row?.unpriced_token_quantity) || 0);
-  const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
-  const cost = total && hasRange && unpricedTokens === 0
-    ? debugGraphCostRowRangeUsdText(row)
-    : debugGraphCostUsagePriceText(microUsd, total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd, tokens, row);
+  const cost = debugGraphCostUsagePriceText(microUsd, total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd, tokens, row);
   const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
   const exactTokens = `${Math.max(0, Number(tokens) || 0).toLocaleString()} tokens`;
   const coverageUnknown = unpricedTokens > 0;
@@ -59768,39 +59632,43 @@ function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row 
 }
 
 function debugGraphCostExactTotalRow(summary) {
-  if (!summary?.dimensionTotals) return null;
+  if (!summary?.dimensions) return null;
   return {
-    token_quantity: Math.max(0, Number(summary.totalTokenQuantity) || 0),
-    priced_token_quantity: Math.max(0, Number(summary.totalTokenQuantity) || 0) - Math.max(0, Number(summary.unpricedTokenQuantity) || 0),
-    unpriced_token_quantity: Math.max(0, Number(summary.unpricedTokenQuantity) || 0),
-    micro_usd: debugGraphCostOptionalInteger(summary.totalMicroUsd),
-    api_list_micro_usd: debugGraphCostApiListMicroUsd(summary),
-    ...summary.dimensionTotals,
+    token_quantity: Math.max(0, Number(summary.total_tokens) || 0),
+    priced_token_quantity: Math.max(0, Number(summary.priced?.tokens) || 0),
+    unpriced_token_quantity: Math.max(0, Number(summary.unpriced?.tokens) || 0),
+    micro_usd: debugGraphCostOptionalInteger(summary.total_micro_usd),
+    api_list_micro_usd: debugGraphCostOptionalInteger(summary.total_api_list_micro_usd),
+    ...debugGraphCostDimensionRows(summary.dimensions),
   };
 }
 
-function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = [], totalRow: exactTotalRow = null} = {}) {
+function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, evidence = [], totalRow: exactTotalRow = null, secondaryFor = null} = {}) {
   if (!rows.length) return '';
   const usageColumns = debugGraphCostUsageColumns();
   const usageLabels = Object.fromEntries(usageColumns.map(({key, label}) => [key, label]));
-  const totalRow = exactTotalRow || debugGraphCostAggregateRows(rows, [])[0] || {};
+  const totalRow = exactTotalRow || {};
   const rowHtml = row => {
     const breakdown = debugGraphCostBreakdownItems(row, {kind});
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
-    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
+    const pricingLinks = kind === 'model' ? debugGraphCostModelEvidenceLinksHtml(evidence, row) : '';
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsagePriceText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row), totalTokens, row)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsagePriceText(item.microUsd, item.apiListMicroUsd, item.tokens, row)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
     const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphCostAgentLabelHtml(label)}</strong>`;
+    const agentDisclosure = kind === 'agent' && secondaryFor ? secondaryFor(row) : '';
     const usageCellHtml = item => {
-      const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
+      const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(evidence, row, item) : '';
       return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
         row,
         apiListMicroUsd: item.apiListMicroUsd,
         unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0,
       });
     };
-    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${usageCellHtml(item)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const expandedIdentity = agentDisclosure
+      ? `<details class="js-debug-cost-agent-row" data-js-debug-cost-agent-key="${esc(row.key || fullLabel)}"><summary>${identity}</summary>${agentDisclosure}</details>`
+      : identity;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${expandedIdentity}</th>${breakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${usageCellHtml(item)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow, {kind, total: true});
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
@@ -59818,14 +59686,14 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col" rowspan="2">${esc(labelHeading)}</th>${headerCell(input, {rowSpan: 2})}${headerCell(cacheRead, {rowSpan: 2})}${headerCell({key: 'cache_write', label: debugGraphCostUsageColumnLabel('cache_write')}, {colSpan: 2})}${headerCell(output, {rowSpan: 2})}${headerCell(other, {rowSpan: 2})}<th scope="col" rowspan="2"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr><tr>${headerCell(cacheWrite5m)}${headerCell(cacheWrite1h)}</tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
-function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
+function debugGraphCostModelUsageChartHtml(rows, evidence, options = {}) {
   if (options.report !== true) return '';
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'model',
     heading: debugGraphCostText('debug.cost.modelUsages', 'Cost by Model'),
     labelHeading: debugGraphCostText('debug.cost.model', 'Model'),
     labelFor: debugGraphCostModelLabel,
-    components,
+    evidence,
     totalRow: debugGraphCostExactTotalRow(options.summary),
   });
 }
@@ -59850,53 +59718,23 @@ function debugGraphCostComponentDimension(row) {
   return 'other';
 }
 
-function debugGraphCostModelFormulaCellHtml(components, model, item) {
+function debugGraphCostModelEvidenceLinksHtml(evidence, model) {
+  const links = evidence.filter(row => row.provider === model.provider && row.model === model.model && row.source_url)
+    .map(row => normalizedExternalHttpUrl(row.source_url, {maxLength: 2048})).filter(Boolean);
+  return links.map(url => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(`${model.model} pricing`)}" title="${esc(`${model.model} pricing`)}">$</a>`).join(' · ');
+}
+
+function debugGraphCostModelFormulaCellHtml(evidence, model, item) {
   if (Math.max(0, Number(item?.tokens) || 0) <= 0) return '';
   const cacheWrite = item.key === 'cache_write';
-  const rows = (components || []).filter(row => {
+  const rows = (evidence || []).filter(row => {
     if (String(row?.provider || '').trim() !== String(model?.provider || '').trim()) return false;
     if (String(row?.model || '').trim() !== String(model?.model || '').trim()) return false;
     const dimension = debugGraphCostComponentDimension(row);
     return cacheWrite ? dimension === 'cache_write_5m' || dimension === 'cache_write_1h' : dimension === item.key;
   });
   if (!rows.length) return '';
-  const grouped = new Map();
-  for (const row of rows) {
-    const rate = debugGraphCostComponentRateText(row);
-    const current = grouped.get(rate) || {...row, quantity: 0, micro_usd: 0, api_list_micro_usd: 0};
-    current.quantity += Math.max(0, Number(row?.quantity) || 0);
-    current.micro_usd += debugGraphCostMicroUsd(row);
-    current.api_list_micro_usd += debugGraphCostApiListMicroUsd(row) ?? debugGraphCostMicroUsd(row);
-    grouped.set(rate, current);
-  }
-  return [...grouped.values()].map(row => `<span class="js-debug-cost-model-formula" title="${esc(`${Math.max(0, Number(row.quantity) || 0).toLocaleString()} tokens x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.quantity))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
-}
-
-function debugGraphCostSourceLabel(row) {
-  const explicit = String(row?.full_label || row?.agent_label || row?.label || '').trim();
-  if (explicit) return explicit;
-  const root = String(row?.root_thread_id || '').trim();
-  const agent = String(row?.agent_thread_id || '').trim();
-  const tool = String(row?.tool_name || '').trim();
-  const source = String(row?.source || '').trim();
-  return [source, agent && agent !== root ? agent : '', tool].filter(Boolean).join(' · ') || root || debugGraphCostText('debug.cost.unknown', 'Unknown');
-}
-
-function debugGraphCostRowRangeUsdText(row) {
-  const lower = debugGraphCostInteger(row?.lower_micro_usd ?? row?.micro_usd);
-  const upper = Math.max(lower, debugGraphCostInteger(row?.upper_micro_usd ?? row?.micro_usd));
-  if (lower === upper) return debugGraphCostUsdText(lower);
-  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
-}
-
-function debugGraphCostSubtotalText(row) {
-  const parts = [
-    ['input_micro_usd', debugGraphCostText('debug.cost.input', 'Input')],
-    ['cache_micro_usd', debugGraphCostText('debug.cost.cache', 'Cache')],
-    ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
-    ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
-  ];
-  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}`;
+  return rows.map(row => `<span class="js-debug-cost-model-formula" title="${esc(`${Math.max(0, Number(row.tokens) || 0).toLocaleString()} ${row.unit} x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.tokens))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
 }
 
 function debugGraphCostTmuxLabel(row) {
@@ -59907,7 +59745,7 @@ function debugGraphCostTmuxLabel(row) {
   const session = String(row?.tmux_session || '').trim();
   const windowLabel = String(row?.tmux_window_label || row?.tmux_window || '').trim();
   const kind = String(row?.agent_kind || '').trim();
-  return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphCostSourceLabel(row);
+  return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphAgentDisplayLabel(row?.source);
 }
 
 function debugGraphCostAgentRowsAlphabetically(rows) {
@@ -59920,50 +59758,55 @@ function debugGraphCostAgentRowsAlphabetically(rows) {
   });
 }
 
-function debugGraphCostTmuxBreakdownRows(rows) {
-  const grouped = new Map();
-  for (const row of rows || []) {
-    const key = String(row?.tmux_key || row?.root_thread_id || row?.source || debugGraphCostTmuxLabel(row)).trim() || 'unknown';
-    const current = grouped.get(key) || {
-      ...row,
-      token_quantity: 0,
-      micro_usd: 0,
-      lower_micro_usd: 0,
-      upper_micro_usd: 0,
-      input_micro_usd: 0,
-      cache_micro_usd: 0,
-      output_micro_usd: 0,
-      other_micro_usd: 0,
-      input_tokens: 0,
-      cache_tokens: 0,
-      output_tokens: 0,
-      other_tokens: 0,
-    };
-    current.token_quantity += Math.max(0, Number(row?.token_quantity) || 0);
-    for (const field of ['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd']) {
-      if (field.includes('api_list') && row?.[field] === undefined) continue;
-      current[field] = debugGraphCostInteger(current[field]) + debugGraphCostInteger(row?.[field]);
-    }
-    for (const field of ['input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']) {
-      current[field] += Math.max(0, Number(row?.[field]) || 0);
-    }
-    grouped.set(key, current);
-  }
-  return [...grouped.values()];
-}
-
 function debugGraphCostTmuxBreakdownHtml(summary) {
-  const directRows = debugGraphCostRows(summary?.tmuxWindows);
-  const rows = debugGraphCostAgentRowsAlphabetically(
-    directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources),
-  );
+  const allAgents = summary?.agents || [];
+  const childRows = allAgents.filter(row => String(row.label || '').includes('|'));
+  const roots = new Map();
+  for (const row of allAgents) {
+    const label = String(row.label || '');
+    const rootLabel = label.split('|')[0];
+    if (label.includes('|')) {
+      const root = roots.get(rootLabel) || {
+        ...row,
+        label: rootLabel,
+        total_tokens: 0,
+        total_micro_usd: 0,
+        total_api_list_micro_usd: 0,
+        dimensions: Object.fromEntries(Object.keys(row.dimensions || {}).map(key => [key, {tokens: 0, micro_usd: 0, api_list_micro_usd: 0}])),
+        priced: {atoms: 0, tokens: 0},
+        unpriced: {atoms: 0, tokens: 0},
+        sources: [],
+      };
+      root.total_tokens += row.total_tokens;
+      root.total_micro_usd += row.total_micro_usd;
+      root.total_api_list_micro_usd += row.total_api_list_micro_usd;
+      root.priced.atoms += row.priced.atoms;
+      root.priced.tokens += row.priced.tokens;
+      root.unpriced.atoms += row.unpriced.atoms;
+      root.unpriced.tokens += row.unpriced.tokens;
+      for (const [key, value] of Object.entries(row.dimensions || {})) {
+        root.dimensions[key].tokens += value.tokens;
+        root.dimensions[key].micro_usd += value.micro_usd;
+        root.dimensions[key].api_list_micro_usd += value.api_list_micro_usd;
+      }
+      roots.set(rootLabel, root);
+    } else roots.set(rootLabel, row);
+  }
+  const rows = debugGraphCostAgentRowsAlphabetically([...roots.values()].map(row => ({...debugGraphCostReportRow(row), children: childRows.filter(child => String(child.label || '').startsWith(`${String(row.label || '').split('|')[0]}|`)).map(debugGraphCostReportRow)})));
   if (!rows.length) return '';
+  const sourceDetails = row => {
+    const sourceRows = (row.children || []).flatMap(child => (child.sources || []).map(source => ({...source, pane: String(child.label || '').split('|')[1]})));
+    return sourceRows.length
+      ? `<div class="js-debug-cost-agent-sources"><span class="js-debug-cost-agent-sources-title">${esc(`AI/pane attribution (${sourceRows.length})`)}</span><ul>${sourceRows.map(source => `<li><strong>${esc(`${source.pane}: ${source.source}`)}</strong><span>${esc(debugGraphTokensText(source.token_quantity))} · ${esc(debugGraphCostPricePairText(source.micro_usd, source.api_list_micro_usd))}</span></li>`).join('')}</ul></div>`
+    : '';
+  };
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'agent',
     heading: debugGraphCostText('debug.cost.byAgent', 'Cost by Agent'),
     labelHeading: t('yoagent.action.row.agent'),
-    labelFor: debugGraphCostTmuxLabel,
+    labelFor: row => row.label || row.source || 'Unknown',
     totalRow: debugGraphCostExactTotalRow(summary),
+     secondaryFor: sourceDetails,
   });
 }
 
@@ -59996,49 +59839,16 @@ function debugGraphCostAgentLabelHtml(value, lineSize = 24) {
   return `<span class="js-debug-cost-agent-name js-debug-cost-agent-name--long" aria-hidden="true"><span>${esc(first)}</span><span>${esc(second)}</span></span>`;
 }
 
-function debugGraphCostSourceLabelHtml(row) {
-  const label = debugGraphCostSourceLabel(row);
-  const transcript = debugGraphCostTranscriptPath(row);
-  if (!transcript) return esc(label);
-  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}" aria-label="${esc(label)}">${debugGraphMiddleTruncatedTextHtml(label)}</a>`;
-}
-
-function debugGraphCostSourceTreeHtml(rows) {
-  if (!rows.length) return '';
-  const usageKeys = ['input', 'cache_read', 'cache_write', 'output', 'other'];
-  const usageLabels = {
-    input: debugGraphCostText('debug.cost.input', 'Input'),
-    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
-    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
-    output: debugGraphCostText('debug.cost.output', 'Output'),
-    other: debugGraphCostText('debug.cost.other', 'Other'),
-  };
-  const rowHtml = row => {
-    const breakdown = debugGraphCostBreakdownItems(row);
-    const byKey = new Map(breakdown.map(item => [item.key, item]));
-    const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
-    const cells = usageKeys.map(key => {
-      const item = byKey.get(key);
-      return `<td data-label="${esc(usageLabels[key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`;
-    }).join('');
-    return `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th>${cells}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
-  };
-  return `<section class="js-debug-cost-details-section">
-    <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><span class="js-debug-cost-usage-label">${esc(usageLabels[key])}</span></th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody></table></div>
-  </section>`;
-}
-
 function debugGraphCostCatalogDetailsHtml(summary) {
   // One compact catalog-status line replacing the four-row table: every fact
   // (revision, freshness, priced coverage, unpriced exclusions) stays present
   // and localized, wraps as meaningful field groups on a narrow pane, and
   // never stretches four scalars across a wide screen. Unpriced exclusions
   // keep their warning semantics when nonzero.
-  const revision = String(summary.activeCatalogRevision || summary.catalogRevision || '').trim() || '—';
-  const freshness = String(summary.freshness || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
-  const exclusions = Math.max(0, Number(summary.unpricedCount) || 0);
-  const priced = Math.max(0, Number(summary.pricedCount) || 0);
+  const revision = String(summary.catalog_revision ?? '').trim() || '—';
+  const freshness = debugGraphCostText('debug.cost.current', 'current');
+  const exclusions = Math.max(0, Number(summary.unpriced?.atoms) || 0);
+  const priced = Math.max(0, Number(summary.priced?.atoms) || 0);
   const groups = [
     {label: debugGraphCostText('debug.cost.catalog', 'Catalog'), value: `${debugGraphCostText('debug.cost.rev', 'rev')} ${revision}`},
     {label: debugGraphCostText('debug.cost.freshnessCompact', 'freshness'), value: freshness.toLowerCase() === freshness ? freshness : freshness.charAt(0).toLowerCase() + freshness.slice(1)},
@@ -60054,74 +59864,33 @@ function debugGraphCostCatalogDetailsHtml(summary) {
   return `<p class="js-debug-cost-catalog-line" data-js-debug-cost-catalog aria-label="${esc(accessible)}">${groups.map((group, index) => `<span class="js-debug-cost-catalog-group${group.warning ? ' js-debug-cost-catalog-group--warning' : ''}">${index === 0 ? `${esc(group.label)}: ` : ''}${index > 0 ? `${esc(group.label)} ` : ''}${esc(group.value)}</span>`).join('<span class="js-debug-cost-catalog-separator" aria-hidden="true"> · </span>')}</p>`;
 }
 
-function debugGraphCostBackfillText(summary) {
-  const state = String(summary?.backfill?.state || 'unknown');
-  if (state === 'complete') return '';
-  if (state === 'partial') return debugGraphCostText('debug.cost.backfillPartial', 'Backfill incomplete');
-  if (state === 'running') return debugGraphCostText('debug.cost.backfillRunning', 'Backfill in progress');
-  if (state === 'unknown') return debugGraphCostText('debug.cost.backfillUnknown', 'Backfill status unknown');
-  return debugGraphCostText('debug.cost.backfillPending', 'Backfill pending');
-}
-
-function debugGraphCostUnpricedUsage(summary) {
-  const rows = debugGraphCostRows(summary?.components).filter(row => row?.priced === false || Math.max(0, Number(row?.unpriced_count) || 0) > 0);
-  const classesByKey = new Map();
-  for (const row of rows) {
-    const provider = String(row?.provider || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
-    const model = String(row?.model || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
-    const itemClass = debugGraphCostClass(row);
-    const key = `${provider}\u0000${model}\u0000${itemClass}`;
-    const current = classesByKey.get(key) || {provider, model, itemClass, tokenQuantity: 0};
-    current.tokenQuantity += Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0));
-    classesByKey.set(key, current);
-  }
-  const classes = [...classesByKey.values()];
-  const rowsTokenQuantity = rows.reduce((total, row) => total + Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0)), 0);
-  const tokenQuantity = Math.max(0, Number(summary?.unpricedTokenQuantity) || rowsTokenQuantity);
-  const knownMicroUsd = debugGraphCostInteger(summary?.knownMicroUsd);
-  const upperMicroUsd = Math.max(knownMicroUsd, debugGraphCostInteger(summary?.upperMicroUsd));
-  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, classes};
-}
-
 function debugGraphCostUnknownUsageHtml(summary) {
-  if (Math.max(0, Number(summary?.unpricedCount) || 0) === 0) return '';
-  const usage = debugGraphCostUnpricedUsage(summary);
+  if (Math.max(0, Number(summary?.unpriced?.atoms) || 0) === 0) return '';
   const rows = [
-    [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary?.knownMicroUsd)],
-    [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(usage.tokenQuantity)],
-    [debugGraphCostText('debug.cost.worstCase', 'Worst-case estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
+    [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary.total_micro_usd)],
+    [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(summary.unpriced.tokens)],
+    [debugGraphCostText('debug.cost.worstCase', 'Worst-case estimate'), 'Unpriced'],
   ];
-  const classesLabel = debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes');
-  const classRows = usage.classes.map(item => {
-    const label = `${item.provider} · ${item.model} · ${item.itemClass}`;
-    return `<tr data-js-debug-unpriced-class><th scope="row">${esc(label)}</th><td>${esc(debugGraphTokensText(item.tokenQuantity))}</td></tr>`;
-  }).join('');
-  const disclosure = usage.classes.length ? `<details class="js-debug-cost-unpriced-disclosure"><summary aria-label="${esc(`${classesLabel}: ${usage.classes.length}`)}"><span>${esc(classesLabel)}</span><strong>${usage.classes.length}</strong></summary><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced-classes"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.modelClass', 'Provider · model · class'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th></tr></thead><tbody>${classRows}</tbody></table></div></details>` : '';
-  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>${disclosure}</section>`;
+  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div></section>`;
 }
 
-function debugGraphCostReportHtml(summary, domain) {
-  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0 || Number(summary.apiListMicroUsd) > 0;
-  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
-  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
-  const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
-  const tokens = debugGraphCostTokenTotals(summary);
+function debugGraphCostReportHtml(report, domain) {
+  if (!report) return '';
+  const hasUsage = report.total_tokens > 0 || report.total_micro_usd > 0 || report.total_api_list_micro_usd > 0;
+  const tokens = {
+    input: report.dimensions.input.tokens,
+    cache: report.dimensions.cache_read.tokens + report.dimensions.cache_write_5m.tokens + report.dimensions.cache_write_1h.tokens,
+    output: report.dimensions.output.tokens,
+    other: report.dimensions.other.tokens,
+    total: report.total_tokens,
+  };
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
   const apiListBasis = debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices');
-  const hasApiListCounterfactual = summary.apiListMicroUsd !== null;
-  // Compact report shell: one heading line carrying the range, one totals line
-  // replacing the old Summary heading + nested list, one catalog status line
-  // replacing the four-row catalog table. Exact values stay reachable through
-  // the accessible labels; nothing about estimate/lower-bound semantics changes.
-  const estimateSentence = !hasEstimatedUsage
-    ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage')
-    : hasApiListCounterfactual
-      ? debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd)
-    : (exact
-      ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total})
-      : hasFiniteRange
-        ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total})
-        : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total}));
+  const estimateSentence = hasUsage
+    ? report.unpriced.tokens > 0
+      ? `${debugGraphCostText('debug.cost.known', 'Known')} ${debugGraphCostPricePairText(report.total_micro_usd, report.total_api_list_micro_usd)} + ${debugGraphCostText('debug.cost.unpriced', 'Unpriced')}`
+      : debugGraphCostPricePairText(report.total_micro_usd, report.total_api_list_micro_usd)
+    : debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage');
   const tokenParts = [
     `${debugGraphCostText('debug.cost.input', 'Input').toLowerCase()}=${debugGraphTokenNumberText(tokens.input)}`,
     `${debugGraphCostText('debug.cost.cache', 'Cache').toLowerCase()}=${debugGraphTokenNumberText(tokens.cache)}`,
@@ -60136,78 +59905,13 @@ function debugGraphCostReportHtml(summary, domain) {
     </div>
     <div class="js-debug-cost-report-body">
       <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
-      ${debugGraphCostUnknownUsageHtml(summary)}
-      ${debugGraphCostCatalogDetailsHtml(summary)}
+      ${debugGraphCostUnknownUsageHtml(report)}
+      ${debugGraphCostCatalogDetailsHtml(report)}
       ${debugGraphCostUsageColumnLegendHtml()}
-      ${debugGraphCostTmuxBreakdownHtml(summary)}
-      ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary})}
-      ${debugGraphCostSourceTreeHtml(summary.sources)}
-      ${debugGraphCostAllPricingSourcesHtml(summary.components)}
+      ${debugGraphCostModelUsageChartHtml(report.models.map(debugGraphCostReportRow), report.evidence, {report: true, summary: report})}
+       ${debugGraphCostTmuxBreakdownHtml(report)}
     </div>
   </article>`;
-}
-
-function debugGraphCostSummaryHtml(buckets, domain) {
-  const summary = debugGraphCostSummaryForBuckets(buckets);
-  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0 || Number(summary.apiListMicroUsd) > 0;
-  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
-  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
-  const estimated = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
-  const compact = debugGraphCostCompactTotals(summary);
-  const compactApiList = debugGraphCostCompactApiListTotals(summary);
-  const tokens = debugGraphCostTokenTotals(summary);
-  const heading = !hasEstimatedUsage
-    ? `${debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices')} —, Σ displayed`
-    : summary.apiListMicroUsd !== null
-      ? `${debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices')} ${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd)}, Σ displayed`
-      : `${debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices')} ${exact || hasFiniteRange ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed`;
-  const accessible = !hasEstimatedUsage
-    ? 'No displayed usage has a selected price'
-    : summary.apiListMicroUsd !== null
-      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd, {basis: 'inline'})} across displayed usage; open model costs and pricing sources`
-    : exact
-    ? `Estimated API list-price total ${estimated} across displayed usage; open model costs and pricing sources`
-    : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
-  const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
-  const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
-  const refreshStatus = jsDebugPricingRefreshState.error || (jsDebugPricingRefreshState.inFlight ? (jsDebugPricingRefreshState.status || `${refreshLabel}…`) : '');
-  const backfillStatus = debugGraphCostBackfillText(summary);
-  const moreInfo = debugGraphCostText('debug.cost.moreInfo', 'More Info');
-  const compactRows = [
-    ['Input', compact.input, compactApiList.input, tokens.input],
-    ['Cache', compact.cache, compactApiList.cache, tokens.cache],
-    ['Output', compact.output, compactApiList.output, tokens.output],
-    ['Total', hasEstimatedUsage ? summary.totalMicroUsd : null, hasEstimatedUsage ? summary.apiListMicroUsd : null, tokens.total],
-  ];
-  // One row shape shared by tbody (Input/Cache/Output) and tfoot (Total). The row-label cell
-  // carries the same per-usage explain-attrs the old <dl> <dt> used, and prices stay concise
-  // (basis stated once in the heading, so debugGraphCostPricePairHtml keeps its default omit).
-  const summaryRowHtml = ([label, value, apiListValue, tokenCount]) => {
-    const key = String(label).toLowerCase();
-    const rowLabel = debugGraphCostText(`debug.cost.${key}`, label);
-    return `<tr><th scope="row"${debugGraphCostUsageColumnHeaderAttrs(key, rowLabel)}>${esc(rowLabel)}</th><td>${esc(debugGraphTokensText(tokenCount))}</td><td>${value === null ? '—' : debugGraphCostPricePairHtml(value, apiListValue)}</td></tr>`;
-  };
-  return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
-    <div class="js-debug-chart-head">
-      <div class="js-debug-chart-heading-row">
-        <span class="js-debug-chart-title">${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}</span>
-        <span class="js-debug-chart-summary js-debug-cost-estimate">(${esc(heading)})</span>
-        ${refreshHtml}
-        <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="costSummary" aria-label="${esc(t('common.close'))} ${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}" title="${esc(t('common.close'))}">×</button>
-      </div>
-      <div class="js-debug-cost-range">${esc(debugGraphCostRangeText(domain))}</div>
-      ${refreshStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(refreshStatus)}</div>` : ''}
-      ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
-    </div>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap">
-      <table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-        <thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.usage', 'Usage'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.priceColumn', 'Price'))}</th></tr></thead>
-        <tbody>${compactRows.slice(0, 3).map(summaryRowHtml).join('')}</tbody>
-        <tfoot>${summaryRowHtml(compactRows[3])}</tfoot>
-      </table>
-    </div>
-    <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
-  </section>`;
 }
 
 async function refreshDebugCostPricing() {
@@ -60274,7 +59978,7 @@ async function refreshDebugCostPricingStatus(scope = debugPricingRefreshLifecycl
   return true;
 }
 
-function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true, patternScope = 'graphs'} = {}) {
+function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {patternScope = 'graphs'} = {}) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
@@ -60287,12 +59991,6 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
       const items = visibleGroupKeys.has(group.key)
         ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis, patternScope: `${patternScope}-${group.key}`})]
         : [];
-      // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
-      // displayed bucket array from the unified cache, but adds no axes, bars, or
-      // independent range state.
-      if (includeCostSummary && group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
-        items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
-      }
       return items;
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
@@ -60732,119 +60430,6 @@ function jsDebugCurrentSeriesValue(series, name) {
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-function jsDebugCurrentCostDimensionRows(dimensions = {}) {
-  const cacheWrite = dimensions.cache_write || {
-    tokens: Number(dimensions.cache_write_5m?.tokens || 0) + Number(dimensions.cache_write_1h?.tokens || 0),
-    micro_usd: Number(dimensions.cache_write_5m?.micro_usd || 0) + Number(dimensions.cache_write_1h?.micro_usd || 0),
-    api_list_micro_usd: Number(dimensions.cache_write_5m?.api_list_micro_usd || 0) + Number(dimensions.cache_write_1h?.api_list_micro_usd || 0),
-  };
-  const values = {
-    input: dimensions.input,
-    cache_read: dimensions.cache_read,
-    // The shared usage grid spans 5m/1h cache writes. Retain both lifetime
-    // fields so Cost by Model can show the authoritative rate formula.
-    cache_write: cacheWrite,
-    cache_write_5m: dimensions.cache_write_5m || dimensions.cache_write,
-    cache_write_1h: dimensions.cache_write_1h,
-    cache: {
-      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(cacheWrite.tokens || 0),
-      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(cacheWrite.micro_usd || 0),
-      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(cacheWrite.api_list_micro_usd || 0),
-    },
-    output: dimensions.output,
-    other: dimensions.other,
-  };
-  return Object.fromEntries(Object.entries(values).flatMap(([key, value]) => value ? [
-    [`${key}_tokens`, Math.max(0, Number(value.tokens) || 0)],
-    [`${key}_micro_usd`, Math.max(0, Number(value.micro_usd) || 0)],
-    [`${key}_api_list_micro_usd`, Math.max(0, Number(value.api_list_micro_usd) || 0)],
-  ] : []));
-}
-
-function jsDebugCurrentCostSummary(report = {}) {
-  const priced = report.priced || {};
-  const unpriced = report.unpriced || {};
-  const modelRows = Array.isArray(report.models) ? report.models.map(row => ({
-    provider: row.provider,
-    model: row.model,
-    label: row.model,
-    token_quantity: Number(row.total_tokens) || 0,
-    micro_usd: Number(row.total_micro_usd) || 0,
-    api_list_micro_usd: Number(row.total_api_list_micro_usd) || 0,
-    lower_micro_usd: Number(row.total_micro_usd) || 0,
-    upper_micro_usd: Number(row.total_micro_usd) || 0,
-    ...jsDebugCurrentCostDimensionRows(row.dimensions),
-    priced_count: Math.max(0, Number(row.priced?.atoms) || 0),
-    priced_token_quantity: Math.max(0, Number(row.priced?.tokens) || 0),
-    unpriced_count: Math.max(0, Number(row.unpriced?.atoms) || 0),
-    unpriced_token_quantity: Math.max(0, Number(row.unpriced?.tokens) || 0),
-  })) : [];
-  const sourceRows = Array.isArray(report.agents) ? report.agents.map(row => ({
-    tmux_key: row.key,
-    tmux_label: debugGraphAgentDisplayLabel(row.label || row.source),
-    agent_kind: row.source,
-    agent_label: row.label || row.source,
-    full_label: row.label || row.source,
-    source: row.source,
-    label: debugGraphAgentDisplayLabel(row.label || row.source),
-    token_quantity: Number(row.total_tokens) || 0,
-    micro_usd: Number(row.total_micro_usd) || 0,
-    api_list_micro_usd: Number(row.total_api_list_micro_usd) || 0,
-    lower_micro_usd: Number(row.total_micro_usd) || 0,
-    upper_micro_usd: Number(row.total_micro_usd) || 0,
-    ...jsDebugCurrentCostDimensionRows(row.dimensions),
-    priced_count: Math.max(0, Number(row.priced?.atoms) || 0),
-    priced_token_quantity: Math.max(0, Number(row.priced?.tokens) || 0),
-    unpriced_count: Math.max(0, Number(row.unpriced?.atoms) || 0),
-    unpriced_token_quantity: Math.max(0, Number(row.unpriced?.tokens) || 0),
-  })) : [];
-  const components = Array.isArray(report.evidence) ? report.evidence.map(row => ({
-    ...row,
-    quantity: Number(row.tokens) || 0,
-    token_quantity: Number(row.tokens) || 0,
-    micro_usd: Number(row.micro_usd) || 0,
-    api_list_micro_usd: Number(row.api_list_micro_usd) || 0,
-    lower_micro_usd: Number(row.micro_usd) || 0,
-    upper_micro_usd: Number(row.micro_usd) || 0,
-    priced: true,
-  })) : [];
-  const totalMicroUsd = Math.max(0, Number(report.total_micro_usd) || 0);
-  const totalApiListMicroUsd = Math.max(0, Number(report.total_api_list_micro_usd) || 0);
-  return {
-    range_report: true,
-    total_micro_usd: totalMicroUsd,
-    api_list_micro_usd: totalApiListMicroUsd,
-    total_token_quantity: Math.max(0, Number(report.total_tokens) || 0),
-    dimension_totals: jsDebugCurrentCostDimensionRows(report.dimensions),
-    known_micro_usd: totalMicroUsd,
-    lower_micro_usd: totalMicroUsd,
-    upper_micro_usd: totalMicroUsd,
-    priced_count: Math.max(0, Number(priced.atoms) || 0),
-    complete: Math.max(0, Number(unpriced.tokens) || 0) === 0,
-    unpriced_count: Math.max(0, Number(unpriced.atoms) || 0),
-    unpriced_token_quantity: Math.max(0, Number(unpriced.tokens) || 0),
-    components,
-    models: modelRows,
-    sources: sourceRows,
-    tmux_windows: sourceRows,
-    catalog_revision: String(report.catalog_revision ?? ''),
-    active_catalog_revision: String(report.catalog_revision ?? ''),
-    freshness: 'current',
-  };
-}
-
-function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
-  const tokens = Math.max(0, Number(rate) || 0) * Math.max(1, Number(duration) || 1) / 60;
-  const values = {
-    input: {direction: 'input', cache_role: 'none'},
-    cache_read: {direction: 'input', cache_role: 'read'},
-    cache_write: {direction: 'input', cache_role: 'write'},
-    output: {direction: 'output', cache_role: 'none'},
-    other: {direction: 'other', cache_role: 'none'},
-  }[dimension] || {direction: 'other', cache_role: 'none'};
-  return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
-}
-
 function jsDebugCurrentCpuProjectionValue(series, averageName) {
   const average = jsDebugCurrentSeriesValue(series, averageName);
   // CPU charts show utilization over the bucket, not its instantaneous peak. Using the
@@ -60871,7 +60456,7 @@ function jsDebugCurrentServiceLoadItem(record, source) {
   return serviceLoad[source];
 }
 
-function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost = null) {
+function jsDebugCurrentBucketRecord(bucket) {
   const series = bucket?.series || {};
   const duration = Math.max(1, Number(bucket?.duration) || 1);
   const record = {
@@ -60884,10 +60469,6 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
   };
   const agentRates = new Map();
   const modelRates = {};
-  const modelComponents = [];
-  let bucketMarginalMicroUsd = null;
-  let bucketApiListMicroUsd = null;
-  let bucketUsageTokens = null;
   for (const name of Object.keys(series)) {
     const value = jsDebugCurrentSeriesValue(series, name);
     if (value === null) continue;
@@ -60966,10 +60547,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
       const source = name.slice('service_rss_bytes:'.length);
       const service = jsDebugCurrentServiceLoadItem(record, source);
       Object.assign(service, {rss_total_bytes: value, rss_samples: 1, rss_min_bytes: value, rss_max_bytes: value});
-    } else if (name === 'cost_micro_usd') bucketMarginalMicroUsd = value;
-    else if (name === 'api_list_cost_micro_usd') bucketApiListMicroUsd = value;
-    else if (name === 'usage_tokens') bucketUsageTokens = value;
-    else if (name === 'browser_api_per_second') record.api_count = value * duration;
+    } else if (name === 'browser_api_per_second') record.api_count = value * duration;
     else if (name === 'browser_sse_per_second') record.sse_count = value * duration;
     else if (name === 'browser_latency_ms') { record.latency_total_ms = value; record.latency_count = 1; }
     else if (name === 'browser_bandwidth_bytes_per_second') record.bandwidth_bytes = value * duration;
@@ -60982,34 +60560,13 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
       const dimension = parts.shift();
       const model = parts.join(':') || 'unknown';
       if (dimension === 'output') modelRates[model] = {total: value, samples: 1, tokens: value * duration / 60, seconds: duration};
-      if (dimension !== 'all') modelComponents.push(jsDebugCurrentModelComponent(dimension, model, value, duration));
+      // Cost is rendered from the server's range report, not inferred from rates.
     }
   }
   const statusValues = ['ask_agent_total', 'run_agent_total', 'transition_agent_total', 'idle_agent_total'];
   if (statusValues.some(key => Number.isFinite(record[key]))) record.agent_activity_samples = 1;
   if (Object.keys(modelRates).length) agentRates.set('__models__', {key: '__models__', label: 'Models', total: 0, samples: 0, tokens: 0, seconds: duration, model_rates: modelRates});
   record.agent_token_rates = [...agentRates.values()];
-  if (bucketMarginalMicroUsd !== null || bucketApiListMicroUsd !== null || bucketUsageTokens !== null) {
-    const hasBucketPrice = bucketMarginalMicroUsd !== null || bucketApiListMicroUsd !== null;
-    const marginalMicroUsd = bucketMarginalMicroUsd ?? bucketApiListMicroUsd ?? 0;
-    record.cost_summary = {
-      range_report: false,
-      total_micro_usd: marginalMicroUsd,
-      total_token_quantity: bucketUsageTokens ?? 0,
-      known_micro_usd: marginalMicroUsd,
-      lower_micro_usd: marginalMicroUsd,
-      upper_micro_usd: marginalMicroUsd,
-      priced_count: hasBucketPrice && bucketUsageTokens !== null ? 1 : 0,
-      complete: hasBucketPrice,
-      unpriced_count: !hasBucketPrice && bucketUsageTokens !== null ? 1 : 0,
-      unpriced_token_quantity: !hasBucketPrice ? bucketUsageTokens ?? 0 : 0,
-      components: modelComponents,
-      own_components: modelComponents,
-    };
-    if (bucketApiListMicroUsd !== null) record.cost_summary.api_list_micro_usd = bucketApiListMicroUsd;
-  } else if (modelComponents.length) record.cost_summary = {components: modelComponents, own_components: modelComponents};
-  else if (includeRangeCost) record.cost_summary = {own_components: modelComponents};
-  if (includeRangeCost && rangeCost) record.cost_summary = {...(record.cost_summary || {}), ...jsDebugCurrentCostSummary(rangeCost), components: [...modelComponents, ...jsDebugCurrentCostSummary(rangeCost).components]};
   return record;
 }
 
@@ -61114,45 +60671,9 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
 function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
   const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
   clearJsDebugGraphData();
-  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
+  jsDebugCurrentCostReport = snapshot.cost_report || null;
+  buckets.forEach(bucket => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket)));
   updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
-}
-
-// The range-level cost total (snapshot.cost_report) belongs to exactly ONE bucket at a
-// time -- whichever one is currently latest -- never zero, never two: debugGraphCostSummaryForBuckets
-// SUMS every bucket carrying rangeReport===true, so two flagged buckets double the total and zero
-// flagged buckets silently reports 0. A delta only carries the buckets that actually changed, so if
-// the position that is latest right now was not itself touched by this delta (an older bucket was
-// corrected instead, or the latest position only just advanced), the per-bucket loop below would
-// never flag it -- while a PREVIOUS delta's now-stale latest bucket, if it WAS touched this round,
-// would have already lost its flag when jsDebugCurrentBucketRecord rebuilt it. This reconciliation
-// is the one owner that always leaves exactly the current latest bucket (if its record already
-// exists) holding the flag, regardless of which buckets this specific delta happened to touch.
-function debugGraphReconcileRangeCostOwner(latest, rangeCost, touchedLatestThisRound) {
-  const latestKey = latest
-    ? `${Math.floor(Number(latest.start) * 1000)}:${Math.max(jsDebugGraphRawBucketMs, Number(latest.duration) * 1000)}`
-    : null;
-  for (const [key, bucket] of jsDebugGraphBuckets) {
-    if (key === latestKey || !bucket.costSummary || bucket.costSummary.rangeReport !== true) continue;
-    bucket.costSummary = {...bucket.costSummary, rangeReport: false};
-  }
-  if (!latestKey || !rangeCost || touchedLatestThisRound) return;
-  // touchedLatestThisRound (an explicit flag from the caller, not costSummary.rangeReport) is
-  // the only correct signal for "did jsDebugCurrentBucketRecord already merge this bucket this
-  // round" -- rangeReport stays true across every subsequent round once EITHER that merge OR
-  // this very patch sets it, so reusing it here to mean "handled this round" silently froze a
-  // bucket's cost data the moment it stayed latest-and-untouched for two or more consecutive
-  // rounds (found by a third independent audit).
-  const latestBucket = jsDebugGraphBuckets.get(latestKey);
-  if (!latestBucket) return;
-  // ownCostComponents is a separate, stable field holding this bucket's true per-tick local
-  // components, updated only by a real touch (see debugGraphApplyServerCostSummary) -- never by
-  // this patch. Reading costSummary.components here instead would re-merge whatever range
-  // components a PREVIOUS round's patch already appended, growing unboundedly across
-  // consecutive untouched rounds instead of freshening to the current round's range data.
-  const ownComponents = latestBucket.ownCostComponents || [];
-  const rangeSummary = jsDebugCurrentCostSummary(rangeCost);
-  debugGraphApplyServerCostSummary(latestBucket, {...rangeSummary, components: [...ownComponents, ...rangeSummary.components], own_components: ownComponents});
 }
 
 function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
@@ -61161,15 +60682,11 @@ function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} =
   tombstones.forEach(tombstone => {
     if (tombstone?.kind === 'bucket') debugGraphDeleteServerRecord(tombstone.start, tombstone.duration);
   });
-  const latest = Array.isArray(snapshot?.buckets) ? snapshot.buckets.at(-1) : null;
-  let touchedLatestThisRound = false;
   buckets.forEach(bucket => {
-    const isLatest = bucket.start === latest?.start && bucket.duration === latest?.duration;
-    if (isLatest) touchedLatestThisRound = true;
     debugGraphDeleteServerRecord(bucket.start, bucket.duration);
-    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, isLatest, snapshot.cost_report));
+    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket));
   });
-  debugGraphReconcileRangeCostOwner(latest, snapshot.cost_report, touchedLatestThisRound);
+  if (delta.cost_report) jsDebugCurrentCostReport = delta.cost_report;
   updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
@@ -63252,9 +62769,9 @@ function yoCostPanelHtml() {
   const buckets = debugGraphDisplayBuckets(nowMs);
   const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
   const charts = buckets.length
-    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false, patternScope: 'cost'})
+    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {patternScope: 'cost'})
     : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
-  const costBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const costReport = jsDebugCurrentCostReport;
   const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
   const ageSeconds = refreshedAtMs > 0 ? Math.max(0, Math.floor((nowMs - refreshedAtMs) / 1000)) : null;
   const age = ageSeconds === null ? t('common.notAvailable') : relativeTimeFormat(ageSeconds);
@@ -63267,7 +62784,7 @@ function yoCostPanelHtml() {
   // rebuilt with YO!stats content by the graph-refresh loops); the readiness
   // sync toggles this overlay through its own targeted pass.
   const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphLayoutControlsHtml()}${refresh}${debugGraphRangeResolutionControlsHtml(nowMs)}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphLayoutControlsHtml()}${refresh}${debugGraphRangeResolutionControlsHtml(nowMs)}</div>${chartArea}</div>${debugGraphCostReportHtml(costReport, debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -63348,6 +62865,7 @@ function renderYoCostPanel(panel, {force = false} = {}) {
     anchors: [
       elementScrollAnchor('.js-yocost-scroll'),
       keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+      keyedDetailsOpenAnchor('.js-debug-cost-agent-row[data-js-debug-cost-agent-key]'),
     ],
   });
   delete panel.dataset.jsDebugGraphRefreshPending;
@@ -81844,6 +81362,7 @@ function startTerminal(session) {
     // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
     macOptionClickForcesSelection: true,
   });
+  term.yolomuxAgentKind = sessionAgentKind(session);
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.

@@ -80,7 +80,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         priced: {atoms: 2, tokens: 1020}, unpriced: {atoms: 1, tokens: 120},
       };
       return {
-        schema_version: 3,
+        schema_version: 4,
         total_micro_usd: 250000,
         total_api_list_micro_usd: 250000,
         total_tokens: 1140,
@@ -88,7 +88,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         priced: {atoms: 2, tokens: 1020},
         unpriced: {atoms: 1, tokens: 120},
         models: [{key: '0123456789abcdef01234567', provider: 'openai', model: 'gpt-5.6-sol', ...attribution}],
-        agents: [{key: '89abcdef0123456789abcdef', source: 'codex', label: 'yo8881|0|codex', ...attribution}],
+        agents: [{key: '89abcdef0123456789abcdef', source: 'codex', label: 'yo8881|0|codex', sources: [{source: 'codex', ...attribution}], ...attribution}],
         evidence: [{
           key: 'fedcba9876543210fedcba98', provider: 'openai', model: 'gpt-5.6-sol',
           dimension: 'output', direction: 'output', modality: 'text', cache_role: 'none',

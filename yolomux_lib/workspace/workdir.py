@@ -97,6 +97,8 @@ def agent_command(agent: str, dangerously_yolo: bool = False, terminal: str | No
         return "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust" if dangerously_yolo else "codex"
     if agent == "term":
         return terminal_command(terminal) or (os.environ.get("SHELL") or "bash")
+    if agent == "opencode":
+        return "opencode"
     # Deliberately NOT --bare: --bare makes Claude Code read auth strictly from
     # ANTHROPIC_API_KEY/apiKeyHelper and never from the OAuth credential file or
     # keychain, so a subscription/enterprise OAuth login shows "Not logged in".
@@ -104,7 +106,7 @@ def agent_command(agent: str, dangerously_yolo: bool = False, terminal: str | No
 
 def available_agent_commands() -> list[str]:
     heal_server_path()
-    agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
+    agents = [agent for agent in ("claude", "codex", "opencode") if shutil.which(agent)]
     # A plain terminal (a shell) is always launchable, so always offer Term — even when Claude/Codex
     # are installed (it used to be a no-agent fallback only, which left Term greyed "unavailable").
     return agents + ["term"]

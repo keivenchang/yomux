@@ -5,7 +5,7 @@
 
 This document owns exhaustive real-capture, fixture-replay, composer-geometry, and fixture-dump details. [`docs/specs/GUI.md`](../../docs/specs/GUI.md) retains the browser-facing fixed-footer and parity contract only.
 
-`tools/mockers/codex.py` and `tools/mockers/claude.py` are text-first prototype clients for driving Codex and Claude without scraping their terminal UIs. They share the terminal/readline/prompt/output/metrics layer in `tools/mockers/text_client_common.py`, but they talk to different upstream backends.
+`tools/mockers/codex.py`, `tools/mockers/claude.py`, and `tools/mockers/opencode.py` are text-first prototype clients for driving Codex, Claude, and OpenCode without scraping their terminal UIs. They share the terminal/readline/prompt/output/metrics layer in `tools/mockers/text_client_common.py` and the TUI renderer in `tools/mockers/common.py`, while each thin entry point supplies its upstream-specific identity and backend behavior.
 
 ## Shared Parent
 
@@ -43,7 +43,7 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/mockers/claude.py -C .
 
 ## Mock Agent Fixture Replay
 
-`tools/mockers/claude.py --mock` and `tools/mockers/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/mockers/common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
+`tools/mockers/claude.py --mock`, `tools/mockers/codex.py --mock`, and `tools/mockers/opencode.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/mockers/common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code, Codex CLI, and OpenCode chrome without launching the real clients for every case.
 
 - `mock list all`: print replayable prompt-corpus cases for the current agent, plus shared and idle fixtures.
 - `fixture <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.

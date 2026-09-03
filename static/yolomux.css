@@ -10633,6 +10633,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   height: 0;
   border-bottom: 1px solid currentColor;
   pointer-events: none;
+  overflow: hidden;
 }
 .terminal .xterm-rows span[style*="text-decoration: underline"],
 .terminal .xterm-rows span[style*="text-decoration-line: underline"] {

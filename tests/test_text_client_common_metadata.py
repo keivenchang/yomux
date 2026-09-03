@@ -226,6 +226,10 @@ def test_text_clients_accept_mock_mode(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["claude.py", "--mock"])
     assert claude.parse_args().mock is True
 
+    monkeypatch.setattr(sys, "argv", ["opencode.py", "--mock"])
+    from tools.mockers import opencode
+    assert opencode.parse_args().mock is True
+
 
 def test_text_clients_accept_dump_fixtures(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["codex.py", "--dump-fixtures"])

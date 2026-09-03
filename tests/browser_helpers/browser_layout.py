@@ -2575,7 +2575,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       }
       function fixtureStatsCostReport() {
         return {
-          schema_version: 3,
+          schema_version: 4,
           total_micro_usd: 0,
           total_api_list_micro_usd: 0,
           total_tokens: 0,

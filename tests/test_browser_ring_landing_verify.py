@@ -630,11 +630,11 @@ def _set_resolution_from_select(driver, target: int) -> None:
     resolution.select_by_value(value)
 
 
-def _show_gpu_util_and_cost_summary(driver) -> None:
+def _show_gpu_util(driver) -> None:
     menu = driver.find_element(By.CSS_SELECTOR, ".js-debug-panel [data-js-debug-chart-menu]")
     if menu.get_attribute("open") is None:
         menu.find_element(By.CSS_SELECTOR, "summary").click()
-    for chart_key in ("gpuUtil", "costSummary"):
+    for chart_key in ("gpuUtil",):
         selector = f'.js-debug-panel [data-js-debug-chart-toggle="{chart_key}"]'
         toggle = driver.find_element(By.CSS_SELECTOR, selector)
         if not toggle.is_selected():
@@ -651,7 +651,7 @@ def _prove_focused_chart_control_converges(driver) -> dict[str, object]:
     baseline = _graph_state(driver)
     accepted = driver.execute_script(
         """
-        const toggle = document.querySelector('.js-debug-panel [data-js-debug-chart-toggle="costSummary"]');
+        const toggle = document.querySelector('.js-debug-panel [data-js-debug-chart-toggle="gpuUtil"]');
         toggle.focus({preventScroll: true});
         const controller = jsDebugCurrentStatsClientState.client.controller();
         const current = controller.generation();
@@ -665,13 +665,13 @@ def _prove_focused_chart_control_converges(driver) -> dict[str, object]:
         };
         """
     )
-    assert accepted == {"key": "costSummary", "focused": True, "accepted": True}, accepted
+    assert accepted == {"key": "gpuUtil", "focused": True, "accepted": True}, accepted
 
     def converged(_driver):
         state = _graph_state(driver)
         if state["controllerGenerationKey"] == baseline["controllerGenerationKey"]:
             return False
-        if state["focusedChartToggle"] != "costSummary":
+        if state["focusedChartToggle"] != "gpuUtil":
             return False
         if state["pendingGenerationKey"]:
             return False
@@ -863,10 +863,10 @@ def test_ring_landing_real_page_restart_and_zero_gap(
 
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
         _wait_pair(browser, 900, "AUTO", 10)
-        _show_gpu_util_and_cost_summary(browser)
+        _show_gpu_util(browser)
         focused_control = _prove_focused_chart_control_converges(browser)
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
-        _show_gpu_util_and_cost_summary(browser)
+        _show_gpu_util(browser)
         first_pairs, first_zero_gap = _exercise_pairs(browser)
         matching_gap = [
             span for span in first_zero_gap["noData"]
@@ -899,7 +899,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert latest_statsd_pid == restarted_statsd["pid"]
         browser_started = time.monotonic()
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
-        _show_gpu_util_and_cost_summary(browser)
+        _show_gpu_util(browser)
         _set_range_from_slider(browser, 300)
         _set_resolution_from_select(browser, 10)
         restarted = _wait_pair(browser, 300, 10, 10)
@@ -1139,7 +1139,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         assert pre_page_snapshot["cost_report"]["total_tokens"] == 12, pre_page_snapshot
 
         _load_real_stats_page(request, browser, prepared.runtime, gate_auth_credentials)
-        _show_gpu_util_and_cost_summary(browser)
+        _show_gpu_util(browser)
         _set_range_from_slider(browser, 3_600)
         _set_resolution_from_select(browser, 60)
         rendered = _wait_pair(browser, 3_600, 60, 60)

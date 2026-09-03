@@ -44,6 +44,7 @@ CREATE_TRANSITION_BUDGET_SECONDS = 2.0
 MOCK_READY_TEXT = {
     "claude": "Claude Code v",
     "codex": "OpenAI Codex (v",
+    "opencode": "Ask anything",
 }
 
 # Every browser test in this module is marked individually so the one non-browser negative
@@ -53,7 +54,7 @@ pytestmark = pytest.mark.socket
 
 def _write_mock_agent_wrapper(path: Path, agent: str) -> None:
     mock_path = REPO_ROOT / "tools" / "mockers" / f"{agent}.py"
-    auth_args = ["auth", "status"] if agent == "claude" else ["login", "status"]
+    auth_args = ["auth", "status"] if agent in {"claude", "opencode"} else ["login", "status"]
     auth_output = json.dumps({"loggedIn": True}) if agent == "claude" else "Logged in"
     path.write_text(
         "\n".join(
@@ -359,6 +360,15 @@ def test_r3_launch_codex_mock_is_live_and_detected_as_codex(browser, gate_live_s
     created = _create_session_in_browser(browser, "codex")
     assert created["terminal"] is True, created
     _assert_agent_detected(browser, gate_live_server, "codex")
+
+
+@pytest.mark.browser
+def test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode(browser, gate_live_server, monkeypatch):
+    _prepare_launch_runtime(monkeypatch, gate_live_server)
+    load_gate_browser(browser, gate_live_server)
+    created = _create_session_in_browser(browser, "opencode")
+    assert created["terminal"] is True, created
+    _assert_agent_detected(browser, gate_live_server, "opencode")
 
 
 @pytest.mark.browser

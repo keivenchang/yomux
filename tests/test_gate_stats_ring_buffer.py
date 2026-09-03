@@ -2350,8 +2350,8 @@ def test_schema_v8_creation_leaves_v7_database_untouched(tmp_path: Path) -> None
     SQLite file grows `-wal`/`-shm` sidecars, so their absence is the evidence that nothing looked
     at it. That is the whole rollback boundary: the v7 build keeps running against its own file.
     """
-    assert storage.SCHEMA_VERSION == 8
-    assert storage.DATABASE_FILENAME == "stats-v8.sqlite3"
+    assert storage.SCHEMA_VERSION == 9
+    assert storage.DATABASE_FILENAME == "stats-v9.sqlite3"
     previous = tmp_path / "stats-v7.sqlite3"
     original = b"existing v7 database belongs to its running build"
     previous.write_bytes(original)

@@ -834,14 +834,14 @@ def test_cursor_presence_prevents_stale_delta_when_a_dimension_reappears(tmp_pat
 
 def test_cursor_state_is_reset_when_the_stats_database_is_replaced(tmp_path: Path) -> None:
     cursor_path = tmp_path / "cursors.json"
-    database = tmp_path / "stats-v8.sqlite3"
+    database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"first")
     store = opencode.OpenCodeCursorStore(cursor_path)
     assert store.reset_for_database(database) is None
     store.prepare({"part:output": 10}, event_revisions={"part:output": "rev-1"})
     store.commit()
 
-    replacement = tmp_path / "stats-v8.sqlite3.new"
+    replacement = tmp_path / "stats-v9.sqlite3.new"
     replacement.write_bytes(b"second")
     replacement.replace(database)
 
@@ -855,7 +855,7 @@ def test_cursor_state_is_reset_when_the_stats_database_is_replaced(tmp_path: Pat
 
 def test_cursor_state_is_preserved_for_normal_stats_database_writes(tmp_path: Path) -> None:
     cursor_path = tmp_path / "cursors.json"
-    database = tmp_path / "stats-v8.sqlite3"
+    database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"stable")
     store = opencode.OpenCodeCursorStore(cursor_path)
     store.reset_for_database(database)

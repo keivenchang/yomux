@@ -2837,7 +2837,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const opencodeHtml = api.agentIcon('opencode');
     assert.ok(opencodeHtml.includes('agent-icon opencode') && opencodeHtml.includes('<svg'), 'OpenCode uses a real peer icon instead of a text abbreviation');
     assert.ok(opencodeHtml.includes('cx="9" cy="12"') && opencodeHtml.includes('M20 7.5'), 'OpenCode icon renders crossed O and C strokes');
-    assert.deepStrictEqual({...api.agentClientSpec('opencode')}, {label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}, 'OpenCode is represented by the shared visible-client capability owner');
+    const opencodeSpec = api.agentClientSpec('opencode');
+    assert.deepStrictEqual({...opencodeSpec, urlContinuationLayouts: [...opencodeSpec.urlContinuationLayouts]}, {label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false, urlContinuationLayouts: ['xterm-soft-wrap', 'hanging-indent', 'repeated-gutter', 'quote-gutter']}, 'OpenCode is represented by the shared visible-client capability owner');
     assert.equal(api.visibleAgentClient('opencode'), 'opencode', 'visible-client selection accepts OpenCode through the shared capability owner');
     assert.equal(windowBarHtml.includes('(pid='), false, 'tmux sub-window button labels do not show process pids');
     assert.equal(windowBarHtml.includes('3:node'), false, 'DOIT.53 P2: process-aware agent labels beat raw tmux sub-window names like node');
@@ -6521,7 +6522,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'The_Earth_seen_from_Apollo_17.jpg',
     ];
     const twoLine = [gutter + parts[0], gutter + parts[1]];
-    const twoLineTerm = {cols: twoLine[0].length + 2, buffer: {active: {getLine: index => terminalLine(twoLine[index] || '', false)}}};
+    const twoLineTerm = {cols: twoLine[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(twoLine[index] || '', false)}}};
     const twoLineRefs = api.terminalWrappedLineLinks(twoLineTerm, 2);
     assert.equal(twoLineRefs.length, 1, 'the two-line OpenCode URL is one logical reference');
     assert.equal(twoLineRefs[0].text, parts.join(''), 'the two-line URL drops only the repeated gutter');
@@ -6534,7 +6535,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     ];
     const threeLine = threeLineParts.map(part => gutter + part);
     assert.deepStrictEqual(threeLine.map(line => line.length), [54, 49, 48], 'the regression uses the reported physical row lengths');
-    const threeLineTerm = {cols: 56, buffer: {active: {getLine: index => terminalLine(threeLine[index] || '', false)}}};
+    const threeLineTerm = {cols: 56, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(threeLine[index] || '', false)}}};
     const expected = threeLineParts.join('');
     for (const row of [1, 2, 3]) {
       const refs = api.terminalWrappedLineLinks(threeLineTerm, row);
@@ -6542,22 +6543,26 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(refs[0].text, expected, `the three-line OpenCode URL is complete from row ${row}`);
     }
     const prose = [gutter + 'https://example.test/complete', gutter + 'next step'];
-    const proseTerm = {cols: prose[0].length + 2, buffer: {active: {getLine: index => terminalLine(prose[index] || '', false)}}};
+    const proseTerm = {cols: prose[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(prose[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(proseTerm, 1)[0].text, 'https://example.test/complete', 'a complete URL remains unchanged');
     assert.equal(api.terminalWrappedLineLinks(proseTerm, 2).some(ref => ref.text.includes('next step')), false, 'same-gutter prose is not joined to a URL');
+    const token = [gutter + 'https://example.test/complete', gutter + 'next-token'];
+    const tokenTerm = {cols: 80, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(token[index] || '', false)}}};
+    assert.equal(api.terminalWrappedLineLinks(tokenTerm, 1)[0].text, 'https://example.test/complete', 'a completed quote-gutter URL does not absorb an adjacent token');
+    assert.equal(api.terminalWrappedLineLinks(tokenTerm, 2).length, 0, 'an adjacent quote-gutter token is not exposed as a URL continuation');
     const completeAtEdge = [gutter + 'https://example.test/complete', gutter + 'next-part'];
-    const completeAtEdgeTerm = {cols: 34, buffer: {active: {getLine: index => terminalLine(completeAtEdge[index] || '', false)}}};
+    const completeAtEdgeTerm = {cols: 34, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(completeAtEdge[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].text, 'https://example.test/complete', 'a complete same-gutter URL at the terminal edge remains independent');
     assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 1)[0].range.end.y, 1, 'a complete same-gutter URL does not underline the next row');
     assert.equal(api.terminalWrappedLineLinks(completeAtEdgeTerm, 2).length, 0, 'the adjacent same-gutter text is not promoted into a URL');
     const punctuation = [gutter + 'https://example.test/a_(b)?x=1&y=2-', gutter + 'tail.json).'];
-    const punctuationTerm = {cols: punctuation[0].length + 2, buffer: {active: {getLine: index => terminalLine(punctuation[index] || '', false)}}};
+    const punctuationTerm = {cols: punctuation[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(punctuation[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(punctuationTerm, 2)[0].text, 'https://example.test/a_(b)?x=1&y=2-tail.json', 'URL punctuation is trimmed only at the logical URL end');
 
     for (const delimiter of ['/', '-', '?', '&', '=', '#', '%']) {
       const continuation = delimiter === '%' ? 'a-next-part' : 'next-part';
       const wrapped = [gutter + `https://example.test/path${delimiter}`, gutter + continuation];
-      const wrappedTerm = {cols: wrapped[0].length + 2, buffer: {active: {getLine: index => terminalLine(wrapped[index] || '', false)}}};
+      const wrappedTerm = {cols: wrapped[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(wrapped[index] || '', false)}}};
       const links = api.terminalWrappedLineLinks(wrappedTerm, 1);
       assert.equal(links.length, 1, `${delimiter} split keeps an adjacent URL token together`);
       assert.equal(links[0].text, `https://example.test/path${delimiter}${continuation}`, `${delimiter} split preserves the URL text`);
@@ -6565,15 +6570,242 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
 
     const separated = [gutter + 'https://example.test/path/', gutter + 'unrelated token', gutter + 'next-part'];
-    const separatedTerm = {cols: separated[0].length + 2, buffer: {active: {getLine: index => terminalLine(separated[index] || '', false)}}};
+    const separatedTerm = {cols: separated[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(separated[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(separatedTerm, 1)[0].text, 'https://example.test/path/', 'intervening prose ends the URL group');
     assert.equal(api.terminalWrappedLineLinks(separatedTerm, 2).some(ref => ref.text.includes('unrelated')), false, 'intervening prose is not promoted to a URL');
     assert.equal(api.terminalWrappedLineLinks(separatedTerm, 3).length, 0, 'a token after intervening prose cannot join the earlier URL');
 
     const adjacent = [gutter + 'https://example.test/first/', gutter + 'first-tail', gutter + 'https://example.test/second/', gutter + 'second-tail'];
-    const adjacentTerm = {cols: adjacent[0].length + 2, buffer: {active: {getLine: index => terminalLine(adjacent[index] || '', false)}}};
+    const adjacentTerm = {cols: adjacent[0].length + 2, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => terminalLine(adjacent[index] || '', false)}}};
     assert.equal(api.terminalWrappedLineLinks(adjacentTerm, 1)[0].text, 'https://example.test/first/first-tail', 'first adjacent URL block stays separate');
     assert.equal(api.terminalWrappedLineLinks(adjacentTerm, 3)[0].text, 'https://example.test/second/second-tail', 'second adjacent URL block stays separate');
+  });
+
+  test('client registry exposes explicit URL continuation layouts and unknown clients fail closed', () => {
+    const api = loadYolomux();
+    const specs = ['claude', 'codex', 'opencode'].map(kind => ({kind, layouts: [...api.agentClientSpec(kind).urlContinuationLayouts]}));
+    assert.deepStrictEqual(specs, [
+      {kind: 'claude', layouts: ['xterm-soft-wrap', 'hanging-indent']},
+      {kind: 'codex', layouts: ['xterm-soft-wrap', 'hanging-indent']},
+      {kind: 'opencode', layouts: ['xterm-soft-wrap', 'hanging-indent', 'repeated-gutter', 'quote-gutter']},
+    ], 'each supported CLI declares its source-level URL continuation layouts');
+    const lines = [terminalLine('https://example.test/path-that-reaches-edge'), terminalLine('continuation', false)];
+    const unknown = {cols: lines[0].translateToString(true).length, yolomuxAgentKind: 'unknown', buffer: {active: {getLine: index => lines[index] || null}}};
+    assert.equal(api.terminalWrappedLineLinks(unknown, 1)[0].text, 'https://example.test/path-that-reaches-edge', 'unknown clients do not enable inferred hard-wrap layouts');
+  });
+
+
+  test('registered CLI URL layouts cover soft wraps, hanging indents, and repeated gutters', () => {
+    const api = loadYolomux();
+    const cases = [
+      {
+        kind: 'claude',
+        layout: 'hanging-indent',
+        rows: ['https://example.test/report/build-', '  12345.html'],
+        expected: 'https://example.test/report/build-12345.html',
+      },
+      {
+        kind: 'codex',
+        layout: 'xterm-soft-wrap',
+        rows: ['https://example.test/report/build-', '12345.html'],
+        expected: 'https://example.test/report/build-12345.html',
+        wrappedRows: [false, true],
+      },
+      {
+        kind: 'opencode',
+        layout: 'repeated-gutter',
+        rows: ['     https://example.test/report/build-', '     12345.html'],
+        expected: 'https://example.test/report/build-12345.html',
+      },
+    ];
+    for (const item of cases) {
+      const lines = item.rows.map((text, index) => terminalLine(text, item.wrappedRows?.[index] === true));
+      const term = {cols: lines[0].translateToString(true).length, yolomuxAgentKind: item.kind, buffer: {active: {getLine: index => lines[index] || null}}};
+      assert.deepStrictEqual([...api.agentClientSpec(item.kind).urlContinuationLayouts].includes(item.layout), true, `${item.kind} registers ${item.layout}`);
+      assert.equal(api.terminalWrappedLineLinks(term, 1)[0].text, item.expected, `${item.kind} joins its ${item.layout} URL fixture`);
+      assert.equal(api.terminalWrappedLineLinks(term, 2)[0].text, item.expected, `${item.kind} resolves the same URL from its continuation row`);
+    }
+  });
+
+  test('OpenCode quote-gutter URL continuations preserve the blue rule as non-URL prefix', () => {
+    const api = loadYolomux();
+    const prefix = '  │ ';
+    const parts = ['https://example.test/report/build-', '12345.html?check=true&original_file=conformance/CONFORMANCE_v2.html'];
+    const width = 65;
+    const lines = parts.map(part => ({isWrapped: false, length: width, translateToString: () => `${prefix}${part}`.padEnd(width, ' ')}));
+    const term = {cols: width, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
+    const reference = api.terminalWrappedLineReferences(term, 2).find(item => item.type === 'url');
+    assert.equal(reference.text, parts.join(''), 'the quote-gutter URL remains one logical reference');
+    assert.deepStrictEqual(canonical(reference.range.segments), parts.map((part, index) => ({
+      start: {x: prefix.length + 1, y: index + 1}, end: {x: prefix.length + part.length, y: index + 1},
+    })), 'the blue quote gutter is excluded from every physical URL segment');
+  });
+
+  test('OpenCode quote-gutter URL scan stops before preceding prose', () => {
+    const api = loadYolomux();
+    const prefix = '  │ ';
+    const rows = [`${prefix}Intro prose`, `${prefix}https://example.test/path/`, `${prefix}continuation.html`];
+    const lines = rows.map(row => terminalLine(row, false));
+    const term = {cols: 80, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
+    const expected = 'https://example.test/path/continuation.html';
+    assert.equal(api.terminalWrappedLineLinks(term, 2).find(item => item.type === 'url')?.text, expected, 'URL starts after unrelated quote-gutter prose');
+    assert.equal(api.terminalWrappedLineLinks(term, 3).find(item => item.type === 'url')?.text, expected, 'URL continuation resolves without absorbing preceding prose');
+  });
+
+  test('OpenCode quote-gutter URLs continue when the first row is shorter than the reported terminal width', () => {
+    const api = loadYolomux();
+    const prefix = '  │ ';
+    const rows = [
+      `${prefix}https://github.com/ai-dynamo/frontend-crates/actions/runs/26919558600/job/`,
+      `${prefix}919558600?check_suite_focus=true&original_file=conformance/CONFORMANCE_v2.html`,
+    ];
+    const lines = rows.map(row => terminalLine(row, false));
+    const term = {cols: 120, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
+    for (const row of [1, 2]) {
+      const links = api.terminalWrappedLineLinks(term, row).filter(item => item.type === 'url');
+      assert.equal(links.length, 1, `quote-gutter URL is clickable from row ${row}`);
+      assert.equal(links[0].text, rows.map(value => value.slice(prefix.length)).join(''), `quote-gutter URL is complete from row ${row}`);
+    }
+  });
+
+  await testAsync('OpenCode URLs remain underlined and clickable across terminal widths', async () => {
+    const api = loadYolomux('', ['opencode-widths']);
+    const url = 'https://example.test/conformance/CONFORMANCE_v2.html?check=true&original_file=tests/GUI.md';
+    const gutter = '  │ ';
+    for (const width of [40, 55, 80, 109]) {
+      const available = width - gutter.length;
+      const parts = [];
+      for (let offset = 0; offset < url.length; offset += available) parts.push(url.slice(offset, offset + available));
+      const lines = parts.map(part => ({
+        isWrapped: false,
+        length: width,
+        translateToString: () => (gutter + part).padEnd(width, ' '),
+      }));
+      const term = {
+        cols: width,
+        rows: lines.length,
+        yolomuxAgentKind: 'opencode',
+        buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}},
+      };
+      const reference = api.terminalWrappedLineReferences(term, 1).find(item => item.type === 'url');
+      assert.equal(reference?.text, url, `width ${width} preserves the complete URL`);
+      assert.equal(reference?.range?.segments?.length || 1, parts.length, `width ${width} creates one physical URL segment per row`);
+      for (let row = 1; row <= parts.length; row += 1) {
+        const links = await api.terminalReferenceProviderLinks('opencode-widths', term, row);
+        assert.equal(links.length, 1, `width ${width} exposes one xterm link on row ${row}`);
+        assert.equal(links[0].text, url, `width ${width} keeps the complete href on row ${row}`);
+        assert.equal(api.terminalReferenceAtPosition(term, {x: gutter.length + 1, y: row})?.text, url, `width ${width} hits the URL start`);
+        assert.equal(api.terminalReferenceAtPosition(term, {x: 1, y: row}), null, `width ${width} excludes the quote gutter`);
+        if (gutter.length + parts[row - 1].length < width) {
+          assert.equal(api.terminalReferenceAtPosition(term, {x: width, y: row}), null, `width ${width} excludes padded tail cells`);
+        }
+      }
+    }
+  });
+
+  await testAsync('OpenCode mock image URLs reflow into provider links at narrow and wide widths', async () => {
+    const api = loadYolomux('', ['opencode-image-urls']);
+    const url = 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg';
+    for (const width of [40, 55, 80, 109]) {
+      const parts = [];
+      for (let offset = 0; offset < url.length; offset += width) parts.push(url.slice(offset, offset + width));
+      const lines = parts.map((part, index) => terminalLine(part, index > 0));
+      const term = {
+        cols: width,
+        rows: parts.length,
+        yolomuxAgentKind: 'opencode',
+        buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}},
+      };
+      for (let row = 1; row <= parts.length; row += 1) {
+        const links = await api.terminalReferenceProviderLinks('opencode-image-urls', term, row);
+        assert.equal(links.length, 1, `width ${width} provides the image URL from row ${row}`);
+        assert.equal(links[0].text, url, `width ${width} retains the full image URL from row ${row}`);
+        assert.equal(links[0].range.start.y, row, `width ${width} gives xterm only row ${row}'s physical range`);
+      }
+    }
+  });
+
+  await testAsync('OpenCode slash-wrapped mock URLs remain one clickable reference', async () => {
+    const api = loadYolomux('', ['opencode-slash-wrap']);
+    const rows = [
+      '   https://upload.wikimedia.org/',
+      '   wikipedia/commons/thumb/3/3f/',
+      '   Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg',
+    ];
+    const width = 58;
+    const lines = rows.map(row => terminalLine(row.padEnd(width, ' '), false));
+    const term = {
+      cols: width,
+      rows: rows.length,
+      yolomuxAgentKind: 'opencode',
+      buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}},
+    };
+    const expected = 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg';
+    for (let row = 1; row <= rows.length; row += 1) {
+      const links = await api.terminalReferenceProviderLinks('opencode-slash-wrap', term, row);
+      assert.equal(links.length, 1, `slash-wrapped row ${row} provides one link`);
+      assert.equal(links[0].text, expected, `slash-wrapped row ${row} preserves the complete URL`);
+      assert.deepStrictEqual(canonical(links[0].decorations), {underline: true, pointerCursor: false}, `slash-wrapped row ${row} is visibly underlined`);
+    }
+  });
+
+  await testAsync('OpenCode short Unsplash query URL remains linked across a hard split', async () => {
+    const api = loadYolomux('', ['opencode-unsplash-wrap']);
+    const rows = [
+      '    https://images.unsplash.com/photo-1507525428034-b723cf961d3e?au',
+      '    to=format&fit=crop&w=2400&q=90',
+    ];
+    const term = {
+      cols: 67,
+      rows: rows.length,
+      yolomuxAgentKind: 'opencode',
+      buffer: {active: {viewportY: 0, getLine: index => terminalLine(rows[index] || '', false)}},
+    };
+    const expected = 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=2400&q=90';
+    for (let row = 1; row <= rows.length; row += 1) {
+      const links = await api.terminalReferenceProviderLinks('opencode-unsplash-wrap', term, row);
+      assert.equal(links.length, 1, `Unsplash row ${row} has one link`);
+      assert.equal(links[0].text, expected, `Unsplash row ${row} retains the logical URL`);
+      assert.deepStrictEqual(canonical(links[0].decorations), {underline: true, pointerCursor: false}, `Unsplash row ${row} is underlined`);
+    }
+  });
+
+  await testAsync('OpenCode prose-prefixed image URL remains linked across slash splits', async () => {
+    const api = loadYolomux('', ['opencode-prose-url-wrap']);
+    const rows = [
+      '    See this image: https://upload.wikimedia.org/wikipedia/commons/',
+      '    thumb/3/3f/Fronalpstock_big.jpg/',
+      '    1280px-Fronalpstock_big.jpg?download=true&source=terminal-test.',
+    ];
+    const term = {
+      cols: 72,
+      rows: rows.length,
+      yolomuxAgentKind: 'opencode',
+      buffer: {active: {viewportY: 0, getLine: index => terminalLine(rows[index] || '', false)}},
+    };
+    const expected = 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg?download=true&source=terminal-test';
+    for (let row = 1; row <= rows.length; row += 1) {
+      const links = await api.terminalReferenceProviderLinks('opencode-prose-url-wrap', term, row);
+      assert.equal(links.length, 1, `prose URL row ${row} has one link`);
+      assert.equal(links[0].text, expected, `prose URL row ${row} retains the logical URL`);
+      assert.deepStrictEqual(canonical(links[0].decorations), {underline: true, pointerCursor: false}, `prose URL row ${row} is underlined`);
+    }
+  });
+
+  test('wide Unicode URL characters use terminal cell columns for every physical segment', () => {
+    const api = loadYolomux();
+    const lines = [terminalLine('https://example.test/path?原始文件=', false), terminalLine('conformance/文件.html', true)];
+    const term = {
+      cols: 35,
+      unicode: {wcwidth: codePoint => /[^\x00-\x7f]/u.test(String.fromCodePoint(codePoint)) ? 2 : 1},
+      buffer: {active: {getLine: index => lines[index] || null}},
+    };
+    const reference = api.terminalWrappedLineReferences(term, 1).find(item => item.type === 'url');
+    assert.equal(reference.text, 'https://example.test/path?原始文件=conformance/文件.html', 'wide-character URL remains one logical reference');
+    assert.deepStrictEqual(canonical(reference.range.segments), [
+      {start: {x: 1, y: 1}, end: {x: 35, y: 1}},
+      {start: {x: 1, y: 2}, end: {x: 21, y: 2}},
+    ], 'each URL segment uses xterm cell columns rather than JavaScript string offsets');
   });
 
   test('padded xterm rows preserve OpenCode URL grouping and hit coordinates', () => {
@@ -6590,7 +6822,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       length: width,
       translateToString: () => (gutter + part).padEnd(width, ' '),
     }));
-    const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+    const term = {cols: width, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
     const expected = parts.join('');
     for (const row of [1, 2, 3]) {
       const links = api.terminalWrappedLineLinks(term, row);
@@ -6607,6 +6839,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         assert.equal(api.terminalReferenceAtPosition(term, {x, y}), null, `padded live-style gutter column ${x} on row ${y} is not a URL hit`);
       }
     }
+
+    const punctuation = 'https://example.test/report.html.';
+    const quoted = '"https://example.test/report.html"';
+    for (const value of [punctuation, quoted]) {
+      const line = terminalLine(value, false);
+      const term = {cols: value.length, buffer: {active: {getLine: () => line}}};
+      const url = api.terminalWrappedLineReferences(term, 1).find(item => item.type === 'url');
+      assert.equal(url.text, 'https://example.test/report.html', 'sentence punctuation and quotes are excluded only at the complete URL boundary');
+    }
     assert.equal(api.terminalReferenceAtPosition(term, {x: gutter.length + 1, y: 2})?.type, 'url', 'a URL continuation character is a hit in the padded live-style buffer');
     assert.equal(api.terminalReferenceAtPosition(term, {x: width, y: 2}), null, 'the padded blank tail is not treated as a URL hit');
   });
@@ -6616,7 +6857,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const gutter = '     ';
     const parts = ['https://example.test/path/', 'continuation?x=1'];
     const lines = parts.map(part => terminalLine(gutter + part, false));
-    const term = {cols: lines[0].translateToString(true).length + 2, buffer: {active: {getLine: index => lines[index] || null}}};
+    const term = {cols: lines[0].translateToString(true).length + 2, yolomuxAgentKind: 'opencode', unicode: {wcwidth: codePoint => String.fromCodePoint(codePoint).length}, buffer: {active: {getLine: index => lines[index] || null}}};
     const reference = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'url');
     assert.deepStrictEqual(canonical(reference.range), {start: {x: gutter.length + 1, y: 1}, end: {x: gutter.length + parts[1].length, y: 2}}, 'logical URL range retains the real first and final columns');
     for (const y of [1, 2]) {
@@ -6673,7 +6914,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         length: width,
         translateToString: () => (gutter + part).padEnd(width, ' '),
       }));
-      const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+    const term = {cols: width, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
       const references = api.terminalWrappedLineReferences(term, 1).filter(ref => ref.type === 'url');
       assert.equal(references.length, 1, `${item.name} is one URL reference`);
       assert.equal(references[0].text, item.expected, `${item.name} keeps every wrapped URL character`);
@@ -6705,7 +6946,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       length: width,
       translateToString: trimRight => (trimRight ? (gutter + part).padEnd(width, ' ') : gutter + part),
     }));
-    const term = {cols: width, rows: 3, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
+    const term = {cols: width, rows: 3, yolomuxAgentKind: 'opencode', buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
 
     for (const y of [1, 2, 3]) {
       const references = api.terminalWrappedLineReferences(term, y).filter(ref => ref.type === 'url');
@@ -6718,7 +6959,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         text: expected,
         range: {start: {x: gutter.length + 1, y: index + 1}, end: {x: gutter.length + part.length, y: index + 1}},
       })).filter(item => item.range.start.y === y), `xterm provider retains the complete URL text and exact physical range for row ${y}`);
-      assert.deepStrictEqual(canonical(providerLinks.map(link => link.decorations)), [{underline: false, pointerCursor: false}], 'the physical URL link defers underline painting to the shared all-segment hover owner');
+      assert.deepStrictEqual(canonical(providerLinks.map(link => link.decorations)), [{underline: true, pointerCursor: false}], 'every physical URL row is visibly underlined before hover');
       assert.equal(providerLinks.every(link => typeof link.hover === 'function' && typeof link.leave === 'function'), true, 'the physical URL link has the shared hover/leave decoration callbacks');
     }
 
@@ -6840,7 +7081,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         length: width,
         translateToString: () => part.padEnd(width, ' '),
       }));
-      const term = {cols: width, buffer: {active: {getLine: index => lines[index] || null}}};
+      const term = {cols: width, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
       for (const row of item.parts.map((_, index) => index + 1)) {
         const references = api.terminalWrappedLineReferences(term, row).filter(ref => ref.type === 'url');
         assert.equal(references.length, 1, `${item.name} is one URL reference from row ${row}`);
@@ -6942,6 +7183,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.terminal\s*\{[\s\S]*--terminal-file-link-underline:\s*rgb\(125 211 252 \/ 0\.50\)[\s\S]*--terminal-file-link-underline-hover:\s*rgb\(125 211 252 \/ 0\.60\)/.test(terminalCss), 'dark terminal existing-file underlines stay visible on dark backgrounds');
     assert.ok(/\.terminal\[data-terminal-theme="light"\]\s*\{[\s\S]*--terminal-file-link-underline:\s*rgb\(3 105 161 \/ 0\.48\)[\s\S]*--terminal-file-link-underline-hover:\s*rgb\(3 105 161 \/ 0\.58\)/.test(terminalCss), 'light terminal existing-file underlines stay visible on white backgrounds');
     assert.ok(/\.terminal-file-link-underlines\s*\{[\s\S]*z-index:\s*var\(--z-terminal-overlay-low\)[\s\S]*pointer-events:\s*none/.test(terminalCss), 'persistent terminal file underlines render above xterm without stealing hover or selection');
+    assert.ok(/const coordinateParent = container\.querySelector\?\.\('\.xterm-screen'\) \|\| container;[\s\S]*coordinateParent\.appendChild\(layer\)/.test(linkProviderSource), 'URL underline overlays share the xterm screen coordinate system');
     assert.ok(/\.terminal-file-link-underline\s*\{[\s\S]*border-bottom:\s*1px solid var\(--terminal-file-link-underline\)/.test(terminalCss), 'persistent terminal file underlines are a one-pixel cue');
     assert.ok(/\.terminal-file-link-underline--hover\s*\{[\s\S]*border-bottom-color:\s*var\(--terminal-file-link-underline-hover\)[\s\S]*border-bottom-width:\s*1px/.test(terminalCss), 'hovered resolved terminal file refs keep a subtle underline overlay');
     assert.ok(/\.terminal \.xterm-rows span\[style\*="text-decoration: underline"\],[\s\S]*span\[style\*="text-decoration-line: underline"\]\s*\{[\s\S]*text-decoration-color:\s*currentColor !important[\s\S]*text-decoration-thickness:\s*1px !important[\s\S]*text-underline-offset:\s*2px !important/.test(terminalCss), 'xterm hover-underlined URL/file spans use the hovered text color and a subtle underline');

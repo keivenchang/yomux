@@ -17,6 +17,7 @@ import textwrap
 import time
 import tty
 import uuid
+import unicodedata
 
 import yaml
 
@@ -44,6 +45,34 @@ PERMISSION_STYLE = "claude"
 STARTUP_STYLE = "default"
 CODEX_BYPASS_HOOK_TRUST = False
 CODEX_DANGER_FULL_ACCESS = False
+OPENCODE_QUOTE_GUTTER = "┃"
+OPENCODE_BLUE = "\x1b[38;5;75m"
+OPENCODE_MUTED = "\x1b[38;5;8m"
+OPENCODE_TEXT = "\x1b[38;5;255m"
+OPENCODE_ELEMENT_BG = "\x1b[48;5;234m"
+OPENCODE_ELEMENT_FG = "\x1b[38;5;234m"
+OPENCODE_WARNING = "\x1b[38;5;215m"
+OPENCODE_VERSION = "1.18.26"
+OPENCODE_COST = "$0.14-$0.8808/1M"
+OPENCODE_PROVIDER = "GPU Inference Hub"
+OPENCODE_WORKING_FRAMES = (
+    ("■⬝⬝⬝⬝⬝⬝⬝", (75, 235, 235, 235, 235, 235, 235, 235)),
+    ("■■⬝⬝⬝⬝⬝⬝", (75, 74, 235, 235, 235, 235, 235, 235)),
+    ("■■■⬝⬝⬝⬝⬝", (75, 74, 61, 239, 235, 235, 235, 235)),
+    ("■■■■⬝⬝⬝⬝", (75, 74, 61, 239, 236, 235, 235, 235)),
+    ("■■■■■⬝⬝⬝", (75, 74, 61, 239, 236, 235, 235, 235)),
+    ("■■■■■■⬝⬝", (75, 74, 61, 239, 236, 235, 60, 60)),
+    ("⬝■■■■■■⬝", (60, 75, 74, 61, 239, 236, 235, 60)),
+    ("⬝⬝■■■■■■", (60, 60, 75, 74, 61, 239, 236, 235)),
+    ("⬝⬝⬝■■■■■", (238, 238, 238, 75, 74, 61, 239, 236)),
+    ("⬝⬝⬝⬝■■■■", (239, 239, 239, 239, 75, 74, 61, 239)),
+    ("⬝⬝⬝⬝⬝■■■", (239, 239, 239, 239, 239, 75, 74, 61)),
+    ("⬝⬝⬝⬝⬝⬝■■", (239, 239, 239, 239, 239, 239, 75, 74)),
+    ("⬝⬝⬝⬝⬝⬝⬝■", (239, 239, 239, 239, 239, 239, 239, 75)),
+    ("⬝⬝⬝⬝⬝⬝⬝⬝", (237, 237, 237, 237, 237, 237, 237, 237)),
+)
+OPENCODE_LOGO_LEFT = ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"]
+OPENCODE_LOGO_RIGHT = ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"]
 CLAUDE_MODE_STATUS_LINES = [
     "",
     "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
@@ -244,6 +273,29 @@ def configure_codex_mock(
     )
 
 
+def configure_opencode_mock(
+    *,
+    display_cwd_override: str = "",
+    model: str = "switchyard/openai/gpt-5.6-luna",
+    effort: str = "",
+) -> None:
+    configure(
+        agent_name="opencode",
+        agent_display_name="OpenCode",
+        agent_product_name="OpenCode",
+        history_file="~/.cache/yolomux/mock_opencode_history",
+        version=OPENCODE_VERSION,
+        model=model or "switchyard/openai/gpt-5.6-luna",
+        effort=effort,
+        model_line=f"{model or 'switchyard/openai/gpt-5.6-luna'} | {effort}",
+        prompt_glyph="",
+        selector_glyph="›",
+        permission_style="opencode",
+        startup_style="opencode",
+        display_cwd_override=display_cwd_override,
+    )
+
+
 def looks_like_shell_command(value: str) -> bool:
     tokens = value.split()
     if not tokens:
@@ -259,9 +311,15 @@ def describe_shell_command(value: str) -> str:
 
 
 def terminal_width() -> int:
-    try:
-        columns = os.get_terminal_size(sys.stdout.fileno()).columns
-    except OSError:
+    columns = 0
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            columns = os.get_terminal_size(stream.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            continue
+        if columns > 0:
+            break
+    if columns <= 0:
         columns = shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns
     # Respect the real pane width (cap at 150). A hard floor wider than the actual
     # terminal makes the welcome box overflow and wrap ("chopped up"); when it can't
@@ -270,10 +328,14 @@ def terminal_width() -> int:
 
 
 def terminal_height() -> int:
-    try:
-        return max(1, os.get_terminal_size(sys.stdout.fileno()).lines)
-    except OSError:
-        return shutil.get_terminal_size((DEFAULT_WIDTH, 40)).lines
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            lines = os.get_terminal_size(stream.fileno()).lines
+        except (AttributeError, OSError, ValueError):
+            continue
+        if lines > 0:
+            return max(1, lines)
+    return shutil.get_terminal_size((DEFAULT_WIDTH, 40)).lines
 
 
 def ctrl_c_requests_exit(state: dict[str, str], now: float | None = None) -> bool:
@@ -334,6 +396,9 @@ def display_cwd() -> str:
 
 
 def print_startup(state: dict[str, str] | None = None) -> None:
+    if STARTUP_STYLE == "opencode":
+        print_opencode_startup(state)
+        return
     if STARTUP_STYLE == "codex":
         print_codex_startup(state)
         return
@@ -557,6 +622,29 @@ def center_cell(text: str, width: int) -> str:
     return (" " * left) + text + (" " * (pad - left))
 
 
+def opencode_logo_part(line: str, color: str, *, bold: bool = False) -> str:
+    shadow_fg = "\x1b[38;5;237m"
+    shadow_bg = "\x1b[48;5;237m"
+    base = (ANSI_BOLD if bold else "") + color
+    rendered: list[str] = []
+    for char in line:
+        if char == "_":
+            rendered.append(f"{base}{shadow_bg} {ANSI_RESET}{base}")
+        elif char == "^":
+            rendered.append(f"{base}{shadow_bg}▀{ANSI_RESET}{base}")
+        elif char == "~":
+            rendered.append(f"{shadow_fg}▀{ANSI_RESET}{base}")
+        elif char == ",":
+            rendered.append(f"{shadow_fg}▄{ANSI_RESET}{base}")
+        else:
+            rendered.append(char)
+    return base + "".join(rendered) + ANSI_RESET
+
+
+def opencode_logo_line(left: str, right: str) -> str:
+    return f"{opencode_logo_part(left, OPENCODE_MUTED)} {opencode_logo_part(right, OPENCODE_TEXT, bold=True)}"
+
+
 def print_welcome_box() -> None:
     width = terminal_width()
     inner = width - 2
@@ -663,29 +751,27 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
             state["codex_startup_inline_composer"] = "1"
         reset_terminal_scroll_region(preserve_cursor=True)
 
-    if include_warnings:
-        print("⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this")
-        print("  invocation.")
-        print()
     if include_box:
         print("╭" + ("─" * inner) + "╮")
         for line in box_lines:
             print(box_line(line))
         print("╰" + ("─" * inner) + "╯")
-        if sys.stdout.isatty() and not include_tip:
-            print()
-    if include_tip:
+    elif not sys.stdout.isatty():
         print()
-        print("  Tip: New Use /fast to enable our fastest inference with increased plan usage.")
+    if sys.stdout.isatty() and not include_tip:
         print()
     if include_warnings:
         print("⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this")
         print("  invocation.")
         print()
+        if not sys.stdout.isatty():
+            print("⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this")
+            print("  invocation.")
+    if include_tip:
+        print()
+        print("  Tip: New Use /fast to enable our fastest inference with increased plan usage.")
+        print()
     if sys.stdout.isatty() and include_tip:
-        # Startup is printed into the existing scrollback, so its last rows can
-        # naturally land inside the footer-owned rows. Move it above that area
-        # before the fixed composer starts clearing/repainting the footer.
         sys.stdout.write("\n" * footer_line_count)
     if not sys.stdout.isatty():
         print()
@@ -695,11 +781,509 @@ def print_codex_startup(state: dict[str, str] | None = None) -> None:
         print()
 
 
+def opencode_model_label() -> str:
+    return f"{MODEL}|{OPENCODE_COST}"
+
+
+def opencode_prompt_lines(text: str = "", *, width: int | None = None, home: bool = False) -> list[str]:
+    width = max(1, width or terminal_width())
+    content_width = max(0, width - 1)
+    placeholder = 'Ask anything... "Fix broken tests"'
+    prompt = text or (placeholder if home else "")
+    prompt_color = OPENCODE_TEXT if text else OPENCODE_MUTED
+    variant = f" · {ANSI_BOLD}{OPENCODE_WARNING}{EFFORT}{ANSI_RESET}{OPENCODE_ELEMENT_BG}" if EFFORT else ""
+    metadata = (
+        f"  {OPENCODE_BLUE}Build{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG} "
+        f"{OPENCODE_MUTED}·{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG} {opencode_model_label()} "
+        f"{OPENCODE_MUTED}{OPENCODE_PROVIDER}{ANSI_RESET}{OPENCODE_ELEMENT_BG}{variant}"
+    )
+    rail = f"{OPENCODE_BLUE}{OPENCODE_QUOTE_GUTTER}{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG}"
+    lines = [
+        rail + pad_cell(f"  {prompt_color}{prompt}", content_width) + ANSI_RESET,
+        rail + pad_cell("", content_width) + ANSI_RESET,
+        rail + pad_cell(metadata, content_width) + ANSI_RESET,
+        f"{OPENCODE_BLUE}╹{OPENCODE_ELEMENT_FG}{'▀' * content_width}{ANSI_RESET}",
+    ]
+    if home:
+        lines.append(f" {OPENCODE_TEXT}tab {OPENCODE_MUTED}agents{ANSI_RESET}   {OPENCODE_TEXT}ctrl+p {OPENCODE_MUTED}commands{ANSI_RESET}")
+    else:
+        path = display_cwd()
+        right = "ctrl+p commands"
+        usage = "27.3K"
+        gap = max(1, width - 1 - len(path) - len(usage) - len(right) - 4)
+        lines.append(
+            f" {OPENCODE_MUTED}{path}{' ' * gap}{usage}{ANSI_RESET}  "
+            f"{OPENCODE_TEXT}ctrl+p {OPENCODE_MUTED}commands{ANSI_RESET}"
+        )
+    return lines
+
+
+def opencode_footer_lines(text: str = "") -> list[str]:
+    return opencode_prompt_lines(text, width=max(1, terminal_width() - 4))
+
+
+def render_opencode_footer(text: str, state: dict[str, str] | None = None, *, working_frame: int | None = None) -> None:
+    width = terminal_width()
+    height = terminal_height()
+    lines = opencode_footer_lines(text)
+    if working_frame is not None:
+        usage = "27.4K"
+        drawable_width = max(1, width - 4)
+        fixed_width = 1 + 8 + 2 + len("esc interrupt") + len(usage) + 2 + len("ctrl+p commands")
+        lines[-1] = (
+            f" {opencode_working_meter(working_frame)}  {OPENCODE_TEXT}esc {OPENCODE_MUTED}interrupt{ANSI_RESET}"
+            f"{' ' * max(1, drawable_width - fixed_width)}"
+            f"{OPENCODE_MUTED}{usage}{ANSI_RESET}  {OPENCODE_TEXT}ctrl+p {OPENCODE_MUTED}commands{ANSI_RESET}"
+        )
+    top = max(1, height - len(lines) + 1)
+    previous_top = int(state.get('opencode_footer_top', str(top))) if state else top
+    for row in range(min(previous_top, top), height + 1):
+        sys.stdout.write(f'\x1b[{row};1H\x1b[2K')
+    for offset, line in enumerate(lines):
+        sys.stdout.write(f'\x1b[{top + offset};1H\x1b[2K\x1b[{top + offset};3H{line}')
+    cursor_col = min(width, 6 + terminal_text_cell_width(text))
+    sys.stdout.write(f"\x1b[{top};{cursor_col}H")
+    if state is not None:
+        state['opencode_footer_top'] = str(top)
+        state['live_composer_terminal_width'] = str(width)
+        state['live_composer_terminal_height'] = str(height)
+    sys.stdout.flush()
+
+
+def render_opencode_composer_row(text: str, cursor: int, state: dict[str, str] | None = None, *, home: bool = False) -> None:
+    """Update only OpenCode's editable row; full-screen painting is reserved for resize/state changes."""
+    width = terminal_width()
+    height = terminal_height()
+    if home:
+        content_width = min(width - 4, max(1, 75 if width >= 79 else width - 4))
+        left = max(1, ((width - content_width) // 2) + 1)
+        central_height = len(OPENCODE_LOGO_LEFT) + 2 + len(opencode_prompt_lines(text, width=content_width, home=True))
+        row = max(1, ((height - central_height) // 2) + 1) + len(OPENCODE_LOGO_LEFT) + 2
+    else:
+        content_width = max(1, width - 4)
+        left = 3
+        row = max(1, height - len(opencode_footer_lines(text)) + 1)
+    visible_text, visible_cursor = opencode_composer_view(text, cursor, max(1, content_width - 3))
+    prompt = visible_text or ('Ask anything... "Fix broken tests"' if home else "")
+    prompt_color = OPENCODE_TEXT if text else OPENCODE_MUTED
+    rail = f"{OPENCODE_BLUE}{OPENCODE_QUOTE_GUTTER}{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG}"
+    line = rail + pad_cell(f"  {prompt_color}{prompt}", max(0, content_width - 1)) + ANSI_RESET
+    cursor_col = min(width, left + 3 + terminal_text_cell_width(visible_text[:visible_cursor]))
+    sys.stdout.write(f"\x1b[{row};{left}H\x1b[2K{line}\x1b[{row};{cursor_col}H")
+    if state is not None:
+        state["live_composer_terminal_width"] = str(width)
+        state["live_composer_terminal_height"] = str(height)
+    sys.stdout.flush()
+
+
+def opencode_composer_view(text: str, cursor: int, width: int) -> tuple[str, int]:
+    cursor = max(0, min(len(text), cursor))
+    start = cursor
+    used = 0
+    while start > 0:
+        char = text[start - 1]
+        cells = terminal_text_cell_width(char)
+        if used + cells > width:
+            break
+        used += cells
+        start -= 1
+    end = start
+    used = 0
+    while end < len(text):
+        cells = terminal_text_cell_width(text[end])
+        if used + cells > width:
+            break
+        used += cells
+        end += 1
+    return text[start:end], cursor - start
+
+
+def print_opencode_startup(state: dict[str, str] | None = None) -> None:
+    width = terminal_width()
+    if not sys.stdout.isatty():
+        if state is not None and state.get("opencode_show_urls") == "1":
+            print("  ┃")
+            for line in opencode_url_listing_lines():
+                print(f"  ┃  {line}")
+        else:
+            for line in opencode_footer_lines():
+                print(ANSI_RE.sub('', line))
+        if state is not None:
+            state['live_composer_terminal_width'] = str(width)
+            state['live_composer_terminal_height'] = str(terminal_height())
+        return
+    reset_terminal_scroll_region(preserve_cursor=True)
+    render_opencode_initial_screen(state)
+
+
+def render_opencode_initial_screen(state: dict[str, str] | None = None, *, text: str = "") -> None:
+    width = terminal_width()
+    height = terminal_height()
+    content_width = min(width - 4, max(1, 75 if width >= 79 else width - 4))
+    left = max(1, ((width - content_width) // 2) + 1)
+    logo_width = max(len(line) for line in OPENCODE_LOGO_LEFT) + 1 + max(len(line) for line in OPENCODE_LOGO_RIGHT)
+    logo_left = max(1, ((width - logo_width) // 2) + 1)
+    logo_lines = [opencode_logo_line(left_part, right_part) for left_part, right_part in zip(OPENCODE_LOGO_LEFT, OPENCODE_LOGO_RIGHT)]
+    prompt_lines = opencode_prompt_lines(text, width=content_width, home=True)
+    central_height = len(logo_lines) + 2 + len(prompt_lines)
+    logo_top = max(1, ((height - central_height) // 2) + 1)
+    path_label = f"{display_cwd()}:main"
+    footer_gap = max(1, width - 4 - len(path_label) - len(OPENCODE_VERSION))
+    footer = f"  {OPENCODE_MUTED}{path_label}{' ' * footer_gap}{OPENCODE_VERSION}{ANSI_RESET}"
+    rows: list[tuple[int, int, str]] = []
+    for offset, line in enumerate(logo_lines):
+        rows.append((logo_top + offset, logo_left, line))
+    prompt_top = logo_top + len(logo_lines) + 2
+    for offset, line in enumerate(prompt_lines):
+        rows.append((prompt_top + offset, left, line))
+    rows.append((height - 1, 1, footer))
+    previous_top = int(state.get("opencode_initial_top", str(logo_top))) if state else logo_top
+    for row in range(min(previous_top, logo_top), height + 1):
+        sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
+    for row, column, line in rows:
+        if row > height:
+            continue
+        sys.stdout.write(f"\x1b[{row};{column}H{clip_display_width(line, width - column + 1)}")
+    cursor_col = min(width, left + 3 + terminal_text_cell_width(text))
+    sys.stdout.write(f"\x1b[{prompt_top};{cursor_col}H")
+    if state is not None:
+        state['opencode_initial_screen'] = '1'
+        state['opencode_initial_top'] = str(logo_top)
+        state['live_composer_terminal_width'] = str(width)
+        state['live_composer_terminal_height'] = str(height)
+    sys.stdout.flush()
+
+
+def read_opencode_initial_composer(state: dict[str, str]) -> str:
+    """Keep OpenCode's startup canvas intact while its centered composer receives input."""
+    text = ""
+    cursor = 0
+    while True:
+        key = read_key(timeout=0.12)
+        if key is None:
+            if live_composer_terminal_size_changed(state):
+                render_opencode_initial_screen(state, text=text)
+            continue
+        if key in {"\r", "\n"}:
+            if not text.strip():
+                continue
+            state.pop("opencode_initial_screen", None)
+            return text
+        if key in {"\x7f", "\b"}:
+            if cursor:
+                text = text[:cursor - 1] + text[cursor:]
+                cursor -= 1
+        elif key == "\x03":
+            text = ""
+            cursor = 0
+        elif key in {"\x1b[D", "\x1bOD", "\x02"}:
+            cursor = max(0, cursor - 1)
+        elif key in {"\x1b[C", "\x1bOC", "\x06"}:
+            cursor = min(len(text), cursor + 1)
+        elif key == "\x01":
+            cursor = 0
+        elif key == "\x05":
+            cursor = len(text)
+        elif key and len(key) == 1 and key >= " ":
+            text = text[:cursor] + key + text[cursor:]
+            cursor += 1
+        render_opencode_composer_row(text, cursor, state, home=True)
+
+
+def enter_opencode_session(text: str, state: dict[str, str]) -> None:
+    """Replace the centered home canvas with the first committed session turn."""
+    height = terminal_height()
+    footer_top = max(1, height - len(opencode_footer_lines()) + 1)
+    output_bottom = max(1, footer_top - 1)
+    sys.stdout.write(f"\x1b[r\x1b[H\x1b[J\x1b[1;{output_bottom}r\x1b[2;1H")
+    if text.strip():
+        remember_opencode_command(state, text)
+    render_opencode_session_screen(state)
+
+
+def render_opencode_history_command(command: str, state: dict[str, str]) -> None:
+    """Append a submitted OpenCode command with the persistent blue transcript rail."""
+    remember_opencode_command(state, command)
+    render_opencode_session_screen(state)
+
+
+def opencode_working_meter(frame: int) -> str:
+    glyphs, colors = OPENCODE_WORKING_FRAMES[frame % len(OPENCODE_WORKING_FRAMES)]
+    return "".join(f"\x1b[38;5;{color}m{glyph}" for glyph, color in zip(glyphs, colors)) + ANSI_RESET
+
+
+def opencode_url_listing_lines() -> list[str]:
+    return [
+        "Here are long image URLs you can use to test terminal wrapping:",
+        "",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/1280px-Example.jpg",
+        "",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg",
+        "",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/50/Vd-Orig.png/1280px-Vd-Orig.png",
+        "",
+        "https://images.unsplash.com/photo-1500534623283-312a9dbc2e2a?auto=format&fit=crop&w=2400&q=90",
+        "",
+        "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=2400&q=90",
+        "",
+        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=2400&q=90",
+        "",
+        "https://raw.githubusercontent.com/github/explore/main/topics/javascript/javascript.png",
+        "",
+        "https://raw.githubusercontent.com/microsoft/vscode/main/resources/linux/code.png",
+        "",
+        "https://raw.githubusercontent.com/python/cpython/main/Doc/logo.png",
+        "",
+        "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f680.png",
+        "",
+        "For a long wrapped sentence with punctuation:",
+        "",
+        "See this image: https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg?download=true&source=terminal-test.",
+        "",
+        "For Unicode cell-width handling:",
+        "",
+        "https://example.test/images/日本語/large-landscape-photo-2026.jpg?width=2400&quality=90",
+    ]
+
+
+def opencode_url_listing_for_width(width: int) -> list[str]:
+    indent = "    "
+    available = max(1, width - len(indent))
+    wrapped: list[str] = []
+    for line in opencode_url_listing_lines():
+        if not line:
+            wrapped.append("")
+            continue
+        while terminal_text_cell_width(line) > available:
+            split = terminal_text_wrap_index(line, available)
+            wrapped.append(indent + line[:split])
+            line = line[split:].lstrip()
+        wrapped.append(indent + line)
+    return wrapped
+
+
+def terminal_text_cell_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 0 if unicodedata.combining(char) else 1 for char in text)
+
+
+def terminal_text_prefix_index(text: str, width: int) -> int:
+    used = 0
+    for index, char in enumerate(text):
+        cells = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 0 if unicodedata.combining(char) else 1
+        if used + cells > width:
+            return index
+        used += cells
+    return len(text)
+
+
+def terminal_text_wrap_index(text: str, width: int) -> int:
+    hard = terminal_text_prefix_index(text, width)
+    if hard >= len(text):
+        return len(text)
+    candidate = text[:hard]
+    space = candidate.rfind(" ")
+    slash = candidate.rfind("/")
+    split = max(space + 1, slash + 1)
+    # Do not leave a tiny fragment merely to honor a very early delimiter.
+    return split if split >= max(8, width // 2) else hard
+
+
+def remember_opencode_command(state: dict[str, str], command: str) -> None:
+    commands = [item for item in state.get("opencode_history", "").split("\x1e") if item]
+    commands.append(command)
+    state["opencode_history"] = "\x1e".join(commands)
+
+
+def remember_opencode_response(state: dict[str, str], response: str) -> None:
+    responses = state.get("opencode_responses", "").split("\x1e") if state.get("opencode_responses") else []
+    command_count = len([item for item in state.get("opencode_history", "").split("\x1e") if item])
+    responses.extend("" for _ in range(max(0, command_count - len(responses))))
+    if responses:
+        responses[-1] = response
+    state["opencode_responses"] = "\x1e".join(responses)
+
+
+def opencode_history_screen_rows(state: dict[str, str], width: int) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    commands = [item for item in state.get("opencode_history", "").split("\x1e") if item]
+    responses = state.get("opencode_responses", "").split("\x1e") if state.get("opencode_responses") else []
+    for index, command in enumerate(commands):
+        rows.extend(("command", line) for line in ("", f"  {command}", ""))
+        if command.lower() in {"mock urls", "mock url", "urls"}:
+            rows.extend(("output", line) for line in opencode_url_listing_for_width(width))
+        elif command == state.get("opencode_sleep_command"):
+            seconds = state.get("opencode_sleep_seconds", "1")
+            rows.extend(("tool", line) for line in (
+                "",
+                "  # Running in yo7220",
+                f"  $ sleep {seconds}",
+                "  (no output)",
+                "",
+            ))
+            if state.get("opencode_sleep_finished") == "1":
+                rows.extend(("output", line) for line in (
+                    f"    The {seconds}-second foreground wait completed.",
+                    "",
+                    f"    {OPENCODE_BLUE}▣{ANSI_RESET}  Build · {opencode_model_label()} · {seconds}s",
+                    "",
+                ))
+        elif index < len(responses) and responses[index]:
+            rows.extend(("output", line) for line in ("", f"   {responses[index]}", ""))
+    return rows
+
+
+def opencode_history_screen_lines(state: dict[str, str], width: int) -> list[str]:
+    return [line for _kind, line in opencode_history_screen_rows(state, width)]
+
+
+def render_opencode_session_screen(
+    state: dict[str, str],
+    text: str = "",
+    cursor: int | None = None,
+    *,
+    working_frame: int | None = None,
+) -> None:
+    width = terminal_width()
+    height = terminal_height()
+    footer_top = max(1, height - len(opencode_footer_lines(text)) + 1)
+    output_bottom = max(1, footer_top - 1)
+    all_rows = opencode_history_screen_rows(state, width)
+    command_count = len([item for item in state.get("opencode_history", "").split("\x1e") if item])
+    preserve_command_rows = 3 * command_count
+    rows = all_rows[-output_bottom:]
+    if preserve_command_rows and all_rows and all_rows[0][0] == "command":
+        command_rows = all_rows[:preserve_command_rows]
+        remaining = all_rows[preserve_command_rows:]
+        rows = command_rows + remaining[:max(0, output_bottom - len(command_rows))]
+    transcript_top = max(1, output_bottom - len(rows) + 1)
+    sys.stdout.write(f"\x1b[r\x1b[H\x1b[J\x1b[1;{output_bottom}r\x1b[{transcript_top};1H")
+    rail = f"{OPENCODE_BLUE}{OPENCODE_QUOTE_GUTTER}{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG}"
+    for kind, line in rows:
+        if kind == "command":
+            sys.stdout.write("  " + rail + pad_cell(line, max(0, width - 5)) + ANSI_RESET + "\r\n")
+        elif kind == "tool":
+            sys.stdout.write("  " + rail + pad_cell(line, max(0, width - 5)) + ANSI_RESET + "\r\n")
+        else:
+            sys.stdout.write(f"{OPENCODE_TEXT}{line}{ANSI_RESET}\r\n")
+    render_opencode_footer(text, state, working_frame=working_frame)
+    if cursor is not None:
+        cursor_col = min(width, 6 + terminal_text_cell_width(text[:cursor]))
+        footer_top = max(1, height - len(opencode_footer_lines(text)) + 1)
+        sys.stdout.write(f"\x1b[{footer_top};{cursor_col}H")
+    set_output_region_above_live_composer(text, False, state, preserve_cursor=True)
+    sys.stdout.flush()
+
+
+def render_opencode_url_listing(state: dict[str, str], *, remember: bool = False) -> None:
+    commands = [item for item in state.get("opencode_history", "").split("\x1e") if item]
+    if remember and (not commands or commands[-1].lower() not in {"mock urls", "mock url", "urls"}):
+        remember_opencode_command(state, "mock urls")
+    render_opencode_session_screen(state)
+    state["opencode_url_listing_visible"] = "1"
+
+
+def cmd_opencode_urls(state: dict[str, str]) -> None:
+    """Print the exact URL test list as a normal OpenCode turn."""
+    state["opencode_show_urls"] = "1"
+    render_opencode_url_listing(state, remember=True)
+
+
+def render_opencode_working_fixture(state: dict[str, str], frame: int = 0) -> None:
+    text = state.get("opencode_working_text", "")
+    case_name = state.get("fixture_case", "")
+    if case_name == "working_tool_wrap":
+        footer_top = max(1, terminal_height() - len(opencode_footer_lines(text)) + 1)
+        tool_lines = [
+            f"  ┃  {OPENCODE_MUTED}⠦ General Task — inspecting wrapped URL output{ANSI_RESET}",
+            f"    {OPENCODE_MUTED}↳ Bash{ANSI_RESET} {OPENCODE_TEXT}running the requested shell command{ANSI_RESET}",
+            f"      {OPENCODE_MUTED}command output is still streaming...{ANSI_RESET}",
+            "",
+        ]
+        render_lines_above_row(tool_lines, max(1, footer_top - 1))
+    render_opencode_footer(text, state, working_frame=frame)
+
+
+def start_opencode_live_working_mock(state: dict[str, str], case: dict[str, object]) -> None:
+    state["pending"] = "opencode-working"
+    state["fixture_case"] = str(case.get("case_name") or "working")
+    state["opencode_working_text"] = ""
+    state["opencode_working_cursor"] = "0"
+    state["opencode_working_frame"] = "0"
+    if sys.stdout.isatty():
+        render_opencode_working_fixture(state)
+        set_output_region_above_live_composer(state=state, preserve_cursor=True)
+
+
+def handle_opencode_live_working_tty(state: dict[str, str]) -> None:
+    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while state.get("pending") == "opencode-working":
+            frame = int(state.get("opencode_working_frame", "0") or 0)
+            render_opencode_working_fixture(state, frame)
+            state["opencode_working_frame"] = str(frame + 1)
+            ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
+            if not ready:
+                continue
+            key = read_key()
+            if key in {"\x1b", "\x03"}:
+                state.pop("pending", None)
+                state.pop("opencode_working_frame", None)
+                render_opencode_footer(state.get("opencode_working_text", ""), state)
+                set_output_region_above_live_composer(state=state, preserve_cursor=True)
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+
+
+def start_opencode_sleep(raw_seconds: str, state: dict[str, str]) -> None:
+    seconds, _label = sleep_duration_text(raw_seconds)
+    command = f"sleep {raw_seconds}"
+    commands = [item for item in state.get("opencode_history", "").split("\x1e") if item]
+    if not commands or commands[-1] != command:
+        remember_opencode_command(state, command)
+    state["opencode_sleep_command"] = command
+    state["opencode_sleep_seconds"] = raw_seconds
+    state["opencode_sleep_deadline"] = str(time.monotonic() + seconds)
+    state["opencode_sleep_frame"] = "0"
+    state["pending"] = "opencode-sleep"
+    if sys.stdout.isatty():
+        render_opencode_session_screen(state, working_frame=0)
+
+
+def handle_opencode_sleep_tty(state: dict[str, str]) -> None:
+    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while state.get("pending") == "opencode-sleep":
+            frame = int(state.get("opencode_sleep_frame", "0") or 0)
+            render_opencode_footer("", state, working_frame=frame)
+            state["opencode_sleep_frame"] = str(frame + 1)
+            if time.monotonic() >= float(state.get("opencode_sleep_deadline", "0") or 0):
+                state["opencode_sleep_finished"] = "1"
+                state.pop("pending", None)
+                render_opencode_session_screen(state)
+                return
+            ready, _write, _error = select.select([sys.stdin.fileno()], [], [], 0.12)
+            if ready and read_key() in {"\x1b", "\x03"}:
+                state.pop("pending", None)
+                state["opencode_sleep_finished"] = "1"
+                render_opencode_session_screen(state)
+                return
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+
+
 def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
     """Animated thinking spinner. Brief by default (~500ms)."""
     print()
     if PERMISSION_STYLE == "codex":
         print_codex_working(seconds)
+        return
+    if PERMISSION_STYLE == "opencode":
+        if not sys.stdout.isatty():
+            print(f"{OPENCODE_QUOTE_GUTTER}  Working · {MODEL} | {EFFORT}")
+            return
+        write_anchored_working_status_block([f"{OPENCODE_QUOTE_GUTTER}  Working · {MODEL} | {EFFORT}"])
         return
     if not sys.stdout.isatty():
         print(f"✻ {random.choice(VERBS)}… ({seconds}s · ↓ {tokens} tokens · thinking with {EFFORT} effort)")
@@ -1048,6 +1632,13 @@ def mock_fixture_is_codex_live_working(case: dict[str, object]) -> bool:
     screen_key = str(expected.get("screen_key") or "").strip()
     reason_code = str(expected.get("reason_code") or "").strip()
     return screen_key == "working" or reason_code == "busy"
+
+
+def mock_fixture_is_opencode_live_working(case: dict[str, object]) -> bool:
+    if PERMISSION_STYLE != "opencode" or str(case.get("agent") or "") != "opencode":
+        return False
+    expected = case.get("expected") if isinstance(case.get("expected"), dict) else {}
+    return str(expected.get("screen_key") or "") == "working" or str(expected.get("reason_code") or "") == "busy"
 
 
 def mock_fixture_is_codex_draft_only(case: dict[str, object]) -> bool:
@@ -2099,6 +2690,8 @@ def live_composer_status_lines(armed_exit: bool = False, state: dict[str, str] |
     # text until the next key (a second Ctrl-C then exits).
     if armed_exit:
         return ["Press Ctrl-C again to exit"]
+    if PERMISSION_STYLE == "opencode":
+        return [f"  {MODEL} | {EFFORT}"]
     if PERMISSION_STYLE != "codex":
         if state and state.get("claude_working") == "1":
             return [state.get("claude_working_footer_status") or "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt"]
@@ -2135,6 +2728,9 @@ def live_composer_layout(armed_exit: bool = False, state: dict[str, str] | None 
     status_count = max(1, len(status_lines))
     if height <= 1:
         return 1, 1, status_lines[:1]
+    if PERMISSION_STYLE == "opencode":
+        footer_top = max(1, height - len(opencode_footer_lines()) + 1)
+        return footer_top + 1, footer_top + 3, status_lines[:1]
     if PERMISSION_STYLE == "codex":
         # Codex owns the active composer as a bottom footer in both idle and working
         # states so transcript output cannot scroll over the model/status rows.
@@ -2250,6 +2846,12 @@ def composer_render_parts(text: str, cursor: int, armed_exit: bool = False, stat
 
 
 def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state: dict[str, str] | None = None) -> None:
+    if PERMISSION_STYLE == "opencode":
+        if state is not None and state.get("opencode_initial_screen") == "1":
+            render_opencode_composer_row(text, cursor, state, home=True)
+        else:
+            render_opencode_composer_row(text, cursor, state)
+        return
     if PERMISSION_STYLE == "codex":
         if codex_startup_inline_composer_pending(state, text):
             remember_live_composer_terminal_size(state)
@@ -2315,6 +2917,14 @@ def maybe_redraw_live_composer_for_resize(
 ) -> bool:
     if state is None or not live_composer_terminal_size_changed(state):
         return False
+    if PERMISSION_STYLE == "opencode":
+        if state.get("opencode_initial_screen") == "1":
+            render_opencode_initial_screen(state, text=text)
+        elif state.get("opencode_url_listing_visible") == "1" and not text:
+            render_opencode_url_listing(state)
+        else:
+            render_opencode_session_screen(state, text, cursor)
+        return True
     if not inline_composer and codex_startup_inline_composer_pending(state, text):
         remember_live_composer_terminal_size(state)
         return False
@@ -2484,6 +3094,15 @@ def commit_live_composer_text(text: str, state: dict[str, str] | None = None) ->
 
 
 def finish_live_composer(text: str, state: dict[str, str] | None = None) -> None:
+    if PERMISSION_STYLE == "opencode":
+        if text.strip():
+            render_opencode_history_command(text, state or {})
+            set_output_region_above_live_composer(state=state, preserve_cursor=False)
+            sys.stdout.write(f"\x1b[{max(1, int((state or {}).get('live_composer_output_bottom', '1')))};1H")
+            sys.stdout.flush()
+        else:
+            render_opencode_footer("", state)
+        return
     commit_live_composer_text(text, state)
     render_live_composer("", 0, state=state)
     reserve_output_region_above_live_composer(state)
@@ -3472,6 +4091,9 @@ def cmd_mock_fixture(state: dict[str, str], name: str, freeze_static: bool = Fal
         else:
             start_codex_live_working_mock(state, case)
         return
+    if not freeze_static and mock_fixture_is_opencode_live_working(case) and sys.stdin.isatty() and sys.stdout.isatty():
+        start_opencode_live_working_mock(state, case)
+        return
     if not freeze_static and mock_fixture_is_claude_live_working(case) and sys.stdin.isatty() and sys.stdout.isatty():
         start_claude_live_working_mock(state, case)
         return
@@ -3819,11 +4441,49 @@ def print_capabilities() -> None:
     print()
 
 
+def print_mock_commands() -> None:
+    print(f"{transcript_bullet()} Valid mock commands:")
+    print("  mock urls · mock <case> · mock list · mock list all · mock list idle")
+    print("  fixture <case> · sleep N · yesno [N] · ask [N] · todos")
+    print("  /status · /clear · /help · /quit · /exit")
+    print()
+    print("  mock urls          ← show the URL wrapping test list")
+
+    if PERMISSION_STYLE != "opencode":
+        return
+
+
+def opencode_model_question(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    if not re.search(r"\b(?:model|version)\b", normalized):
+        return False
+    return bool(
+        re.search(r"\bwhat (?:model|model version) (?:are you|is this)\b", normalized)
+        or re.search(r"\bwhat version (?:are you|is (?:this|the model))\b", normalized)
+        or re.search(r"\bwhich model (?:are you|is this|is running)\b", normalized)
+        or re.search(r"\b(?:what|which) (?:is |s )?(?:your |the |opencode )?(?:model|version)\b", normalized)
+        or re.search(r"\b(?:model|version)(?: are you)?(?: running)?\b", normalized)
+    )
+
+
 def fallback_response(value: str) -> None:
+    if PERMISSION_STYLE == "opencode" and opencode_model_question(value):
+        print(f"   I'm running {OPENCODE_TEXT}{MODEL}{ANSI_RESET} via {OPENCODE_PROVIDER}.")
+        print()
+        print(f"   {OPENCODE_BLUE}▣{ANSI_RESET}  {OPENCODE_TEXT}Build{OPENCODE_MUTED} · {opencode_model_label()} · 1.9s{ANSI_RESET}")
+        print()
+        return
     snippet = value if len(value) <= 80 else value[:77] + "…"
     print_assistant(f'I don\'t know how to handle "{snippet}" — this is a mock, not real {AGENT_DISPLAY_NAME}. Here are real things I can do:')
     print()
     print_capabilities()
+
+
+def opencode_fallback_response_text(value: str) -> str:
+    if opencode_model_question(value):
+        return f"I'm running {MODEL} via {OPENCODE_PROVIDER}."
+    snippet = value if len(value) <= 80 else value[:77] + "…"
+    return f'I don\'t know how to handle "{snippet}" — this is a mock, not real OpenCode.'
 
 
 def handle_command(user_input: str, state: dict[str, str]) -> None:
@@ -3853,7 +4513,22 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         cmd_status(state)
         return
 
-    if mock_fixture_key(value) in {"mock", "mocklist", "fixturelist", "fixtures"}:
+    if lower in {"mock urls", "urls", "mock url"}:
+        cmd_opencode_urls(state)
+        return
+
+    if lower == "mocks":
+        print_mock_commands()
+        return
+
+    if lower == "mock":
+        if PERMISSION_STYLE == "opencode":
+            print_mock_commands()
+        else:
+            print_mock_fixture_list()
+        return
+
+    if mock_fixture_key(value) in {"mock", "mocks", "mocklist", "fixturelist", "fixtures"}:
         print_mock_fixture_list()
         return
 
@@ -3913,6 +4588,9 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
             if queued_text:
                 state["composer_prefill"] = queued_text
             return
+        if PERMISSION_STYLE == "opencode":
+            start_opencode_sleep(secs, state)
+            return
         unit = "second" if float(secs) == 1 else "seconds"
         description = f"Sleep for {secs} {unit}"
         n = print_bash_prompt(value, description)
@@ -3937,6 +4615,14 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         state["real_exec"] = "1"
         return
 
+    if PERMISSION_STYLE == "opencode" and re.match(r"^(?:https?|file)://", value, re.IGNORECASE):
+        print(f"{OPENCODE_BLUE}{OPENCODE_QUOTE_GUTTER}{ANSI_RESET}  {value}")
+        print()
+        return
+    if PERMISSION_STYLE == "opencode":
+        remember_opencode_response(state, opencode_fallback_response_text(value))
+        render_opencode_session_screen(state)
+        return
     print_thinking()
     fallback_response(value)
 
@@ -3967,11 +4653,23 @@ def main() -> None:
             if state.get("pending") in {"codex-working", "codex-goal-active"} and sys.stdin.isatty():
                 handle_codex_live_working_tty(state)
                 continue
+            if state.get("pending") == "opencode-working" and sys.stdin.isatty():
+                handle_opencode_live_working_tty(state)
+                continue
+            if state.get("pending") == "opencode-sleep" and sys.stdin.isatty():
+                handle_opencode_sleep_tty(state)
+                continue
             if state.get("pending") == "fixture":
                 if state.get("fixture_interactive") == "1" and sys.stdin.isatty():
                     handle_pending_fixture_tty(state)
                 else:
                     time.sleep(0.25)
+                continue
+            if AGENT_NAME == "opencode" and state.get("opencode_initial_screen") == "1" and sys.stdin.isatty():
+                user_input = read_opencode_initial_composer(state)
+                clear_ctrl_c_exit_window(state)
+                enter_opencode_session(user_input, state)
+                handle_command(user_input, state)
                 continue
             pending = state.get("pending") == "permission"
             prompt = "" if pending else f"{PROMPT_GLYPH} "

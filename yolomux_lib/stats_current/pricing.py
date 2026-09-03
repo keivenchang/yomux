@@ -87,6 +87,23 @@ class _RateDimension:
     service_tier: str
 
 
+def _catalog_provider(provider: str, model: str) -> tuple[str, str]:
+    """Map routed provider identities to the reviewed catalog provider."""
+    route = provider.strip().lower()
+    catalog_model = model.strip()
+    lowered_model = catalog_model.lower()
+    if lowered_model.startswith("switchyard/openai/"):
+        return "openai", catalog_model.split("/", 2)[2]
+    if route == "switchyard" and "/" in catalog_model:
+        routed_provider, catalog_model = catalog_model.split("/", 1)
+        route = routed_provider
+    if route == "switchyard":
+        route = "openai"
+    if route == "openai" and catalog_model.lower().startswith("openai/"):
+        catalog_model = catalog_model.split("/", 1)[1]
+    return route, catalog_model
+
+
 @dataclass(slots=True)
 class _RateWindow:
     start: str | None
@@ -139,6 +156,11 @@ class UsagePriceProjector:
         _require_canonical(atom)
         timestamp = _iso_timestamp(atom.observed_at)
         dimension = _dimension(atom)
+        catalog_provider, catalog_model = _catalog_provider(dimension.provider, dimension.model)
+        dimension = _RateDimension(
+            catalog_provider, catalog_model, dimension.direction, dimension.modality,
+            dimension.cache_role, dimension.unit, dimension.profile, dimension.service_tier,
+        )
         with self._lock:
             self._refresh_revision_if_due()
             api_list_rate = self._rate(_api_list_dimension(dimension), timestamp)

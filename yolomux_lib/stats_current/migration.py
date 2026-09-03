@@ -85,6 +85,27 @@ V7_SCHEMA_VERSION = 7
 # fence; it must not be rejected merely because the daemon build has advanced past it.
 V7_MIN_WRITER_PROTOCOL = 24
 V7_MIN_WRITER_BUILD = 6
+V8_DATABASE_FILENAME = "stats-v8.sqlite3"
+V8_SCHEMA_VERSION = 8
+V8_RING_TABLE_COLUMNS = {
+    "aggregate_publication": (
+        "singleton", "ring_generation", "source_generation", "published_at",
+    ),
+    "aggregate_rings": (
+        "resolution_seconds", "slot_count", "newest_bucket_start",
+    ),
+    "aggregate_ring_slots": (
+        "resolution_seconds", "slot_index", "bucket_start", "bucket_json", "complete",
+        "source_generation", "ring_generation", "published_at", "payload_version",
+    ),
+    "ring_replay_cursor": (
+        "resolution_seconds", "folded_through_observed_at", "folded_source_generation", "updated_at",
+    ),
+    "ring_invalidations": (
+        "resolution_seconds", "bucket_start", "source_generation", "reason", "created_at",
+        "applied_at",
+    ),
+}
 # The FACT tables, which are byte-identical between v7 and v8. Schema 8 added only ring-extension
 # objects, so every fact identity, payload and generation crosses unchanged and must not be
 # re-materialized: re-deriving them would be slow and could change identities.
@@ -326,6 +347,9 @@ def migrate(
     # Newest released format first. A v7 store is the CURRENT history of a running build; a v5 file
     # beside it is a leftover from an earlier one. Checking v5 first would let a stale artifact
     # shadow live history, and adding v7 after v5 would have exactly that effect.
+    v8_source = state_dir / V8_DATABASE_FILENAME
+    if v8_source.is_file():
+        return migrate_current_v8_database(state_dir, target, v8_source, now=finished_at)
     v7_source = _v7_migration_source(state_dir)
     if v7_source is not None:
         return migrate_current_v7_database(state_dir, target, v7_source, now=finished_at)
@@ -997,11 +1021,9 @@ def _recover_bucket(bucket: dict[str, Any], recovered: _Recovered, source: str) 
     components = summary.get("components") if isinstance(summary.get("components"), list) else []
     failed_components = 0
     for component in components:
-        if not isinstance(component, dict):
-            failed_components += 1
-            continue
-        candidate = dict(component)
-        candidate.setdefault("timestamp", start)
+        candidate = dict(component) if isinstance(component, dict) else component
+        if isinstance(candidate, dict):
+            candidate.setdefault("timestamp", start)
         if not _recover_component(candidate, recovered, source, 1):
             failed_components += 1
     token_facts = bool(_finite(bucket.get("agent_token_samples")) or bucket.get("agent_token_rates"))
@@ -1142,7 +1164,7 @@ def _recover_component(
         "pricing_profile": raw.get("pricing_profile"),
         "service_tier": raw.get("service_tier"),
         "effort": raw.get("effort"),
-        "execution_source": raw.get("execution_source") or raw.get("agent_kind"),
+        "execution_source": raw.get("execution_source") or raw.get("agent_kind") or raw.get("endpoint"),
         "thread_id": raw.get("thread_id") or raw.get("agent_thread_id") or raw.get("root_thread_id"),
     }
     payload.update({
@@ -1974,11 +1996,12 @@ def _validate_current_v7_database(path: Path) -> None:
             connection.close()
 
 
-def _copy_v7_fact_table(
+def _copy_fact_table(
     connection: sqlite3.Connection,
     table: str,
     columns: tuple[str, ...],
     fault_hook: Any,
+    source_schema: str,
 ) -> tuple[int, int]:
     """Copy one fact table in bounded keyed chunks, returning (rows, decoded bytes).
 
@@ -1989,7 +2012,7 @@ def _copy_v7_fact_table(
     """
     key_columns = tuple(
         str(row[1])
-        for row in connection.execute(f"PRAGMA source_v7.table_info({table})")
+        for row in connection.execute(f"PRAGMA {source_schema}.table_info({table})")
         if int(row[5]) > 0
     )
     if not key_columns:
@@ -2003,13 +2026,13 @@ def _copy_v7_fact_table(
     while True:
         if cursor is None:
             query = (
-                f"SELECT {column_list} FROM source_v7.{table} "
+                f"SELECT {column_list} FROM {source_schema}.{table} "
                 f"ORDER BY {key_list} LIMIT ?"
             )
             parameters: tuple[Any, ...] = (V8_MIGRATION_ROW_CHUNK,)
         else:
             query = (
-                f"SELECT {column_list} FROM source_v7.{table} "
+                f"SELECT {column_list} FROM {source_schema}.{table} "
                 f"WHERE ({key_list}) > ({placeholders}) ORDER BY {key_list} LIMIT ?"
             )
             parameters = (*cursor, V8_MIGRATION_ROW_CHUNK)
@@ -2082,12 +2105,12 @@ def migrate_current_v7_database(
     fault_hook: Any = None,
     now: float | None = None,
 ) -> MigrationReport:
-    """Copy a schema-7 current store into a schema-8 store, bounded and restartable.
+    """Copy a schema-7 current store into the current store, bounded and restartable.
 
     The shadow is built in a temporary directory beside the target and activated by one atomic
     rename, so an interruption leaves either the untouched v7 source plus a discarded partial
     shadow, or a fully validated v8. There is no window in which a mixed format is reachable: the
-    target name `stats-v8.sqlite3` only ever appears as the finished file.
+    The target name only ever appears as the finished file.
 
     Restart is by RESTART, not by resume-from-offset. The partial shadow lives in a temporary
     directory that is removed on the way out, so a repeated run starts from a clean shadow and
@@ -2100,7 +2123,7 @@ def migrate_current_v7_database(
     """
     stamp = time.time() if now is None else float(now)
     _v8_fault(fault_hook, "before_shadow_creation")
-    with tempfile.TemporaryDirectory(prefix=".stats-v8-migration-", dir=target.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".stats-v9-migration-", dir=target.parent) as temporary:
         work = Path(temporary)
         source_digest = hashlib.sha256()
         copied_source = _copy_database(source, work / "source", source_digest)
@@ -2115,7 +2138,7 @@ def migrate_current_v7_database(
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 for table, columns in V7_FACT_TABLE_COLUMNS.items():
-                    rows, size = _copy_v7_fact_table(connection, table, columns, fault_hook)
+                    rows, size = _copy_fact_table(connection, table, columns, fault_hook, "source_v7")
                     copied_rows[table] = rows
                     copied_bytes[table] = size
                 invalidated = _record_v7_ring_invalidations(connection, stamp)
@@ -2189,6 +2212,127 @@ def migrate_current_v7_database(
             MigrationIssue("current_schema", source.name, str(V7_SCHEMA_VERSION)),
             MigrationIssue("ring_payload_rebuild", source.name, str(invalidated)),
         ),
+        1,
+        False,
+    )
+
+
+def _validate_current_v8_database(path: Path) -> None:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
+        if int(connection.execute("PRAGMA application_id").fetchone()[0]) != APPLICATION_ID:
+            raise MigrationError("schema-8 source has the wrong application id")
+        found = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if found != V8_SCHEMA_VERSION:
+            raise MigrationError(f"schema-8 source has user_version {found}, expected {V8_SCHEMA_VERSION}")
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        expected = set(V7_FACT_TABLE_COLUMNS) | set(V8_RING_TABLE_COLUMNS) | {"schema_meta"}
+        if tables != expected:
+            raise MigrationError("schema-8 source has an unexpected table set")
+        for table, columns in {**V7_FACT_TABLE_COLUMNS, **V8_RING_TABLE_COLUMNS}.items():
+            found_columns = tuple(
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+            )
+            if found_columns != columns:
+                raise MigrationError(f"schema-8 source table {table} has unexpected columns")
+        schema_meta = tuple(
+            str(row[1]) for row in connection.execute("PRAGMA table_info(schema_meta)")
+        )
+        if schema_meta != (
+            "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation", "last_vacuumed_at",
+        ):
+            raise MigrationError("schema-8 source table schema_meta has unexpected columns")
+    except sqlite3.Error as error:
+        raise MigrationError(f"schema-8 source is unreadable: {type(error).__name__}") from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def migrate_current_v8_database(
+    state_dir: Path,
+    target: Path,
+    source: Path,
+    *,
+    now: float | None = None,
+) -> MigrationReport:
+    """Copy schema 8 facts into v9 and invalidate its unversioned ring payloads."""
+    stamp = time.time() if now is None else float(now)
+    with tempfile.TemporaryDirectory(prefix=".stats-v9-migration-", dir=target.parent) as temporary:
+        work = Path(temporary)
+        source_digest = hashlib.sha256()
+        copied_source = _copy_database(source, work / "source", source_digest)
+        _validate_current_v8_database(copied_source)
+        shadow = work / DATABASE_FILENAME
+        copied_rows: dict[str, int] = {}
+        with Store.open(shadow) as store:
+            connection = store._connection()
+            connection.execute("ATTACH DATABASE ? AS source_v8", (str(copied_source),))
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for table, columns_tuple in V7_FACT_TABLE_COLUMNS.items():
+                    copied_rows[table], _bytes = _copy_fact_table(
+                        connection, table, columns_tuple, None, "source_v8",
+                    )
+                connection.execute(
+                    "UPDATE schema_meta SET minimum_writer_protocol = ?, minimum_writer_build = ?, "
+                    "source_generation = (SELECT source_generation FROM source_v8.schema_meta WHERE singleton = 1), "
+                    "last_vacuumed_at = 0 WHERE singleton = 1",
+                    (MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO ring_invalidations("
+                    "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+                    "SELECT resolution_seconds, bucket_start, source_generation, "
+                    "'v8_payload_unversioned', ?, NULL FROM source_v8.aggregate_ring_slots "
+                    "WHERE bucket_start IS NOT NULL AND bucket_json IS NOT NULL",
+                    (stamp,),
+                )
+                publication = connection.execute(
+                    "SELECT ring_generation, published_at FROM source_v8.aggregate_publication WHERE singleton = 1"
+                ).fetchone()
+                if publication is not None:
+                    connection.execute(
+                        "UPDATE aggregate_publication SET ring_generation = ?, published_at = ? "
+                        "WHERE singleton = 1",
+                        (int(publication[0]), float(publication[1])),
+                    )
+                connection.execute(
+                    "UPDATE ring_replay_cursor SET folded_through_observed_at = 0, "
+                    "folded_source_generation = 0, updated_at = ?",
+                    (stamp,),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.execute("DETACH DATABASE source_v8")
+            Store._validate_schema_shape(connection)
+        _validate_database(shadow)
+        _compact_database(shadow)
+        _validate_database(shadow)
+        require_compatible_writer(target)
+        if target.exists():
+            raise MigrationError("current database appeared during schema-8 migration")
+        _activate_database(shadow, target)
+        _fsync_directory(target.parent)
+        with Store.open(target):
+            pass
+    return MigrationReport(
+        target,
+        source_digest.hexdigest(),
+        copied_rows.get("observations", 0),
+        copied_rows.get("coverage_epochs", 0),
+        copied_rows.get("usage_atoms", 0),
+        copied_rows.get("unavailable_spans", 0),
+        (MigrationIssue("current_schema", source.name, str(V8_SCHEMA_VERSION)),),
         1,
         False,
     )

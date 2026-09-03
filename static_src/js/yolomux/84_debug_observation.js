@@ -290,7 +290,7 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
@@ -506,9 +506,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
-const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
-  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
-  : [group]));
+const jsDebugGraphChartControlItems = jsDebugGraphChartGroups;
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
@@ -1581,7 +1579,6 @@ function debugGraphNewBucket(startMs, durationMs) {
     tokensPerAgentTotal: 0,
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
-    costSummary: null,
     hostMetrics: debugGraphNewHostMetrics(),
     clients: new Map(),
     servers: new Map(),
@@ -1882,51 +1879,6 @@ function debugGraphMergeAgentTokenRates(target, source, multiplier = 1) {
   }
 }
 
-function debugGraphMergeCostSummary(target, source, multiplier = 1) {
-  if (!source?.costSummary) return;
-  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
-  if (!scale) return;
-  const current = target.costSummary || {
-    totalMicroUsd: 0, apiListMicroUsd: null, totalTokenQuantity: 0, dimensionTotals: null, rangeReport: false, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
-    components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
-  };
-  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd) * scale;
-  const sourceApiListMicroUsd = debugGraphCostApiListMicroUsd(source.costSummary);
-  if (sourceApiListMicroUsd !== null) current.apiListMicroUsd = (current.apiListMicroUsd ?? 0) + sourceApiListMicroUsd * scale;
-  current.totalTokenQuantity += Math.max(0, Number(source.costSummary.totalTokenQuantity) || 0) * scale;
-  if (source.costSummary.dimensionTotals) {
-    current.dimensionTotals ||= {};
-    for (const field of [...DEBUG_GRAPH_COST_TOKEN_FIELDS, ...DEBUG_GRAPH_COST_SUBTOTAL_FIELDS]) {
-      if (source.costSummary.dimensionTotals[field] === undefined) continue;
-      current.dimensionTotals[field] = (Number(current.dimensionTotals[field]) || 0) + Math.max(0, Number(source.costSummary.dimensionTotals[field]) || 0) * scale;
-    }
-  }
-  current.rangeReport = current.rangeReport || source.costSummary.rangeReport === true;
-  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd) * scale;
-  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
-  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
-  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount) * scale;
-  current.complete = current.complete && source.costSummary.complete === true;
-  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount) * scale;
-  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0) * scale;
-  const scaledRows = value => debugGraphCostRows(value).map(row => {
-    if (scale === 1) return row;
-    const scaled = {...row};
-    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'api_list_micro_usd', 'total_api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
-      if (Number.isFinite(Number(scaled[key]))) scaled[key] = Number(scaled[key]) * scale;
-    }
-    return scaled;
-  });
-  current.components.push(...scaledRows(source.costSummary.components));
-  current.models.push(...scaledRows(source.costSummary.models));
-  current.sources.push(...scaledRows(source.costSummary.sources));
-  current.tmuxWindows.push(...scaledRows(source.costSummary.tmuxWindows));
-  current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
-  current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
-  current.freshness = source.costSummary.freshness || current.freshness;
-  target.costSummary = current;
-}
-
 function debugGraphMergeBucket(target, source, multiplier = 1) {
   const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
   if (!scale) return;
@@ -1951,7 +1903,6 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.tokensPerAgentTotal += (source.tokensPerAgentTotal || 0) * scale;
   target.agentTokenSamples += (source.agentTokenSamples || 0) * scale;
   debugGraphMergeAgentTokenRates(target, source, scale);
-  debugGraphMergeCostSummary(target, source, scale);
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());

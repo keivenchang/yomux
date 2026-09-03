@@ -311,11 +311,10 @@ RING_READ_ERRORS = (
     materializer.MaterializationError,
     protocol.ProtocolValidationError,
 )
-RING_BUCKET_PAYLOAD_VERSION = 1
+RING_BUCKET_PAYLOAD_VERSION = 2
 RING_BUCKET_PAYLOAD_FIELDS = frozenset(
-    "version generated_at cache_generation bucket no_data cost_detail_json view".split()
+    "version generated_at cache_generation bucket no_data cost_detail".split()
 )
-RING_VIEW_FIELDS = frozenset("range_seconds window_end cost_report".split())
 RING_COST_DETAIL_FIELDS = frozenset(
     "dimensions priced unpriced models agents evidence omitted_models omitted_agents omitted_evidence".split()
 )
@@ -324,7 +323,10 @@ RING_COST_DIMENSION_FIELDS = frozenset(
 )
 RING_COST_COVERAGE_FIELDS = frozenset("atoms tokens".split())
 RING_COST_ATTRIBUTION_FIELDS = frozenset(
-    "key provider model source label dimensions priced unpriced".split()
+    "key provider model source label dimensions priced unpriced sources".split()
+)
+RING_COST_SOURCE_FIELDS = frozenset(
+    "source total_tokens total_micro_usd total_api_list_micro_usd dimensions priced unpriced".split()
 )
 RING_COST_EVIDENCE_FIELDS = frozenset(
     "key provider model dimension direction modality cache_role unit pricing_profile "
@@ -478,8 +480,7 @@ class PublishedCache:
 class DecodedRingBucket:
     wire: dict[str, object]
     no_data: tuple[dict[str, object], ...]
-    cost_detail_json: str
-    view: dict[str, object] | None
+    cost_detail: dict[str, object]
     cache_generation: int
     generated_at: float
     ring_generation: int
@@ -863,13 +864,8 @@ def _changed_ring_no_data_starts(
     )
 
 
-def _ring_cost_detail_json(detail: materializer.BucketCostDetail) -> str:
-    return json.dumps(
-        asdict(detail),
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+def _ring_cost_detail_payload(detail: materializer.BucketCostDetail) -> dict[str, object]:
+    return asdict(detail)
 
 
 def _ring_bucket_payload(
@@ -893,42 +889,8 @@ def _ring_bucket_payload(
         ],
         # Keep cold/downtime reconstruction self-contained without making every
         # healthy request recursively decode the full attribution tree.
-        "cost_detail_json": _ring_cost_detail_json(bucket.cost_detail),
-        "view": _ring_bucket_view(generation, layer, bucket),
+        "cost_detail": _ring_cost_detail_payload(bucket.cost_detail),
     }
-
-
-def _ring_view_carriers(layer: materializer.Layer) -> tuple[tuple[int, int], ...]:
-    ranges = tuple(
-        range_seconds
-        for range_seconds in stats_resolution.RANGE_SECONDS
-        if stats_resolution.is_supported(range_seconds, layer.resolution)
-    )
-    return tuple(
-        (range_seconds, layer.end - (index + 1) * layer.resolution)
-        for index, range_seconds in enumerate(ranges)
-    )
-
-
-def _ring_bucket_view(
-    generation: materializer.Generation,
-    layer: materializer.Layer,
-    bucket: materializer.Bucket,
-) -> dict[str, object] | None:
-    for range_seconds, carrier_start in _ring_view_carriers(layer):
-        if bucket.start != carrier_start:
-            continue
-        view = materializer.slice_generation(
-            generation,
-            range_seconds,
-            layer.resolution,
-        )
-        return {
-            "range_seconds": range_seconds,
-            "window_end": view.end,
-            "cost_report": materializer.build_cost_report(view),
-        }
-    return None
 
 
 def _ring_cost_coverage(value: object, name: str) -> materializer.CostCoverage:
@@ -949,6 +911,7 @@ def _ring_cost_attributions(value: object, name: str) -> tuple[materializer.Cost
     result = []
     for index, raw in enumerate(_items(value, name)):
         item = _object(raw, f"{name}[{index}]", RING_COST_ATTRIBUTION_FIELDS)
+        sources = _ring_cost_sources(item["sources"], f"{name}[{index}].sources")
         result.append(materializer.CostAttribution(
             key=item["key"],
             provider=item["provider"],
@@ -964,8 +927,29 @@ def _ring_cost_attributions(value: object, name: str) -> tuple[materializer.Cost
             unpriced=_ring_cost_coverage(
                 item["unpriced"], f"{name}[{index}].unpriced",
             ),
+            sources=sources,
         ))
     return tuple(result)
+
+
+def _ring_cost_sources(value: object, name: str) -> tuple[materializer.CostSourceValue, ...]:
+    result = []
+    for index, raw in enumerate(_items(value, name)):
+        item = _object(raw, f"{name}[{index}]", RING_COST_SOURCE_FIELDS)
+        result.append(materializer.CostSourceValue(
+            source=item["source"],
+            total_tokens=item["total_tokens"],
+            total_micro_usd=item["total_micro_usd"],
+            total_api_list_micro_usd=item["total_api_list_micro_usd"],
+            dimensions=_ring_cost_dimensions(
+                item["dimensions"], f"{name}[{index}].dimensions",
+            ),
+            priced=_ring_cost_coverage(item["priced"], f"{name}[{index}].priced"),
+            unpriced=_ring_cost_coverage(item["unpriced"], f"{name}[{index}].unpriced"),
+        ))
+    return tuple(result)
+
+
 
 
 def _ring_cost_evidence(value: object) -> tuple[materializer.CostEvidenceValue, ...]:
@@ -981,7 +965,7 @@ def _ring_cost_evidence(value: object) -> tuple[materializer.CostEvidenceValue, 
     )
 
 
-def _ring_cost_detail(value: object) -> materializer.BucketCostDetail:
+def _decode_cost_detail(value: object) -> materializer.BucketCostDetail:
     item = _object(value, "ring bucket cost detail", RING_COST_DETAIL_FIELDS)
     return materializer.BucketCostDetail(
         dimensions=_ring_cost_dimensions(
@@ -1040,30 +1024,12 @@ def _decode_ring_bucket(row: storage.RingBucketRow) -> DecodedRingBucket:
         ))
         for index, raw in enumerate(_items(payload["no_data"], "ring bucket no_data"))
     )
-    cost_detail_json = payload["cost_detail_json"]
-    if not isinstance(cost_detail_json, str):
-        raise ValueError("ring bucket cost_detail_json is invalid")
-    raw_view = payload["view"]
-    if raw_view is None:
-        view = None
-    else:
-        view = dict(_object(raw_view, "ring bucket view", RING_VIEW_FIELDS))
-        range_seconds = view["range_seconds"]
-        window_end = view["window_end"]
-        if (
-            isinstance(range_seconds, bool)
-            or not isinstance(range_seconds, int)
-            or not stats_resolution.is_supported(range_seconds, row.resolution_seconds)
-            or isinstance(window_end, bool)
-            or not isinstance(window_end, int)
-            or window_end % row.resolution_seconds
-        ):
-            raise ValueError("ring bucket view identity is invalid")
+    cost_detail = dict(_object(payload["cost_detail"], "ring bucket cost_detail", RING_COST_DETAIL_FIELDS))
+    _decode_cost_detail(cost_detail)
     return DecodedRingBucket(
         wire,
         no_data,
-        cost_detail_json,
-        view,
+        cost_detail,
         cache_generation,
         float(generated_at),
         row.ring_generation,
@@ -1104,7 +1070,7 @@ def _materialized_ring_bucket(item: DecodedRingBucket) -> materializer.Bucket:
         source["first_timestamp"],
         source["last_timestamp"],
         not item.wire["open"],
-        _ring_cost_detail(json.loads(item.cost_detail_json)),
+        _decode_cost_detail(item.cost_detail),
     )
 
 
@@ -1142,8 +1108,7 @@ def _ring_gap_bucket(
             "open": False,
         },
         no_data,
-        _ring_cost_detail_json(materializer.BucketCostDetail()),
-        None,
+        _ring_cost_detail_payload(materializer.BucketCostDetail()),
         cache_generation,
         generated_at,
         ring_generation,
@@ -2162,18 +2127,6 @@ class StatsCurrentService:
                 materializer.DirtyCell(layer.resolution, start)
                 for start in _changed_ring_no_data_starts(previous_layer, layer)
             )
-        for layer in candidate.layers:
-            changed_starts = {
-                cell.start for cell in changed if cell.resolution == layer.resolution
-            }
-            changed.update(
-                materializer.DirtyCell(layer.resolution, carrier_start)
-                for range_seconds, carrier_start in _ring_view_carriers(layer)
-                if any(
-                    layer.end - range_seconds <= start < layer.end
-                    for start in changed_starts
-                )
-            )
         return frozenset(changed)
 
     def _stage_ring_candidate(
@@ -2188,12 +2141,6 @@ class StatsCurrentService:
                 for range_seconds, resolution_seconds, private_source_id in self._ring_views
                 if private_source_id is None
             }
-        for layer in candidate.layers:
-            changed.update(
-                materializer.DirtyCell(layer.resolution, carrier_start)
-                for range_seconds, carrier_start in _ring_view_carriers(layer)
-                if (range_seconds, layer.resolution) in active_public_views
-            )
         previous_no_data = {
             layer.resolution: layer.no_data
             for layer in (() if previous is None else previous.layers)
@@ -4503,27 +4450,14 @@ class StatsCurrentService:
                     resolution_seconds,
                 )
             )
-            summaries = tuple(
-                item.view
-                for item in selected
-                if not gap_starts
-                and item.view is not None
-                and item.view["range_seconds"] == parsed.range_seconds
-                and item.view["window_end"] == window.window_end
+            layer = materializer.Layer(
+                resolution_seconds,
+                window.window_start,
+                window.window_end,
+                tuple(_materialized_ring_bucket(item) for item in selected),
+                (),
             )
-            if len(summaries) > 1:
-                raise ValueError("ring window contains duplicate view summaries")
-            if summaries:
-                cost_report = summaries[0]["cost_report"]
-            else:
-                layer = materializer.Layer(
-                    resolution_seconds,
-                    window.window_start,
-                    window.window_end,
-                    tuple(_materialized_ring_bucket(item) for item in selected),
-                    (),
-                )
-                cost_report = materializer.build_cost_report(layer)
+            cost_report = materializer.build_cost_report(layer)
             wire: protocol.SnapshotWire = {
                 "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
                 "range_seconds": parsed.range_seconds,

@@ -25,7 +25,7 @@ MAX_SNAPSHOT_CHUNKS = 64
 # Cache-write durations are distinct billable provider operations.  They must remain
 # exclusive cost-report dimensions so each report's dimension sum still reconciles
 # exactly to its total.
-COST_REPORT_SCHEMA_VERSION = 3
+COST_REPORT_SCHEMA_VERSION = 4
 COST_REPORT_DIMENSIONS = (
     "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "other",
 )
@@ -384,8 +384,15 @@ COST_MODEL_FIELDS = {
 }
 COST_AGENT_FIELDS = {
     "key", "source", "label", "total_tokens", "total_micro_usd",
-    "total_api_list_micro_usd", "dimensions", "priced", "unpriced",
+    "total_api_list_micro_usd", "dimensions", "priced", "unpriced", "sources",
 }
+COST_SOURCE_FIELDS = {
+    "source", "total_tokens", "total_micro_usd", "total_api_list_micro_usd",
+    "dimensions", "priced", "unpriced",
+}
+COST_SOURCE_KINDS = frozenset({
+    "claude", "codex", "opencode", "yoagent", "summary", "images", "responses", "legacy", "unknown",
+})
 COST_EVIDENCE_FIELDS = {
     "key", "provider", "model", "dimension", "direction", "modality", "cache_role",
     "unit", "pricing_profile", "service_tier", "catalog_model", "rate_usd", "rate_scale",
@@ -512,7 +519,54 @@ def _cost_rows(
         else:
             _cost_text(row["source"], f"{name}[{index}].source")
             _cost_text(row["label"], f"{name}[{index}].label")
+            _cost_sources(row["sources"], f"{name}[{index}].sources", row)
     return cast(list[dict[str, object]], value)
+
+
+def _cost_sources(value: object, name: str, parent: Mapping[str, object]) -> None:
+    if not isinstance(value, list) or len(value) > len(COST_SOURCE_KINDS):
+        raise ProtocolValidationError(f"{name} must contain only known source categories")
+    previous: tuple[int, int, int, str] | None = None
+    kinds: set[str] = set()
+    totals = [0, 0, 0]
+    for index, raw in enumerate(value):
+        row_name = f"{name}[{index}]"
+        row = _fields(raw, row_name, COST_SOURCE_FIELDS)
+        source = _cost_text(row["source"], f"{row_name}.source")
+        if source not in COST_SOURCE_KINDS:
+            raise ProtocolValidationError(f"{row_name}.source is unsupported")
+        if source in kinds:
+            raise ProtocolValidationError(f"{name} sources must be unique")
+        kinds.add(source)
+        dimensions = _cost_dimensions(row["dimensions"], f"{row_name}.dimensions")
+        totals_for_row = (
+            _cost_integer(row["total_tokens"], f"{row_name}.total_tokens"),
+            _cost_integer(row["total_micro_usd"], f"{row_name}.total_micro_usd"),
+            _cost_integer(row["total_api_list_micro_usd"], f"{row_name}.total_api_list_micro_usd"),
+        )
+        dimension_totals = tuple(
+            sum(cast(Mapping[str, object], dimensions[dimension])[field] for dimension in COST_REPORT_DIMENSIONS)
+            for field in ("tokens", "micro_usd", "api_list_micro_usd")
+        )
+        if totals_for_row != dimension_totals:
+            raise ProtocolValidationError(f"{row_name} totals disagree with dimensions")
+        priced = _cost_coverage(row["priced"], f"{row_name}.priced")
+        unpriced = _cost_coverage(row["unpriced"], f"{row_name}.unpriced")
+        if priced["tokens"] + unpriced["tokens"] != totals_for_row[0]:
+            raise ProtocolValidationError(f"{row_name} coverage disagrees with total")
+        order = (-totals_for_row[0], -totals_for_row[2], -totals_for_row[1], source)
+        if previous is not None and order <= previous:
+            raise ProtocolValidationError(f"{name} rows must use deterministic rank order")
+        previous = order
+        totals = [left + right for left, right in zip(totals, totals_for_row, strict=True)]
+    parent_totals = (
+        int(parent["total_tokens"]), int(parent["total_micro_usd"]),
+        int(parent["total_api_list_micro_usd"]),
+    )
+    if tuple(totals) != parent_totals:
+        raise ProtocolValidationError(f"{name} totals disagree with parent attribution")
+
+
 
 
 def _cost_evidence(value: object) -> list[dict[str, object]]:

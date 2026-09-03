@@ -21,7 +21,7 @@ flowchart LR
     H -->|render-ready values and no-data spans| B
 ```
 
-- `statsd` is the sole SQLite writer and the sole owner of source generations, materialization generations, family aggregation, coverage, usage/cost projection, precomputed Range-level cost reports, and exact snapshot bytes. Current snapshot/delta wire protocol version 2 requires the complete `cost_report`; cost-report schema version 3 separately represents 5-minute and 1-hour cache writes, and earlier cost-report schemas are not accepted as compatibility shapes.
+- `statsd` is the sole SQLite writer and the sole owner of source generations, materialization generations, family aggregation, coverage, usage/cost projection, precomputed Range-level cost reports, and exact snapshot bytes. Current snapshot/delta wire protocol version 2 requires the complete `cost_report`; cost-report schema version 4 separately represents 5-minute and 1-hour cache writes, and earlier cost-report schemas are not accepted as compatibility shapes.
 - The SQLite database stores original per-family observations at their real timestamps and cadences, identity-deduplicated usage atoms, covered epochs, explicit unavailable spans, and schema metadata. Explicit unavailable spans are coverage facts used when an old aggregate or a known source outage cannot be represented by an original observation; they are never display buckets.
 - One background materializer reads a consistent database snapshot and builds the four epoch-aligned immutable resolution layers. Full rebuilds, incremental dirty-cell recomputation, coverage generation, and encoding never run on the statsd listener/writer thread or an HTTP request thread.
 - The web process does not open the stats database. It authenticates and validates HTTP, forwards current RPC requests, and returns statsd's pre-encoded JSON bytes without temporal aggregation or decode/re-encode work.
@@ -98,16 +98,16 @@ A successful response contains:
   "buckets": [],
   "no_data": [],
   "cost_report": {
-    "schema_version": 3,
+    "schema_version": 4,
     "total_micro_usd": 0,
     "total_tokens": 0,
     "dimensions": {
-      "input": {"tokens": 0, "micro_usd": 0},
-      "cache_read": {"tokens": 0, "micro_usd": 0},
-      "cache_write_5m": {"tokens": 0, "micro_usd": 0},
-      "cache_write_1h": {"tokens": 0, "micro_usd": 0},
-      "output": {"tokens": 0, "micro_usd": 0},
-      "other": {"tokens": 0, "micro_usd": 0}
+       "input": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0},
+       "cache_read": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0},
+       "cache_write_5m": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0},
+       "cache_write_1h": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0},
+       "output": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0},
+       "other": {"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0}
     },
     "priced": {"atoms": 0, "tokens": 0},
     "unpriced": {"atoms": 0, "tokens": 0},

@@ -638,6 +638,7 @@ def test_codex_mock_question_strips_captured_footer_and_reserves_live_footer(mon
     monkeypatch.setattr(mock_agent_common, "EFFORT", "medium")
     monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "~/yolomux.dev8002")
     state = {}
+    state["opencode_show_urls"] = "1"
 
     mock_agent_common.cmd_mock_fixture(state, "choice_question", freeze_static=False)
 
@@ -1913,6 +1914,43 @@ def test_codex_sleep_turn_uses_bottom_working_block(monkeypatch):
     assert state.get("pending") != "permission"
 
 
+def test_opencode_sleep_uses_its_working_footer_without_permission_prompt(monkeypatch, capsys):
+    class TtyOutput(io.StringIO):
+        def isatty(self):
+            return True
+
+    output_buffer = TtyOutput()
+    monkeypatch.setattr(sys, "stdout", output_buffer)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    monkeypatch.setattr(mock_agent_common, "time", type("Clock", (), {"monotonic": staticmethod(lambda: 10.0)})())
+    state = {"opencode_history": "sleep 10"}
+
+    mock_agent_common.handle_command("sleep 10", state)
+
+    output = mock_agent_common.ANSI_RE.sub("", output_buffer.getvalue())
+    assert state["pending"] == "opencode-sleep"
+    assert state["opencode_sleep_command"] == "sleep 10"
+    assert "┃  sleep 10" in output
+    assert "# Running in yo7220" in output
+    assert "$ sleep 10" in output
+    assert "(no output)" in output
+    assert output.count("┃") >= 8
+    assert "esc interrupt" in output
+    assert "Permission rule" not in output
+    assert "Do you want to proceed" not in output
+
+
+def test_opencode_sleep_adds_its_submitted_prompt_when_called_directly(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "time", type("Clock", (), {"monotonic": staticmethod(lambda: 10.0)})())
+    state = {}
+
+    mock_agent_common.start_opencode_sleep("10", state)
+
+    assert state["opencode_history"] == "sleep 10"
+
+
 def test_codex_permission_prompt_reserves_footer(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
@@ -2255,6 +2293,609 @@ def test_live_composer_redraws_when_terminal_size_changes(monkeypatch, capsys):
     assert state["live_composer_terminal_width"] == "60"
     assert state["live_composer_terminal_height"] == "10"
     assert mock_agent_common.maybe_redraw_live_composer_for_resize("resize me", len("resize me"), state=state) is False
+
+
+def test_opencode_startup_and_prompt_use_blue_quote_footer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
+    state = {}
+
+    mock_agent_common.print_startup(state)
+
+    output = capsys.readouterr().out
+    assert "┃" in output
+    assert "╭" not in output
+    assert "╰" not in output
+    assert "ctrl+p commands" in output
+    assert state["live_composer_terminal_width"] == "80"
+
+
+def test_opencode_resize_repositions_fixed_blue_footer(monkeypatch, capsys):
+    size = {"width": 80, "height": 20}
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    state = {}
+
+    mock_agent_common.render_live_composer("resize me", len("resize me"), state=state)
+    capsys.readouterr()
+    size.update(width=45, height=12)
+
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("resize me", len("resize me"), state=state) is True
+    output = capsys.readouterr().out
+    assert "resize me" in output
+    assert state["live_composer_terminal_width"] == "45"
+    assert state["live_composer_terminal_height"] == "12"
+
+
+def test_opencode_resize_preserves_home_layout(monkeypatch):
+    size = {"width": 80, "height": 20}
+    calls = []
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    monkeypatch.setattr(mock_agent_common, "render_opencode_initial_screen", lambda state, *, text="": calls.append((text, dict(state))))
+    state = {
+        "opencode_initial_screen": "1",
+        "live_composer_terminal_width": "79",
+        "live_composer_terminal_height": "20",
+    }
+
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("draft", 5, state=state) is True
+    assert calls == [("draft", state)]
+
+
+def test_opencode_session_resize_reanchors_scroll_region(monkeypatch, capsys):
+    size = {"width": 90, "height": 40}
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    state = {
+        "live_composer_terminal_width": "109",
+        "live_composer_terminal_height": "59",
+    }
+
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("draft", 5, state=state) is True
+
+    output = capsys.readouterr().out
+    assert "\x1b7\x1b[1;35r\x1b8" in output
+
+
+def test_opencode_initial_screen_contains_real_capture_layout(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 101)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 30)
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "/nfs/keivenc/dev/yolomux/yo7220")
+
+    mock_agent_common.render_opencode_initial_screen({})
+
+    output = capsys.readouterr().out
+    assert "█▀▀█ █▀▀█ █▀▀█ █▀▀▄" in output
+    assert "█▀▀▀ █▀▀█ █▀▀█ █▀▀█" in output
+    assert 'Ask anything... "Fix broken tests"' in output
+    assert "Build" in output and "switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M" in output
+    assert "tab " in output and "agents" in output and "ctrl+p " in output and "commands" in output
+    assert "rm -rf *" not in output
+    assert "/nfs/keivenc/dev/yolomux/yo7220:main" in output
+    assert "1.18.26" in output
+    assert "╭" not in output
+    assert "╰" not in output
+
+
+def test_opencode_prompt_matches_real_five_row_footer(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "/nfs/keivenc/dev/yolomux")
+
+    lines = [mock_agent_common.ANSI_RE.sub("", line) for line in mock_agent_common.opencode_prompt_lines(width=109, home=True)]
+
+    assert len(lines) == 5
+    assert lines[0] == "┃  Ask anything... \"Fix broken tests\"" + (" " * 72)
+    assert lines[1] == "┃" + (" " * 108)
+    assert lines[2].startswith("┃  Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M GPU Inference Hub")
+    assert lines[3] == "╹" + ("▀" * 108)
+    assert lines[4] == " tab agents   ctrl+p commands"
+    assert not any("╭" in line or "╰" in line or "│" in line for line in lines)
+
+
+def test_opencode_idle_session_composer_is_empty(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    lines = [mock_agent_common.ANSI_RE.sub("", line) for line in mock_agent_common.opencode_footer_lines()]
+
+    assert lines[0].strip() == "┃"
+    assert "Ask anything" not in "\n".join(lines)
+
+
+def test_opencode_home_placeholder_is_muted_but_typed_text_is_bright(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+
+    placeholder = mock_agent_common.opencode_prompt_lines(width=109, home=True)[0]
+    typed = mock_agent_common.opencode_prompt_lines("Hello world", width=109, home=True)[0]
+
+    assert f"{mock_agent_common.OPENCODE_MUTED}Ask anything..." in placeholder
+    assert f"{mock_agent_common.OPENCODE_TEXT}Ask anything..." not in placeholder
+    assert f"{mock_agent_common.OPENCODE_TEXT}Hello world" in typed
+    assert f"{mock_agent_common.OPENCODE_MUTED}Hello world" not in typed
+
+
+def test_opencode_prompt_uses_captured_palette(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    lines = mock_agent_common.opencode_prompt_lines(width=109, home=True)
+
+    assert lines[0].startswith(
+        f"{mock_agent_common.OPENCODE_BLUE}┃{mock_agent_common.OPENCODE_TEXT}{mock_agent_common.OPENCODE_ELEMENT_BG}"
+    )
+    assert f"{mock_agent_common.OPENCODE_BLUE}Build" in lines[2]
+    assert f"{mock_agent_common.OPENCODE_MUTED}{mock_agent_common.OPENCODE_PROVIDER}" in lines[2]
+    assert lines[3].startswith(f"{mock_agent_common.OPENCODE_BLUE}╹{mock_agent_common.OPENCODE_ELEMENT_FG}")
+
+
+def test_opencode_initial_composer_updates_only_the_centered_prompt_row(monkeypatch):
+    keys = iter(["h", "i", "\r"])
+    calls = []
+    monkeypatch.setattr(mock_agent_common, "read_key", lambda timeout=None: next(keys))
+    monkeypatch.setattr(
+        mock_agent_common,
+        "render_opencode_composer_row",
+        lambda text, cursor, state, *, home=False: calls.append((text, cursor, home)),
+    )
+    state = {"opencode_initial_screen": "1"}
+
+    assert mock_agent_common.read_opencode_initial_composer(state) == "hi"
+    assert calls == [("h", 1, True), ("hi", 2, True)]
+    assert "opencode_initial_screen" not in state
+
+
+def test_opencode_empty_home_submit_stays_on_home(monkeypatch):
+    keys = iter(["\r", "h", "i", "\r"])
+    monkeypatch.setattr(mock_agent_common, "read_key", lambda timeout=None: next(keys))
+    monkeypatch.setattr(mock_agent_common, "render_opencode_initial_screen", lambda state, *, text="": None)
+    state = {"opencode_initial_screen": "1"}
+
+    assert mock_agent_common.read_opencode_initial_composer(state) == "hi"
+
+
+def test_opencode_initial_composer_supports_cursor_movement(monkeypatch):
+    keys = iter(["h", "i", "\x1b[D", "!", "\r"])
+    calls = []
+    monkeypatch.setattr(mock_agent_common, "read_key", lambda timeout=None: next(keys))
+    monkeypatch.setattr(
+        mock_agent_common,
+        "render_opencode_composer_row",
+        lambda text, cursor, state, *, home=False: calls.append((text, cursor, home)),
+    )
+
+    assert mock_agent_common.read_opencode_initial_composer({"opencode_initial_screen": "1"}) == "h!i"
+    assert calls[-1] == ("h!i", 2, True)
+
+
+def test_opencode_first_submit_clears_home_and_draws_session_prompt(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "")
+    monkeypatch.setattr(mock_agent_common, "display_cwd", lambda: "/nfs/keivenc/dev/yolomux")
+    state = {"opencode_initial_screen": "1", "opencode_initial_top": "20"}
+
+    mock_agent_common.enter_opencode_session("what model are you", state)
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "\x1b[r\x1b[H\x1b[J" in output
+    assert "  ┃  what model are you" in output
+    assert 'Ask anything... "Fix broken tests"' not in output
+    assert "█▀▀█" not in output
+    assert "● Tip" not in output
+
+
+def test_opencode_first_submit_immediately_returns_to_active_composer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    state = {"opencode_initial_screen": "1"}
+
+    mock_agent_common.enter_opencode_session("hello", state)
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "┃  hello" in output
+    assert "┃" in output and "Build" in output
+    assert state["opencode_history"] == "hello"
+    assert state["live_composer_terminal_width"] == "109"
+
+
+def test_opencode_response_redraw_preserves_submitted_blue_prompt(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    state = {"opencode_history": "hello"}
+
+    mock_agent_common.handle_command("hello", state)
+
+    raw = capsys.readouterr().out
+    output = mock_agent_common.ANSI_RE.sub("", raw)
+    assert "┃  hello" in output
+    assert 'I don\'t know how to handle "hello"' in output
+    assert raw.startswith("\x1b[r\x1b[H\x1b[J")
+    assert "Here are real things I can do" not in output
+
+
+def test_opencode_fallback_response_matches_real_session_answer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+
+    mock_agent_common.fallback_response("what model are you")
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "I'm running switchyard/openai/gpt-5.6-luna via GPU Inference Hub." in output
+    assert "▣  Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M · 1.9s" in output
+    assert "this is a mock" not in output
+    assert "Built-in actions" not in output
+
+
+def test_opencode_model_response_is_not_used_for_unrelated_prompts(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+
+    mock_agent_common.fallback_response("tell me about this system")
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "I'm running switchyard/openai/gpt-5.6-luna" not in output
+    assert "this is a mock" in output
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("what model are you", True),
+        ("what model version is this", True),
+        ("what version are you", True),
+        ("what version is the model", True),
+        ("which model is running", True),
+        ("what's your model", True),
+        ("what is your model", True),
+        ("which version are you running", True),
+        ("model?", True),
+        ("what OpenCode version is this", True),
+        ("what are you running", False),
+        ("tell me about this system", False),
+        ("fix the tests", False),
+    ],
+)
+def test_opencode_model_question_is_narrow(question, expected):
+    assert mock_agent_common.opencode_model_question(question) is expected
+
+
+@pytest.mark.parametrize("case_name", ["working_coordinator", "working_tool_wrap"])
+def test_opencode_working_capture_enters_live_working_footer(monkeypatch, case_name):
+    class TtyBuffer(io.StringIO):
+        def isatty(self):
+            return True
+
+    class TtyInput:
+        def isatty(self):
+            return True
+
+    output = TtyBuffer()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "opencode")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+    monkeypatch.setattr(mock_agent_common, "EFFORT", "")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    state = {}
+
+    mock_agent_common.cmd_mock_fixture(state, case_name, freeze_static=False)
+
+    rendered = output.getvalue()
+    plain = mock_agent_common.ANSI_RE.sub("", rendered)
+    assert state["pending"] == "opencode-working"
+    assert state["fixture_case"] == case_name
+    assert "<redacted" not in plain
+    assert "■⬝⬝⬝⬝⬝⬝⬝  esc interrupt" in plain
+    assert "Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M GPU Inference Hub" in plain
+    assert "27.4K  ctrl+p commands" in plain
+
+
+def test_opencode_mock_urls_prints_the_exact_url_listing(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 40)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 30)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+
+    mock_agent_common.cmd_opencode_urls({})
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "\x1b[r\x1b[H\x1b[J" in output
+    assert "mock urls" in output
+    assert "    Here are long image URLs you can " in output
+    assert "    https://upload.wikimedia.org/" in output
+
+
+def test_opencode_url_listing_uses_xterm_width_and_repeated_indent(monkeypatch):
+    monkeypatch.setattr(mock_agent_common.os, "get_terminal_size", lambda _fd: os.terminal_size((40, 20)))
+
+    lines = mock_agent_common.opencode_url_listing_for_width(mock_agent_common.terminal_width())
+
+    assert mock_agent_common.terminal_width() == 40
+    assert all(not line or line.startswith("    ") for line in lines)
+    assert all(mock_agent_common.visible_len(line) <= 40 for line in lines)
+    assert "    https://upload.wikimedia.org/" in lines
+    assert "    wikipedia/commons/thumb/a/a9/" in lines
+
+
+def test_opencode_url_listing_matches_the_reported_narrow_split_example():
+    lines = mock_agent_common.opencode_url_listing_for_width(40)
+
+    assert lines[3:11] == [
+        "    https://upload.wikimedia.org/",
+        "    wikipedia/commons/thumb/a/a9/",
+        "    Example.jpg/1280px-Example.jpg",
+        "",
+        "    https://upload.wikimedia.org/",
+        "    wikipedia/commons/thumb/3/3f/",
+        "    Fronalpstock_big.jpg/",
+        "    1280px-Fronalpstock_big.jpg",
+    ]
+
+
+def test_opencode_url_listing_counts_unicode_terminal_cells():
+    lines = mock_agent_common.opencode_url_listing_for_width(40)
+
+    assert all(mock_agent_common.terminal_text_cell_width(line) <= 40 for line in lines)
+    assert "    https://example.test/images/日本語/" in lines
+
+
+def test_opencode_url_listing_prefers_slash_and_word_wrap_boundaries():
+    lines = mock_agent_common.opencode_url_listing_for_width(40)
+
+    assert "    https://upload.wikimedia.org/" in lines
+    assert "    wikipedia/commons/thumb/a/a9/" in lines
+    assert "    Here are long image URLs you can " in lines
+    assert "    use to test terminal wrapping:" in lines
+
+
+def test_opencode_url_listing_redraws_at_new_width(monkeypatch, capsys):
+    size = {"width": 80, "height": 40}
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    state = {
+        "opencode_history": "mock urls",
+        "opencode_url_listing_visible": "1",
+        "live_composer_terminal_width": "80",
+        "live_composer_terminal_height": "40",
+    }
+
+    size["width"] = 40
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("", 0, state=state) is True
+
+    output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
+    assert "\x1b[r\x1b[H\x1b[J" in output
+    assert "mock urls" in output
+    assert "    https://upload.wikimedia.org/" in output
+    assert state["live_composer_terminal_width"] == "40"
+
+
+def test_opencode_resize_redraws_all_remembered_blue_prompt_blocks(monkeypatch, capsys):
+    size = {"width": 80, "height": 40}
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    state = {
+        "opencode_history": "first command\x1emock urls",
+        "opencode_url_listing_visible": "1",
+        "live_composer_terminal_width": "80",
+        "live_composer_terminal_height": "40",
+    }
+
+    size["width"] = 55
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("", 0, state=state) is True
+
+    raw = capsys.readouterr().out
+    output = mock_agent_common.ANSI_RE.sub("", raw)
+    assert raw.startswith("\x1b[r\x1b[H\x1b[J")
+    assert "op&w=2400&q=90" in output
+    assert raw.count("\r\n") <= 35
+    assert "\r\n" in raw
+    assert "\n" not in raw.replace("\r\n", "")
+
+
+def test_opencode_history_is_bottom_anchored_above_the_active_composer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 40)
+    state = {"opencode_history": "hello\x1eaoeu\x1eueoa"}
+
+    mock_agent_common.render_opencode_session_screen(state)
+
+    output = capsys.readouterr().out
+    # Five footer rows leave 35 transcript rows. Nine history rows therefore start at row 27.
+    assert output.startswith("\x1b[r\x1b[H\x1b[J\x1b[1;35r\x1b[27;1H")
+    assert "\x1b[27;1H" in output
+
+
+@pytest.mark.parametrize("width", [32, 40, 48, 55, 67, 71, 80, 109, 120])
+def test_opencode_url_transcript_fits_all_supported_widths(width, monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: width)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 58)
+    rows = mock_agent_common.opencode_history_screen_rows({"opencode_history": "mock urls"}, width)
+
+    assert all(mock_agent_common.terminal_text_cell_width(line) <= width for _kind, line in rows)
+    assert any("images.unsplash.com" in line for _kind, line in rows)
+
+
+def test_opencode_resize_does_not_append_another_mock_urls_turn(monkeypatch, capsys):
+    size = {"width": 80, "height": 40}
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: size["height"])
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    state = {
+        "opencode_history": "mock urls\x1esecond prompt",
+        "opencode_url_listing_visible": "1",
+        "live_composer_terminal_width": "80",
+        "live_composer_terminal_height": "40",
+    }
+
+    size["width"] = 55
+    assert mock_agent_common.maybe_redraw_live_composer_for_resize("", 0, state=state) is True
+
+    capsys.readouterr()
+    assert state["opencode_history"] == "mock urls\x1esecond prompt"
+
+
+def test_opencode_history_command_is_only_the_blue_user_message(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 30)
+    monkeypatch.setattr(mock_agent_common, "MODEL", "switchyard/openai/gpt-5.6-luna")
+
+    mock_agent_common.render_opencode_history_command("mock urls", {})
+
+    raw = capsys.readouterr().out
+    output = mock_agent_common.ANSI_RE.sub("", raw)
+    assert "┃  mock urls" in output
+    assert "# Running in yo7220" not in output
+    assert "$ mock urls" not in output
+    assert "(no output)" not in output
+    assert raw.count(f"{mock_agent_common.OPENCODE_BLUE}{mock_agent_common.OPENCODE_QUOTE_GUTTER}") >= 3
+
+
+def test_mock_and_mocks_list_valid_commands(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+
+    mock_agent_common.handle_command("mocks", {})
+
+    output = capsys.readouterr().out
+    assert "mock urls" in output
+    assert "mock <case>" in output
+    assert "mock list all" in output
+    assert "yesno [N]" in output
+    assert "todos" in output
+
+
+def test_opencode_non_tty_mock_urls_is_an_exact_url_list(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "STARTUP_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common.sys.stdout, "isatty", lambda: False)
+    state = {"opencode_show_urls": "1"}
+
+    mock_agent_common.print_opencode_startup(state)
+
+    output = capsys.readouterr().out
+    for line in mock_agent_common.opencode_url_listing_lines():
+        assert line in output
+    assert output.count("https://") >= 8
+
+
+def test_opencode_composer_cursor_is_on_its_first_visible_row(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+
+    mock_agent_common.render_opencode_footer("hello", {})
+
+    output = capsys.readouterr().out
+    assert "\x1b[55;11H" in output
+    assert "\x1b[56;11H" not in output
+
+
+def test_opencode_typed_composer_updates_only_prompt_row_and_places_cursor_after_text(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    state = {"opencode_history": "mock urls", "opencode_url_listing_visible": "1"}
+
+    mock_agent_common.render_live_composer("hello", 5, state=state)
+
+    raw = capsys.readouterr().out
+    output = mock_agent_common.ANSI_RE.sub("", raw)
+    assert "┃  hello" in output
+    assert "\x1b[55;11H" in raw
+    assert "\x1b[r\x1b[H\x1b[J" not in raw
+    assert "mock urls" not in output
+
+
+def test_opencode_composer_view_keeps_long_input_cursor_visible():
+    text = "0123456789abcdefghij"
+
+    visible, cursor = mock_agent_common.opencode_composer_view(text, 18, 8)
+
+    assert visible == "abcdefgh"
+    assert cursor == 8
+
+
+def test_opencode_history_preserves_consecutive_duplicate_submissions():
+    state = {}
+
+    mock_agent_common.remember_opencode_command(state, "hello")
+    mock_agent_common.remember_opencode_command(state, "hello")
+
+    assert state["opencode_history"] == "hello\x1ehello"
+
+
+def test_opencode_submit_parks_output_above_the_footer(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "opencode")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    state = {}
+
+    mock_agent_common.finish_live_composer("mock urls", state)
+
+    output = capsys.readouterr().out
+    assert "\x1b[1;54r" in output
+    assert output.endswith("\x1b[54;1H")
+
+
+def test_opencode_working_meter_preserves_captured_color_gradient():
+    meter = mock_agent_common.opencode_working_meter(0)
+
+    assert meter == (
+        "\x1b[38;5;75m■\x1b[38;5;235m⬝\x1b[38;5;235m⬝\x1b[38;5;235m⬝"
+        "\x1b[38;5;235m⬝\x1b[38;5;235m⬝\x1b[38;5;235m⬝\x1b[38;5;235m⬝\x1b[0m"
+    )
+
+
+def test_opencode_working_footer_fits_its_inset_width(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 109)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 59)
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+
+    mock_agent_common.render_opencode_footer("", {}, working_frame=0)
+
+    status_write = output.getvalue().split("\x1b[59;3H", 1)[1]
+    status_line = status_write.rsplit("\x1b[55;6H", 1)[0]
+    assert mock_agent_common.visible_len(status_line) == 105
+    assert mock_agent_common.ANSI_RE.sub("", status_line).endswith("27.4K  ctrl+p commands")
+
+
+def test_opencode_working_handler_animates_until_escape(monkeypatch):
+    class TtyInput:
+        def fileno(self):
+            return 0
+
+    renders = []
+    state = {"pending": "opencode-working", "opencode_working_frame": "0", "opencode_working_text": ""}
+    monkeypatch.setattr(sys, "stdin", TtyInput())
+    monkeypatch.setattr(mock_agent_common.termios, "tcgetattr", lambda _fd: [])
+    monkeypatch.setattr(mock_agent_common.termios, "tcsetattr", lambda *_args: None)
+    monkeypatch.setattr(mock_agent_common.tty, "setraw", lambda _fd: None)
+    readiness = iter([([], [], []), ([0], [], [])])
+    monkeypatch.setattr(mock_agent_common.select, "select", lambda *_args: next(readiness))
+    monkeypatch.setattr(mock_agent_common, "read_key", lambda: "\x1b")
+    monkeypatch.setattr(mock_agent_common, "render_opencode_working_fixture", lambda _state, frame=0: renders.append(frame))
+    monkeypatch.setattr(mock_agent_common, "render_opencode_footer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mock_agent_common, "set_output_region_above_live_composer", lambda **_kwargs: 1)
+
+    mock_agent_common.handle_opencode_live_working_tty(state)
+
+    assert renders == [0, 1]
+    assert "pending" not in state
+    assert "opencode_working_frame" not in state
 
 
 def test_claude_header_redraw_clears_previous_rows_after_resize(monkeypatch, capsys):

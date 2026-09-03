@@ -942,7 +942,7 @@ def test_build2_repairs_early_schema5_unavailable_rows_once_and_fences_build1(tm
     with Store.open(path) as store:
         second = store.read_snapshot()
 
-    assert first.schema.minimum_writer_build == MIN_WRITER_BUILD == 7
+    assert first.schema.minimum_writer_build == MIN_WRITER_BUILD
     assert first.schema.source_generation == 8
     assert first.unavailable_spans == (
         UnavailableSpan(

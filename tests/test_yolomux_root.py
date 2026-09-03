@@ -191,5 +191,5 @@ def test_socket_budget_enumerates_product_candidates_not_a_guessed_suffix(tmp_pa
     candidates = common.runtime_socket_candidates(paths)
 
     assert {path.name for path in candidates} >= {"statusd.sock", "batchd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}
-    assert any(path.name.startswith("statsd.p24s7.") for path in candidates)
+    assert any(path.name.startswith("statsd.p25s9.") for path in candidates)
     assert max(candidates, key=lambda path: len(str(path).encode())) in candidates

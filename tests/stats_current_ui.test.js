@@ -73,7 +73,7 @@ function costDimensions(changes = {}) {
 
 function costReport(changes = {}) {
   return {
-    schema_version: 3,
+    schema_version: 4,
     total_micro_usd: 0,
     total_api_list_micro_usd: 0,
     total_tokens: 0,
@@ -478,6 +478,7 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
     priced: {atoms: 2, tokens: 575},
     unpriced: {atoms: 1, tokens: 25},
   };
+  agentAttribution.sources = [{source: 'codex', ...agentAttribution}];
   result.cost_report = costReport({
     total_micro_usd: 300000,
     total_api_list_micro_usd: 600000,
@@ -674,6 +675,20 @@ test('accepts the producer-shaped snapshot before atomically replacing the gener
   const missingAgentLabel = rendererSnapshot();
   delete missingAgentLabel.cost_report.agents[0].label;
   assert.throws(() => controller.acceptSnapshot(missingAgentLabel), /fields are not exact/);
+  const undercountedSources = rendererSnapshot();
+  undercountedSources.cost_report.agents[0].sources[0] = {
+    ...undercountedSources.cost_report.agents[0].sources[0],
+    total_tokens: 0,
+    total_micro_usd: 0,
+    total_api_list_micro_usd: 0,
+    dimensions: costDimensions(),
+    priced: {atoms: 0, tokens: 0},
+    unpriced: {atoms: 0, tokens: 0},
+  };
+  assert.throws(
+    () => controller.acceptSnapshot(undercountedSources),
+    /sources totals disagree with parent attribution/,
+  );
   const withGap = snapshot({requested: 1, cache: 2});
   withGap.no_data = [{
     family: 'gpu', source_id: 'gpu:0', start: 10, end: 20, epoch: 'gpu-e1',
@@ -3299,9 +3314,12 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('gpt-5.6-sol'));
   assert.ok(modal.includes('122_frontend-crates'), 'Cost by Agent uses the same canonical tmux-session label as Session tokens/min');
   assert.ok(modal.includes('>122_frontend-crates</span>'), 'Cost by Agent does not waste visible space on pane-key suffixes');
-  assert.equal((modal.match(/>122_frontend-crates<\/span>/g) || []).length, 1, 'Cost by Agent consolidates pane keys with the same visible session name');
-  assert.match(modal, /yo-cost-current-agent[^>]*>122_frontend-crates<\/span><\/th><td>1\.2K<small>/, 'the consolidated agent row sums both pane attributions');
+  assert.equal((modal.match(/>122_frontend-crates<\/span>/g) || []).length, 2, 'Cost by Agent preserves distinct server agent rows');
+  assert.match(modal, /yo-cost-current-agent-row[\s\S]*?yo-cost-current-agent[^>]*>122_frontend-crates<\/span><\/summary>[\s\S]*?<\/th><td>600<small>/, 'the server-owned agent rows retain their individual attributions');
   assert.ok(modal.includes('Cost by Agent'));
+  assert.ok(modal.includes('Source attribution'));
+  assert.equal((modal.match(/Source attribution/g) || []).length, 2);
+  assert.equal((modal.match(/data-stats-current-cost-table="source"/g) || []).length, 0);
   assert.ok(modal.includes('Pricing attribution'));
   assert.ok(modal.includes('$0.10 marginal · $0.20 list'));
   assert.ok(modal.includes('https://example.com/pricing'));

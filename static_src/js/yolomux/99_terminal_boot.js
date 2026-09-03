@@ -5186,6 +5186,7 @@ function startTerminal(session) {
     // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
     macOptionClickForcesSelection: true,
   });
+  term.yolomuxAgentKind = sessionAgentKind(session);
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.

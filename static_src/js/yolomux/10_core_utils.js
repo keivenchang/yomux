@@ -2597,11 +2597,19 @@ function agentLabel(kind) {
 }
 
 const AGENT_CLIENT_SPECS = Object.freeze({
-  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
-  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true}),
+  claude: Object.freeze({label: 'Claude', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent'])}),
+  codex: Object.freeze({label: 'Codex', visible: true, nativeContextMenu: false, restart: true, managedChat: true, autoApprove: true, promptTransport: true, jsonlTranscript: true, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent'])}),
   // TODO(OpenCode): enable these capabilities only after their transport and safety contracts are implemented.
-  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false}),
+  opencode: Object.freeze({label: 'OpenCode', visible: true, nativeContextMenu: true, restart: false, managedChat: false, autoApprove: false, promptTransport: false, jsonlTranscript: false, urlContinuationLayouts: Object.freeze(['xterm-soft-wrap', 'hanging-indent', 'repeated-gutter', 'quote-gutter'])}),
 });
+
+function agentUrlContinuationLayouts(kind) {
+  // Terminal metadata can arrive after xterm has been opened. Preserve the generic legacy parser until
+  // the client kind is known; once known, the client registry is the only source of enabled layouts.
+  const normalized = String(kind || '').toLowerCase();
+  return agentClientSpec(normalized)?.urlContinuationLayouts
+    || (normalized ? ['xterm-soft-wrap'] : ['xterm-soft-wrap', 'hanging-indent']);
+}
 
 function agentClientSpec(kind) {
   return AGENT_CLIENT_SPECS[String(kind || '').toLowerCase()] || null;
@@ -4865,6 +4873,23 @@ function keyedScrollAnchor(selector) {
   };
 }
 
+function keyedDetailsOpenAnchor(selector) {
+  return {
+    capture: body => new Set(
+      [...body.querySelectorAll?.(selector) || []]
+        .filter(element => element.open)
+        .map(element => String(element.dataset.jsDebugCostAgentKey || '').trim())
+        .filter(Boolean),
+    ),
+    restore: (body, keys) => {
+      if (!(keys instanceof Set)) return;
+      for (const element of body.querySelectorAll?.(selector) || []) {
+        element.open = keys.has(String(element.dataset.jsDebugCostAgentKey || '').trim());
+      }
+    },
+  };
+}
+
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams({session, client: browserClientId});
@@ -5070,6 +5095,11 @@ function terminalTailIsUnterminatedUrl(text) {
   return last.index + last[0].length === text.length;
 }
 
+function terminalTailHasUrlSplitBoundary(text) {
+  const value = String(text || '');
+  return terminalTailIsUnterminatedUrl(value) && /[-/?&=#%]$/.test(value);
+}
+
 function terminalRowStartsNewUrlToken(text) {
   return /^(?:https?:\/\/|file:\/\/|www\.)/i.test(String(text || ''));
 }
@@ -5084,18 +5114,33 @@ function terminalRowHangingShape(buffer, index) {
   const match = /^(\s*)([^\s<>"'`])/.exec(raw);
   if (!match) return null;
   const text = raw.slice(match[1].length);
-  if (!text || /\s/.test(text) || terminalRowStartsNewUrlToken(text)) return null;
+  if (!text || terminalRowStartsNewUrlToken(text)) return null;
   return {indent: match[1].length, text};
+}
+
+function terminalQuoteGutterShape(buffer, index) {
+  const line = buffer.getLine(index);
+  if (!line || line.isWrapped === true) return null;
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s*[│┃|]\s+)([^\s<>'"`].*)$/.exec(raw);
+  return match ? {prefix: match[1], indent: match[1].length, text: match[2]} : null;
+}
+
+function terminalQuoteGutterUrlBaseContext(buffer, index, cols) {
+  const shape = terminalQuoteGutterShape(buffer, index);
+  if (!shape || !/^(?:https?:\/\/|file:\/\/|www\.)/i.test(shape.text)) return null;
+  return shape;
 }
 
 function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
   const line = buffer.getLine(index);
   const raw = terminalBufferLineText(line);
   const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
-  if (!match || !match[1] || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+  if (!match || !match[1]) return null;
   const indent = match[1].length;
   const text = raw.slice(indent);
   if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
   return {indent, text};
 }
 
@@ -5111,13 +5156,27 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   const base = String(baseText || '');
   const continuation = String(continuationText || '');
   if (!base || !terminalTailIsUnterminatedUrl(base)) return false;
-  if (!continuation || /\s/.test(continuation) || terminalRowStartsNewUrlToken(continuation)) return false;
-  if (!/^[A-Za-z0-9!$'()*+,;=:@/?%#[\]_.~-]+$/.test(continuation)) return false;
+  if (!continuation || terminalRowStartsNewUrlToken(continuation)) return false;
+  if (/\s/.test(continuation)) return false;
+  if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
   const delimiter = base.at(-1);
   if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
-  if (delimiter === '%') return /^[0-9A-Fa-f]/.test(continuation);
-  if (delimiter === '?' || delimiter === '&' || delimiter === '=') return /^[A-Za-z0-9]/.test(continuation);
-  return /^[A-Za-z0-9]/.test(continuation);
+  if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
+  return true;
+}
+
+function terminalUrlContinuationCharactersAreValid(text) {
+  const continuation = String(text || '');
+  return Boolean(continuation)
+    && !/^[>$#%]$/.test(continuation)
+    && !terminalRowStartsNewUrlToken(continuation)
+    && !/\s/.test(continuation)
+    && /^[^<>'"`\s]+$/.test(continuation);
+}
+
+function terminalUrlCanContinueAtBoundary(text) {
+  const value = String(text || '');
+  return terminalTailIsUnterminatedUrl(value) && /[A-Za-z0-9/_.~%-]$/.test(value);
 }
 
 function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape) {
@@ -5146,6 +5205,18 @@ function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, sha
   return false;
 }
 
+
+function terminalQuoteGutterUrlBaseBefore(buffer, index, cols, shape) {
+  if (!shape?.prefix || index < 1) return null;
+  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+    const context = terminalQuoteGutterUrlBaseContext(buffer, baseIndex, cols);
+    if (context) return context.prefix === shape.prefix ? {index: baseIndex, context} : null;
+    const candidate = terminalQuoteGutterShape(buffer, baseIndex);
+    if (!candidate || candidate.prefix !== shape.prefix || !terminalUrlContinuationCharactersAreValid(candidate.text)) return null;
+  }
+  return null;
+}
+
 function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
   if (index < 1) return false;
   for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
@@ -5154,7 +5225,7 @@ function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
     let joined = context.text;
     for (let rowIndex = baseIndex + 1; rowIndex <= index; rowIndex += 1) {
       const continuation = terminalBufferLineText(buffer.getLine(rowIndex));
-      if (!terminalUrlContinuationTextIsStrong(joined, continuation, rowIndex === baseIndex + 1)) {
+      if (!terminalUrlContinuationTextIsStrong(joined, continuation)) {
         joined = '';
         break;
       }
@@ -5186,7 +5257,12 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
   if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
   if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
-  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(terminalBufferLineText(prev))) return true;
+  const previousText = terminalBufferLineText(prev);
+  // The OpenCode mock uses four-space markdown output indentation and wraps at slash/word boundaries.
+  // Its short query-key fragments can end before the terminal edge, e.g. `?au` then `to=format`.
+  if (shape.indent === 4 && terminalUrlContinuationTextIsStrong(previousText, shape.text)) return true;
+  if (terminalVisibleRowReachesRightEdge(prev, cols) && terminalTailIsUnterminatedUrl(previousText)) return true;
+  if (terminalTailHasUrlSplitBoundary(previousText) && terminalUrlContinuationCharactersAreValid(shape.text)) return true;
   return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
@@ -5195,6 +5271,10 @@ function terminalWrappedLineGroup(term, y) {
   if (!buffer?.getLine) return null;
   // terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
   const cols = Number(term.cols) || 0;
+  const layouts = agentUrlContinuationLayouts(term.yolomuxAgentKind);
+  const allowsRepeatedGutter = layouts.includes('repeated-gutter');
+  const allowsQuoteGutter = layouts.includes('quote-gutter');
+  const allowsHangingIndent = layouts.includes('hanging-indent');
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
@@ -5203,8 +5283,12 @@ function terminalWrappedLineGroup(term, y) {
   let start = requested;
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
-    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
-    if (start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (allowsHangingIndent && start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
+    if (allowsQuoteGutter && start > 0) {
+      const quoteShape = terminalQuoteGutterShape(buffer, start);
+      if (terminalQuoteGutterUrlBaseBefore(buffer, start, cols, quoteShape)) { start -= 1; continue; }
+    }
+    if (allowsRepeatedGutter && start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -5214,30 +5298,47 @@ function terminalWrappedLineGroup(term, y) {
   let offset = 0;
   let joined = '';
   let index = start;
-  const repeatedGutterGroup = Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
-  const zeroIndentGroup = Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
+  const repeatedGutterGroup = allowsRepeatedGutter && Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
+  const zeroIndentGroup = allowsRepeatedGutter && Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
+  const quoteGutterBase = allowsQuoteGutter ? terminalQuoteGutterUrlBaseContext(buffer, start, cols) : null;
   for (;;) {
     let text;
     let indent = 0;
     if (index === start) {
-      text = terminalBufferLineText(buffer.getLine(index));
+      text = quoteGutterBase ? quoteGutterBase.text : terminalBufferLineText(buffer.getLine(index));
+      indent = quoteGutterBase ? quoteGutterBase.indent : 0;
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined)) {
+    } else if (repeatedGutterGroup || zeroIndentGroup || quoteGutterBase || terminalUrlCanContinueAtBoundary(joined)) {
       const shape = terminalRowHangingShape(buffer, index);
-      if (!shape) break;
+      const quoteShape = allowsQuoteGutter ? terminalQuoteGutterShape(buffer, index) : null;
+      if (!shape && !quoteShape) break;
+      const rowShape = quoteShape || shape;
+      const continuationAllowed = terminalUrlContinuationCharactersAreValid(rowShape.text);
       const repeatedContinuation = repeatedGutterGroup
-        && shape.indent > 0
-        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
+        && rowShape.indent > 0
+        && continuationAllowed
+        && (index > start + 1 || /[-/?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
       const zeroIndentContinuation = zeroIndentGroup
-        && shape.indent === 0
-        && terminalUrlContinuationTextIsStrong(joined, shape.text, index === start + 1);
-      const genericContinuation = !repeatedGutterGroup && !zeroIndentGroup
-        && !terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)
-        && terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      if (!repeatedContinuation && !zeroIndentContinuation && !genericContinuation) break;
-      indent = shape.indent;
-      text = shape.text;
+        && rowShape.indent === 0
+        && continuationAllowed;
+      const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
+      const quoteGutterSplitBoundary = /[-/?&=#%]$/.test(joined);
+      const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
+        && quoteShape.prefix === quoteGutterBase.prefix
+        && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
+        && terminalUrlContinuationTextIsStrong(joined, quoteShape.text, !quoteGutterReachedEdge));
+      const genericContinuation = allowsHangingIndent && !repeatedGutterGroup
+        && (!terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) || shape.indent === 4)
+        && terminalUrlContinuationTextIsStrong(
+          joined,
+          shape.text,
+          !(shape.indent === 4)
+            && !terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols),
+        );
+      if (!repeatedContinuation && !zeroIndentContinuation && !quoteGutterContinuation && !genericContinuation) break;
+      indent = rowShape.indent;
+      text = rowShape.text;
     } else {
       break;
     }
@@ -5248,7 +5349,7 @@ function terminalWrappedLineGroup(term, y) {
     if (rows.length >= terminalWrappedUrlMaxRows) break;
     if (!buffer.getLine(index)) break;
   }
-  return {text: joined, rows};
+  return {text: joined, rows, term};
 }
 
 function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
@@ -5258,6 +5359,23 @@ function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
   // terminal column is shifted right by that indent.
   return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
+}
+
+function terminalTextCellWidth(term, text) {
+  const value = String(text || '');
+  const unicodeService = term?.unicode;
+  if (typeof unicodeService?.wcwidth === 'function') {
+    let width = 0;
+    for (const char of value) width += Math.max(0, Number(unicodeService.wcwidth(char.codePointAt(0))) || 0);
+    return width;
+  }
+  let width = 0;
+  for (const char of value) width += /[\u1100-\u115f\u2329\u232a\u2e80-\u303e\u3040-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(char) ? 2 : 1;
+  return width;
+}
+
+function terminalRowCellOffset(term, text, offset) {
+  return terminalTextCellWidth(term, String(text || '').slice(0, Math.max(0, offset)));
 }
 
 function terminalWrappedRange(group, startIndex, endIndex) {
@@ -5270,9 +5388,11 @@ function terminalWrappedRange(group, startIndex, endIndex) {
       const segmentEnd = Math.min(endIndex, row.end);
       if (segmentEnd <= segmentStart) return null;
       const indent = row.indent || 0;
+      const rowStart = terminalRowCellOffset(group.term, row.text, segmentStart - row.start);
+      const rowEnd = terminalRowCellOffset(group.term, row.text, segmentEnd - row.start);
       return {
-        start: {x: indent + segmentStart - row.start + 1, y: row.y},
-        end: {x: indent + segmentEnd - row.start, y: row.y},
+        start: {x: indent + rowStart + 1, y: row.y},
+        end: {x: indent + Math.max(rowStart, rowEnd), y: row.y},
       };
     })
     .filter(Boolean);
@@ -5307,7 +5427,7 @@ function terminalWrappedLineLinks(term, y) {
 function terminalWrappedLineReferences(term, y) {
   const group = terminalWrappedLineGroup(term, y);
   if (!group) return [];
-  const references = group.rows.length === 1
+  const references = group.rows.length === 1 && !group.rows[0].indent
     ? terminalTextReferences(group.text, (startIndex, endIndex) => ({
       start: {x: startIndex + 1, y},
       end: {x: endIndex, y},
@@ -5362,18 +5482,20 @@ function terminalUrlReferenceUnderlineSegments(term, reference) {
 
 function terminalUrlReferenceUnderlineLayer(container) {
   if (!container) return null;
-  let layer = container.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  const coordinateParent = container.querySelector?.('.xterm-screen') || container;
+  let layer = coordinateParent.querySelector?.(':scope > .terminal-url-link-underlines') || null;
   if (!layer) {
     layer = document.createElement('div');
     layer.className = 'terminal-url-link-underlines';
     layer.setAttribute('aria-hidden', 'true');
-    container.appendChild(layer);
+    coordinateParent.appendChild(layer);
   }
   return layer;
 }
 
 function clearTerminalUrlReferenceUnderlines(container) {
-  const layer = container?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
+  const coordinateParent = container?.querySelector?.('.xterm-screen') || container;
+  const layer = coordinateParent?.querySelector?.(':scope > .terminal-url-link-underlines') || null;
   layer?.replaceChildren?.();
   return 0;
 }
@@ -5391,8 +5513,10 @@ function renderTerminalUrlReferenceUnderlines(term, container, reference) {
     return clearTerminalUrlReferenceUnderlines(container);
   }
   const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
-  const leftOrigin = screenRect.left - containerRect.left;
-  const topOrigin = screenRect.top - containerRect.top;
+  const coordinateParent = layer.parentElement;
+  const layerInsideScreen = coordinateParent === screen;
+  const leftOrigin = layerInsideScreen ? 0 : screenRect.left - containerRect.left;
+  const topOrigin = layerInsideScreen ? 0 : screenRect.top - containerRect.top;
   const nodes = [];
   for (const segment of terminalUrlReferenceUnderlineSegments(term, reference)) {
     const screenRow = segment.y - viewportY;
@@ -5409,10 +5533,11 @@ function renderTerminalUrlReferenceUnderlines(term, container, reference) {
 }
 
 async function terminalReferenceProviderLinks(session, term, y, container = null) {
+  if (!term.yolomuxAgentKind && typeof sessionAgentKind === 'function') term.yolomuxAgentKind = sessionAgentKind(session);
   const refs = terminalWrappedLineReferences(term, y);
   const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
     row: y,
-    underline: false,
+    underline: true,
     hover: () => renderTerminalUrlReferenceUnderlines(term, container, ref),
     leave: () => clearTerminalUrlReferenceUnderlines(container),
   }));
@@ -5897,6 +6022,7 @@ function terminalRangeContainsPosition(range, position) {
   const start = range.start || {};
   const end = range.end || {};
   if (position.y < start.y || position.y > end.y) return false;
+  if (position.y > start.y && position.y < end.y) return false;
   if (start.y === end.y) return position.x >= start.x && position.x <= end.x;
   if (position.y === start.y) return position.x >= start.x;
   if (position.y === end.y) return position.x <= end.x;

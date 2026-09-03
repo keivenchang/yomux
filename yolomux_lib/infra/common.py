@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.30"
+YOLOMUX_VERSION = "0.7.31"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -109,7 +109,7 @@ def resolve_yolomux_roots(
 # `runtime_socket_candidates`, which is a divergent copy of the same fact: bumping the schema left
 # the socket digest computed from a filename the product no longer uses, so the socket-length
 # preflight validated a path that would never exist.
-STATS_SCHEMA_VERSION = 8
+STATS_SCHEMA_VERSION = 9
 STATS_DATABASE_FILENAME = f"stats-v{STATS_SCHEMA_VERSION}.sqlite3"
 
 

@@ -982,7 +982,7 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
     assert model_values[model_a].model == "model-a"
     assert agent_values[agent_a].source == "codex"
     assert agent_values[agent_a].label == f"codex:{agent_a[:8]}"
-    assert agent_values[agent_c].source.startswith("sha256-")
+    assert agent_values[agent_c].source == "unknown"
     assert detail.evidence
     assert all(
         item.source_url == "https://developers.openai.com/api/docs/pricing"
@@ -1014,9 +1014,7 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
     assert model_rows["unknown-model"]["unpriced"] == {"atoms": 1, "tokens": 7}
     assert model_rows["unknown-model"]["total_micro_usd"] == 0
     assert model_rows["unknown-model"]["total_api_list_micro_usd"] == 0
-    assert {row["source"] for row in report["agents"]} == {
-        "codex", "mixed", "sha256-7555f019daf1e0ad1350e992",
-    }
+    assert {row["source"] for row in report["agents"]} == {"codex", "mixed", "unknown"}
     assert all("agent-" not in row["label"] for row in report["agents"])
     assert report["evidence"]
     assert all(

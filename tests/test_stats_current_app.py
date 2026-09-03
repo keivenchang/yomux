@@ -922,14 +922,14 @@ def test_token_adapter_passes_safe_opencode_started_at_to_the_reader(monkeypatch
 
 
 def test_token_adapter_fences_opencode_cursor_to_the_stats_database(monkeypatch, tmp_path):
-    database = tmp_path / "stats-v8.sqlite3"
+    database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"new stats database")
     cursor_path = tmp_path / "opencode-cursors.json"
     cursor = opencode_module.OpenCodeCursorStore(cursor_path)
     assert cursor.reset_for_database(database) is None
     cursor.prepare({"session:ses-a:output": 20}, event_revisions={"old-event": "old-revision"})
     cursor.commit()
-    replacement = tmp_path / "stats-v8.sqlite3.new"
+    replacement = tmp_path / "stats-v9.sqlite3.new"
     replacement.write_bytes(b"replacement stats database")
     replacement.replace(database)
     result = opencode_module.OpenCodeReadSuccess(
