@@ -960,7 +960,9 @@ def safe_descendant(
             raise FilesystemError.changed_on_disk(requested_root)
         if stat.S_ISLNK(handle.stat_result.st_mode):
             try:
-                target_text = os.readlink("", dir_fd=handle.descriptor)
+                # macOS does not implement readlinkat's empty-path form; the requested path is
+                # already pinned and authorized, so read its link target by name.
+                target_text = os.readlink(requested)
             except OSError as error:
                 raise FilesystemError.changed_on_disk(requested, diagnostic=error) from error
             target = Path(target_text)
