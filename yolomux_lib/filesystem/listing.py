@@ -347,11 +347,7 @@ def _visible_directory_names(
                             )
                             paths.authority_pinned(operation, entry_path)
                             entry_stat = os.fstat(link_fd)
-                            # macOS does not implement readlinkat's empty-path form. Read the
-                            # target through the already pinned parent descriptor instead.
-                            target_text = os.readlink(name, dir_fd=directory_descriptor)
-                        except OSError as error:
-                            raise error
+                            target_text = paths.symlink_target_from_descriptor(link_fd, entry_path)
                         finally:
                             if link_fd is not None:
                                 os.close(link_fd)

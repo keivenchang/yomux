@@ -144,6 +144,24 @@ def descriptor_open_flags(flags: int) -> int:
     return flags | nofollow | getattr(os, "O_CLOEXEC", 0)
 
 
+def symlink_target_from_descriptor(
+    descriptor: int,
+    requested: Path,
+) -> str:
+    """Read a symlink target from the already-authorized descriptor or fail closed."""
+
+    try:
+        return os.readlink("", dir_fd=descriptor)
+    except OSError as error:
+        # macOS lacks readlinkat's empty-path form. Reopening a parent/name pair can race with an
+        # unlink/recreate/restore sequence, so no post-read identity check can make it safe.
+        raise FilesystemError(
+            "descriptor-bound symlink target reads are unsupported on this platform",
+            status=500,
+            message_key="fs.error.operationFailed",
+        ) from error
+
+
 def _renameat_with_flags(parent_descriptor: int, source: str, target: str, flags: int) -> None:
     """Apply a platform-native atomic rename flag within one pinned directory."""
 
@@ -959,12 +977,10 @@ def safe_descendant(
         if handle is None:
             raise FilesystemError.changed_on_disk(requested_root)
         if stat.S_ISLNK(handle.stat_result.st_mode):
-            try:
-                # macOS does not implement readlinkat's empty-path form; the requested path is
-                # already pinned and authorized, so read its link target by name.
-                target_text = os.readlink(requested)
-            except OSError as error:
-                raise FilesystemError.changed_on_disk(requested, diagnostic=error) from error
+            target_text = symlink_target_from_descriptor(
+                handle.descriptor,
+                requested,
+            )
             target = Path(target_text)
             if not target.is_absolute():
                 target = requested.parent / target

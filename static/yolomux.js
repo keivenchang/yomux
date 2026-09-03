@@ -11925,7 +11925,13 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('root' in finder) {
     const root = String(finder.root || '').trim();
     if (root) {
-      fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+      const expandedRoot = normalizeDirectoryPath(expandUserPath(root));
+      // macOS keeps an empty `/home` compatibility symlink. Older saved layouts can retain it
+      // even though the server bootstrap identifies the real user home under `/Users`; migrate
+      // that stale root before the first Finder request so reload cannot restore an empty tree.
+      fileExplorerRoot = expandedRoot === '/home' && homePath && homePath !== '/home'
+        ? normalizeDirectoryPath(homePath)
+        : expandedRoot;
       layoutUrlState.finderRootKindUnverified = true;
     }
   }

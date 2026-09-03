@@ -5083,6 +5083,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
     readonlyApi.setAutoApproveStateForTest('1', {enabled: true});
     assert.equal(readonlyApi.menuTabCommand('1', {toggleYolo: true}).html.includes('data-auto-session'), false);
+    const macFinderApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'admin', {homePath: '/Users/test'});
+    macFinderApi.applyLayoutUrlStateSeedForTest({finder: {root: '/home', rootMode: 'fixed'}});
+    assert.equal(macFinderApi.fileExplorerRootForTest(), '/Users/test', 'saved macOS /home Finder root migrates to the bootstrap home');
     api.setTranscriptInfoForTest('1', {
       project: {git: {cwd: '/home/test/yolomux.dev', root: '/home/test/yolomux.dev'}},
       panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
