@@ -415,10 +415,6 @@ def _graph_state(driver) -> dict[str, object]:
           .map(node => ({series: node.dataset.jsDebugBarSeries, height: Number(node.getAttribute('height')), width: Number(node.getAttribute('width'))}));
         const gapRects = [...document.querySelectorAll('.js-debug-panel [data-js-debug-history-coverage-family="gpu"] [data-js-debug-history-no-data-range]')]
           .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}));
-        const costRows = [...document.querySelectorAll('.js-debug-panel [data-js-debug-cost-table="summary"] tr')]
-          .map(row => [...row.querySelectorAll('th, td')].map(cell => String(cell.textContent || '').trim()))
-          .filter(cells => cells.length >= 3 && cells[0] !== 'Usage')
-          .map(cells => ({label: cells[0], tokens: Number(cells[1].replace(/[^0-9.-]/g, '')) || 0}));
         return {
           selection,
           range: Number(generation?.range_seconds || 0),
@@ -428,7 +424,7 @@ def _graph_state(driver) -> dict[str, object]:
           noData: Array.isArray(generation?.no_data) ? generation.no_data : [],
           cacheGeneration: Number(generation?.cache_generation || 0),
           sourceGeneration: Number(generation?.source_generation || 0),
-          generationCostTokens: Number(generation?.cost_report?.total_tokens || 0),
+           generationCostTokens: Number(generation?.cost_report?.total_tokens || 0),
           controllerGenerationKey: generation && typeof jsDebugCurrentStatsGenerationKey === 'function'
             ? jsDebugCurrentStatsGenerationKey(generation)
             : '',
@@ -445,7 +441,6 @@ def _graph_state(driver) -> dict[str, object]:
           focusedChartToggle: document.activeElement?.dataset?.jsDebugChartToggle || '',
           zeroBars,
           gapRects,
-          costRows,
           readiness: typeof jsDebugHistoryReadinessSnapshot === 'function' ? jsDebugHistoryReadinessSnapshot() : null,
           debugEvents: typeof jsDebugEventsForTest === 'function' ? jsDebugEventsForTest().slice(-12) : [],
           bootErrors: jsDebugFailureEvents('error'),
@@ -522,7 +517,6 @@ def test_ring_pair_wait_rejects_stale_auto_paint_during_explicit_selection() -> 
         "renderPaths": 1,
         "renderedCharts": 12,
         "generationCostTokens": 12,
-        "costRows": [{"label": "Total", "tokens": 0}],
     }
 
     assert _pair_state_ready(stale_auto_paint, 3_600, 60, 60) is False
@@ -531,7 +525,6 @@ def test_ring_pair_wait_rejects_stale_auto_paint_during_explicit_selection() -> 
         "paintedGenerationKey": stale_auto_paint["controllerGenerationKey"],
         "pendingGenerationKey": "",
         "graphGenerationKey": stale_auto_paint["controllerGenerationKey"],
-        "costRows": [{"label": "Total", "tokens": 12}],
     }
     assert _pair_state_ready(converged, 3_600, 60, 60) is converged
 
@@ -710,11 +703,7 @@ def _exercise_pairs(driver) -> tuple[list[dict[str, object]], dict[str, object]]
             "buckets": state["bucketCount"],
             "cache_generation": state["cacheGeneration"],
             "source_generation": state["sourceGeneration"],
-            "cost_tokens": next(
-                row["tokens"]
-                for row in state["costRows"]
-                if row["label"] == "Total"
-            ),
+            "cost_tokens": state["generationCostTokens"],
         })
         assert results[-1]["cost_tokens"] == 12, json.dumps(state, sort_keys=True)
         assert not [
@@ -896,7 +885,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert restarted_client.ensure_started()
         restarted_status_before_browser = restarted_client.status()
         latest_statsd_pid = int(restarted_status_before_browser.get("pid") or 0)
-        assert latest_statsd_pid == restarted_statsd["pid"]
+        assert latest_statsd_pid == int(restarted_statsd["pid"])
         browser_started = time.monotonic()
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
         _show_gpu_util(browser)
@@ -915,11 +904,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert matching_restart_gap, restarted
         assert restarted["gapRects"], restarted
         assert restarted["renderPaths"] > 0, restarted
-        restarted_total = next(
-            row["tokens"]
-            for row in restarted["costRows"]
-            if row["label"] == "Total"
-        )
+        restarted_total = restarted["generationCostTokens"]
         assert restarted_total == 12, restarted
         assert not [
             span
@@ -931,7 +916,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         evidence = {
             "head": subprocess.run(
                 ("git", "rev-parse", "--short=9", "HEAD"),
-                cwd=REPO_ROOT,
+                cwd=Path.cwd(),
                 text=True,
                 capture_output=True,
                 check=True,
@@ -1143,9 +1128,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         _set_range_from_slider(browser, 3_600)
         _set_resolution_from_select(browser, 60)
         rendered = _wait_pair(browser, 3_600, 60, 60)
-        rendered_total = next(
-            row["tokens"] for row in rendered["costRows"] if row["label"] == "Total"
-        )
+        rendered_total = rendered["generationCostTokens"]
         assert rendered_total == 12, rendered
         assert not [
             span for span in rendered["noData"]

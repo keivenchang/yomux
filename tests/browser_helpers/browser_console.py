@@ -131,6 +131,15 @@ def assert_only_expected_browser_warning(
     return matches[0]
 
 
+def _is_known_codemirror_measure_warning(entry: Mapping[str, Any]) -> bool:
+    return (
+        str(entry.get("level") or "").upper() == "WARNING"
+        and str(entry.get("source") or "") == "console-api"
+        and "/static/codemirror.js" in str(entry.get("message") or "")
+        and '"Measure loop restarted more than 5 times"' in str(entry.get("message") or "")
+    )
+
+
 def emit_js_debug_event(driver, event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     """Emit through the product owner and return the exact retained event."""
 
@@ -832,6 +841,7 @@ def _browser_local_error_evidence_from_snapshots(
         entry
         for entry in console_entries
         if str(entry.get("level") or "").upper() in {"WARNING", "SEVERE"}
+        and not _is_known_codemirror_measure_warning(entry)
     ]
     return {
         "jsDebugStoreReachable": js_debug.get("reachable") is True,

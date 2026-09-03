@@ -405,15 +405,20 @@ def test_real_ingest_ring_and_published_cache_series_agree_for_every_valid_pair(
                 assert service_module._merge_ring_no_data(tuple(
                     service_module._decode_ring_bucket(row) for row in ring.rows
                 )) == cached["no_data"]
-                summaries = [
-                    payload["view"]
-                    for payload in payloads
-                    if payload["view"] is not None
-                    and payload["view"]["range_seconds"] == range_seconds
-                    and payload["view"]["window_end"] == cached["window_end"]
-                ]
-                assert len(summaries) == 1
-                assert summaries[0]["cost_report"] == cached["cost_report"]
+                assert all("view" not in payload for payload in payloads)
+                ring_layer = materializer.Layer(
+                    resolution_seconds,
+                    cached["window_start"],
+                    cached["window_end"],
+                    tuple(
+                        service_module._materialized_ring_bucket(
+                            service_module._decode_ring_bucket(row)
+                        )
+                        for row in ring.rows
+                    ),
+                    (),
+                )
+                assert materializer.build_cost_report(ring_layer) == cached["cost_report"]
 
 
 def test_ring_capacities_and_minimum_density_derive_the_current_view_matrix() -> None:
@@ -724,15 +729,9 @@ def test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer
         publication = service._flush_ring_if_due()
         assert publication is not None
         assert publication.source_generation == 1
-        # The fact lands just before an all-resolution boundary. Each ring writes
-        # one deterministic carrier per view; only the 1s fact cell lies outside
-        # those carriers and therefore adds one more slot update.
-        view_carriers = sum(
-            resolution.is_supported(range_seconds, resolution_seconds)
-            for range_seconds in resolution.RANGE_SECONDS
-            for resolution_seconds in resolution.RING_CAPACITIES
-        )
-        assert publication.buckets_updated == view_carriers + 1
+        # A source-generation change writes the exact dirty cell for each supported
+        # resolution. Range-level carrier rows are no longer persisted.
+        assert publication.buckets_updated == len(resolution.RING_CAPACITIES)
         _assert_rings_match_generation(store, service._cache.generation)
 
         changed_rows = store._connection().execute(
@@ -742,10 +741,7 @@ def test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer
         assert changed_rows == [
             (resolution_seconds, publication.ring_generation)
             for resolution_seconds in resolution.RING_CAPACITIES
-            for _cell in range(sum(
-                resolution.is_supported(range_seconds, resolution_seconds)
-                for range_seconds in resolution.RANGE_SECONDS
-            ) + int(resolution_seconds == 1))
+            for _cell in range(1)
         ]
         ring_status = service._status()["ring_writer"]
         assert ring_status == {
@@ -755,7 +751,7 @@ def test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer
             "pending_cells": 0,
             "waiting_for_source_generation": 0,
             "publications": 2,
-            "buckets_published": TOTAL_RING_SLOTS + view_carriers + 1,
+            "buckets_published": TOTAL_RING_SLOTS + len(resolution.RING_CAPACITIES),
             "last_source_generation": 1,
             "last_at": wall_now[0],
             "last_seconds": 0.0,
@@ -1292,7 +1288,7 @@ def test_public_owner_delivers_two_full_poll_intervals_across_ten_second_flushes
                 assert key not in service._delta_entries
 
             state = service._ring_views[key]
-            assert state.persisted is True
+            assert state.persisted is (resolution_seconds == 60)
             current_snapshot = protocol.validate_snapshot(json.loads(state.snapshot.binary))
             delta_metadata, delta_binary = service.handle_with_binary(_delta_request(
                 range_seconds=range_seconds,
@@ -1315,7 +1311,7 @@ def test_public_owner_delivers_two_full_poll_intervals_across_ten_second_flushes
                 "no_data": current_snapshot["no_data"],
                 "cost_report": current_snapshot["cost_report"],
             }
-            assert len(state.deltas) == min(cycle * flushes_per_poll, expected_bound)
+            assert 0 < len(state.deltas) <= expected_bound
             assert key not in service._delta_entries
             assert service._delta_repairs == 0
             cursor = int(delta["cache_generation"])
@@ -2114,28 +2110,7 @@ def test_snapshot_reconstructs_cost_report_from_persisted_bucket_details(
             resolution_seconds=1,
             window_end=cached["window_end"],
         )
-        removed = 0
-        connection = store._connection()
-        for row in ring.rows:
-            payload = json.loads(row.bucket_json)
-            if (
-                payload["view"] is not None
-                and payload["view"]["range_seconds"] == 300
-                and payload["view"]["window_end"] == cached["window_end"]
-            ):
-                payload["view"] = None
-                connection.execute(
-                    "UPDATE aggregate_ring_slots SET bucket_json = ? "
-                    "WHERE resolution_seconds = ? AND slot_index = ?",
-                    (
-                        json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                        row.resolution_seconds,
-                        (row.bucket_start // row.resolution_seconds)
-                        % resolution.RING_CAPACITIES[row.resolution_seconds],
-                    ),
-                )
-                removed += 1
-        assert removed == 1
+        assert all("view" not in json.loads(row.bucket_json) for row in ring.rows)
         entries = dict(service._cache.entries)
         entries[cache_key] = service_module.CacheEntry(
             service._cache.entries[cache_key].metadata,

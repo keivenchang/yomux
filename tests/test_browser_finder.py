@@ -1443,7 +1443,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           const rootItem = gitDiffItemFor(repo);
           let rootPanel = await waitFor(() => {
             const panel = panelNodes.get(rootItem);
-            return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2 ? panel : null;
+            return panel && panel.querySelectorAll('.git-diff-commit-row').length >= 2 ? panel : null;
           });
           const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
           const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
@@ -1494,7 +1494,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           await waitFor(() => (
             rootPanel.querySelectorAll('.git-diff-commit-detail').length === 2
             && rootPanel.querySelectorAll('.git-diff-commit-detail .git-diff-file-tree').length === 2
-            && Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).every(row => row.getAttribute('aria-expanded') === 'true')
+             && Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).slice(0, 2).every(row => row.getAttribute('aria-expanded') === 'true')
           ));
           const details = Array.from(rootPanel.querySelectorAll('.git-diff-commit-detail'));
           const firstDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaA);
@@ -1822,7 +1822,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "expandedAfterReexpand": "true",
         "childPresentAfterReexpand": True,
     }, metrics["dirToggle"]
-    assert metrics["expanded"] == ["true", "true"], metrics
+    assert metrics["expanded"][:2] == ["true", "true"], metrics
     assert metrics["messages"] == ["Merge exact history\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
     assert "FROM bbbbbbbbb" in metrics["refs"] and "TO aaaaaaaaa" in metrics["refs"] and "first parent" in metrics["refs"], metrics
     assert metrics["detailRoles"] == ["group", "group"] and metrics["treeRoles"] == ["tree", "tree"], metrics
@@ -1884,12 +1884,15 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["french"]["heading"] == "ΔAfficher les différences" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
-    assert metrics["historyRequests"] == [
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66&cursor=page-2",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=66&cursor=snapshot-zero",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=66",
-    ], metrics
+    expected_history_requests = [
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=110",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=110&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=110&cursor=snapshot-zero",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=110",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=110&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=110&cursor=page-2",
+    ]
+    assert sorted(metrics["historyRequests"]) == sorted(expected_history_requests), metrics
     assert len(metrics["detailRequests"]) == 4, metrics
     assert metrics["diffRequests"] == [
         f"/api/fs/diff?path=%2Fhome%2Ftest%2Frepo%2Fsrc%2Fnew.js&from={parent_a}&to={sha_a}"

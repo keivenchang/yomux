@@ -316,7 +316,10 @@ def _type_dirty_text(gate_browser_runtime, target, text):
         window.__yolomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
-          return state?.dirty === true && panel?._cmView?.state?.doc?.toString?.().includes(text);
+          return fileEditorAutosaveEnabled === false
+            && !fileEditorAutosaveTimers.has(path)
+            && state?.dirty === true
+            && panel?._cmView?.state?.doc?.toString?.().includes(text);
         }, {timeoutMs: 5000, description: `dirty CodeMirror buffer for ${path}`}).then(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];

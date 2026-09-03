@@ -279,7 +279,10 @@ const report = JSON.parse(fs.readFileSync(0, 'utf8'));
   debugGraphTokenNumberText: value => String(value),
   debugGraphTokensText: value => `${value} tokens`,
     debugGraphCostAggregateRows: () => [],
-    debugGraphCostPricePairText: (marginal, list) => `${marginal}:${list}`,
+    debugGraphCostPricePairText: (marginal, list) => {
+      const format = value => '$' + (Number(value) / 1000000).toFixed(6);
+      return Number(list) === Number(marginal) ? format(Number(marginal)) : format(Number(marginal)) + ' marginal / ' + format(Number(list)) + ' list';
+    },
   debugGraphCostPricePairHtml: (marginal, list) => `${marginal}:${list}`,
   debugGraphCostModelIdentityHtml: row => String(row?.model || 'unknown'),
   debugGraphCostAgentLabelHtml: value => String(value),
@@ -305,8 +308,14 @@ vm.runInNewContext(`
   const debugGraphCostOptionalInteger = value => value === null || value === undefined ? null : debugGraphCostInteger(value);
   const debugGraphCostText = (_key, fallback) => fallback;
   const debugGraphCostUsageTokensText = value => String(value);
-  const debugGraphCostUsagePriceText = (marginal, list) => String(marginal) + ':' + String(list);
-  const debugGraphCostUsdText = value => '$' + String(value);
+  const debugGraphCostUsagePriceText = (marginal, list, tokens, row) => {
+    if (Number(row?.unpriced_token_quantity) > 0 && Number(row?.priced_token_quantity) <= 0) return 'Unpriced';
+    return debugGraphCostPricePairText(marginal, list);
+  };
+  const debugGraphCostUsdText = value => {
+    const microUsd = Number(value);
+    return Number.isFinite(microUsd) ? '$' + (microUsd / 1000000).toFixed(6) : '$0.000000';
+  };
   const debugGraphCostUsageTableCellHtml = (tokens, micro) => String(tokens) + ':' + String(micro);
   const debugGraphCostRowRangeUsdText = row => debugGraphCostUsdText(row?.micro_usd);
   ${constants}

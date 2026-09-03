@@ -865,7 +865,8 @@ def _changed_ring_no_data_starts(
 
 
 def _ring_cost_detail_payload(detail: materializer.BucketCostDetail) -> dict[str, object]:
-    return asdict(detail)
+    # JSON normalization keeps synthesized gap buckets in the persisted wire shape.
+    return json.loads(json.dumps(asdict(detail), separators=(",", ":")))
 
 
 def _ring_bucket_payload(

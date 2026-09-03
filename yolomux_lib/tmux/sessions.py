@@ -425,7 +425,7 @@ def classify_agent(command: str, executable: str | None = None) -> str | None:
     # classify an actual mock entry point here; an argument or commit message that merely mentions
     # "claude" or "codex" must not become a second agent for the same pane.
     if "--mock" in command_tokens(command):
-        for kind in ("claude", "codex"):
+        for kind in ("claude", "codex", "opencode"):
             if label == f"{kind}.py":
                 return kind
     return None

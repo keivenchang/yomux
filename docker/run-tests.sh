@@ -69,9 +69,18 @@ fi
 # directory at the identical absolute path, read-only, so git reads work without restoring
 # a shared writable index inside the container.
 git_mount=()
+worktree_mount=()
 if [ -f "$REPO_ROOT/.git" ]; then
   git_common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)"
   git_mount=(-v "$git_common:$git_common:ro")
+  # Linked-worktree config stores the checkout's host path. Mount the checkout at
+  # that path too, so Git can honor core.worktree inside the /w test mount.
+  recorded_worktree="$(git -C "$REPO_ROOT" config --get core.worktree || true)"
+  if [ -n "$recorded_worktree" ] && [ "$recorded_worktree" != "$REPO_ROOT" ]; then
+    worktree_mount=(-v "$REPO_ROOT:$recorded_worktree:ro")
+  else
+    worktree_mount=(-v "$REPO_ROOT:$REPO_ROOT:ro")
+  fi
 fi
 
 agent_mounts=()
@@ -151,6 +160,7 @@ docker run --rm --init \
   "${run_user[@]+"${run_user[@]}"}" \
   -v "$REPO_ROOT:/w" \
   "${git_mount[@]+"${git_mount[@]}"}" \
+  "${worktree_mount[@]+"${worktree_mount[@]}"}" \
   "${agent_mounts[@]+"${agent_mounts[@]}"}" \
   -w "$workdir" \
   -e HOME=/home/runner \

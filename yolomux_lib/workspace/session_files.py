@@ -2126,6 +2126,12 @@ def claude_usage_atoms_from_record(
         state.occurrences_by_message.pop(retired_message_id, None)
     model = transcript_model_name(message.get("model"))
     effort = message.get("effort") or record.get("effort")
+    bounded_thread_id = agent_thread_id or source
+    if len(bounded_thread_id.encode("utf-8")) > 160:
+        bounded_thread_id = f"claude-transcript:{hashlib.sha256(bounded_thread_id.encode('utf-8')).hexdigest()}"
+    bounded_root_thread_id = root_thread_id or source
+    if len(bounded_root_thread_id.encode("utf-8")) > 160:
+        bounded_root_thread_id = f"claude-transcript:{hashlib.sha256(bounded_root_thread_id.encode('utf-8')).hexdigest()}"
     return usage_component_atoms(
         source=source,
         timestamp=timestamp,
@@ -2139,8 +2145,8 @@ def claude_usage_atoms_from_record(
         model_evidence="assistant.message.model" if model else "unknown",
         effort=effort,
         components=delta,
-        root_thread_id=root_thread_id or source,
-        agent_thread_id=agent_thread_id or source,
+        root_thread_id=bounded_root_thread_id,
+        agent_thread_id=bounded_thread_id,
         parent_thread_id=parent_thread_id,
         depth=depth,
         endpoint="messages",
