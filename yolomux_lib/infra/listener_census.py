@@ -227,6 +227,11 @@ def parse_lsof_listener_snapshot(output: str) -> tuple[list[int], dict[int, int]
             if not current_pid or not value or current_pid in commands:
                 raise ListenerCensusError(f"lsof listener census returned an invalid command field: {field!r}")
             commands[current_pid] = value
+        elif prefix == "f":
+            # Apple lsof emits the selected file descriptor even when -F requests only p/c/R.
+            # It still belongs to the current process record, but ownership does not depend on it.
+            if not current_pid or not value:
+                raise ListenerCensusError(f"lsof listener census returned an invalid file descriptor field: {field!r}")
         else:
             raise ListenerCensusError(f"lsof listener census returned an unknown ownership field: {field!r}")
     incomplete = sorted(pid for pid in pids if pid not in parents or pid not in commands)
