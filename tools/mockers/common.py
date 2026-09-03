@@ -1148,13 +1148,9 @@ def render_opencode_session_screen(
     footer_top = max(1, height - len(opencode_footer_lines(text)) + 1)
     output_bottom = max(1, footer_top - 1)
     all_rows = opencode_history_screen_rows(state, width)
-    command_count = len([item for item in state.get("opencode_history", "").split("\x1e") if item])
-    preserve_command_rows = 3 * command_count
+    # The terminal body is a viewport immediately above the composer. Always paint one contiguous
+    # suffix: prepending old command rows breaks its height budget after a narrow URL reflow.
     rows = all_rows[-output_bottom:]
-    if preserve_command_rows and all_rows and all_rows[0][0] == "command":
-        command_rows = all_rows[:preserve_command_rows]
-        remaining = all_rows[preserve_command_rows:]
-        rows = command_rows + remaining[:max(0, output_bottom - len(command_rows))]
     transcript_top = max(1, output_bottom - len(rows) + 1)
     sys.stdout.write(f"\x1b[r\x1b[H\x1b[J\x1b[1;{output_bottom}r\x1b[{transcript_top};1H")
     rail = f"{OPENCODE_BLUE}{OPENCODE_QUOTE_GUTTER}{OPENCODE_TEXT}{OPENCODE_ELEMENT_BG}"

@@ -5256,7 +5256,7 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   if (!prev) return false;
   if (terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, shape)) return true;
   if (!shape?.indent && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols)) return true;
-  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape)) return false;
+  if (terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) && shape.indent !== 4) return false;
   const previousText = terminalBufferLineText(prev);
   // The OpenCode mock uses four-space markdown output indentation and wraps at slash/word boundaries.
   // Its short query-key fragments can end before the terminal edge, e.g. `?au` then `to=format`.

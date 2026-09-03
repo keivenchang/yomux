@@ -2613,9 +2613,8 @@ def test_opencode_mock_urls_prints_the_exact_url_listing(monkeypatch, capsys):
 
     output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
     assert "\x1b[r\x1b[H\x1b[J" in output
-    assert "mock urls" in output
-    assert "    Here are long image URLs you can " in output
-    assert "    https://upload.wikimedia.org/" in output
+    assert "    microsoft/vscode/main/resources/" in output
+    assert "    linux/code.png" in output
 
 
 def test_opencode_url_listing_uses_xterm_width_and_repeated_indent(monkeypatch):
@@ -2678,8 +2677,7 @@ def test_opencode_url_listing_redraws_at_new_width(monkeypatch, capsys):
 
     output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
     assert "\x1b[r\x1b[H\x1b[J" in output
-    assert "mock urls" in output
-    assert "    https://upload.wikimedia.org/" in output
+    assert "    https://images.unsplash.com/" in output
     assert state["live_composer_terminal_width"] == "40"
 
 
@@ -2730,6 +2728,25 @@ def test_opencode_url_transcript_fits_all_supported_widths(width, monkeypatch):
     assert any("images.unsplash.com" in line for _kind, line in rows)
 
 
+@pytest.mark.parametrize("width", [32, 40, 48, 55, 67, 71, 80, 109, 120])
+@pytest.mark.parametrize("height", [12, 24, 40, 58])
+def test_opencode_renderer_keeps_a_contiguous_newest_viewport_at_all_sizes(width, height, monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: width)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: height)
+    state = {"opencode_history": "hello\x1eaoeu\x1eueoa\x1emock urls"}
+    all_rows = mock_agent_common.opencode_history_screen_rows(state, width)
+    output_bottom = height - len(mock_agent_common.opencode_footer_lines())
+    expected_rows = all_rows[-max(1, output_bottom):]
+    expected_top = max(1, output_bottom - len(expected_rows) + 1)
+
+    mock_agent_common.render_opencode_session_screen(state)
+
+    raw = capsys.readouterr().out
+    assert raw.startswith(f"\x1b[r\x1b[H\x1b[J\x1b[1;{max(1, output_bottom)}r\x1b[{expected_top};1H")
+    assert raw.count("\r\n") == len(expected_rows)
+    assert "\n" not in raw.replace("\r\n", "")
+
+
 def test_opencode_resize_does_not_append_another_mock_urls_turn(monkeypatch, capsys):
     size = {"width": 80, "height": 40}
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: size["width"])
@@ -2758,7 +2775,7 @@ def test_opencode_history_command_is_only_the_blue_user_message(monkeypatch, cap
 
     raw = capsys.readouterr().out
     output = mock_agent_common.ANSI_RE.sub("", raw)
-    assert "┃  mock urls" in output
+    assert "    https://images.unsplash.com/" in output
     assert "# Running in yo7220" not in output
     assert "$ mock urls" not in output
     assert "(no output)" not in output

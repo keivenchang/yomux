@@ -6770,6 +6770,38 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
+  await testAsync('OpenCode mock-style four-space URL rows link at every supported width', async () => {
+    const api = loadYolomux('', ['opencode-mock-width-matrix']);
+    const url = 'https://images.unsplash.com/photo-1500534623283-312a9dbc2e2a?auto=format&fit=crop&w=2400&q=90';
+    const split = (value, cells) => {
+      const rows = [];
+      while (value.length > cells) {
+        const candidate = value.slice(0, cells);
+        const boundary = Math.max(candidate.lastIndexOf(' ') + 1, candidate.lastIndexOf('/') + 1);
+        const offset = boundary >= Math.max(8, Math.floor(cells / 2)) ? boundary : cells;
+        rows.push(value.slice(0, offset));
+        value = value.slice(offset).trimStart();
+      }
+      rows.push(value);
+      return rows;
+    };
+    for (const width of [32, 40, 48, 55, 67, 71, 80, 109, 120]) {
+      const rows = split(url, width - 4).map(value => `    ${value}`);
+      const term = {
+        cols: width,
+        rows: rows.length,
+        yolomuxAgentKind: 'opencode',
+        buffer: {active: {viewportY: 0, getLine: index => terminalLine(rows[index] || '', false)}},
+      };
+      for (let row = 1; row <= rows.length; row += 1) {
+        const links = await api.terminalReferenceProviderLinks('opencode-mock-width-matrix', term, row);
+        assert.equal(links.length, 1, `width ${width} row ${row} exposes one link`);
+        assert.equal(links[0].text, url, `width ${width} row ${row} preserves the logical URL`);
+        assert.deepStrictEqual(canonical(links[0].decorations), {underline: true, pointerCursor: false}, `width ${width} row ${row} is underlined`);
+      }
+    }
+  });
+
   await testAsync('OpenCode prose-prefixed image URL remains linked across slash splits', async () => {
     const api = loadYolomux('', ['opencode-prose-url-wrap']);
     const rows = [
