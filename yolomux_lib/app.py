@@ -9028,6 +9028,8 @@ class TmuxWebtermApp:
                 directory=directory,
                 started_at=started_at,
                 now=attempt.scheduled_at,
+                known_event_revisions=proposed_cursor_event_revisions,
+                incremental=True,
             )
             opencode_results[token_key] = result
             if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):

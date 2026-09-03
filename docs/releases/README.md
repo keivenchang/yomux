@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.33 | `v0.7.33` | `v0.7.33^{commit}` | [v0.7.33-evidence.md](v0.7.33-evidence.md) | bounded incremental OpenCode usage collection for long-lived sessions |
 | 0.7.32 | `v0.7.32` | `v0.7.32^{commit}` | [v0.7.32-evidence.md](v0.7.32-evidence.md) | OpenCode URL reflow, ring-buffer cost reconstruction, linked-worktree gate isolation, and launch/editor gate fixes |
 | 0.7.31 | `v0.7.31` | `v0.7.31^{commit}` | [v0.7.31-evidence.md](v0.7.31-evidence.md) | server-owned YO!cost reporting, expandable agent/source attribution, routed-provider pricing, and stats schema 9 |
 | 0.7.30 | `v0.7.30` | `v0.7.30^{commit}` | [v0.7.30-evidence.md](v0.7.30-evidence.md) | serialized editor saves, journal recovery hardening, OpenCode live token attribution, and terminal touch routing |

@@ -32,8 +32,10 @@ DEFAULT_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 DEFAULT_SESSION_START_SKEW_SECONDS = 5 * 60
 DEFAULT_FUTURE_SKEW_SECONDS = 5 * 60
 DEFAULT_CURSOR_FILENAME = "stats-current-opencode-cursors.json"
-MAX_CURSOR_ENTRIES = 8_192
+MAX_CURSOR_ENTRIES = 100_000
 MAX_SAFE_CURSOR_VALUE = (1 << 53) - 1
+MAX_INCREMENTAL_PARTS = 100_000
+MAX_EVENT_ID_BYTES = 512
 
 _SESSION_COLUMNS = (
     "id", "directory", "agent", "model", "time_created", "time_updated", "cost",
@@ -541,13 +543,19 @@ def _cursor_revision_values(value: object) -> dict[str, str]:
         raise ValueError("invalid cursor revisions")
     result: dict[str, str] = {}
     for key, raw in value.items():
-        if not isinstance(key, str) or not _bounded_text(key) or not _bounded_text(raw):
+        if (
+            not isinstance(key, str)
+            or not key.strip()
+            or len(key.encode("utf-8")) > MAX_EVENT_ID_BYTES
+            or not _bounded_text(raw)
+        ):
             raise ValueError("invalid cursor revision")
         result[key] = raw
     if len(result) <= MAX_CURSOR_ENTRIES:
         return result
-    # Revision entries are only a local parse optimization. Deterministically retain the suffix;
-    # a pruned event may be offered again, but statsd's event identity makes that replay a no-op.
+    # Retain the newest deterministic suffix. The event ID remains the durable statsd replay
+    # identity, so entries outside this local optimization may be offered again without double
+    # counting; keeping a larger bound prevents ordinary long-lived sessions from churning it.
     return dict(sorted(result.items())[-MAX_CURSOR_ENTRIES:])
 
 
@@ -563,6 +571,8 @@ def read_usage(
     max_session_age_seconds: float = DEFAULT_SESSION_MAX_AGE_SECONDS,
     start_skew_seconds: float = DEFAULT_SESSION_START_SKEW_SECONDS,
     future_skew_seconds: float = DEFAULT_FUTURE_SKEW_SECONDS,
+    known_event_revisions: dict[str, str] | None = None,
+    incremental: bool = False,
 ) -> OpenCodeReadResult:
     """Read completed OpenCode usage without opening any credential-bearing table.
 
@@ -608,7 +618,13 @@ def read_usage(
         )
         if isinstance(selected, (OpenCodeUnavailable, OpenCodeAmbiguousSession)):
             return selected
-        return _read_session_parts(connection, selected, max_parts=max_parts)
+        return _read_session_parts(
+            connection,
+            selected,
+            max_parts=max_parts,
+            known_event_revisions=known_event_revisions,
+            incremental=incremental,
+        )
     except OSError:
         return OpenCodeUnavailable("database-unavailable")
     except sqlite3.OperationalError as error:
@@ -1039,7 +1055,10 @@ def _read_session_parts(
     session: OpenCodeSession,
     *,
     max_parts: int,
+    known_event_revisions: dict[str, str] | None = None,
+    incremental: bool = False,
 ) -> OpenCodeReadResult:
+    session_event_revisions = known_event_revisions if known_event_revisions is not None else None
     columns = ", ".join(_PART_COLUMNS)
     # Bound the event-owner rows, not all transcript parts. Tool/text rows can otherwise consume
     # the raw LIMIT and hide a later step-finish snapshot without producing an error.
@@ -1053,18 +1072,24 @@ def _read_session_parts(
         f'SELECT {columns} FROM "part" WHERE session_id = ? '
         "AND json_valid(data) = 1 AND json_extract(data, '$.type') = ? "
         "ORDER BY time_created ASC, id ASC LIMIT ?",
-        (session.session_id, "step-finish", max_parts + 1),
+        (session.session_id, "step-finish", (MAX_INCREMENTAL_PARTS if incremental else max_parts) + 1),
     ).fetchall()
     step_finish_rows: list[sqlite3.Row] = []
+    part_limit = MAX_INCREMENTAL_PARTS if incremental else max_parts
     for row in rows:
         try:
             part_data = _json_object(row["data"])
         except ValueError:
             return OpenCodeUnavailable("malformed-transcript-json")
         step_finish_rows.append(row)
-        if len(step_finish_rows) > max_parts:
+        if len(step_finish_rows) > part_limit:
             return OpenCodeUnavailable("part-bound-exceeded")
     rows = step_finish_rows
+    session_has_known_revision = bool(session_event_revisions) and any(
+        _event_id(session.session_id, str(row["id"]), dimension) in session_event_revisions
+        for row in rows
+        for dimension in _TOKEN_DIMENSIONS
+    )
     message_ids = tuple(dict.fromkeys(str(row["message_id"]) for row in rows))
     messages = _read_messages(connection, session.session_id, message_ids)
 
@@ -1105,9 +1130,11 @@ def _read_session_parts(
             if snapshot_dimensions is None
             else snapshot_dimensions & available_dimensions
         )
-        for dimension, value in dimensions.items():
-            if value is not None:
-                history_totals[dimension] += value
+        revision = _part_revision(row, dimensions, provider, model)
+        if not incremental or not session_has_known_revision:
+            for dimension, value in dimensions.items():
+                if value is not None:
+                    history_totals[dimension] += value
         observed_at = _milliseconds(row["time_updated"])
         if observed_at is None:
             return OpenCodeUnavailable("invalid-part-completion-time")
@@ -1124,7 +1151,8 @@ def _read_session_parts(
     counters = session.cumulative_tokens or {}
     comparable_dimensions = tuple(
         dimension for dimension in _TOKEN_DIMENSIONS
-        if counters.get(dimension) is not None
+        if (not incremental or not session_has_known_revision)
+        and counters.get(dimension) is not None
         and snapshot_dimensions is not None
         and dimension in snapshot_dimensions
     )
@@ -1152,10 +1180,13 @@ def _read_session_parts(
             quantity = dimensions[dimension]
             if quantity is None:
                 continue
+            event_id = _event_id(session.session_id, row_id, dimension)
+            if incremental and session_event_revisions is not None and session_event_revisions.get(event_id) == revision:
+                continue
             # If an optional counter is absent from the session row, retain the exact per-step
             # value. Only the supported dimensions are materialized downstream.
             components.append(OpenCodeUsageComponent(
-                event_id=_event_id(session.session_id, row_id, dimension),
+                event_id=event_id,
                 session_id=session.session_id,
                 message_id=message_id,
                 part_id=row_id,

@@ -918,6 +918,7 @@ def test_token_adapter_passes_safe_opencode_started_at_to_the_reader(monkeypatch
 
     assert calls == [{
         "session_id": "ses-a", "directory": "/repo/a", "started_at": 1.5, "now": 110,
+        "known_event_revisions": {}, "incremental": True,
     }]
 
 
@@ -982,6 +983,7 @@ def test_token_adapter_allows_cwd_only_opencode_selection(monkeypatch):
 
     assert calls == [{
         "session_id": None, "directory": "/repo/a", "started_at": None, "now": 110,
+        "known_event_revisions": {}, "incremental": True,
     }]
     assert facts.unavailable_spans == ()
 
@@ -1620,6 +1622,36 @@ def test_opencode_cursor_and_materialized_rates_survive_new_collector_instance(t
     assert values["model_tokens_per_minute:output:model-a"] == 54
     assert values["model_tokens_per_minute:input:model-a"] == 48
     assert values["model_tokens_per_minute:cache_read:model-a"] == 60
+
+
+def test_opencode_incremental_reader_passes_persisted_revisions_to_usage_reader(tmp_path, monkeypatch):
+    cursor_path = tmp_path / "opencode-cursors.json"
+    cursor = opencode_module.OpenCodeCursorStore(cursor_path)
+    calls = []
+
+    def read_usage(**kwargs):
+        calls.append(kwargs)
+        return opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-a", "/repo/a", "model-a", "provider-a", "build", 1.0, 2.0),
+            (),
+        )
+
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", read_usage)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7772"]
+    webapp.stats_agent_window_rows = lambda: [{"session": "yo7772"}]
+    webapp.stats_agent_token_rows = lambda _rows: [{
+        "key": "yo7772|0|opencode", "kind": "opencode", "agent_session_id": "ses-a", "cwd": "/repo/a",
+    }]
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-7772", "web", 7772)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    webapp.stats_opencode_cursors = cursor
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.usage_atoms == ()
+    assert calls and calls[0]["known_event_revisions"] == {}
 
 
 def test_token_adapter_publishes_emitted_rejected_reason_counters(monkeypatch):
