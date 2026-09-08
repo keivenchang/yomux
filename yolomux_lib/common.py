@@ -4,7 +4,7 @@ The literal remains here because ``pyproject.toml`` reads this root module as
 the static package-version source.
 """
 
-YOLOMUX_VERSION = "0.7.35"
+YOLOMUX_VERSION = "0.8.0"
 
 from .infra import common as _implementation
 import sys

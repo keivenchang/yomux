@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.8.0 | `v0.8.0` | `v0.8.0^{commit}` | [v0.8.0-evidence.md](v0.8.0-evidence.md) | source-backed Markdown ViewEditor, layout hardening, Git-history recovery, and startup-capacity fixes |
 | 0.7.35 | `v0.7.35` | `v0.7.35^{commit}` | [v0.7.35-evidence.md](v0.7.35-evidence.md) | source-backed Markdown ViewEditor, image editing flows, and corrected Linux startup capacity admission |
 | 0.7.33 | `v0.7.33` | `v0.7.33^{commit}` | [v0.7.33-evidence.md](v0.7.33-evidence.md) | bounded incremental OpenCode usage collection for long-lived sessions |
 | 0.7.32 | `v0.7.32` | `v0.7.32^{commit}` | [v0.7.32-evidence.md](v0.7.32-evidence.md) | OpenCode URL reflow, ring-buffer cost reconstruction, linked-worktree gate isolation, and launch/editor gate fixes |

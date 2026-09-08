@@ -508,6 +508,41 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });
 
+  await testAsync('Git commit detail refreshes history once when its frozen head is stale', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const sha = 'a'.repeat(40);
+    const head = 'b'.repeat(40);
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        const error = new Error('Git history snapshot is stale');
+        error.status = 409;
+        error.payload = {user_message: {key: 'fs.error.gitHistoryStale', params: {}, fallback: error.message}};
+        return Promise.reject(error);
+      }
+      if (requests.length === 2) {
+        return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], next_cursor: '', truncated: false}));
+      }
+      return Promise.resolve(jsonResponse({sha, repo: '/repo', parents: [], from_ref: '0'.repeat(40), to_ref: sha, message: 'fresh detail', files: [], message_truncated: false, files_truncated: false, truncated: false}));
+    });
+    api.setGitDiffTabStateForTest(item, {path: '/repo', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], visibleCommitCount: 1, loaded: true, loadAttempted: true});
+    assert.equal(await api.loadGitDiffCommitDetailForTest(item, sha), true);
+    assert.deepStrictEqual(requests, [
+      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
+      '/api/fs/git-history?path=%2Frepo&limit=200',
+      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
+    ]);
+    assert.equal(api.gitDiffTabStateForTest(item).detailErrors.has(sha), false);
+  });
+
+  test('Git commit messages render escaped newline markers as actual returns', () => {
+    const api = loadYolomux('', ['1']);
+    const message = api.gitDiffCommitMessageForTest({message: 'subject\\n\\nbody'});
+    assert.equal(message.textContent, 'subject\n\nbody');
+  });
+
   await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');

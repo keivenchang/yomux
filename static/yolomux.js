@@ -64334,6 +64334,10 @@ function gitDiffHistoryCursorIsInvalid(error) {
   return String(error?.payload?.user_message?.key || '') === 'fs.error.gitHistoryCursor';
 }
 
+function gitDiffHistorySnapshotIsStale(error) {
+  return String(error?.payload?.user_message?.key || '') === 'fs.error.gitHistoryStale';
+}
+
 function gitDiffHistoryPayloadIsValid(payload) {
   return Boolean(payload && typeof payload === 'object'
     && typeof payload.path === 'string'
@@ -64522,7 +64526,7 @@ function gitDiffDetailGuard(state, sha) {
   return guard;
 }
 
-async function loadGitDiffCommitDetail(item, sha) {
+async function loadGitDiffCommitDetail(item, sha, options = {}) {
   const state = ensureGitDiffTabState(item);
   if (!state || !state.head || !sha) return false;
   if (state.details.has(sha)) return true;
@@ -64545,6 +64549,14 @@ async function loadGitDiffCommitDetail(item, sha) {
       return true;
     } catch (error) {
       if (!isCurrent() || state.head !== requestedHead || error?.name === 'AbortError') return false;
+      if (options.retryOnStale !== false && gitDiffHistorySnapshotIsStale(error)) {
+        const refreshed = await refreshGitDiffHistory(item, {refresh: true});
+        const current = ensureGitDiffTabState(item);
+        if (refreshed && current?.commits?.some(commit => String(commit?.sha || '') === sha)) {
+          return loadGitDiffCommitDetail(item, sha, {retryOnStale: false});
+        }
+        return false;
+      }
       state.detailErrors.set(sha, gitDiffErrorSnapshot(error));
       return false;
     } finally {
@@ -64745,7 +64757,7 @@ function bindGitDiffCommitTree(tree) {
 function gitDiffCommitMessage(detail) {
   const message = document.createElement('pre');
   message.className = 'git-diff-commit-message';
-  message.textContent = String(detail?.message || '');
+  message.textContent = String(detail?.message || '').replace(/\\n/g, '\n');
   return message;
 }
 
