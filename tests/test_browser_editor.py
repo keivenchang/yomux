@@ -744,6 +744,7 @@ def test_markdown_prosemirror_preserves_empty_paragraph_spacing_round_trip(brows
               trailingOne: 'hello\\n\\n',
               trailingTwo: 'hello\\n\\n\\n',
               hardBreak: 'hello\\\\\\nworld',
+              commentPrefix: '<!-- editor metadata -->\\n# Title',
             };
             const result = Object.fromEntries(Object.entries(cases).map(([name, source]) => {
               const doc = parser.parse(source);
@@ -764,6 +765,7 @@ def test_markdown_prosemirror_preserves_empty_paragraph_spacing_round_trip(brows
     assert cases["trailingOne"]["serialized"] == "hello\n\n", cases
     assert cases["trailingTwo"]["serialized"] == "hello\n\n\n", cases
     assert cases["hardBreak"]["serialized"] == "hello\\\nworld", cases
+    assert cases["commentPrefix"]["serialized"] == "# Title", cases
     assert [node["type"] for node in cases["adjacent"]["doc"]["content"]] == ["paragraph", "paragraph"], cases
     assert [node["type"] for node in cases["oneEmpty"]["doc"]["content"]] == ["paragraph", "paragraph", "paragraph"], cases
     assert [node["type"] for node in cases["twoEmpty"]["doc"]["content"]] == ["paragraph", "paragraph", "paragraph", "paragraph"], cases
@@ -1113,7 +1115,7 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
             const source = [
               'before<br>after',
               '',
-              '<mark>highlight</mark> <kbd>Ctrl</kbd> <img src="static/brand.css" alt="brand" title="Brand">',
+              '<mark>highlight</mark> <kbd>Ctrl</kbd> <sup>2</sup> <img src="static/brand.css" alt="brand" title="Brand">',
               '',
               '<details>',
               '<summary>More details</summary>',
@@ -1141,7 +1143,8 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
               serialized,
               br: dom.querySelectorAll('br').length,
               mark: dom.querySelector('mark')?.textContent || '',
-              kbd: dom.querySelector('kbd')?.textContent || '',
+               kbd: dom.querySelector('kbd')?.textContent || '',
+               sup: dom.querySelector('sup')?.textContent || '',
                   image: dom.querySelector('img')?.dataset.originalSrc || '',
               imageAlt: dom.querySelector('img')?.getAttribute('alt') || '',
               details: dom.querySelector('details > summary')?.textContent || '',
@@ -1160,9 +1163,10 @@ def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
     assert "<br>" not in metrics["serialized"] and "\\\n" in metrics["serialized"], metrics
     assert "<mark>highlight</mark>" in metrics["serialized"], metrics
     assert "<kbd>Ctrl</kbd>" in metrics["serialized"], metrics
+    assert "<sup>2</sup>" in metrics["serialized"], metrics
     assert '![brand](static/brand.css "Brand")' in metrics["serialized"], metrics
     assert "<details>" in metrics["serialized"] and "<summary>More details</summary>" in metrics["serialized"], metrics
-    assert metrics["br"] >= 1 and metrics["mark"] == "highlight" and metrics["kbd"] == "Ctrl", metrics
+    assert metrics["br"] >= 1 and metrics["mark"] == "highlight" and metrics["kbd"] == "Ctrl" and metrics["sup"] == "2", metrics
     assert metrics["image"] == "static/brand.css" and metrics["imageAlt"] == "brand", metrics
     assert metrics["details"] == "More details" and "Inside details." in metrics["detailsBody"], metrics
     assert metrics["pmError"] == "", metrics

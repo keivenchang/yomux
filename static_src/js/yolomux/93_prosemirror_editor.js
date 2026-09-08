@@ -116,6 +116,9 @@ function prosemirrorMarkdownSchema(api) {
   }).addToEnd('kbd', {
     parseDOM: [{tag: 'kbd'}],
     toDOM() { return ['kbd', 0]; },
+  }).addToEnd('superscript', {
+    parseDOM: [{tag: 'sup'}],
+    toDOM() { return ['sup', 0]; },
   });
   return new api.Schema({
     nodes,
@@ -145,13 +148,18 @@ function prosemirrorMarkdownParser(api, schema) {
     };
     const unsupportedHtml = [];
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
+      const normalized = [];
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if ((token.type === 'html_inline' || token.type === 'html_block') && /^<!--[\s\S]*-->$/.test(html)) {
+          // Markdown comments are authoring metadata, not editable document content.
+          continue;
+        }
         if (token.type === 'html_inline') {
-          const open = html.match(/^<(u|mark|kbd)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
-          const close = html.match(/^<\/(u|mark|kbd)\s*>$/i)?.[1]?.toLowerCase();
-          const markName = {u: 'underline', mark: 'highlight', kbd: 'kbd'};
+          const open = html.match(/^<(u|mark|kbd|sup)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
+          const close = html.match(/^<\/(u|mark|kbd|sup)\s*>$/i)?.[1]?.toLowerCase();
+          const markName = {u: 'underline', mark: 'highlight', kbd: 'kbd', sup: 'superscript'};
           if (open) token.type = `${markName[open]}_open`;
           else if (close) token.type = `${markName[close]}_close`;
           else if (/^<br\s*\/?>$/i.test(html)) token.type = 'html_break';
@@ -180,9 +188,10 @@ function prosemirrorMarkdownParser(api, schema) {
         if ((token.type === 'html_inline' || token.type === 'html_block') && html) {
           unsupportedHtml.push({html: html.slice(0, 160), line: tokenLine || 1});
         }
-        if (token.children) normalizeHtmlTokens(token.children, tokenLine);
+        if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
+        normalized.push(token);
       }
-      return tokens;
+      return normalized;
     };
     const tokens = normalizeHtmlTokens(markdownItParse(source, environment));
     // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
@@ -235,6 +244,7 @@ function prosemirrorMarkdownParser(api, schema) {
     underline: {mark: 'underline'},
     highlight: {mark: 'highlight'},
     kbd: {mark: 'kbd'},
+    superscript: {mark: 'superscript'},
   };
   return new api.MarkdownParser(schema, tokenizer, tokens);
 }
@@ -299,6 +309,7 @@ function prosemirrorMarkdownSerializer(api) {
     underline: {open: '<u>', close: '</u>', mixable: true},
     highlight: {open: '<mark>', close: '</mark>', mixable: true},
     kbd: {open: '<kbd>', close: '</kbd>', mixable: true},
+    superscript: {open: '<sup>', close: '</sup>', mixable: true},
   });
 }
 
