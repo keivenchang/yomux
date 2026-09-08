@@ -147,14 +147,28 @@ def descriptor_open_flags(flags: int) -> int:
 def symlink_target_from_descriptor(
     descriptor: int,
     requested: Path,
+    *,
+    parent_descriptor: int | None = None,
+    name: str | None = None,
 ) -> str:
-    """Read a symlink target from the already-authorized descriptor or fail closed."""
+    """Read a symlink target from the already-authorized descriptor or fail closed.
+
+    macOS does not implement the empty-path ``readlinkat`` form.  Directory scans can
+    provide the already-pinned parent descriptor and entry name, which keeps the lookup
+    inside that authorized directory without reopening the parent path by name.
+    """
 
     try:
         return os.readlink("", dir_fd=descriptor)
     except OSError as error:
+        if parent_descriptor is not None and name:
+            try:
+                return os.readlink(name, dir_fd=parent_descriptor)
+            except OSError as parent_error:
+                error = parent_error
         # macOS lacks readlinkat's empty-path form. Reopening a parent/name pair can race with an
-        # unlink/recreate/restore sequence, so no post-read identity check can make it safe.
+        # unlink/recreate/restore sequence when the parent descriptor is unavailable, so no
+        # name-bound fallback is allowed for those callers.
         raise FilesystemError(
             "descriptor-bound symlink target reads are unsupported on this platform",
             status=500,

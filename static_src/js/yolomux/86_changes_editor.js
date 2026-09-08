@@ -864,10 +864,7 @@ function fileExplorerSelectedSessionForView(view) {
 
 function fileExplorerFinderTargetSession() {
   const selected = fileExplorerSelectedSessionForView('finder');
-  if (selected) {
-    fileExplorerFinderSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
@@ -875,13 +872,45 @@ function fileExplorerFinderTargetSession() {
 
 function fileExplorerSessionFilesTargetSession() {
   const selected = fileExplorerSelectedSessionForView('differ');
-  if (selected) {
-    fileExplorerChangesSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
+}
+
+function sessionFilesSurfaceDescriptor(destination, options = {}) {
+  const normalizedDestination = destination === 'finder' ? 'finder' : 'differ';
+  const state = sessionFilesStateForDestination(normalizedDestination);
+  const session = options.session || (normalizedDestination === 'finder'
+    ? fileExplorerFinderTargetSession()
+    : fileExplorerSessionFilesTargetSession());
+  return {
+    destination: normalizedDestination,
+    state,
+    session,
+    visible: normalizedDestination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible(),
+    cache: sessionFilesCacheForDestination(normalizedDestination),
+  };
+}
+
+function sessionFilesSurfaceNeedsFetch(view, state, session) {
+  if (view === 'finder') return !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session);
+  return !sessionFilesPayloadIsLoadedForSession(state.payload, session);
+}
+
+function ensureSessionFilesSurfaceLoaded(view, options = {}) {
+  if (view === 'tabber') {
+    fetchTabberActivity();
+    return;
+  }
+  const destination = view === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(destination, options);
+  if (!surface.session || sessionFilesSurfaceNeedsFetch(view, surface.state, surface.session) === false) return;
+  if (clientPushCanSupplyData() && options.fetchEvenWhenPush !== true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  } else {
+    fetchSessionFiles({destination, session: surface.session, silent: true});
+  }
 }
 
 function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
@@ -957,6 +986,7 @@ function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'di
 
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  if (!isTmuxSession(session) || !sessions.includes(session)) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
@@ -1010,7 +1040,6 @@ function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
   if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
-  if (fileExplorerChangesSelectedSession === session) return false;
   fileExplorerChangesSelectedSession = session;
   if (document.querySelector('.file-explorer-changes-panel')) {
     switchFileExplorerChangesSession(session);
@@ -1162,7 +1191,7 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = sessionFilesSurfaceDescriptor(destination).visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
@@ -1175,20 +1204,21 @@ function renderSessionFilesDestination(destination, options = {}) {
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = options.destination === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(options.destination, options);
+  const destination = surface.destination;
   const forceRefresh = options.force === true;
   const freshGit = options.freshGit === true;
   const backgroundRefresh = options.background === true;
   const cacheOnly = options.cacheOnly === true;
   const cacheView = String(options.cacheView || '');
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = surface.visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
-  const state = sessionFilesStateForDestination(destination);
+  const session = surface.session;
+  const state = surface.state;
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true, destination);
@@ -2185,6 +2215,14 @@ function syncFileExplorerDiffSessionControls() {
   }
 }
 
+function syncFileExplorerSessionControlVisibility(scope = document) {
+  for (const control of scope.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
+    const visible = fileExplorerRootMode === 'sync';
+    control.hidden = !visible;
+    control.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+}
+
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   // Legacy/test callers without an item still receive their requested compatibility view; live
@@ -3130,24 +3168,15 @@ function createFileExplorerPanel(item = finderItemId) {
   if (view !== 'finder') bindFileExplorerChangesResizer(panel);
   applyFileExplorerPanelView(panel, item);
   if (view === 'finder') {
+    panel.classList.toggle('file-explorer-root-mode-sync', fileExplorerRootMode === 'sync');
+    panel.classList.toggle('file-explorer-root-mode-fixed', fileExplorerRootMode !== 'sync');
+    syncFileExplorerSessionControlVisibility(panel);
     renderFileExplorerRootModeControls();
     refreshFileExplorerPanelTree(panel);
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
-    }
-  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
-    }
-  } else if (view === 'tabber') fetchTabberActivity();
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return panel;
 }
 
@@ -3247,10 +3276,7 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
-    const session = fileExplorerFinderTargetSession();
-    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
-      fetchSessionFiles({destination: 'finder', session, silent: true});
-    }
+    ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -3258,10 +3284,7 @@ function activateFileExplorerSurface(item) {
     fetchTabberActivity();
     return true;
   }
-  const session = fileExplorerSessionFilesTargetSession();
-  if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'differ', session, silent: true});
-  }
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return true;
 }
 
@@ -3302,6 +3325,22 @@ function bindFileExplorerChangesResizer(panel) {
   });
 }
 
+const fileEditorPreviewPropagationFrames = new Map();
+
+function scheduleFileEditorPreviewPropagation(panel, path) {
+  const key = String(path || '');
+  if (!key || fileEditorPreviewPropagationFrames.has(key)) return;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  const frame = schedule(() => {
+    fileEditorPreviewPropagationFrames.delete(key);
+    const state = fileEditorStateForItem(path, fileEditorItemFor(path));
+    if (!state || state.kind !== 'text') return;
+    renderLinkedFilePreviewPanels(panel, path, state.content);
+    updateFilePreviewPopout(path, state.content);
+  });
+  fileEditorPreviewPropagationFrames.set(key, frame);
+}
+
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
   if (!state || state.kind !== 'text' || state.historical === true) return;
@@ -3317,9 +3356,18 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-  renderLinkedFilePreviewPanels(panel, path, state.content);
-  updateFilePreviewPopout(path, state.content);
+  if (options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
+    if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+    else if (options.sourceSurface !== 'view-editor') renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  }
+  if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+  if (options.sourceSurface === 'view-editor') syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'view-editor');
+  else if (panel?._cmView && options.previewEdit !== true) syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'text-editor');
+  if (options.previewEdit === true) scheduleFileEditorPreviewPropagation(panel, path);
+  else {
+    renderLinkedFilePreviewPanels(panel, path, state.content);
+    updateFilePreviewPopout(path, state.content);
+  }
   scheduleFileEditorSplitScrollSync(panel, 'editor');
   const item = fileEditorPanelItem(panel);
   if (item && panel?.contains?.(document.activeElement)) {
@@ -3328,7 +3376,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (state.externalChanged && !state.externalChangeEditPrompted) {
     promptExternalChangeBeforeEditing(path, panel);
   }
-  if (state.dirty) scheduleFileAutosave(path);
+  if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
   else clearFileAutosaveTimer(path);
   if (dirtyChanged) {
     renderSessionButtons();
@@ -3469,15 +3517,15 @@ function fileEditorToolbarHtml(item) {
                   action: 'editor-mode',
                   dataset: {editorMode: 'edit'},
                   html: '<span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span>',
-                  title: t('common.edit'),
-                  ariaLabel: t('common.edit'),
+                  title: t('editor.mode.textEdit'),
+                  ariaLabel: t('editor.mode.textEdit'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
                   dataset: {editorMode: 'preview'},
                   html: '<span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span>',
-                  title: t('common.preview'),
-                  ariaLabel: t('common.preview'),
+                  title: t('editor.mode.viewEdit'),
+                  ariaLabel: t('editor.mode.viewEdit'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
@@ -3630,9 +3678,9 @@ function createFileEditorPanel(item) {
       afterHeadHtml: fileEditorToolbarHtml(item),
       bodyClass: 'file-editor-panel-body',
       bodyHtml: `<div class="file-editor-content">
-          <div class="file-editor-codemirror-panel" hidden></div>
+           <div class="file-editor-codemirror-panel" data-editor-surface="text-editor" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
-          <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
+           <div class="file-editor-preview-pane-panel markdown-body" data-editor-surface="view-editor" hidden></div>
           <div class="file-editor-find-overview" hidden aria-hidden="true"></div>
           <form class="file-editor-preview-find-panel" hidden role="search" aria-label="${esc(t('preview.find'))}">
             <input type="search" placeholder="${esc(t('preview.find'))}" aria-label="${esc(t('preview.find'))}" autocomplete="off">

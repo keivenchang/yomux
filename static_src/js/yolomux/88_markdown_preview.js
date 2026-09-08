@@ -6,6 +6,595 @@ function markdownTextWithSourceAnchors(text) {
   return String(text || '');
 }
 
+function markdownInlinePlainText(value) {
+  return String(value || '')
+    .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
+    .replace(/(`+)(.*?)\1/g, '$2')
+    .replace(/\*\*|__/g, '')
+    .replace(/~~/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function markdownPreviewVisibleText(node) {
+  if (!node) return '';
+  if (node.nodeType === 3) return String(node.nodeValue || '');
+  if (node.nodeType !== 1) return '';
+  if (String(node.tagName || '').toUpperCase() === 'BR') return '\n';
+  if (node.classList?.contains('markdown-source-anchor')) return '';
+  return Array.from(node.childNodes || []).map(markdownPreviewVisibleText).join('');
+}
+
+function markdownInlineSourceFromNode(node) {
+  if (!node) return '';
+  if (node.nodeType === 3) return String(node.nodeValue || '');
+  if (node.nodeType !== 1) return '';
+  if (node.classList?.contains('markdown-source-anchor')) return '';
+  const tagName = String(node.tagName || '').toUpperCase();
+  if (tagName === 'BR') return '\n';
+  const content = Array.from(node.childNodes || []).map(markdownInlineSourceFromNode).join('');
+  if (!content) return '';
+  if (tagName === 'STRONG' || tagName === 'B') return `**${content}**`;
+  if (tagName === 'EM' || tagName === 'I') return `*${content}*`;
+  if (tagName === 'CODE') return `\`${content}\``;
+  if (tagName === 'DEL' || tagName === 'S') return `~~${content}~~`;
+  if (tagName === 'U') return `<u>${content}</u>`;
+  return content;
+}
+
+function markdownSourceContinuationLine(line) {
+  const value = String(line || '').trim();
+  return Boolean(value) && !/^(?:#{1,6}\s|[-+*]\s|\d+[.)]\s|>|```|~~~|\||---+$)/.test(value);
+}
+
+function markdownEditableSourceRange(text, sourceLine, block, options = {}) {
+  const lines = String(text || '').split('\n');
+  const start = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (start >= lines.length) return null;
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = lines[start].match(/^(\s*#{1,6}\s+)(.*)$/);
+  const storedEnd = Number(block?.dataset?.sourceEndLine || 0) - 1;
+  const end = Number.isInteger(storedEnd) && storedEnd >= start
+    ? storedEnd
+    : tagName === 'P'
+    ? (() => {
+      let index = start;
+      while (index + 1 < lines.length && markdownSourceContinuationLine(lines[index + 1])) index += 1;
+      return index;
+    })()
+    : start;
+  const body = heading && start === end
+    ? heading[2]
+    : lines.slice(start, end + 1).map(line => line.trim()).join(' ');
+  if (!body.trim() || (tagName !== 'P' && !heading)) return null;
+  if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(lines[start]) || /^\s*[>|`~]/.test(lines[start])) return null;
+  if (options.validateText !== false && (block?.textContent || block?.childNodes)) {
+    if (markdownInlinePlainText(body) !== markdownInlinePlainText(markdownPreviewVisibleText(block))) return null;
+  }
+  return {
+    start,
+    end,
+    prefix: heading ? heading[1] : (lines[start].match(/^\s*/)?.[0] || ''),
+    body,
+    heading: Boolean(heading),
+  };
+}
+
+function markdownSourceLineOffsets(text, lineNumber) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(lineNumber) || 1) - 1);
+  let start = 0;
+  for (let current = 0; current < index; current += 1) start += lines[current].length + 1;
+  return {start, end: start + (lines[index] || '').length, line: lines[index] || ''};
+}
+
+function markdownEditableRangeOffsets(text, sourceLine, sourceEndLine, block) {
+  const start = markdownSourceLineOffsets(text, sourceLine);
+  const end = markdownSourceLineOffsets(text, sourceEndLine || sourceLine);
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = start.line.match(/^(\s*#{1,6}\s+)/);
+  const bodyStart = heading && /^H[1-6]$/.test(tagName) ? start.start + heading[1].length : start.start;
+  return {start: bodyStart, end: end.end, sourceStart: start.start, sourceEnd: end.end, prefix: heading?.[1] || ''};
+}
+
+function markdownPreviewBlockBySourceLine(container, sourceLine) {
+  return Array.from(container?.querySelectorAll?.('[data-markdown-preview-editable="true"]') || [])
+    .find(block => Number(block.dataset.sourceLine || 0) === Number(sourceLine)) || null;
+}
+
+function markdownPreviewTextNodeAtOffset(root, offset) {
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, Number(offset) || 0);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.classList?.contains('markdown-source-anchor')) continue;
+    if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+    remaining -= node.nodeValue.length;
+  }
+  return null;
+}
+
+function markdownSourceOffsetAtVisibleOffset(source, visibleOffset) {
+  const text = String(source || '');
+  const target = Math.max(0, Number(visibleOffset) || 0);
+  let visible = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const br = text.slice(index).match(/^<br\s*\/?\s*>/i);
+    if (br) {
+      visible += 1;
+      index += br[0].length - 1;
+    } else if (!'*_~'.includes(text[index])) {
+      visible += 1;
+    }
+    if (visible >= target) return index + 1;
+  }
+  return text.length;
+}
+
+function selectMarkdownPreviewSourceRange(path, sourceLine, selectedText = '') {
+  for (const panel of fileEditorPanelsForPath(path)) {
+    const container = panel.querySelector?.('.file-editor-preview-pane-panel');
+    const block = markdownPreviewBlockBySourceLine(container, sourceLine);
+    if (!container || !block) continue;
+    const visible = markdownPreviewVisibleText(block);
+    const start = selectedText ? visible.indexOf(selectedText) : 0;
+    if (start < 0) continue;
+    const from = markdownPreviewTextNodeAtOffset(block, start);
+    const to = markdownPreviewTextNodeAtOffset(block, start + selectedText.length);
+    if (!from || !to) continue;
+    const range = container.ownerDocument.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    const selection = container.ownerDocument.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  }
+  return false;
+}
+
+function markdownPreviewSourceChange(container, sourcePanel, path, start, end, replacement, options = {}) {
+  const state = fileEditorPanelState(sourcePanel);
+  if (!state || state.kind !== 'text' || state.historical === true) return false;
+  const before = state.content;
+  const next = `${before.slice(0, start)}${replacement}${before.slice(end)}`;
+  if (next === before) return false;
+  container._markdownPreviewHistory = container._markdownPreviewHistory || {entries: [], index: -1};
+  const history = container._markdownPreviewHistory;
+  history.entries.splice(history.index + 1);
+  history.entries.push({before, after: next});
+  history.index += 1;
+  container._markdownPreviewLastEdit = history.entries[history.index];
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownTextWithBackspaceAtOffset(text, sourceOffset, blockStart = 0) {
+  const source = String(text || '');
+  const offset = Math.max(blockStart, Math.min(source.length, Number(sourceOffset) || 0));
+  if (offset <= blockStart) {
+    if (source.slice(blockStart - 2, blockStart) === '\n\n') return `${source.slice(0, blockStart - 2)}${source.slice(blockStart)}`;
+    if (source[blockStart - 1] === '\n') return `${source.slice(0, blockStart - 1)}${source.slice(blockStart)}`;
+    return null;
+  }
+  if (source[offset - 1] === '\n') return `${source.slice(0, offset - 1)}${source.slice(offset)}`;
+  const br = source.slice(Math.max(blockStart, offset - 7), offset).match(/<br\s*\/?\s*>$/i);
+  if (br) return `${source.slice(0, offset - br[0].length)}${source.slice(offset)}`;
+  return null;
+}
+
+function handleMarkdownPreviewBackspace(container, event = null) {
+  const selection = container.ownerDocument?.getSelection?.();
+  const context = markdownPreviewSelectionContext(container) || {
+    block: event?.target?.closest?.('[data-markdown-preview-editable="true"]') || container._markdownPreviewActiveBlock,
+    selectedText: '',
+  };
+  const block = context?.block;
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true || !selection?.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed || !block.contains(range.startContainer)) return false;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  const prefix = container.ownerDocument.createRange();
+  prefix.selectNodeContents(block);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const sourceOffset = offsets.start + markdownSourceOffsetAtVisibleOffset(
+    state.content.slice(offsets.start, offsets.end),
+    Math.min(prefix.toString().length, offsets.end - offsets.start),
+  );
+  const next = markdownTextWithBackspaceAtOffset(state.content, sourceOffset, offsets.start);
+  if (next === null) return false;
+  const nextCaret = Math.max(0, sourceOffset - 1);
+  if (!markdownPreviewSourceChange(container, panel, path, 0, state.content.length, next)) return false;
+  renderFileEditorPreviewSurface(panel, container, path, fileEditorPanelState(panel).content, {preserveSelection: false, force: true});
+  requestAnimationFrame(() => selectMarkdownPreviewSourceRange(path, line, state.content.slice(offsets.start, nextCaret)));
+  return true;
+}
+
+function handleMarkdownPreviewEnter(container, event = null) {
+  const selection = container.ownerDocument?.getSelection?.();
+  const eventBlock = event?.target?.closest?.('[data-markdown-preview-editable="true"]');
+  const context = markdownPreviewSelectionContext(container) || {
+    block: eventBlock || container._markdownPreviewActiveBlock,
+    selectedText: '',
+  };
+  const block = context?.block;
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (/^H[1-6]$/.test(String(block.tagName || '').toUpperCase())) return false;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  if (!range && !container._markdownPreviewCaretOffset) return false;
+  if (!range) return false;
+  if (!block.contains(range.startContainer)) return false;
+  const prefix = container.ownerDocument.createRange();
+  prefix.selectNodeContents(block);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const visibleOffset = Math.min(
+    prefix.toString().length,
+    Math.max(0, offsets.end - offsets.start),
+  );
+  const sourceOffset = offsets.start + markdownSourceOffsetAtVisibleOffset(
+    state.content.slice(offsets.start, offsets.end),
+    visibleOffset,
+  );
+  const replacement = `${state.content.slice(offsets.start, sourceOffset)}<br>${state.content.slice(sourceOffset, offsets.end)}`;
+  if (!markdownPreviewSourceChange(container, panel, path, offsets.start, offsets.end, replacement)) return false;
+  const nextContent = fileEditorPanelState(panel).content;
+  renderFileEditorPreviewSurface(panel, container, path, nextContent, {preserveSelection: false, force: true});
+  requestAnimationFrame(() => {
+    const nextBlock = markdownPreviewBlockBySourceLine(container, line);
+    if (!nextBlock) return;
+    nextBlock.focus();
+    const target = markdownPreviewTextNodeAtOffset(nextBlock, prefix.toString().length + 1);
+    if (!target) return;
+    const nextSelection = container.ownerDocument.getSelection?.();
+    const nextRange = container.ownerDocument.createRange();
+    nextRange.setStart(target.node, target.offset);
+    nextRange.collapse(true);
+    nextSelection.removeAllRanges();
+    nextSelection.addRange(nextRange);
+  });
+  return true;
+}
+
+function handleMarkdownPreviewInput(container, block) {
+  if (!block) return false;
+  const panel = container.closest?.('.file-editor-panel');
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = state && markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  if (!state || !offsets) return false;
+  const rendered = markdownInlineSourceFromNode(block).replace(/\n+/g, '\n\n').trim();
+  const next = `${state.content.slice(offsets.start, offsets.start + (offsets.prefix || '').length)}${rendered}`;
+  return markdownPreviewSourceChange(container, panel, path, offsets.start, offsets.end, next);
+}
+
+function markdownEditableSourceLine(line, block) {
+  const raw = String(line || '');
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = raw.match(/^(\s*#{1,6}\s+)(.*)$/);
+  const prefix = heading ? heading[1] : '';
+  const body = heading ? heading[2] : raw;
+  if (!body.trim() || (tagName !== 'P' && !heading)) return null;
+  if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(raw) || /^\s*[>|~]/.test(raw) || /[\[\]|]/.test(body)) return null;
+  if (block?.textContent || block?.childNodes) {
+    if (markdownInlinePlainText(body) !== markdownInlinePlainText(markdownPreviewVisibleText(block))) return null;
+  }
+  return {prefix, body, heading: Boolean(heading)};
+}
+
+function markdownTextWithInlineLineEdited(text, sourceLine, nextInline, blockKind = 'paragraph') {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length) return null;
+  const parsed = markdownEditableSourceRange(text, sourceLine, {
+    tagName: blockKind === 'heading' ? 'H1' : 'P',
+  }, {validateText: false});
+  if (!parsed) return null;
+  const replacement = `${parsed.prefix}${nextInline}`;
+  lines.splice(parsed.start, parsed.end - parsed.start + 1, replacement);
+  return lines.join('\n');
+}
+
+function markdownTextWithInlineFormat(text, sourceLine, selectedText, command) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length) return null;
+  const selected = String(selectedText || '').trim();
+  if (!selected) return null;
+  const inlineMarkers = [
+    {open: '**', close: '**', command: 'bold'},
+    {open: '__', close: '__', command: 'bold'},
+    {open: '*', close: '*', command: 'italic'},
+    {open: '_', close: '_', command: 'italic'},
+    {open: '~~', close: '~~', command: 'strike'},
+    {open: '<u>', close: '</u>', command: 'underline'},
+    {open: '`', close: '`', command: 'code'},
+  ];
+  const sourceTextLine = lines[index];
+  const directStart = sourceTextLine.indexOf(selected);
+  if (directStart < 0) return null;
+  const before = sourceTextLine.slice(0, directStart);
+  const after = sourceTextLine.slice(directStart + selected.length);
+  const active = new Set();
+  let left = before;
+  let right = after;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const marker of inlineMarkers) {
+      if (left.endsWith(marker.open) && right.startsWith(marker.close)) {
+        active.add(marker.command);
+        left = left.slice(0, -marker.open.length);
+        right = right.slice(marker.close.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (command !== 'clearInline' && !inlineMarkers.some(marker => marker.command === command)) return null;
+  if (command === 'clearInline') {
+    lines[index] = `${left}${selected}${right}`;
+    return lines.join('\n');
+  }
+  if (active.has(command)) active.delete(command);
+  else active.add(command);
+  const wrappers = [
+    ['bold', '**', '**'],
+    ['italic', '*', '*'],
+    ['strike', '~~', '~~'],
+    ['underline', '<u>', '</u>'],
+    ['code', '`', '`'],
+  ];
+  let formatted = selected;
+  for (const [kind, open, close] of wrappers.slice().reverse()) {
+    if (active.has(kind)) formatted = `${open}${formatted}${close}`;
+  }
+  lines[index] = `${left}${formatted}${right}`;
+  return lines.join('\n');
+  /* legacy implementation retained for reference:
+  if (command === 'clearInline') {
+    const start = lines[index].indexOf(selected);
+    if (start < 0) return null;
+    const before = lines[index].slice(0, start);
+    const after = lines[index].slice(start + selected.length);
+    const prefixes = ['**', '__', '*', '_', '~~', '<u>', '`'];
+    const suffixes = ['**', '__', '*', '_', '~~', '</u>', '`'];
+    let nextBefore = before;
+    let nextAfter = after;
+    let removed = true;
+    while (removed) {
+      removed = false;
+      for (let i = 0; i < prefixes.length; i += 1) {
+        if (nextBefore.endsWith(prefixes[i]) && nextAfter.startsWith(suffixes[i])) {
+          nextBefore = nextBefore.slice(0, -prefixes[i].length);
+          nextAfter = nextAfter.slice(suffixes[i].length);
+          removed = true;
+          break;
+        }
+      }
+    }
+    lines[index] = `${nextBefore}${selected}${nextAfter}`;
+    return lines.join('\n');
+  }
+  const plainLine = markdownInlinePlainText(lines[index]);
+  const plainStart = plainLine.indexOf(selected);
+  if (plainStart < 0 || plainLine.indexOf(selected, plainStart + selected.length) >= 0) return null;
+  const visibleSourceText = value => String(value || '')
+    .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
+    .replace(/(`+)(.*?)\1/g, '$2')
+    .replace(/\*\*|__/g, '')
+    .replace(/~~/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[*_]/g, '');
+  const sourceOffsetAtVisible = visibleOffset => {
+    for (let offset = 0; offset <= lines[index].length; offset += 1) {
+      if (visibleSourceText(lines[index].slice(0, offset)).length >= visibleOffset) return offset;
+    }
+    return lines[index].length;
+  };
+  const directStart = lines[index].indexOf(selected);
+  const start = directStart >= 0 ? directStart : sourceOffsetAtVisible(plainStart);
+  const end = directStart >= 0 ? directStart + selected.length : sourceOffsetAtVisible(plainStart + selected.length);
+  const marker = command === 'bold' ? ['**', '**']
+    : command === 'italic' ? ['*', '*']
+    : command === 'strike' ? ['~~', '~~']
+        : command === 'underline' ? ['<u>', '</u>']
+          : command === 'code' ? ['`', '`'] : null;
+  if (!marker) return null;
+  const before = lines[index].slice(0, start);
+  const after = lines[index].slice(end);
+  const active = before.endsWith(marker[0]) && after.startsWith(marker[1])
+    && !(marker[0] === '*' && (before.endsWith('**') || after.startsWith('**')));
+  lines[index] = active
+    ? `${before.slice(0, -marker[0].length)}${selected}${after.slice(marker[1].length)}`
+    : `${before}${marker[0]}${selected}${marker[1]}${after}`;
+  return lines.join('\n');
+  */
+}
+
+function markdownTextWithBlockFormat(text, sourceLine, command) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length || !lines[index].trim()) return null;
+  const current = lines[index];
+  const indent = current.match(/^\s*/)?.[0] || '';
+  if (command === 'bullet') {
+    if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(current)) return null;
+    lines[index] = `${indent}- ${current.trim()}`;
+    return lines.join('\n');
+  }
+  if (command === 'pre') {
+    if (current.trim().startsWith('```')) return null;
+    lines.splice(index, 1, `${indent}__YOLOMUX_FENCE_START__`, current, `${indent}__YOLOMUX_FENCE_END__`);
+    return lines.join('\n').replace(/__YOLOMUX_FENCE_(?:START|END)__/g, '```');
+  }
+  const heading = command.match(/^h([1-6])$/);
+  if (!heading) return null;
+  const body = current.replace(/^\s*#{1,6}\s+/, '').trim();
+  if (!body || /[\[\]|]/.test(body)) return null;
+  lines[index] = `${indent}${'#'.repeat(Number(heading[1]))} ${body}`;
+  return lines.join('\n');
+}
+
+function markdownPreviewInlineBlockIsEditable(block) {
+  return !block?.querySelector?.('div,p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,pre,table');
+}
+
+function markdownPreviewSelectionContext(container, event = null) {
+  const selection = document.getSelection?.();
+  const selectionNode = selection?.anchorNode;
+  const selectionElement = selectionNode?.nodeType === 1 ? selectionNode : selectionNode?.parentElement;
+  const eventElement = event?.target?.nodeType === 1 ? event.target : event?.target?.parentElement;
+  const block = selectionElement?.closest?.('[data-markdown-preview-editable="true"]')
+    || eventElement?.closest?.('[data-markdown-preview-editable="true"]')
+    || container._markdownPreviewSelectionContext?.block;
+  if (!block || !container.contains(block) || !markdownPreviewInlineBlockIsEditable(block)) return null;
+  const selectedText = selection && !selection.isCollapsed
+    && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
+    ? selection.toString()
+    : container._markdownPreviewSelectionContext?.block === block
+      ? container._markdownPreviewSelectionContext.selectedText
+      : '';
+  return {block, selectedText: selectedText.trim()};
+}
+
+function markdownPreviewCaptureSelection(container) {
+  const selection = document.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const block = range.commonAncestorContainer?.parentElement?.closest?.('[data-markdown-preview-editable="true"]');
+  if (!block || !container.contains(block) || !block.contains(range.startContainer) || !block.contains(range.endContainer)) return null;
+  return {block, selectedText: selection.toString().trim()};
+}
+
+function markdownPreviewFormatActive(container, context, command) {
+  const path = container?.dataset?.mdPath || '';
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : fileState.get(path);
+  const sourceLine = Number(context?.block?.dataset?.sourceLine || 0);
+  if (!state || !sourceLine || !context?.selectedText) return false;
+  return markdownInlineFormatState(state.content, sourceLine, context.selectedText).has(command);
+}
+
+function markdownInlineFormatState(text, sourceLine, selectedText) {
+  const line = String(text || '').split('\n')[Math.max(0, Number(sourceLine || 1) - 1)] || '';
+  const selected = String(selectedText || '').trim();
+  const start = line.indexOf(selected);
+  if (start < 0 || !selected) return new Set();
+  let left = line.slice(0, start);
+  let right = line.slice(start + selected.length);
+  const markers = [
+    ['bold', '**', '**'], ['bold', '__', '__'], ['italic', '*', '*'], ['italic', '_', '_'],
+    ['strike', '~~', '~~'], ['underline', '<u>', '</u>'], ['code', '`', '`'],
+  ];
+  const active = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [kind, open, close] of markers) {
+      if (left.endsWith(open) && right.startsWith(close)) {
+        active.add(kind);
+        left = left.slice(0, -open.length);
+        right = right.slice(close.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return active;
+}
+
+function markdownPreviewBlockClass(block) {
+  const tag = String(block?.tagName || '').toUpperCase();
+  if (/^H[1-6]$/.test(tag)) return `h${tag.slice(1)}`;
+  if (block?.closest?.('pre')) return 'pre';
+  if (block?.closest?.('li')) return 'bullet';
+  return 'normal';
+}
+
+function markdownPreviewCopySelection(selectedText) {
+  if (!selectedText || !navigator.clipboard?.writeText) return false;
+  void navigator.clipboard.writeText(selectedText);
+  return true;
+}
+
+function markdownPreviewPasteSelection(container, context) {
+  if (!navigator.clipboard?.readText) return false;
+  void navigator.clipboard.readText().then(text => {
+    if (!text || !context?.block) return;
+    const selection = document.getSelection?.();
+    if (!selection?.rangeCount || !context.block.contains(selection.anchorNode)) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(document.createTextNode(text));
+    selection.collapseToEnd();
+    context.block.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  return true;
+}
+
+function markdownPreviewSelectionTransform(container, command, context = null) {
+  const selected = context || markdownPreviewSelectionContext(container);
+  if (!selected?.block) return false;
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(selected.block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
+    ? markdownTextWithInlineFormat(state.content, sourceLine, selected.selectedText, command)
+    : markdownTextWithBlockFormat(state.content, sourceLine, command);
+  if (next === null || next === state.content) return false;
+  const before = state.content;
+  container._markdownPreviewHistory = container._markdownPreviewHistory || {entries: [], index: -1};
+  container._markdownPreviewHistory.entries.splice(container._markdownPreviewHistory.index + 1);
+  container._markdownPreviewHistory.entries.push({before, after: next});
+  container._markdownPreviewHistory.index += 1;
+  container._markdownPreviewLastEdit = {before, after: next};
+  container._markdownPreviewSelectionContext = null;
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownEditorSelectionTransform(view, panel, path, command, context) {
+  const selectedText = String(context?.selectedText || '').trim();
+  const sourceLine = Number(context?.sourceLine || 0);
+  if (!view || !panel || !path || !sourceLine || !selectedText) return false;
+  const state = fileEditorPanelState(panel);
+  if (readOnlyMode || !state || state.kind !== 'text' || state.historical === true) return false;
+  const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
+    ? markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command)
+    : markdownTextWithBlockFormat(state.content, sourceLine, command);
+  if (next === null || next === state.content) return false;
+  handleFileEditorContentChanged(panel, path, next, {syntax: false});
+  syncCodeMirrorDocument(view, next, {path});
+  const line = view.state.doc.line(sourceLine);
+  const selectedStart = line.text.indexOf(selectedText);
+  if (selectedStart >= 0) {
+    view.dispatch({selection: {anchor: line.from + selectedStart, head: line.from + selectedStart + selectedText.length}});
+  }
+  return true;
+}
+
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
 const MARKDOWN_INLINE_NUMBERED_TASK_RE = /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+(\d+)([.)])\s+\S/;
 const MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS = 'markdown-rendered-task-checkbox';
@@ -104,8 +693,9 @@ function applyMarkdownSourceLines(container, source) {
   let searchFrom = 0;
   const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
   for (const block of blocks) {
-    const text = String(block.textContent || '').trim();
+    const text = markdownPreviewVisibleText(block).trim();
     let lineIndex = -1;
+    let lineEnd = -1;
     for (let index = searchFrom; index < lines.length; index += 1) {
       const trimmed = lines[index].trim();
       if (!trimmed) continue;
@@ -117,18 +707,29 @@ function applyMarkdownSourceLines(container, source) {
         lineIndex = index;
         break;
       }
-      if (text && trimmed.includes(text.slice(0, Math.min(text.length, 40)))) {
+      if (text && (trimmed.includes(text.slice(0, Math.min(text.length, 40)))
+        || markdownInlinePlainText(trimmed) === markdownInlinePlainText(text))) {
         lineIndex = index;
+        lineEnd = index;
+        if (block.tagName === 'P') {
+          let sourceText = trimmed;
+          while (lineEnd + 1 < lines.length && markdownSourceContinuationLine(lines[lineEnd + 1])) {
+            sourceText += ` ${lines[lineEnd + 1].trim()}`;
+            if (markdownInlinePlainText(sourceText) === markdownInlinePlainText(text)) break;
+            lineEnd += 1;
+          }
+        }
         break;
       }
     }
     if (lineIndex >= 0) {
       block.dataset.sourceLine = String(lineIndex + 1);
+      block.dataset.sourceEndLine = String((lineEnd >= lineIndex ? lineEnd : lineIndex) + 1);
       const anchor = document.createElement('span');
       anchor.className = 'markdown-source-anchor';
       anchor.dataset.sourceLine = String(lineIndex + 1);
       block.appendChild(anchor);
-      searchFrom = lineIndex + 1;
+      searchFrom = (lineEnd >= lineIndex ? lineEnd : lineIndex) + 1;
     }
   }
 }
@@ -618,6 +1219,303 @@ function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
   return lines.join('\n');
 }
 
+function updateMarkdownInlineFromPreview(container, block) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (!markdownPreviewInlineBlockIsEditable(block)) {
+    renderFileEditorPreviewSurface(sourcePanel, container, path, state.content, {preserveSelection: false});
+    return false;
+  }
+  const nextInline = markdownInlineSourceFromNode(block).replace(/\n+/g, ' ').trim();
+  const kind = /^H[1-6]$/.test(String(block.tagName || '').toUpperCase()) ? 'heading' : 'paragraph';
+  const next = markdownTextWithInlineLineEdited(state.content, sourceLine, nextInline, kind);
+  if (next === null || next === state.content) return false;
+  container._markdownPreviewLastEdit = {before: state.content, after: next};
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) {
+      panel._previewEditContainer = container;
+      syncCodeMirrorDocument(panel._cmView, next, {path});
+      delete panel._previewEditContainer;
+    }
+  }
+  return true;
+}
+
+function updateMarkdownFormatFromPreview(container, block, command) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  const selection = document.getSelection?.();
+  const selectedText = selection && !selection.isCollapsed && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
+    ? selection.toString()
+    : '';
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (!markdownPreviewInlineBlockIsEditable(block)) return false;
+  const next = markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command);
+  if (next === null || next === state.content) return false;
+  container._markdownPreviewLastEdit = {before: state.content, after: next};
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownPreviewEditorToolbar(container) {
+  const toolbar = document.createElement('div');
+  toolbar.className = 'markdown-preview-editor-toolbar';
+  toolbar.setAttribute('role', 'toolbar');
+  toolbar.setAttribute('aria-label', t('editor.toolbar.aria'));
+  for (const [command, label] of [['bold', 'B'], ['italic', 'I']]) {
+    const button = makeButton({
+      className: 'markdown-preview-editor-format-button',
+      label: command === 'bold' ? 'B' : 'I',
+      title: `${t('editor.toolbar.aria')}: ${label}`,
+      ariaLabel: `${t('editor.toolbar.aria')}: ${label}`,
+    });
+    button.dataset.markdownPreviewCommand = command;
+    toolbar.appendChild(button);
+  }
+  container.prepend(toolbar);
+  return toolbar;
+}
+
+function markdownFormattingContextMenu(event, context, options = {}) {
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu markdown-preview-context-menu';
+  menu.setAttribute('role', 'menu');
+  const closeMenu = () => markdownPreviewContextMenuController.close();
+  const apply = command => options.applyCommand?.(command, context) === true;
+  appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
+  appendContextMenuSeparator(menu);
+  const action = (label, command, disabled = false, checked = undefined) => {
+    const button = appendContextMenuButton(
+      menu,
+      label,
+      () => apply(command),
+      closeMenu,
+      {disabled, checked},
+    );
+    button.dataset.markdownCommand = command;
+    return button;
+  };
+  action('Bold', 'bold', !context.selectedText, options.isActive?.('bold', context) === true);
+  action('Italic', 'italic', !context.selectedText, options.isActive?.('italic', context) === true);
+  action('Strikethrough', 'strike', !context.selectedText, options.isActive?.('strike', context) === true);
+  action('Underline', 'underline', !context.selectedText, options.isActive?.('underline', context) === true);
+  action('Clear inline formatting', 'clearInline', !context.selectedText);
+  appendContextMenuSeparator(menu);
+  for (const [label, command] of [['Inline code', 'code'], ['Preformatted block', 'pre'], ['Bullet list', 'bullet'], ['Title / H1', 'h1'], ['Heading 2 / H2', 'h2'], ['Heading 3 / H3', 'h3'], ['Heading 4 / H4', 'h4'], ['Heading 5 / H5', 'h5']]) {
+    action(label, command, false);
+  }
+  action('Normal text', 'normal', false, markdownPreviewBlockClass(context.block) === 'normal');
+  markdownPreviewContextMenuController.open(menu, event.clientX, event.clientY);
+}
+
+function markdownPreviewContextMenu(container, event, context) {
+  markdownFormattingContextMenu(event, context, {
+    applyCommand: command => markdownPreviewSelectionTransform(container, command, context),
+    paste: () => markdownPreviewPasteSelection(container, context),
+    isActive: command => markdownPreviewFormatActive(container, context, command),
+  });
+}
+
+function markdownEditorContextMenu(view, panel, path, event, context) {
+  markdownFormattingContextMenu(event, context, {
+    applyCommand: command => markdownEditorSelectionTransform(view, panel, path, command, context),
+    isActive: command => markdownEditorFormatActive(panel, context, command),
+  });
+}
+
+function markdownEditorFormatActive(panel, context, command) {
+  const state = fileEditorPanelState(panel);
+  return state ? markdownInlineFormatState(state.content, context?.sourceLine, context?.selectedText).has(command) : false;
+}
+
+function bindMarkdownPreviewEditing(container, text, markdownPath) {
+  if (!markdownPath || container._markdownReadOnly === true || !container.closest?.('.file-editor-panel')) return;
+  const editableBlocks = [];
+  for (const block of Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p'))) {
+    const line = Number(block.dataset.sourceLine || 0);
+    if (!line || !markdownEditableSourceRange(text, line, block, {validateText: false})) continue;
+    block.dataset.markdownPreviewEditable = 'true';
+    block.contentEditable = 'true';
+    block.spellcheck = true;
+    block.setAttribute('role', 'textbox');
+    block.setAttribute('aria-label', t('common.edit'));
+    editableBlocks.push(block);
+  }
+  if (!editableBlocks.length) return;
+  container.dataset.markdownPreviewEditor = 'true';
+  const toolbar = markdownPreviewEditorToolbar(container);
+  toolbar.contentEditable = 'false';
+  container._markdownPreviewEditingDisposer = bindScopedOnce(container, 'markdown-preview-editing', scope => {
+    editableBlocks.forEach((block, index) => {
+      scope.ownEvent(`markdown-preview-enter-${index}`, block, 'keydown', event => {
+        if (event.key !== 'Enter') return;
+        if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+      });
+    });
+    scope.ownEvent('beforeinput-preview-enter', container, 'beforeinput', event => {
+      if (event.inputType !== 'insertParagraph' && event.inputType !== 'insertLineBreak') return;
+      if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('pointerdown', container, 'pointerdown', event => {
+      if (event.button !== 2) return;
+      const context = markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (context) container._markdownPreviewSelectionContext = context;
+    }, {capture: true});
+    scope.ownEvent('mousedown', container, 'mousedown', event => {
+      if (event.button !== 2) return;
+      const context = markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (context) container._markdownPreviewSelectionContext = context;
+    }, {capture: true});
+    scope.ownEvent('focusin', container, 'focusin', event => {
+      const block = event.target?.closest?.('[data-markdown-preview-editable="true"]');
+      if (block) {
+        container._markdownPreviewActiveBlock = block;
+        const state = fileEditorPanelState(container.closest?.('.file-editor-panel'));
+        container._markdownPreviewActiveBlockSource = state?.content || '';
+      }
+    });
+    scope.ownEvent('mousedown', container, 'mousedown', event => {
+      const button = event.target?.closest?.('[data-markdown-preview-command]');
+      if (!button) return;
+      event.preventDefault();
+    });
+    scope.ownEvent('click', container, 'click', event => {
+      const button = event.target?.closest?.('[data-markdown-preview-command]');
+      if (!button) return;
+      const selection = document.getSelection?.();
+      const block = selection?.anchorNode?.parentElement?.closest?.('[data-markdown-preview-editable="true"]');
+      if (block) updateMarkdownFormatFromPreview(container, block, button.dataset.markdownPreviewCommand);
+    });
+    scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const context = container._markdownPreviewSelectionContext || markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (!context || !context.block) return;
+      event.preventDefault();
+      event.stopPropagation();
+      markdownPreviewContextMenu(container, event, context);
+    }, {capture: true});
+    scope.ownEvent('keydown', container, 'keydown', event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || String(event.key).toLowerCase() !== 's') return;
+      event.preventDefault();
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+      if (path && panel) void saveFileEditor(path, panel);
+    });
+    scope.ownEvent('input', container, 'input', event => {
+      if (event.target?.closest?.('.ProseMirror')) return;
+      const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
+        || container._markdownPreviewActiveBlock
+        || markdownPreviewSelectionContext(container)?.block;
+      if (!block || !container.contains(block)) return;
+      handleMarkdownPreviewInput(container, block);
+    });
+    scope.ownEvent('selectionchange', container.ownerDocument, 'selectionchange', () => {
+      const context = markdownPreviewCaptureSelection(container);
+      if (!context) return;
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || '';
+      const state = panel ? fileEditorPanelState(panel) : null;
+      const line = Number(context.block.dataset.sourceLine || 0);
+      const selection = container.ownerDocument.getSelection?.();
+      if (!state || !selection?.rangeCount) return;
+      const range = selection.getRangeAt(0);
+      const prefix = container.ownerDocument.createRange();
+      prefix.selectNodeContents(context.block);
+      prefix.setEnd(range.startContainer, range.startOffset);
+      const visibleStart = prefix.toString().length;
+      const offsets = markdownEditableRangeOffsets(state.content, line, context.block.dataset.sourceEndLine, context.block);
+      container._markdownPreviewSourceSelection = {
+        path,
+        sourceLine: line,
+        start: offsets.start + visibleStart,
+        end: offsets.start + visibleStart + context.selectedText.length,
+        text: context.selectedText,
+      };
+      if (panel?._cmView && context.selectedText) {
+        const lineInfo = panel._cmView.state.doc.line(line);
+        const visibleStart = prefix.toString().length;
+        const sourceOffset = markdownSourceOffsetAtVisibleOffset(lineInfo.text, visibleStart);
+        const sourceEnd = markdownSourceOffsetAtVisibleOffset(lineInfo.text, visibleStart + context.selectedText.length);
+        panel._cmView.dispatch({selection: {anchor: lineInfo.from + sourceOffset, head: lineInfo.from + sourceEnd}});
+      }
+    });
+    scope.ownEvent('keydown-preview-enter', container, 'keydown', event => {
+      if (event.key !== 'Enter') return;
+      if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('keydown-preview-backspace', container, 'keydown', event => {
+      if (event.key !== 'Backspace') return;
+      if (handleMarkdownPreviewBackspace(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('paste', container, 'paste', event => {
+      const context = markdownPreviewSelectionContext(container);
+      const pasted = event.clipboardData?.getData?.('text/plain') || '';
+      if (!context?.block || !pasted) return;
+      event.preventDefault();
+      const selection = document.getSelection?.();
+      if (!selection?.rangeCount || !context.block.contains(selection.anchorNode) || !context.block.contains(selection.focusNode)) return;
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(document.createTextNode(pasted));
+      selection.collapseToEnd();
+      context.block.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+    scope.ownEvent('beforeinput', container, 'beforeinput', event => {
+      if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+        if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+        return;
+      }
+    });
+    scope.ownEvent('beforeinput-preview-backspace', container, 'beforeinput', event => {
+      if (event.inputType !== 'deleteContentBackward') return;
+      if (handleMarkdownPreviewBackspace(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('keydown', container, 'keydown-preview-history', event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = String(event.key || '').toLowerCase();
+      const history = container._markdownPreviewHistory;
+      if (key !== 'z' || !history?.entries?.length) return;
+      event.preventDefault();
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || '';
+      const nextIndex = event.shiftKey ? Math.min(history.entries.length - 1, history.index + 1) : history.index;
+      if (!event.shiftKey && history.index < 0) return;
+      if (event.shiftKey && nextIndex <= history.index) return;
+      const edit = history.entries[nextIndex];
+      const next = event.shiftKey ? edit.after : edit.before;
+      const state = panel ? fileEditorPanelState(panel) : fileState.get(path);
+      if (!state || state.content === next) return;
+      history.index = event.shiftKey ? nextIndex : history.index - 1;
+      container._markdownPreviewLastEdit = history.index >= 0 ? history.entries[history.index] : null;
+      handleFileEditorContentChanged(panel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+      for (const linked of fileEditorPanelsForPath(path)) {
+        if (linked?._cmView) syncCodeMirrorDocument(linked._cmView, next, {path});
+      }
+      if (container._markdownPreviewSourceSelection) {
+        selectMarkdownPreviewSourceRange(path, container._markdownPreviewSourceSelection.sourceLine, container._markdownPreviewSourceSelection.text);
+      }
+    });
+  });
+}
+
+function disposeMarkdownPreviewEditing(container) {
+  container?._markdownPreviewEditingDisposer?.();
+  if (container) delete container._markdownPreviewEditingDisposer;
+}
+
 function updateMarkdownTaskFromPreview(container, input) {
   const path = container?.dataset?.mdPath || '';
   const sourceLine = Number(input?.dataset?.sourceLine || 0);
@@ -960,6 +1858,7 @@ function invalidateMarkdownPreviewArtifacts(container) {
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
   const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
+  disposeMarkdownPreviewEditing(container);
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
   applyMarkdownTaskListClasses(frag, text);
@@ -974,6 +1873,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  if (options.readOnly !== true) bindMarkdownPreviewEditing(container, text, markdownPath);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,

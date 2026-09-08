@@ -1169,6 +1169,11 @@ function defaultFileEditorViewModeForPath(path, kind) {
   return previewRendererForPath(path)?.defaultMode || 'edit';
 }
 
+function defaultFileEditorWrapForPath(path, kind) {
+  if (kind !== 'text') return false;
+  return previewRendererForPath(path)?.defaultWrap === true;
+}
+
 function openFileKindForPreviewPath(path) {
   const renderer = previewRendererForPath(path);
   const mediaKind = renderer?.mediaKind || '';
@@ -1289,6 +1294,21 @@ function fileEntryChanged(state, entry) {
   // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
   if (state.size == null || entry.size == null) return true;
   return Number(state.size) !== Number(entry.size);
+}
+
+function fileEditorSelfWriteAcknowledged(path, entry) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
+  const mtime = fileEntryMtime(entry);
+  const size = entry?.size;
+  const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
+  const transientMatch = ack.pending === true && Number(size) === 0;
+  if (!finalMatch && !transientMatch) return false;
+  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
 }
 
 function filePanelItemsForPath(path) {
@@ -1607,8 +1627,8 @@ function openFileStatus(state) {
 }
 
 function fileEditorAutosaveDelayMs() {
-  const seconds = Number(fileEditorAutosaveDelaySeconds || 2.5);
-  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 2.5));
+  const seconds = Number(fileEditorAutosaveDelaySeconds || 6);
+  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 6));
   return Math.round(clamped * 1000);
 }
 
@@ -1629,6 +1649,7 @@ function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
+  flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
   state.content = cmContent;
@@ -1637,6 +1658,10 @@ function syncOpenFileContentFromPanel(path, panel) {
 }
 
 function syncOpenFileContentFromPanels(path, preferredPanel = null) {
+  if (preferredPanel?._pmView) flushProseMirrorSource(preferredPanel, path);
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel !== preferredPanel && panel?._pmView) flushProseMirrorSource(panel, path);
+  }
   if (syncOpenFileContentFromPanel(path, preferredPanel)) return true;
   for (const panel of fileEditorPanelsForPath(path)) {
     if (panel === preferredPanel) continue;
@@ -2786,6 +2811,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     }
     return;
   }
+  if (fileEditorSelfWriteAcknowledged(path, entry)) return;
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
       clearOpenFileMissingState(state);
@@ -4162,6 +4188,7 @@ function updateFileEditorCountStatus(panel) {
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
+  const state = options.state || fileState.get(path);
   const save = options.save || (() => saveFileEditor(path, panel));
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
@@ -4220,7 +4247,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.bracketMatching(),
     api.foldGutter(),
     api.highlightActiveLine(),
-    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, {...options, path, state}),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     codeMirrorSearchScrollFix(api),
@@ -4232,6 +4259,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
+    codeMirrorSplitSyncExtension(api, panel, path),
     ...(options.plain ? [codeMirrorThemeOnlyExtensions(api, panel)] : [codeMirrorLanguageExtension(api, path), codeMirrorThemedExtensions(api, panel, path)]),
   ];
 }
@@ -4245,6 +4273,8 @@ async function removeOpenFile(path, options = {}) {
   const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
+  if (closePanel?._pmView) flushProseMirrorSource(closePanel, path);
+  if (closePanel?._cmView) flushCodeMirrorSource(closePanel, path);
   if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;

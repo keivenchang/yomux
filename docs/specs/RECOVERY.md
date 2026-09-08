@@ -65,7 +65,7 @@ The primary button must name the action (`Recover`, `Restore shell`, or `Restore
 
 ## Isolated End-To-End Environment
 
-Recovery QA must never kill sessions on the default socket or use live ports 7770-7773/8880-8883. Each run owns an isolated `/tmp` root, private tmux socket, isolated `YOLOMUX_STATE_DIR`, isolated config/cache/upload directories, ephemeral HTTP ports, unique session names, and cleanup that targets only those recorded resources. Two YOLOmux server processes must share the isolated state and tmux socket so cross-server classification and UI convergence are exercised.
+Recovery QA must never kill sessions on the default socket or use an operator-configured live port. Each run owns an isolated `/tmp` root, private tmux socket, isolated `YOLOMUX_STATE_DIR` and `YOLOMUX_RUNTIME_DIR`, isolated config/cache/upload directories, ephemeral HTTP ports, unique session names, and cleanup that targets only those recorded resources. Two YOLOmux server processes must share the isolated state, runtime, and tmux socket so cross-server classification and UI convergence are exercised.
 
 The browser lane uses real Chrome/Selenium against the generated bundle served by the restarted isolated process. Before the first action, record both server PIDs, `/proc/<pid>/cwd` or platform equivalent, bundle hash/build revision, state directory, socket path, auth mode, and a hard-reload marker. Fail immediately if another process owns either port, the server cwd is not this checkout, the served bundle does not match the built bundle, or the browser reports a JavaScript error/unhandled rejection.
 

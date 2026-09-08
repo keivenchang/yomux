@@ -1676,6 +1676,29 @@ def test_descriptor_symlink_target_fails_closed_without_empty_path_support(repoi
     assert (changed.value.status, changed.value.message_key) == (500, "fs.error.operationFailed")
 
 
+def test_symlink_listing_falls_back_to_the_pinned_parent_on_macos(repoint_tree, monkeypatch):
+    root, _blocked = repoint_tree
+    target = root / "target"
+    target.mkdir()
+    (target / "inside.txt").write_text("safe", encoding="utf-8")
+    link = root / "link"
+    link.symlink_to(target.name, target_is_directory=True)
+    real_readlink = paths.os.readlink
+
+    def macos_readlink(path, *args, **kwargs):
+        if path == "":
+            raise OSError(errno.ENOTSUP, "simulated macOS empty-path readlink rejection")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(paths.os, "readlink", macos_readlink)
+    payload = filesystem.list_directory(str(root), include_repo_info=False)
+
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+    assert entries["link"]["kind"] == "dir"
+    assert entries["link"]["symlink_target"] == "target"
+    assert entries["target"]["kind"] == "dir"
+
+
 def test_rename_refuses_source_replacement_after_descriptor_pin(repoint_tree):
     root, blocked = repoint_tree
     source = root / "source.txt"

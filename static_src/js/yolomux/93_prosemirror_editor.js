@@ -1,0 +1,696 @@
+const prosemirrorLoadPromise = {value: null};
+const PROSEMIRROR_SERIALIZE_DELAY_MS = 1250;
+
+function prosemirrorFailureMessage(error) {
+  const raw = userMessageText(error, String(error?.message || error || 'unknown error'));
+  const detail = raw.replace(/^ProseMirror ViewEditor failed:\s*/i, '');
+  return t('editor.prosemirrorFailed', {error: detail});
+}
+
+function renderProseMirrorFailure(panel, path, parts, error) {
+  const pane = parts?.previewPane;
+  if (!pane) return false;
+  const message = prosemirrorFailureMessage(error);
+  panel._pmError = message;
+  panel._pmRequired = true;
+  renderMarkdownPreviewInto(pane, fileEditorPanelState(panel)?.content || '', path, {context: fileEditorPanelMode(panel), readOnly: true});
+  const failure = document.createElement('section');
+  failure.className = 'file-editor-prosemirror-error file-editor-prosemirror-watermark';
+  failure.setAttribute('role', 'alert');
+  const title = document.createElement('strong');
+  title.textContent = t('editor.prosemirrorErrorTitle');
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  const help = document.createElement('p');
+  help.textContent = t('editor.prosemirrorErrorHelp');
+  failure.append(title, detail, help);
+  pane.prepend(failure);
+  pane.hidden = false;
+  pane.dataset.prosemirrorState = 'error';
+  setFileEditorPanelStatus(panel, message, 'error');
+  statusErr(esc(message));
+  return true;
+}
+
+function renderProseMirrorLoading(parts) {
+  const pane = parts?.previewPane;
+  if (!pane || pane.querySelector('.file-editor-prosemirror-loading')) return;
+  disposeMarkdownPreviewEditing(pane);
+  cleanupStandardPreviewStrategy(pane);
+  pane.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'file-editor-prosemirror-loading';
+  loading.textContent = t('editor.prosemirrorLoading');
+  pane.append(loading);
+  pane.hidden = false;
+  pane.dataset.prosemirrorState = 'loading';
+}
+
+function loadProseMirrorApi() {
+  if (window.YOLOmuxProseMirror) return Promise.resolve(window.YOLOmuxProseMirror);
+  if (prosemirrorLoadPromise.value) return prosemirrorLoadPromise.value;
+  const asset = bootstrap.proseMirrorAssetUrl || '/static/prosemirror.js';
+  const promise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = asset;
+    script.onload = () => window.YOLOmuxProseMirror ? resolve(window.YOLOmuxProseMirror) : reject(new Error('ProseMirror bundle did not initialize'));
+    script.onerror = () => reject(new Error(`Unable to load ${asset}`));
+    document.head.appendChild(script);
+  });
+  prosemirrorLoadPromise.value = promise;
+  promise.catch(() => {
+    if (prosemirrorLoadPromise.value === promise) prosemirrorLoadPromise.value = null;
+  });
+  return promise;
+}
+
+function prosemirrorMarkdownSchema(api) {
+  let nodes = api.addListNodes(api.defaultMarkdownParser.schema.spec.nodes, 'paragraph block*', 'block');
+  nodes = nodes.addBefore('blockquote', 'details', {
+    group: 'block',
+    content: 'block+',
+    defining: true,
+    attrs: {summary: {default: ''}},
+    parseDOM: [{tag: 'details', getAttrs(dom) {
+      return {summary: dom.querySelector(':scope > summary')?.textContent || ''};
+    }}],
+    toDOM() { return ['details', 0]; },
+  });
+  nodes = nodes.addBefore('blockquote', 'table', {
+    group: 'block',
+    content: 'table_row+',
+    isolating: true,
+    parseDOM: [{tag: 'table'}],
+    toDOM() { return ['table', ['tbody', 0]]; },
+  }).addBefore('blockquote', 'table_row', {
+    content: '(table_header | table_cell)+',
+    parseDOM: [{tag: 'tr'}],
+    toDOM() { return ['tr', 0]; },
+  }).addBefore('blockquote', 'table_header', {
+    content: 'inline*',
+    attrs: {align: {default: null}},
+    parseDOM: [{tag: 'th', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
+    toDOM(node) { return ['th', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
+  }).addBefore('blockquote', 'table_cell', {
+    content: 'inline*',
+    attrs: {align: {default: null}},
+    parseDOM: [{tag: 'td', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
+    toDOM(node) { return ['td', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
+  });
+  nodes = nodes.addBefore('hard_break', 'soft_break', {
+    inline: true,
+    group: 'inline',
+    selectable: false,
+    parseDOM: [{tag: 'span[data-markdown-soft-break]'}],
+    toDOM() { return ['span', {'data-markdown-soft-break': 'true'}, ' ']; },
+  });
+  const marks = api.defaultMarkdownParser.schema.spec.marks.addToEnd('strike', {
+    parseDOM: [{tag: 's'}, {tag: 'del'}, {style: 'text-decoration: line-through'}],
+    toDOM() { return ['s', 0]; },
+  }).addToEnd('underline', {
+    parseDOM: [{tag: 'u'}, {style: 'text-decoration: underline'}],
+    toDOM() { return ['u', 0]; },
+  }).addToEnd('highlight', {
+    parseDOM: [{tag: 'mark'}],
+    toDOM() { return ['mark', 0]; },
+  }).addToEnd('kbd', {
+    parseDOM: [{tag: 'kbd'}],
+    toDOM() { return ['kbd', 0]; },
+  });
+  return new api.Schema({
+    nodes,
+    marks,
+  });
+}
+
+function prosemirrorMarkdownParser(api, schema) {
+  const parser = api.defaultMarkdownParser;
+  const tokenizer = new api.MarkdownIt({html: true, breaks: false});
+  tokenizer.enable('strikethrough');
+  const markdownItParse = tokenizer.parse.bind(tokenizer);
+  tokenizer.parse = (source, environment) => {
+    const htmlElement = html => {
+      const template = document.createElement('template');
+      template.innerHTML = String(html || '').trim();
+      return template.content.firstElementChild;
+    };
+    const imageAttrs = html => {
+      const image = htmlElement(html);
+      if (!image || image.tagName !== 'IMG' || !image.getAttribute('src')) return null;
+      return {
+        src: image.getAttribute('src'),
+        alt: image.getAttribute('alt'),
+        title: image.getAttribute('title'),
+      };
+    };
+    const unsupportedHtml = [];
+    const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
+      for (const token of tokens || []) {
+        const html = String(token.content || '').trim();
+        const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if (token.type === 'html_inline') {
+          const open = html.match(/^<(u|mark|kbd)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
+          const close = html.match(/^<\/(u|mark|kbd)\s*>$/i)?.[1]?.toLowerCase();
+          const markName = {u: 'underline', mark: 'highlight', kbd: 'kbd'};
+          if (open) token.type = `${markName[open]}_open`;
+          else if (close) token.type = `${markName[close]}_close`;
+          else if (/^<br\s*\/?>$/i.test(html)) token.type = 'html_break';
+          else {
+            const attrs = imageAttrs(html);
+            if (attrs) {
+              token.type = 'html_image';
+              token.meta = attrs;
+            }
+          }
+        } else if (token.type === 'html_block') {
+          const details = html.match(/^<details\s*>\s*<summary>([\s\S]*?)<\/summary>\s*$/i);
+          if (details) {
+            token.type = 'details_open';
+            token.meta = {summary: details[1].replace(/<[^>]+>/g, '').trim()};
+          } else if (/^<\/details>\s*$/i.test(html)) {
+            token.type = 'details_close';
+          } else {
+            const attrs = imageAttrs(html);
+            if (attrs) {
+              token.type = 'html_image';
+              token.meta = attrs;
+            }
+          }
+        }
+        if ((token.type === 'html_inline' || token.type === 'html_block') && html) {
+          unsupportedHtml.push({html: html.slice(0, 160), line: tokenLine || 1});
+        }
+        if (token.children) normalizeHtmlTokens(token.children, tokenLine);
+      }
+      return tokens;
+    };
+    const tokens = normalizeHtmlTokens(markdownItParse(source, environment));
+    // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
+    // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
+    const spacedTokens = [];
+    let previousBlockEnd = null;
+    for (const token of tokens) {
+      const blockStart = token.nesting === 1 && token.block && Array.isArray(token.map) ? token.map[0] : null;
+      if (blockStart !== null && previousBlockEnd !== null) {
+        const emptyParagraphs = Math.max(0, blockStart - previousBlockEnd - 1);
+        for (let index = 0; index < emptyParagraphs; index += 1) {
+          spacedTokens.push(
+            {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: [blockStart, blockStart], block: true, children: null, content: ''},
+            {type: 'inline', tag: '', nesting: 0, level: 1, map: [blockStart, blockStart], block: true, children: [], content: ''},
+            {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
+          );
+        }
+      }
+      spacedTokens.push(token);
+      if (token.nesting === 1 && token.block && Array.isArray(token.map)) previousBlockEnd = token.map[1];
+    }
+    const trailingNewlines = (String(source).match(/\n+$/) || [''])[0].length;
+    const trailingEmptyParagraphs = Math.max(0, trailingNewlines - 1);
+    for (let index = 0; index < trailingEmptyParagraphs; index += 1) {
+      spacedTokens.push(
+        {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: null, block: true, children: null, content: ''},
+        {type: 'inline', tag: '', nesting: 0, level: 1, map: null, block: true, children: [], content: ''},
+        {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
+      );
+    }
+    if (unsupportedHtml.length) {
+      const first = unsupportedHtml[0];
+      throw new Error(`Unsupported raw HTML at line ${first.line}: ${first.html}`);
+    }
+    return spacedTokens;
+  };
+  const tokens = {
+    ...parser.tokens,
+    softbreak: {node: 'soft_break'},
+    html_break: {node: 'hard_break'},
+    html_image: {node: 'image', getAttrs: token => token.meta},
+    details: {block: 'details', getAttrs: token => token.meta},
+    table: {block: 'table'},
+    thead: {ignore: true},
+    tbody: {ignore: true},
+    tr: {block: 'table_row'},
+    th: {block: 'table_header', getAttrs: token => ({align: token.attrGet('style')?.match(/text-align\s*:\s*(left|center|right)/i)?.[1]?.toLowerCase() || null})},
+    td: {block: 'table_cell', getAttrs: token => ({align: token.attrGet('style')?.match(/text-align\s*:\s*(left|center|right)/i)?.[1]?.toLowerCase() || null})},
+    s: {mark: 'strike'},
+    underline: {mark: 'underline'},
+    highlight: {mark: 'highlight'},
+    kbd: {mark: 'kbd'},
+  };
+  return new api.MarkdownParser(schema, tokenizer, tokens);
+}
+
+function prosemirrorMarkdownSerializer(api) {
+  return new api.MarkdownSerializer({
+    ...api.defaultMarkdownSerializer.nodes,
+    paragraph(state, node) {
+      if (node.content.size) {
+        state.renderInline(node);
+      } else {
+        // A Markdown paragraph separator is two newlines. Empty ViewEditor paragraphs need one
+        // additional source newline each or Markdown would collapse them on the next parse.
+        state.flushClose(1);
+        state.write('\n');
+      }
+      state.closeBlock(node);
+    },
+    soft_break(state) { state.write('\n'); },
+    // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
+    // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
+    hard_break(state) { state.write('\\\n'); },
+    details(state, node) {
+      state.write(`<details>\n<summary>${node.attrs.summary}</summary>\n\n`);
+      state.renderContent(node);
+      state.write('\n</details>');
+      state.closeBlock(node);
+    },
+    table(state, node) {
+      const inline = cell => {
+        const saved = {out: state.out, delim: state.delim, closed: state.closed, atBlockStart: state.atBlockStart, inTightList: state.inTightList};
+        state.out = '';
+        state.delim = '';
+        state.closed = null;
+        state.atBlockStart = true;
+        state.renderInline(cell);
+        const result = state.out.trim();
+        Object.assign(state, saved);
+        return result.replace(/\|/g, '\\|');
+      };
+      const cells = row => {
+        const result = [];
+        row.forEach(cell => result.push({text: inline(cell), align: cell.attrs.align || ''}));
+        return result;
+      };
+      const alignment = align => align === 'left' ? ':---' : align === 'right' ? '---:' : align === 'center' ? ':---:' : '---';
+      const rows = [];
+      node.forEach(row => rows.push(cells(row)));
+      if (!rows.length) return;
+      state.write(`| ${rows[0].map(cell => cell.text).join(' | ')} |`);
+      state.ensureNewLine();
+      state.write(`| ${rows[0].map(cell => alignment(cell.align)).join(' | ')} |`);
+      for (const row of rows.slice(1)) {
+        state.ensureNewLine();
+        state.write(`| ${row.map(cell => cell.text).join(' | ')} |`);
+      }
+      state.closeBlock(node);
+    },
+  }, {
+    ...api.defaultMarkdownSerializer.marks,
+    strike: {open: '~~', close: '~~', mixable: true},
+    underline: {open: '<u>', close: '</u>', mixable: true},
+    highlight: {open: '<mark>', close: '</mark>', mixable: true},
+    kbd: {open: '<kbd>', close: '</kbd>', mixable: true},
+  });
+}
+
+function prosemirrorDetailsNodeView(node) {
+  const dom = document.createElement('details');
+  dom.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = node.attrs.summary;
+  const contentDOM = document.createElement('div');
+  dom.append(summary, contentDOM);
+  return {dom, contentDOM};
+}
+
+function prosemirrorImageNodeView(node, panel, markdownPath) {
+  const image = document.createElement('img');
+  const original = String(node.attrs.src || '');
+  image.className = 'markdown-preview-image prosemirror-image';
+  image.alt = node.attrs.alt || '';
+  if (node.attrs.title) image.title = node.attrs.title;
+  image.dataset.originalSrc = original;
+  const target = markdownPreviewImageTarget(original, markdownPath);
+  if (!target) {
+    image.src = original;
+  } else if (target.external) {
+    image.src = target.src;
+  } else {
+    image.dataset.resolvedPath = target.path;
+    void installRawFileMediaSource(image, target.path, {
+      isCurrent: () => panel?._pmView?.dom?.isConnected && image.isConnected,
+      onFailure: error => {
+        image.classList.add('prosemirror-image-error');
+        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+      },
+      onDecodeFailure: () => {
+        image.classList.add('prosemirror-image-error');
+        image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+      },
+    });
+  }
+  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function normalizeProseMirrorEndBreakSource(text) {
+  return String(text || '').replace(/\\\n(?=\S)/g, '\n');
+}
+
+function normalizeLegacyBreakMarkup(text) {
+  // Files produced by the earlier adapter may contain literal `<br>` markers. Treat only the
+  // standalone marker as a Markdown hard break; ordinary prose containing that text stays text.
+  return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\s*(?=\n|$)/gi, '$1$2\\\n');
+}
+
+function destroyProseMirrorPanel(panel) {
+  const view = panel?._pmView;
+  if (!view) return;
+  flushProseMirrorSource(panel, panel._pmPath);
+  releaseRawFileMediaSources(view.dom);
+  view.destroy();
+  delete panel._pmView;
+  delete panel._pmPath;
+  delete panel._pmSource;
+  delete panel._pmPlugins;
+}
+
+function syncProseMirrorPanelSource(panel, path, state) {
+  if (!panel?._pmView || panel._pmPath !== path || !state) return false;
+  const next = normalizeLegacyBreakMarkup(state.content || '');
+  if (panel._pmSource === next) return true;
+  if (panel._pmSerializeTimer) return true;
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  panel._pmSerializeTimer = null;
+  panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+  try {
+    const doc = panel._pmParser.parse(next);
+    const selection = panel._pmView.state.selection;
+    const max = doc.content.size;
+    const anchor = Math.min(selection.anchor, max);
+    const head = Math.min(selection.head, max);
+    const api = window.YOLOmuxProseMirror;
+    const nextSelection = api.TextSelection.create(doc, anchor, head);
+    panel._pmView.updateState(api.EditorState.create({doc, selection: nextSelection, plugins: panel._pmPlugins || []}));
+    panel._pmSource = next;
+    return true;
+  } catch (error) {
+    renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
+    return false;
+  }
+}
+
+function prosemirrorSupportedSource(path, state) {
+  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true;
+}
+
+function clearProseMirrorFallback(parts) {
+  const fallback = parts?.previewPane?.querySelector('.file-editor-preview-fallback');
+  fallback?.remove();
+}
+
+function serializeProseMirrorSource(panel) {
+  if (!panel?._pmSerializer || !panel._pmView) return null;
+  return panel._pmSerializer.serialize(panel._pmView.state.doc);
+}
+
+function commitProseMirrorSource(panel, path, options = {}) {
+  if (!panel?._pmView || panel._pmPath !== path) return false;
+  const next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
+  if (next === null) return false;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.historical === true) return false;
+  if (next === state.content) {
+    panel._pmSource = next;
+    return true;
+  }
+  panel._pmSource = next;
+  handleFileEditorContentChanged(panel, path, next, {
+    syntax: false,
+    previewEdit: true,
+    sourceSurface: 'view-editor',
+    skipPreviewPanel: panel.querySelector('.file-editor-preview-pane-panel'),
+    deferAutosave: options.deferAutosave === true,
+  });
+  syncCodeMirrorToCanonicalPanels(path, next, panel, 'view-editor');
+  return true;
+}
+
+function syncCodeMirrorToCanonicalPanels(path, content, sourcePanel = null, sourceSurface = '') {
+  for (const linked of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(linked)?.historical === true) continue;
+    if (linked._cmView && !(linked === sourcePanel && sourceSurface === 'text-editor')) {
+      syncCodeMirrorDocument(linked._cmView, content, {path});
+    }
+    if (linked._pmView && !(linked === sourcePanel && sourceSurface === 'view-editor')) {
+      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked));
+    }
+  }
+}
+
+function updateProseMirrorSource(panel, path) {
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  const generation = Number(panel._pmSerializeGeneration || 0) + 1;
+  panel._pmSerializeGeneration = generation;
+  panel._pmSerializeTimer = setTimeout(() => {
+    if (generation !== panel._pmSerializeGeneration || panel._pmPath !== path || !panel._pmView?.dom?.isConnected) return;
+    panel._pmSerializeTimer = null;
+    commitProseMirrorSource(panel, path, {deferAutosave: true});
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function scheduleProseMirrorAutosave(panel, path) {
+  if (panel._pmAutosaveTimer) clearTimeout(panel._pmAutosaveTimer);
+  panel._pmAutosaveTimer = setTimeout(() => {
+    panel._pmAutosaveTimer = null;
+    if (panel._pmPath !== path || !panel._pmView?.dom?.isConnected) return;
+    const state = fileEditorPanelState(panel);
+    if (state?.dirty) scheduleFileAutosave(path);
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function flushProseMirrorSource(panel, path) {
+  if (!panel?._pmView || panel._pmPath !== path) return false;
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  panel._pmSerializeTimer = null;
+  panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+  if (panel._pmAutosaveTimer) clearTimeout(panel._pmAutosaveTimer);
+  panel._pmAutosaveTimer = null;
+  return commitProseMirrorSource(panel, path);
+}
+
+function insertProseMirrorHardBreak(api, schema) {
+  return (state, dispatch) => {
+    const {$from, $to} = state.selection;
+    if (!$from.sameParent($to) || !$from.parent.isTextblock) return false;
+    const type = schema.nodes.hard_break;
+    if (!type) return false;
+    if (dispatch) {
+      dispatch(state.tr.replaceSelectionWith(type.create()).scrollIntoView());
+    }
+    return true;
+  };
+}
+
+function clearLinkedCodeMirrorSelection(panel, path) {
+  for (const linked of fileEditorPanelsForPath(path)) {
+    const view = linked._cmView;
+    const main = view?.state?.selection?.main;
+    if (!view || !main || main.empty) continue;
+    view.dispatch({selection: {anchor: main.head}});
+  }
+}
+
+function prosemirrorSelectionContext(view) {
+  const {from, to} = view.state.selection;
+  const domNode = view.domAtPos(from)?.node;
+  const domElement = domNode?.nodeType === 1 ? domNode : domNode?.parentElement;
+  return {
+    selectedText: from === to ? '' : view.state.doc.textBetween(from, to, '\n'),
+    from,
+    to,
+    block: domElement?.closest?.('p,h1,h2,h3,h4,h5,h6') || null,
+  };
+}
+
+function prosemirrorSelectionAtClientPoint(view, event) {
+  const selection = view.state.selection;
+  if (!selection.empty) return prosemirrorSelectionContext(view);
+  const point = view.posAtCoords({left: event.clientX, top: event.clientY});
+  if (!point) return prosemirrorSelectionContext(view);
+  const {$from} = view.state.doc.resolve(point.pos);
+  const text = $from.parent.textContent || '';
+  if (!text) return prosemirrorSelectionContext(view);
+  const offset = Math.max(0, Math.min($from.parentOffset, text.length));
+  let start = offset;
+  let end = offset;
+  while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+  while (end < text.length && !/\s/.test(text[end])) end += 1;
+  const base = $from.start();
+  view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, base + start, base + end)));
+  return prosemirrorSelectionContext(view);
+}
+
+function prosemirrorSelectionHasMark(view, mark) {
+  if (!mark || view.state.selection.empty) return false;
+  let sawText = false;
+  let covered = true;
+  view.state.doc.nodesBetween(view.state.selection.from, view.state.selection.to, node => {
+    if (!node.isText || !node.nodeSize) return;
+    sawText = true;
+    if (!mark.isInSet(node.marks)) covered = false;
+  });
+  return sawText && covered;
+}
+
+function applyProseMirrorFormat(api, view, schema, command) {
+  const marks = schema.marks;
+  const nodes = schema.nodes;
+  const run = command === 'bold' ? api.toggleMark(marks.strong)
+    : command === 'italic' ? api.toggleMark(marks.em)
+    : command === 'code' ? api.toggleMark(marks.code)
+      : command === 'strike' ? api.toggleMark(marks.strike)
+        : command === 'underline' ? api.toggleMark(marks.underline)
+      : command === 'bullet' ? api.wrapInList(nodes.bullet_list)
+          : command === 'normal' ? api.setBlockType(nodes.paragraph)
+            : /^h[1-5]$/.test(command) ? api.setBlockType(nodes.heading, {level: Number(command.slice(1))})
+              : null;
+  return run ? run(view.state, view.dispatch, view) : false;
+}
+
+function installProseMirrorInteractions(panel, path, view, schema, api) {
+  view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
+  view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
+  view.dom.addEventListener('contextmenu', event => {
+    const context = prosemirrorSelectionAtClientPoint(view, event);
+    if (!context.block) return;
+    event.preventDefault();
+    event.stopPropagation();
+    markdownFormattingContextMenu(event, context, {
+      applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
+      isActive: command => {
+        const mark = command === 'bold' ? schema.marks.strong
+          : command === 'italic' ? schema.marks.em
+            : command === 'code' ? schema.marks.code
+              : command === 'strike' ? schema.marks.strike
+                : command === 'underline' ? schema.marks.underline
+                  : null;
+        return prosemirrorSelectionHasMark(view, mark);
+      },
+    });
+  });
+}
+
+function createProseMirrorPanel(panel, item, path, state, parts, api) {
+  if (!parts?.previewPane) return false;
+  const schema = prosemirrorMarkdownSchema(api);
+  const parser = prosemirrorMarkdownParser(api, schema);
+  const serializer = prosemirrorMarkdownSerializer(api);
+  const doc = parser.parse(state.content || '');
+  const container = document.createElement('div');
+  container.className = 'prosemirror-editor markdown-body';
+  container.setAttribute('data-prosemirror-editor', 'true');
+  const plugins = [
+    api.keymap({
+      'Mod-s': () => {
+        flushProseMirrorSource(panel, path);
+        void saveFileEditor(path, panel);
+        return true;
+      },
+      'Shift-Enter': insertProseMirrorHardBreak(api, schema),
+    }),
+    api.history(),
+    api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
+    api.keymap(api.baseKeymap),
+  ];
+  const editorState = api.EditorState.create({doc, plugins});
+  if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) {
+    return false;
+  }
+  if (panel._pmView) panel._pmView.destroy();
+  cleanupStandardPreviewStrategy(parts.previewPane);
+  disposeMarkdownPreviewEditing(parts.previewPane);
+  parts.previewPane._previewRendererId = null;
+  parts.previewPane.replaceChildren(container);
+  clearProseMirrorFallback(parts);
+  const view = new api.EditorView(container, {
+    state: editorState,
+    nodeViews: {
+      details: prosemirrorDetailsNodeView,
+      image: node => prosemirrorImageNodeView(node, panel, path),
+    },
+    dispatchTransaction(transaction) {
+      const nextState = view.state.apply(transaction);
+      view.updateState(nextState);
+      if (transaction.docChanged) {
+        panel._pmSource = null;
+        updateProseMirrorSource(panel, path);
+        scheduleProseMirrorAutosave(panel, path);
+      }
+    },
+  });
+  container._prosemirrorView = view;
+  panel._pmView = view;
+  panel._pmPath = path;
+  panel._pmSchema = schema;
+  panel._pmParser = parser;
+  panel._pmSerializer = serializer;
+  panel._pmPlugins = plugins;
+  panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  delete panel._pmError;
+  parts.previewPane.dataset.prosemirrorState = 'ready';
+  installProseMirrorInteractions(panel, path, view, schema, api);
+  return true;
+}
+
+async function ensureProseMirrorPanel(panel, item, path, state, parts) {
+  if (!prosemirrorSupportedSource(path, state)) return false;
+  if (panel._pmView && panel._pmPath === path) return syncProseMirrorPanelSource(panel, path, state);
+  if (panel._pmEnsurePromise) return panel._pmEnsurePromise;
+  destroyProseMirrorPanel(panel);
+  const promise = (async () => {
+    try {
+      const api = await loadProseMirrorApi();
+      if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
+      try {
+        const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
+        if (ready) {
+          delete panel._pmUnsupportedSource;
+          delete panel._pmError;
+        }
+        return ready;
+      } catch (error) {
+        renderProseMirrorFailure(panel, path, parts, error);
+        return false;
+      }
+    } catch (error) {
+      renderProseMirrorFailure(panel, path, parts, error);
+      return false;
+    }
+  })();
+  panel._pmEnsurePromise = promise;
+  promise.finally(() => {
+    if (panel._pmEnsurePromise === promise) delete panel._pmEnsurePromise;
+  });
+  return promise;
+}
+
+function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
+  if (!prosemirrorSupportedSource(path, state)) return false;
+  if (parts.previewPane) parts.previewPane.hidden = false;
+  panel._pmRequired = true;
+  const ensureGeneration = Number(panel._pmEnsureGeneration || 0) + 1;
+  panel._pmEnsureGeneration = ensureGeneration;
+  if (!panel._pmView) {
+    renderProseMirrorLoading(parts);
+  }
+  if (panel._pmError) {
+    renderProseMirrorFailure(panel, path, parts, panel._pmError);
+    return true;
+  }
+  void ensureProseMirrorPanel(panel, item, path, state, parts).then(ready => {
+    if (ensureGeneration !== panel._pmEnsureGeneration) return;
+    if (!ready && panel.dataset.filePath === path) {
+      renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
+    }
+  });
+  return true;
+}
+
+function prosemirrorViewEditorHealth(panel) {
+  const container = panel?.querySelector?.('[data-editor-surface="view-editor"]');
+  return {
+    connected: Boolean(panel?._pmView?.dom?.isConnected),
+    roots: container?.querySelectorAll?.('.ProseMirror').length || 0,
+    text: panel?._pmView?.state?.doc?.textContent || '',
+    error: panel?._pmError || '',
+  };
+}

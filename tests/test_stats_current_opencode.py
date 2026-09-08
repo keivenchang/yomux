@@ -89,6 +89,17 @@ def _part(part_id: str, message_id: str, session_id: str, tokens: dict[str, obje
     return (part_id, message_id, session_id, 1_600, 1_600, json.dumps(data))
 
 
+def _tool_part(part_id: str, message_id: str, session_id: str, tool: str, input_data: object, *, status: str = "completed") -> tuple[object, ...]:
+    return (
+        part_id,
+        message_id,
+        session_id,
+        1_600,
+        1_600,
+        json.dumps({"type": "tool", "tool": tool, "state": {"status": status, "input": input_data}}),
+    )
+
+
 def _state_database(path: Path, *, parts=(), messages=(), inputs=(), tokens=(0, 0, 0, 0, 0)) -> None:
     _database(path, [_session("ses-a", "/repo/a", tokens=tokens)], list(messages), list(parts))
     with sqlite3.connect(path) as connection:
@@ -96,6 +107,96 @@ def _state_database(path: Path, *, parts=(), messages=(), inputs=(), tokens=(0, 
             "INSERT INTO session_input VALUES (?, ?, ?, ?, ?, ?, ?)",
             inputs,
         )
+
+
+def test_read_tool_inputs_returns_only_completed_tool_inputs(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            (
+                "patch",
+                "msg-a",
+                "ses-a",
+                1_600,
+                1_600,
+                json.dumps({
+                    "type": "tool",
+                    "tool": "apply_patch",
+                    "state": {
+                        "status": "completed",
+                        "input": {"patchText": "*** Begin Patch\n*** Update File: app.py\n"},
+                        "metadata": {"files": [{"filePath": "/repo/a/app.py", "type": "update", "patch": "large output omitted"}]},
+                    },
+                }),
+            ),
+            _tool_part("read", "msg-a", "ses-a", "read", {"filePath": "/repo/a/app.py"}),
+            _tool_part("running", "msg-a", "ses-a", "bash", {"command": "git add app.py"}, status="running"),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a")
+
+    assert isinstance(result, tuple)
+    assert [(item.part_id, item.tool, item.patch_text, item.changed_files) for item in result] == [
+        ("patch", "apply_patch", "*** Begin Patch\n*** Update File: app.py\n", (("/repo/a/app.py", "update"),)),
+    ]
+
+
+def test_read_tool_inputs_keeps_newest_bounded_slice_and_write_metadata(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("old", "msg-a", "ses-a", 1_000, 1_000, json.dumps({"type": "tool", "tool": "bash", "state": {"status": "completed", "input": {"command": "git add old.py"}}})),
+            ("new", "msg-a", "ses-a", 2_000, 2_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/new.py"}, "metadata": {"exists": False}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", max_parts=1)
+
+    assert isinstance(result, tuple)
+    assert [(item.tool, item.file_path, item.file_exists) for item in result] == [("write", "/repo/a/new.py", False)]
+
+
+def test_read_tool_inputs_applies_start_time_and_reports_move_paths(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("old", "msg-a", "ses-a", 1_000, 1_000, json.dumps({"type": "tool", "tool": "apply_patch", "state": {"status": "completed", "metadata": {"files": [{"filePath": "/repo/a/old.py", "type": "update"}]}}})),
+            ("move", "msg-a", "ses-a", 2_000, 2_000, json.dumps({"type": "tool", "tool": "apply_patch", "state": {"status": "completed", "metadata": {"files": [{"filePath": "/repo/a/old.py", "movePath": "/repo/a/new.py", "type": "move"}]}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", after=1.5)
+
+    assert isinstance(result, tuple)
+    assert result[0].changed_files == (("/repo/a/old.py", "delete"), ("/repo/a/new.py", "add"))
+
+
+def test_read_tool_inputs_bounds_by_updated_time(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("older-created", "msg-a", "ses-a", 1_000, 5_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/recent.py"}}})),
+            ("newer-created", "msg-a", "ses-a", 4_000, 4_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/old.py"}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", max_parts=1)
+
+    assert isinstance(result, tuple)
+    assert [item.file_path for item in result] == ["/repo/a/recent.py"]
 
 
 def test_read_usage_emits_exact_step_finish_dimensions_without_message_double_count(tmp_path: Path) -> None:

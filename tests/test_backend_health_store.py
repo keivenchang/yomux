@@ -62,8 +62,8 @@ from yolomux_lib.backend_health.store import process_epoch_token
 from yolomux_lib.infra.atomic_file import atomic_write_text
 
 
-PORT = 7771
-OTHER_PORT = 7772
+PORT = 7111
+OTHER_PORT = 7112
 EPOCH_A = ("proc:98", 4242)
 EPOCH_B = ("proc:200", 5000)
 
@@ -194,7 +194,7 @@ def test_publication_replaces_the_whole_document_and_leaves_no_partial_file(tmp_
     assert writer.observed_before_write[0] is None
     assert json.loads(writer.observed_before_write[1])["revision"] == 1
     assert json.loads(store.document_path.read_text(encoding="utf-8")) == second.document
-    assert sorted(entry.name for entry in store.directory.iterdir()) == [".7771.json.lock", "7771.json"]
+    assert sorted(entry.name for entry in store.directory.iterdir()) == [".7111.json.lock", "7111.json"]
     assert store.status()["persistence"]["state"] == PERSISTENCE_OK
 
 
@@ -268,8 +268,8 @@ def test_every_published_document_names_its_writer_and_only_its_own_port(tmp_pat
     for _ in range(3):
         publish(theirs, clock, observation(state="down", reason_code="service_absent"))
 
-    assert mine.document_path.name == "7771.json"
-    assert theirs.document_path.name == "7772.json"
+    assert mine.document_path.name == "7111.json"
+    assert theirs.document_path.name == "7112.json"
     assert mine.document()["port"] == PORT and theirs.document()["port"] == OTHER_PORT
     assert mine.document()["revision"] == 1 and theirs.document()["revision"] == 3
     assert mine.document()["writer"] == writer_identity().as_dict()
@@ -280,7 +280,7 @@ def test_every_published_document_names_its_writer_and_only_its_own_port(tmp_pat
 def test_another_ports_document_is_rejected_rather_than_adopted(tmp_path, clock, epoch_ids):
     foreign = build_store(tmp_path, clock, epoch_ids, port=OTHER_PORT)
     publish(foreign, clock, observation(state="ready"))
-    (tmp_path / "backend-health" / "7771.json").write_text(
+    (tmp_path / "backend-health" / "7111.json").write_text(
         foreign.document_path.read_text(encoding="utf-8"), encoding="utf-8"
     )
 
@@ -630,7 +630,7 @@ def test_corruption_keeps_exactly_one_bounded_quarantine_copy(tmp_path, clock, e
     first = build_store(tmp_path, clock, epoch_ids)
     # One copy from the first corruption too, or "exactly one" below would pass while the
     # store accumulated a copy per reopen and merely happened to reuse one name.
-    assert sorted(path.name for path in first.directory.glob("*.quarantine*")) == ["7771.json.quarantine"]
+    assert sorted(path.name for path in first.directory.glob("*.quarantine*")) == ["7111.json.quarantine"]
     assert first.quarantine_path.read_text(encoding="utf-8") == first_corrupt_document
 
     publish(first, clock, observation(state="ready"))
@@ -638,7 +638,7 @@ def test_corruption_keeps_exactly_one_bounded_quarantine_copy(tmp_path, clock, e
     second = build_store(tmp_path, clock, epoch_ids)
 
     quarantine_files = sorted(path.name for path in second.directory.glob("*.quarantine*"))
-    assert quarantine_files == ["7771.json.quarantine"]
+    assert quarantine_files == ["7111.json.quarantine"]
     quarantined = second.quarantine_path.read_text(encoding="utf-8")
     assert quarantined.startswith("second corruption")
     assert len(quarantined) == 64 * 1024
@@ -698,7 +698,7 @@ def test_an_invalid_reason_code_is_reported_once_per_episode(tmp_path, clock, ep
 
 
 SECRETS = (
-    "/home/keivenc/dev/yolomux.dev7771/state/services/yolomux-statsd.sock",
+    "/home/keivenc/dev/yolomux.dev7111/state/services/yolomux-statsd.sock",
     "Authorization: Bearer sk-live-9f3a-DO-NOT-LEAK",
     "python -m yolomux_lib.stats_current.service --serve --token=hunter2",
     "Traceback (most recent call last): child log line",
@@ -818,7 +818,7 @@ def test_an_fsync_failure_keeps_the_previous_snapshot_and_leaves_no_temp_file(tm
     assert (failed.persistence_state, failed.reason_code) == (PERSISTENCE_DEGRADED, "write_failed")
     assert failed.revision == published.revision
     assert store.document_path.read_text(encoding="utf-8") == durable
-    assert sorted(entry.name for entry in store.directory.iterdir()) == [".7771.json.lock", "7771.json"]
+    assert sorted(entry.name for entry in store.directory.iterdir()) == [".7111.json.lock", "7111.json"]
     assert store.status()["persistence"]["state"] == PERSISTENCE_DEGRADED
 
 
@@ -846,7 +846,7 @@ def test_a_duplicate_resource_in_one_snapshot_fails_fast(tmp_path, clock, epoch_
         store.record(HealthSnapshot(observed_at=1.0, resources=(observation(), observation(state="down"))))
 
 
-@pytest.mark.parametrize("port", [0, -1, 70000, "7771", True])
+@pytest.mark.parametrize("port", [0, -1, 70000, "7111", True])
 def test_the_store_is_scoped_to_one_real_tcp_port(tmp_path, clock, epoch_ids, port):
     with pytest.raises(BackendHealthContractError):
         BackendHealthStore(port, state_dir=tmp_path, writer_identity=writer_identity(), clock=clock)
@@ -909,8 +909,8 @@ def test_the_production_store_writes_under_the_RESOLVED_state_root(tmp_path, clo
     """WHERE the history lands, pinned at the one construction `cli` actually uses.
 
     THE REPRO, and it cost hours. `~/.local/state/yolomux/backend-health/` on this machine held a
-    zero-byte `.7771.json.lock` and no document, which reads exactly like "this feature has never
-    produced a durable publication". It had. The live 7771 server is a MANAGED INSTANCE PORT, so
+    zero-byte `.7111.json.lock` and no document, which reads exactly like "this feature has never
+    produced a durable publication". It had. The live 7111 server is a MANAGED INSTANCE PORT, so
     `tools/instance_isolation` gives it its own root and its history was sitting in that root's
     state directory, 34,860 bytes of it, revision 122, written by that server's own pid. The empty
     home directory was the leftover of an older process that ran with an explicit

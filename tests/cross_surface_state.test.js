@@ -956,6 +956,15 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Differ interaction leaves Finder selected session intact');
     assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
   });
+  test('Differ session selector remains authoritative after switching away and back', () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '1', loaded: true, files: [], repos: [], errors: []});
+    api.setFileExplorerChangesSelectedSessionForTest('2');
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'Differ selector owns the target immediately');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '2', loaded: true, files: [], repos: [], errors: []});
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'later payload reads do not restore the previous session');
+  });
   test('Finder sync prefers live tmux path over transcript metadata', () => {
     const signalPathApi = loadYolomux('', ['5']);
     signalPathApi.setTranscriptInfoForTest('5', {
@@ -3198,7 +3207,8 @@ async function runCrossSurfaceStateSuite() {
       left: {active: 'old', tabs: ['old', 'recent']},
       right: {active: 'newest', tabs: ['newest']},
     }, 'the responsive owner leaves the same restored URL split intact on a desktop viewport');
-    assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
+    assert.ok(/function dispatchTouchContextMenu[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
+    assert.ok(coreSource.includes('event.yolomuxTouchLongPress = true'), 'a bridged long press is marked for editor selection ownership');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
     const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
@@ -4842,11 +4852,11 @@ async function runCrossSurfaceStateSuite() {
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
     assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
     assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
-    assert.ok(pinTabRow?.innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
-    assert.equal((pinTabRow?.innerHTML.match(/app-menu-ui-icon-pin/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
+    assert.ok(pinTabRow?.innerHTML.includes('context-menu-check'), 'Pin Tab context menu row has the shared pin icon');
+    assert.equal((pinTabRow?.innerHTML.match(/context-menu-check/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');

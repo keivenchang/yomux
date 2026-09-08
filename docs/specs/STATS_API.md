@@ -22,7 +22,7 @@ flowchart LR
 ```
 
 - `statsd` is the sole SQLite writer and the sole owner of source generations, materialization generations, family aggregation, coverage, usage/cost projection, precomputed Range-level cost reports, and exact snapshot bytes. Current snapshot/delta wire protocol version 2 requires the complete `cost_report`; cost-report schema version 4 separately represents 5-minute and 1-hour cache writes, and earlier cost-report schemas are not accepted as compatibility shapes.
-- The SQLite database stores original per-family observations at their real timestamps and cadences, identity-deduplicated usage atoms, covered epochs, explicit unavailable spans, and schema metadata. Explicit unavailable spans are coverage facts used when an old aggregate or a known source outage cannot be represented by an original observation; they are never display buckets.
+- The SQLite database stores original per-family observations at their real timestamps and cadences, identity-deduplicated usage atoms, covered epochs, explicit unavailable spans, bounded aggregate rings, invalidation-ledger entries, and schema metadata. Explicit unavailable spans are coverage facts used when an old aggregate or a known source outage cannot be represented by an original observation; they are never display buckets.
 - One background materializer reads a consistent database snapshot and builds the four epoch-aligned immutable resolution layers. Full rebuilds, incremental dirty-cell recomputation, coverage generation, and encoding never run on the statsd listener/writer thread or an HTTP request thread.
 - The web process does not open the stats database. It authenticates and validates HTTP, forwards current RPC requests, and returns statsd's pre-encoded JSON bytes without temporal aggregation or decode/re-encode work.
 - Agent Status rows consume the shared statusd generation. The web collector does not rediscover tmux panes, classify screens, read transcript tails, or construct a second status roster.
@@ -30,7 +30,7 @@ flowchart LR
 
 ## Schema and writer fence
 
-- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 7 contains only metadata, observations, usage atoms, covered epochs, explicit unavailable spans, and migration reconciliation; derived display buckets are absent.
+- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 9 stores metadata, observations, usage atoms, covered epochs, explicit unavailable spans, migration reconciliation, persisted aggregate rings, and the invalidation ledger that records owed ring cells.
 - Its active filename is schema-versioned (`stats-v<schema>.sqlite3`) and its daemon socket is protocol-and-schema scoped (`statsd.p<protocol>s<schema>.sock`). Mixed-version worktrees therefore use distinct writer locks, RPC sockets, and databases; neither can discover, fence, or replace the other's daemon. The retired `stats-history.sqlite3` path is never aliased.
 - Every binary that can write performs a minimal read-only preflight of those markers before `CREATE TABLE`, migration, WAL-mode changes, quarantine, vacuum, or DML. A database newer than the binary supports raises the typed `SchemaTooNewError` result and closes unchanged.
 - A too-new database is not corrupt. The database, WAL, SHM, inode, bytes, timestamps, schema, and service record must not be renamed, recreated, downgraded, quarantined, or repaired.
@@ -230,7 +230,7 @@ Neither health path reports PSS or USS. `/proc/<pid>/smaps_rollup` is the only s
 
 ### `/livez` versus `/readyz`
 
-`/readyz` and `/livez` are served by the web listener. `/readyz` requires authentication and reports whether statsd can serve a correct snapshot, failing closed and naming every failing condition. `/livez` is public — a process supervisor polls it before any operator cookie exists — and answers only whether the statsd process can make progress, computed from `/proc` without entering the daemon. The detailed resource projection is on `/readyz` and is not exposed to unauthenticated callers; `/livez` returns an ok flag and a live flag and nothing else, because a richer public response both leaks system state and lets an unrelated subsystem fail a restart. **No live HTTP request has been made against either route.** Route resolution and dispatcher refusal are proven; end-to-end is not. Both are implemented and not yet integrated, so they are absent from the current candidate tree.
+`/readyz` and `/livez` are served by the web listener. `/readyz` requires authentication and reports whether statsd can serve a correct snapshot, failing closed and naming every failing condition. `/livez` is public and answers only whether the statsd process can make progress, computed from `/proc` without entering the daemon. The detailed resource projection is on `/readyz` and is not exposed to unauthenticated callers; `/livez` returns an ok flag and a live flag and nothing else, because a richer public response both leaks system state and lets an unrelated subsystem fail a restart. `boot.sh` uses the separate public `/healthz` listener probe for restart readiness.
 
 They answer different questions and neither substitutes for the other.
 

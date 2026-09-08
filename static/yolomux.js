@@ -470,9 +470,10 @@ let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
 let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the editor/terminal scheme cursor
 let fileEditorAutosaveEnabled = false;
-let fileEditorAutosaveDelaySeconds = 2.5;
+let fileEditorAutosaveDelaySeconds = 6;
 const fileEditorAutosaveTimers = new Map();
 const fileEditorSaveOwners = new Map();
+const fileEditorSelfWriteAcks = new Map();
 const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
@@ -675,7 +676,7 @@ const SETTING_FALLBACKS = Object.freeze({
   'appearance.terminal_font_size': 14,
   'appearance.ui_font_size': 14,
   'appearance.global_font_size': 14,
-  'editor.autosave_delay_seconds': 2.5,
+  'editor.autosave_delay_seconds': 6,
   'file_explorer.image_open_mode': 'same-tab',
   'file_explorer.image_preview_max_px': 320,
   'general.auto_focus': false,
@@ -2054,6 +2055,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
+const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
@@ -5017,6 +5019,7 @@ function dispatchTouchContextMenu(target, x, y) {
     clientX: x,
     clientY: y,
   });
+  event.yolomuxTouchLongPress = true;
   touchContextMenuSyntheticEvents.add(event);
   return !target.dispatchEvent(event);
 }
@@ -5840,7 +5843,7 @@ function writeStoredInfoSubTab(value) {
 }
 
 function readStoredEditorWrap() {
-  return storageGet(fileEditorWrapStorageKey) === '1';
+  return storageGet(fileEditorWrapStorageKey) !== '0';
 }
 
 function writeStoredEditorWrap(value) {
@@ -9093,7 +9096,9 @@ function dedupeInflight(inflight, key, canReuse, makeRequest) {
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
-  const iconHtml = options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
+  const iconHtml = options.checked !== undefined
+    ? `<span class="context-menu-check" aria-hidden="true">${options.checked ? '✓' : ''}</span>`
+    : options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
   const shortcutHtml = options.shortcut ? `<span class="context-menu-shortcut">${esc(options.shortcut)}</span>` : '';
   const buttonHtml = iconHtml || shortcutHtml
     ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
@@ -9126,7 +9131,8 @@ function appendContextMenuSeparator(menu) {
 }
 
 function contextMenuIsOpen() {
-  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen();
+  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen()
+    || markdownPreviewContextMenuController.isOpen();
 }
 
 function rootCssLengthPx(name) {
@@ -9194,6 +9200,7 @@ function closeContextMenus() {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeLinkContextMenu();
+  markdownPreviewContextMenuController.close();
 }
 
 function normalizedExternalHttpUrl(value, options = {}) {
@@ -14897,10 +14904,10 @@ function commandPaletteKeybinding(label, detail = '') {
 
 // a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
-  if (mode === 'preview') return t('common.preview');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
   if (mode === 'split') return t('editor.mode.split');
   if (mode === 'diff') return t('common.diff');
-  return t('common.edit');
+  return t('editor.mode.textEdit');
 }
 
 function commandPaletteNumericTime(value) {
@@ -21611,7 +21618,7 @@ function setFileExplorerListError(path, error, status = 0) {
 
 function currentFileExplorerListError(path) {
   const root = normalizeDirectoryPath(path || '');
-  return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
+  return root && fileExplorerLastListError && normalizeDirectoryPath(fileExplorerLastListError.path || '') === root
     ? userMessageText(fileExplorerLastListError.source, fileExplorerLastListError.fallback)
     : '';
 }
@@ -22691,6 +22698,14 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
+  const finderIsSynced = fileExplorerRootMode === 'sync';
+  for (const panel of document.querySelectorAll('.file-explorer-panel[data-file-explorer-view="finder"]')) {
+    panel.classList.toggle('file-explorer-root-mode-sync', finderIsSynced);
+    panel.classList.toggle('file-explorer-root-mode-fixed', !finderIsSynced);
+  }
+  if (typeof syncFileExplorerSessionControlVisibility === 'function') {
+    syncFileExplorerSessionControlVisibility();
+  }
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -22773,13 +22788,15 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
+  const finderSelectionChanged = fileExplorerFinderSelectedSession !== normalizedSession;
+  fileExplorerFinderSelectedSession = normalizedSession;
   const previous = fileExplorerExplicitSyncSessionTarget();
   const changed = setExplicitPaneFocusItem(normalizedSession);
   if (changed) {
     if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
   }
-  return changed;
+  return changed || finderSelectionChanged;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {
@@ -23742,10 +23759,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
   const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
+  const syncTargetChanged = explicit && Boolean(fileExplorerVisibleSyncSession)
+    && String(syncPlan.session || '') !== String(fileExplorerVisibleSyncSession || '');
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
-    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || syncTargetChanged || (explicit && staleInFlightSync))
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
@@ -24202,7 +24221,11 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
-      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true, user: options.user === true});
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {
+        auto: options.auto === true,
+        generation,
+        user: options.user === true,
+      });
       if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
@@ -24224,11 +24247,11 @@ async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoo
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
   setFileExplorerPathDisplay(root);
-  for (const container of fileExplorerTreeContainers()) {
-    if (generation !== fileExplorerSyncState.generation) return false;
-    expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
-  }
-  return expanded;
+  if (generation !== fileExplorerSyncState.generation) return false;
+  const results = await Promise.all(fileExplorerTreeContainers().map(container => (
+    expandFileTreeContainerToPath(container, root, path, generation, options)
+  )));
+  return results.some(Boolean);
 }
 
 async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplorerRoot()) {
@@ -24237,9 +24260,20 @@ async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplore
     .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path))
     .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
   const generation = ++fileExplorerSyncState.generation;
-  for (const path of expandedPaths) {
+  let depth = 1;
+  while (depth <= expandedPaths.reduce((maximum, path) => Math.max(maximum, childPathParts(root, path).length), 0)) {
     if (generation !== fileExplorerSyncState.generation) return false;
-    await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
+    const pathsAtDepth = expandedPaths.filter(path => childPathParts(root, path).length === depth);
+    let nextIndex = 0;
+    const workers = Array.from({length: Math.min(8, pathsAtDepth.length)}, async () => {
+      while (nextIndex < pathsAtDepth.length) {
+        const path = pathsAtDepth[nextIndex++];
+        if (generation !== fileExplorerSyncState.generation) return;
+        await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
+      }
+    });
+    await Promise.all(workers);
+    depth += 1;
   }
   return true;
 }
@@ -28507,6 +28541,11 @@ function defaultFileEditorViewModeForPath(path, kind) {
   return previewRendererForPath(path)?.defaultMode || 'edit';
 }
 
+function defaultFileEditorWrapForPath(path, kind) {
+  if (kind !== 'text') return false;
+  return previewRendererForPath(path)?.defaultWrap === true;
+}
+
 function openFileKindForPreviewPath(path) {
   const renderer = previewRendererForPath(path);
   const mediaKind = renderer?.mediaKind || '';
@@ -28627,6 +28666,21 @@ function fileEntryChanged(state, entry) {
   // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
   if (state.size == null || entry.size == null) return true;
   return Number(state.size) !== Number(entry.size);
+}
+
+function fileEditorSelfWriteAcknowledged(path, entry) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
+  const mtime = fileEntryMtime(entry);
+  const size = entry?.size;
+  const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
+  const transientMatch = ack.pending === true && Number(size) === 0;
+  if (!finalMatch && !transientMatch) return false;
+  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
 }
 
 function filePanelItemsForPath(path) {
@@ -28945,8 +28999,8 @@ function openFileStatus(state) {
 }
 
 function fileEditorAutosaveDelayMs() {
-  const seconds = Number(fileEditorAutosaveDelaySeconds || 2.5);
-  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 2.5));
+  const seconds = Number(fileEditorAutosaveDelaySeconds || 6);
+  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 6));
   return Math.round(clamped * 1000);
 }
 
@@ -28967,6 +29021,7 @@ function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
+  flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
   state.content = cmContent;
@@ -28975,6 +29030,10 @@ function syncOpenFileContentFromPanel(path, panel) {
 }
 
 function syncOpenFileContentFromPanels(path, preferredPanel = null) {
+  if (preferredPanel?._pmView) flushProseMirrorSource(preferredPanel, path);
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel !== preferredPanel && panel?._pmView) flushProseMirrorSource(panel, path);
+  }
   if (syncOpenFileContentFromPanel(path, preferredPanel)) return true;
   for (const panel of fileEditorPanelsForPath(path)) {
     if (panel === preferredPanel) continue;
@@ -30124,6 +30183,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     }
     return;
   }
+  if (fileEditorSelfWriteAcknowledged(path, entry)) return;
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
       clearOpenFileMissingState(state);
@@ -31500,6 +31560,7 @@ function updateFileEditorCountStatus(panel) {
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
+  const state = options.state || fileState.get(path);
   const save = options.save || (() => saveFileEditor(path, panel));
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
@@ -31558,7 +31619,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.bracketMatching(),
     api.foldGutter(),
     api.highlightActiveLine(),
-    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, {...options, path, state}),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     codeMirrorSearchScrollFix(api),
@@ -31570,6 +31631,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
+    codeMirrorSplitSyncExtension(api, panel, path),
     ...(options.plain ? [codeMirrorThemeOnlyExtensions(api, panel)] : [codeMirrorLanguageExtension(api, path), codeMirrorThemedExtensions(api, panel, path)]),
   ];
 }
@@ -31583,6 +31645,8 @@ async function removeOpenFile(path, options = {}) {
   const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
+  if (closePanel?._pmView) flushProseMirrorSource(closePanel, path);
+  if (closePanel?._cmView) flushCodeMirrorSource(closePanel, path);
   if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
@@ -32288,6 +32352,11 @@ function editorViewModeFor(path, item = null) {
   return 'edit';
 }
 
+function fileEditorWrapForPath(path, state = null) {
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
+}
+
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   const state = fileEditorStateForItem(path, item);
@@ -32327,9 +32396,9 @@ function updateEditorModeControl(control, path, state, item = null) {
 
 function editorModeLabel(mode) {
   if (mode === 'diff') return t('common.diff');
-  if (mode === 'preview') return t('common.preview');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
   if (mode === 'split') return t('editor.mode.split');
-  return t('common.edit');
+  return t('editor.mode.textEdit');
 }
 
 function editorModeIconClass(mode) {
@@ -32497,7 +32566,8 @@ function refreshOpenEditorThemePanels() {
     const state = fileEditorStateForItem(path, item);
     if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -32819,14 +32889,18 @@ function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) 
 // selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
 function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
   if (!pane) return false;
-  if (previewScrollUserOwnsElementNow(pane)) {
+  if (host?._pmRequired && previewKindForPath(path) === 'markdown') return false;
+  if (host?._pmView && host._pmPath === path && host._pmView.dom?.isConnected) {
+    return syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+  }
+  if (options.force !== true && previewScrollUserOwnsElementNow(pane)) {
     void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
       renderFileEditorPreviewSurface(host, pane, path, text, options)
     ));
     return false;
   }
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
-  const selection = fileEditorPreviewSelectionOffsets(pane);
+  const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
   const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
@@ -32965,7 +33039,8 @@ function applyEditorWrapPreference() {
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
-      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+      else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
@@ -33885,6 +33960,10 @@ function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
 }
 
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  const expansionGeneration = options.generation;
+  const generationIsCurrent = () => expansionGeneration === undefined
+    || expansionGeneration === fileExplorerSyncState.generation;
+  if (!generationIsCurrent()) return;
   const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
   if (Array.isArray(cachedEntries)) {
     if (options.manual === true) {
@@ -33897,6 +33976,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
     }
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, cachedEntries);
     void fetchDirectory(fullPath, {user: options.user === true, fresh: true}).then(entries => {
+      if (!generationIsCurrent()) return;
       if (!Array.isArray(entries) || !fileExplorerExpanded.has(fullPath)) return;
       if (directoryRowExpansionIsSuppressed(fullPath, options)) return;
       settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
@@ -33919,6 +33999,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // arrive, but it no longer owns this row and must not restore children the user just hid.
   const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
   if (!ownsExpansion) return;
+  if (!generationIsCurrent()) return;
   if (!entries) {
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;
@@ -40237,12 +40318,18 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
   if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
   const userInitiated = options.userInitiated === true || pendingUserGesture;
-  if (isTmuxSession(panelItem) && userInitiated && focusedPanelItem !== panelItem) {
+  if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
+    scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
   }
   setFocusedPanelItem(panelItem, {userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
   return true;
+}
+
+function dockviewCommitTouchTabActivation(event) {
+  const state = dockviewLayoutState.tabPointerDrag;
+  return Boolean(state) && state.dragged !== true && event?.type === 'touchend';
 }
 
 function dockviewCore() {
@@ -40289,9 +40376,11 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 }
 
 function dockviewRootBoundaryDropIntent(event) {
+  if (event?.kind === 'tab') return null;
   if (narrowSingleColumnMode()) return null;
   const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
   if (event?.nativeEvent && tabPointerDrag?.item) {
+    if (dockviewTabDropTargetActive(event)) return null;
     // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
     // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
     // The pointer gesture owns the decision while it is live: it only returns a root intent when
@@ -40320,8 +40409,28 @@ function dockviewRootBoundaryDropIntent(event) {
   };
 }
 
+function dockviewContentDropRegionForEvent(event) {
+  const nativeEvent = event?.nativeEvent || event;
+  const group = event?.group || dockviewGroupForPoint(Number(nativeEvent?.clientX), Number(nativeEvent?.clientY));
+  const targetSlot = group ? dockviewSlotForGroupElement(group) : '';
+  const targetRect = group?.getBoundingClientRect?.() || null;
+  if (!group || !targetSlot || !targetRect) return null;
+  const headerRect = group.querySelector?.('.dv-tabs-and-actions-container')?.getBoundingClientRect?.();
+  if (headerRect && Number(nativeEvent?.clientY) <= headerRect.bottom) return null;
+  const content = Array.from(group.querySelectorAll?.('[data-dockview-region="content"]') || [])
+    .find(node => {
+      const rect = node.getBoundingClientRect?.();
+      const x = Number(nativeEvent?.clientX);
+      const y = Number(nativeEvent?.clientY);
+      return rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+  if (!content) return null;
+  return {group, slot: targetSlot, rect: content.getBoundingClientRect()};
+}
+
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
+  if (dockviewTabDropTargetActive(event)) return null;
   const targetSlot = dockviewSlotForGroupId(event.group.id || '');
   const targetRect = targetSlot ? layoutSlotScreenRect(targetSlot) : null;
   const fileSurfaceContent = event.nativeEvent?.target?.closest?.(
@@ -40355,6 +40464,7 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
   if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return null;
+  if (dockviewTabDropTargetActive(event)) return null;
   const dx = Math.abs(pointerX - (Number(state.x) || 0));
   const dy = Math.abs(pointerY - (Number(state.y) || 0));
   const explicitZone = ['top', 'bottom'].includes(event?.position) ? event.position : null;
@@ -40461,6 +40571,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 }
 
 function dockviewTrackRootBoundaryOverlay(event) {
+  if (dockviewTabDropTargetActive(event)) {
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearRootBoundaryPreview();
+    event.preventDefault?.();
+    return;
+  }
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
   const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
@@ -40720,7 +40836,41 @@ function dockviewTabEdgeReorderIntent(event) {
 function dockviewTabForPoint(x, y) {
   const node = document.elementFromPoint?.(x, y);
   const tab = node?.closest?.('.dv-tab');
-  return tab?.querySelector?.('.dockview-pane-tab') || node?.closest?.('.dockview-pane-tab') || null;
+  if (tab) return tab.querySelector?.('.dockview-pane-tab') || null;
+  const tabNodes = dockviewLayoutState.host?.querySelectorAll?.('.dv-tab') || [];
+  for (const candidate of tabNodes) {
+    const rect = candidate.getBoundingClientRect?.();
+    if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      return candidate.querySelector?.('.dockview-pane-tab') || null;
+    }
+  }
+  return node?.closest?.('.dockview-pane-tab') || null;
+}
+
+function dockviewTabPointerOverTab(event) {
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  const node = document.elementFromPoint?.(x, y);
+  if (node?.closest?.('.dv-tab, .dockview-pane-tab')) return true;
+  const padding = 16;
+  const tabNodes = [
+    ...(dockviewLayoutState.host?.querySelectorAll?.('.dv-tab, .dockview-pane-tab') || []),
+    ...(document.querySelectorAll?.('.dv-tab, .dockview-pane-tab') || []),
+  ];
+  return [...new Set(tabNodes)].some(tab => {
+    const rect = tab.getBoundingClientRect?.();
+    return rect
+      && x >= rect.left - padding
+      && x <= rect.right + padding
+      && y >= rect.top - padding
+      && y <= rect.bottom + padding;
+  });
+}
+
+function dockviewTabDropTargetActive(event) {
+  return event?.kind === 'tab'
+    || Boolean(dockviewLayoutState.tabPointerDrag?.item && dockviewTabPointerOverTab(event?.nativeEvent || event));
 }
 
 function dockviewSuppressPanePointerDrag(ms = PANE_DRAG_SUPPRESS_MS) {
@@ -40788,6 +40938,7 @@ function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
 
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
+  if (dockviewTabPointerOverTab(event)) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
@@ -40847,6 +40998,7 @@ function dockviewTrackTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  state.dragged = true;
   beginLayoutMutationCompletion(state);
   const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) {
@@ -40893,13 +41045,13 @@ function dockviewFinishTabPointerDrag(event) {
     }, 0);
     return;
   }
-  const targetGroup = dockviewGroupForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
-  const contentTargetSlot = dockviewSlotForGroupElement(targetGroup);
+  const contentRegion = dockviewContentDropRegionForEvent(event);
+  const contentTargetSlot = contentRegion?.slot || '';
   const contentIntent = contentTargetSlot ? {
     item: state.item,
     sourceSlot: state.slot,
     targetSlot: contentTargetSlot,
-    targetRect: layoutSlotScreenRect(contentTargetSlot),
+    targetRect: contentRegion?.rect || null,
     zone: 'middle',
     createsPane: false,
   } : null;
@@ -41271,6 +41423,10 @@ function dockviewInstallTabPointerReorderFallback() {
     dockviewTrackPanePointerDrag(event);
   };
   const finish = event => {
+    if (dockviewCommitTouchTabActivation(event)) {
+      const state = dockviewLayoutState.tabPointerDrag;
+      dockviewCommitPanelActivation(state.item, {userInitiated: true});
+    }
     dockviewFinishTabPointerDrag(event);
     dockviewFinishPanePointerDrag(event);
   };
@@ -42304,6 +42460,9 @@ function createDockviewTabRenderer() {
   let item = '';
   let api = null;
   let disposables = [];
+  const bindDrag = () => {
+    bindPaneTabNativeDragSource(element, () => item, () => slotForItem(item));
+  };
   const render = () => {
     if (dockviewLayoutState.applyingFromLayout) return;
     if (!item) return;
@@ -42322,6 +42481,7 @@ function createDockviewTabRenderer() {
     }
     cleanupDetachedPaneTabPopover(element);
     element.innerHTML = dockviewPaneTabHtml(item);
+    bindDrag();
     if (isFileEditorItem(item)) {
       bindFilePopoverActions(element);
       bindPaneTabPopover(element, item);
@@ -43098,6 +43258,7 @@ function renderEmptyPane(slot) {
   }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
+  fill.dataset.dockviewRegion = 'content';
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -43368,7 +43529,7 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
     ${headAfterTabsHtml}
   </div>
   ${afterHeadHtml}
-  <div class="${classes}"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
+  <div class="${classes}" data-dockview-region="content"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
   ${afterBodyHtml}`;
 }
 
@@ -44045,97 +44206,6 @@ function bindPanelShell(panel, session) {
       schedulePaneViewStateCapture(session, panel);
     }
   }, true);
-  const head = panel.querySelector('.panel-head');
-  if (head) {
-    head.draggable = true;
-    head.dataset.dragSession = session;
-    head.addEventListener('dragstart', event => startPaneDrag(event, head.dataset.dragSlot || slotForSession(session)));
-    head.addEventListener('dragend', endSessionDrag);
-    head.addEventListener('dragover', event => {
-      const panePayload = paneDragPayload(event);
-      if (panePayload?.slot) {
-        event.preventDefault();
-        event.stopPropagation();
-        clearDropPreview();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
-        if (!paneSwapIntentAllowed(intent)) {
-          event.dataTransfer.dropEffect = 'none';
-          head.classList.remove(CLS.tabDragOver);
-          return;
-        }
-        event.dataTransfer.dropEffect = 'move';
-        head.classList.add(CLS.tabDragOver);
-        return;
-      }
-      const filePayload = fileDragPayload(event);
-      if (filePayload?.path) {
-        event.preventDefault();
-        event.stopPropagation();
-        clearDropPreview();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot)) {
-          event.dataTransfer.dropEffect = 'none';
-          return;
-        }
-        event.dataTransfer.dropEffect = 'copy';
-        head.classList.add(CLS.tabDragOver);
-        return;
-      }
-      const payload = dragPayload(event);
-      if (!payload?.session) return;
-      event.preventDefault();
-      event.stopPropagation();
-      clearDropPreview();
-      if (event.target.closest('.pane-tabs')) return;
-      const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot)) {
-        event.dataTransfer.dropEffect = 'none';
-        return;
-      }
-      event.dataTransfer.dropEffect = 'move';
-      head.classList.add(CLS.tabDragOver);
-    });
-    head.addEventListener('dragleave', event => {
-      if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
-    });
-    head.addEventListener('drop', event => {
-      const panePayload = paneDragPayload(event);
-      if (panePayload?.slot && !event.target.closest('.pane-tabs')) {
-        head.classList.remove(CLS.tabDragOver);
-        event.preventDefault();
-        event.stopPropagation();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
-        clearDropPreview();
-        if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-        return;
-      }
-      const filePayload = fileDragPayload(event);
-      if (filePayload?.path && !event.target.closest('.pane-tabs')) {
-        head.classList.remove(CLS.tabDragOver);
-        event.preventDefault();
-        event.stopPropagation();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot)) return;
-        if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
-        return;
-      }
-      const payload = dragPayload(event);
-      head.classList.remove(CLS.tabDragOver);
-      if (!payload?.session || event.target.closest('.pane-tabs')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot)) return;
-      if (isFileExplorerItem(payload.session) && !fileExplorerUsesNormalTabMovement()) {
-        dockFileExplorerPane();
-        return;
-      }
-      moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), paneTabs(targetSlot).length);
-    });
-  }
   panel.querySelector('[data-detail-toggle]')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -64183,6 +64253,7 @@ function newGitDiffTabState(item, defaults = {}) {
     focusedFilePaths: new Map(),
     historyGuard: makeGenerationGuard(),
     historyController: null,
+    historyRefreshTimer: null,
     focusedSha: '',
     ...defaults,
   };
@@ -64210,10 +64281,32 @@ function invalidateGitDiffDetailRequests(state) {
 
 function cleanupGitDiffTab(item) {
   const state = gitDiffTabState.get(item);
+  if (state?.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
   state?.historyController?.abort?.();
   state?.historyGuard?.invalidate?.();
   invalidateGitDiffDetailRequests(state);
   gitDiffTabState.delete(item);
+}
+
+const gitDiffHistoryRefreshIntervalMs = 10000;
+
+function scheduleGitDiffHistoryRefresh(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return;
+  if (state.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
+  state.historyRefreshTimer = setTimeout(() => {
+    state.historyRefreshTimer = null;
+    const panel = panelNodes.get(item);
+    if (!panel?.isConnected || !state.loaded || state.loading || state.loadingOlder) {
+      if (panel?.isConnected && state.loaded) scheduleGitDiffHistoryRefresh(item);
+      return;
+    }
+    if (state.nextCursor || state.visibleCommitCount < state.commits.length) {
+      scheduleGitDiffHistoryRefresh(item);
+      return;
+    }
+    void refreshGitDiffHistory(item, {refresh: true});
+  }, gitDiffHistoryRefreshIntervalMs);
 }
 
 function gitDiffHistoryPageSize(body) {
@@ -64316,7 +64409,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     const panel = panelNodes.get(item);
     const body = panel?.querySelector?.('.git-diff-panel-body');
        const pageSize = gitDiffHistoryPageSize(body);
-    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize * (gitDiffHistoryPagesPrefetched + 1)), {
+      const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, 200), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
     });
@@ -64341,6 +64434,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.truncationReason = String(payload.truncation_reason || '');
     state.loaded = true;
     state.error = null;
+    scheduleGitDiffHistoryRefresh(item);
     renderPaneTabStrips();
     refreshPaneTabLabel(item);
     if (itemInLayout(tabberItemId)) refreshTabberPanels();
@@ -64350,6 +64444,12 @@ async function refreshGitDiffHistory(item, options = {}) {
     return true;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
+    if (append && error?.code === 'git_history_stale') {
+      state.nextCursor = '';
+      state.snapshotCursor = '';
+      state.error = null;
+      return refreshGitDiffHistory(item, {refresh: true});
+    }
     if (!append && cursor && gitDiffHistoryCursorIsInvalid(error)) {
       // A saved layout can outlive the server's cursor format. Drop that opaque cursor once and
       // reload the current snapshot instead of leaving the restored Diff tab permanently failed.
@@ -64359,6 +64459,7 @@ async function refreshGitDiffHistory(item, options = {}) {
       return refreshGitDiffHistory(item, {refresh: true});
     }
     state.error = gitDiffErrorSnapshot(error);
+    if (state.loaded) scheduleGitDiffHistoryRefresh(item);
     return false;
   } finally {
     if (isCurrent()) {
@@ -64871,6 +64972,7 @@ function createGitDiffPanel(item) {
   meta.className = 'git-diff-meta';
   const body = document.createElement('div');
   body.className = 'git-diff-panel-body';
+  body.dataset.dockviewRegion = 'content';
   body.setAttribute('aria-label', gitDiffTabLabel(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
@@ -65868,10 +65970,7 @@ function fileExplorerSelectedSessionForView(view) {
 
 function fileExplorerFinderTargetSession() {
   const selected = fileExplorerSelectedSessionForView('finder');
-  if (selected) {
-    fileExplorerFinderSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
@@ -65879,13 +65978,45 @@ function fileExplorerFinderTargetSession() {
 
 function fileExplorerSessionFilesTargetSession() {
   const selected = fileExplorerSelectedSessionForView('differ');
-  if (selected) {
-    fileExplorerChangesSelectedSession = selected;
-    return selected;
-  }
+  if (selected) return selected;
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
+}
+
+function sessionFilesSurfaceDescriptor(destination, options = {}) {
+  const normalizedDestination = destination === 'finder' ? 'finder' : 'differ';
+  const state = sessionFilesStateForDestination(normalizedDestination);
+  const session = options.session || (normalizedDestination === 'finder'
+    ? fileExplorerFinderTargetSession()
+    : fileExplorerSessionFilesTargetSession());
+  return {
+    destination: normalizedDestination,
+    state,
+    session,
+    visible: normalizedDestination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible(),
+    cache: sessionFilesCacheForDestination(normalizedDestination),
+  };
+}
+
+function sessionFilesSurfaceNeedsFetch(view, state, session) {
+  if (view === 'finder') return !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session);
+  return !sessionFilesPayloadIsLoadedForSession(state.payload, session);
+}
+
+function ensureSessionFilesSurfaceLoaded(view, options = {}) {
+  if (view === 'tabber') {
+    fetchTabberActivity();
+    return;
+  }
+  const destination = view === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(destination, options);
+  if (!surface.session || sessionFilesSurfaceNeedsFetch(view, surface.state, surface.session) === false) return;
+  if (clientPushCanSupplyData() && options.fetchEvenWhenPush !== true) {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  } else {
+    fetchSessionFiles({destination, session: surface.session, silent: true});
+  }
 }
 
 function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
@@ -65961,6 +66092,7 @@ function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'di
 
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  if (!isTmuxSession(session) || !sessions.includes(session)) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
@@ -66014,7 +66146,6 @@ function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
   if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
-  if (fileExplorerChangesSelectedSession === session) return false;
   fileExplorerChangesSelectedSession = session;
   if (document.querySelector('.file-explorer-changes-panel')) {
     switchFileExplorerChangesSession(session);
@@ -66166,7 +66297,7 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = sessionFilesSurfaceDescriptor(destination).visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
@@ -66179,20 +66310,21 @@ function renderSessionFilesDestination(destination, options = {}) {
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = options.destination === 'finder' ? 'finder' : 'differ';
+  const surface = sessionFilesSurfaceDescriptor(options.destination, options);
+  const destination = surface.destination;
   const forceRefresh = options.force === true;
   const freshGit = options.freshGit === true;
   const backgroundRefresh = options.background === true;
   const cacheOnly = options.cacheOnly === true;
   const cacheView = String(options.cacheView || '');
-  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  const visible = surface.visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
-  const state = sessionFilesStateForDestination(destination);
+  const session = surface.session;
+  const state = surface.state;
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true, destination);
@@ -67189,6 +67321,14 @@ function syncFileExplorerDiffSessionControls() {
   }
 }
 
+function syncFileExplorerSessionControlVisibility(scope = document) {
+  for (const control of scope.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
+    const visible = fileExplorerRootMode === 'sync';
+    control.hidden = !visible;
+    control.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+}
+
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   // Legacy/test callers without an item still receive their requested compatibility view; live
@@ -68134,24 +68274,15 @@ function createFileExplorerPanel(item = finderItemId) {
   if (view !== 'finder') bindFileExplorerChangesResizer(panel);
   applyFileExplorerPanelView(panel, item);
   if (view === 'finder') {
+    panel.classList.toggle('file-explorer-root-mode-sync', fileExplorerRootMode === 'sync');
+    panel.classList.toggle('file-explorer-root-mode-fixed', fileExplorerRootMode !== 'sync');
+    syncFileExplorerSessionControlVisibility(panel);
     renderFileExplorerRootModeControls();
     refreshFileExplorerPanelTree(panel);
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
-    }
-  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
-    if (clientPushCanSupplyData()) {
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    } else {
-      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
-    }
-  } else if (view === 'tabber') fetchTabberActivity();
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return panel;
 }
 
@@ -68251,10 +68382,7 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
-    const session = fileExplorerFinderTargetSession();
-    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
-      fetchSessionFiles({destination: 'finder', session, silent: true});
-    }
+    ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -68262,10 +68390,7 @@ function activateFileExplorerSurface(item) {
     fetchTabberActivity();
     return true;
   }
-  const session = fileExplorerSessionFilesTargetSession();
-  if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'differ', session, silent: true});
-  }
+  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return true;
 }
 
@@ -68306,6 +68431,22 @@ function bindFileExplorerChangesResizer(panel) {
   });
 }
 
+const fileEditorPreviewPropagationFrames = new Map();
+
+function scheduleFileEditorPreviewPropagation(panel, path) {
+  const key = String(path || '');
+  if (!key || fileEditorPreviewPropagationFrames.has(key)) return;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  const frame = schedule(() => {
+    fileEditorPreviewPropagationFrames.delete(key);
+    const state = fileEditorStateForItem(path, fileEditorItemFor(path));
+    if (!state || state.kind !== 'text') return;
+    renderLinkedFilePreviewPanels(panel, path, state.content);
+    updateFilePreviewPopout(path, state.content);
+  });
+  fileEditorPreviewPropagationFrames.set(key, frame);
+}
+
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const state = fileEditorPanelState(panel);
   if (!state || state.kind !== 'text' || state.historical === true) return;
@@ -68321,9 +68462,18 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-  renderLinkedFilePreviewPanels(panel, path, state.content);
-  updateFilePreviewPopout(path, state.content);
+  if (options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
+    if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+    else if (options.sourceSurface !== 'view-editor') renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  }
+  if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+  if (options.sourceSurface === 'view-editor') syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'view-editor');
+  else if (panel?._cmView && options.previewEdit !== true) syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'text-editor');
+  if (options.previewEdit === true) scheduleFileEditorPreviewPropagation(panel, path);
+  else {
+    renderLinkedFilePreviewPanels(panel, path, state.content);
+    updateFilePreviewPopout(path, state.content);
+  }
   scheduleFileEditorSplitScrollSync(panel, 'editor');
   const item = fileEditorPanelItem(panel);
   if (item && panel?.contains?.(document.activeElement)) {
@@ -68332,7 +68482,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (state.externalChanged && !state.externalChangeEditPrompted) {
     promptExternalChangeBeforeEditing(path, panel);
   }
-  if (state.dirty) scheduleFileAutosave(path);
+  if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
   else clearFileAutosaveTimer(path);
   if (dirtyChanged) {
     renderSessionButtons();
@@ -68473,15 +68623,15 @@ function fileEditorToolbarHtml(item) {
                   action: 'editor-mode',
                   dataset: {editorMode: 'edit'},
                   html: '<span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span>',
-                  title: t('common.edit'),
-                  ariaLabel: t('common.edit'),
+                  title: t('editor.mode.textEdit'),
+                  ariaLabel: t('editor.mode.textEdit'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
                   dataset: {editorMode: 'preview'},
                   html: '<span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span>',
-                  title: t('common.preview'),
-                  ariaLabel: t('common.preview'),
+                  title: t('editor.mode.viewEdit'),
+                  ariaLabel: t('editor.mode.viewEdit'),
                 }),
                 toolbarButtonHtml({
                   action: 'editor-mode',
@@ -68634,9 +68784,9 @@ function createFileEditorPanel(item) {
       afterHeadHtml: fileEditorToolbarHtml(item),
       bodyClass: 'file-editor-panel-body',
       bodyHtml: `<div class="file-editor-content">
-          <div class="file-editor-codemirror-panel" hidden></div>
+           <div class="file-editor-codemirror-panel" data-editor-surface="text-editor" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
-          <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
+           <div class="file-editor-preview-pane-panel markdown-body" data-editor-surface="view-editor" hidden></div>
           <div class="file-editor-find-overview" hidden aria-hidden="true"></div>
           <form class="file-editor-preview-find-panel" hidden role="search" aria-label="${esc(t('preview.find'))}">
             <input type="search" placeholder="${esc(t('preview.find'))}" aria-label="${esc(t('preview.find'))}" autocomplete="off">
@@ -69122,6 +69272,595 @@ function markdownTextWithSourceAnchors(text) {
   return String(text || '');
 }
 
+function markdownInlinePlainText(value) {
+  return String(value || '')
+    .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
+    .replace(/(`+)(.*?)\1/g, '$2')
+    .replace(/\*\*|__/g, '')
+    .replace(/~~/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function markdownPreviewVisibleText(node) {
+  if (!node) return '';
+  if (node.nodeType === 3) return String(node.nodeValue || '');
+  if (node.nodeType !== 1) return '';
+  if (String(node.tagName || '').toUpperCase() === 'BR') return '\n';
+  if (node.classList?.contains('markdown-source-anchor')) return '';
+  return Array.from(node.childNodes || []).map(markdownPreviewVisibleText).join('');
+}
+
+function markdownInlineSourceFromNode(node) {
+  if (!node) return '';
+  if (node.nodeType === 3) return String(node.nodeValue || '');
+  if (node.nodeType !== 1) return '';
+  if (node.classList?.contains('markdown-source-anchor')) return '';
+  const tagName = String(node.tagName || '').toUpperCase();
+  if (tagName === 'BR') return '\n';
+  const content = Array.from(node.childNodes || []).map(markdownInlineSourceFromNode).join('');
+  if (!content) return '';
+  if (tagName === 'STRONG' || tagName === 'B') return `**${content}**`;
+  if (tagName === 'EM' || tagName === 'I') return `*${content}*`;
+  if (tagName === 'CODE') return `\`${content}\``;
+  if (tagName === 'DEL' || tagName === 'S') return `~~${content}~~`;
+  if (tagName === 'U') return `<u>${content}</u>`;
+  return content;
+}
+
+function markdownSourceContinuationLine(line) {
+  const value = String(line || '').trim();
+  return Boolean(value) && !/^(?:#{1,6}\s|[-+*]\s|\d+[.)]\s|>|```|~~~|\||---+$)/.test(value);
+}
+
+function markdownEditableSourceRange(text, sourceLine, block, options = {}) {
+  const lines = String(text || '').split('\n');
+  const start = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (start >= lines.length) return null;
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = lines[start].match(/^(\s*#{1,6}\s+)(.*)$/);
+  const storedEnd = Number(block?.dataset?.sourceEndLine || 0) - 1;
+  const end = Number.isInteger(storedEnd) && storedEnd >= start
+    ? storedEnd
+    : tagName === 'P'
+    ? (() => {
+      let index = start;
+      while (index + 1 < lines.length && markdownSourceContinuationLine(lines[index + 1])) index += 1;
+      return index;
+    })()
+    : start;
+  const body = heading && start === end
+    ? heading[2]
+    : lines.slice(start, end + 1).map(line => line.trim()).join(' ');
+  if (!body.trim() || (tagName !== 'P' && !heading)) return null;
+  if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(lines[start]) || /^\s*[>|`~]/.test(lines[start])) return null;
+  if (options.validateText !== false && (block?.textContent || block?.childNodes)) {
+    if (markdownInlinePlainText(body) !== markdownInlinePlainText(markdownPreviewVisibleText(block))) return null;
+  }
+  return {
+    start,
+    end,
+    prefix: heading ? heading[1] : (lines[start].match(/^\s*/)?.[0] || ''),
+    body,
+    heading: Boolean(heading),
+  };
+}
+
+function markdownSourceLineOffsets(text, lineNumber) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(lineNumber) || 1) - 1);
+  let start = 0;
+  for (let current = 0; current < index; current += 1) start += lines[current].length + 1;
+  return {start, end: start + (lines[index] || '').length, line: lines[index] || ''};
+}
+
+function markdownEditableRangeOffsets(text, sourceLine, sourceEndLine, block) {
+  const start = markdownSourceLineOffsets(text, sourceLine);
+  const end = markdownSourceLineOffsets(text, sourceEndLine || sourceLine);
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = start.line.match(/^(\s*#{1,6}\s+)/);
+  const bodyStart = heading && /^H[1-6]$/.test(tagName) ? start.start + heading[1].length : start.start;
+  return {start: bodyStart, end: end.end, sourceStart: start.start, sourceEnd: end.end, prefix: heading?.[1] || ''};
+}
+
+function markdownPreviewBlockBySourceLine(container, sourceLine) {
+  return Array.from(container?.querySelectorAll?.('[data-markdown-preview-editable="true"]') || [])
+    .find(block => Number(block.dataset.sourceLine || 0) === Number(sourceLine)) || null;
+}
+
+function markdownPreviewTextNodeAtOffset(root, offset) {
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, Number(offset) || 0);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.classList?.contains('markdown-source-anchor')) continue;
+    if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+    remaining -= node.nodeValue.length;
+  }
+  return null;
+}
+
+function markdownSourceOffsetAtVisibleOffset(source, visibleOffset) {
+  const text = String(source || '');
+  const target = Math.max(0, Number(visibleOffset) || 0);
+  let visible = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const br = text.slice(index).match(/^<br\s*\/?\s*>/i);
+    if (br) {
+      visible += 1;
+      index += br[0].length - 1;
+    } else if (!'*_~'.includes(text[index])) {
+      visible += 1;
+    }
+    if (visible >= target) return index + 1;
+  }
+  return text.length;
+}
+
+function selectMarkdownPreviewSourceRange(path, sourceLine, selectedText = '') {
+  for (const panel of fileEditorPanelsForPath(path)) {
+    const container = panel.querySelector?.('.file-editor-preview-pane-panel');
+    const block = markdownPreviewBlockBySourceLine(container, sourceLine);
+    if (!container || !block) continue;
+    const visible = markdownPreviewVisibleText(block);
+    const start = selectedText ? visible.indexOf(selectedText) : 0;
+    if (start < 0) continue;
+    const from = markdownPreviewTextNodeAtOffset(block, start);
+    const to = markdownPreviewTextNodeAtOffset(block, start + selectedText.length);
+    if (!from || !to) continue;
+    const range = container.ownerDocument.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    const selection = container.ownerDocument.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  }
+  return false;
+}
+
+function markdownPreviewSourceChange(container, sourcePanel, path, start, end, replacement, options = {}) {
+  const state = fileEditorPanelState(sourcePanel);
+  if (!state || state.kind !== 'text' || state.historical === true) return false;
+  const before = state.content;
+  const next = `${before.slice(0, start)}${replacement}${before.slice(end)}`;
+  if (next === before) return false;
+  container._markdownPreviewHistory = container._markdownPreviewHistory || {entries: [], index: -1};
+  const history = container._markdownPreviewHistory;
+  history.entries.splice(history.index + 1);
+  history.entries.push({before, after: next});
+  history.index += 1;
+  container._markdownPreviewLastEdit = history.entries[history.index];
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownTextWithBackspaceAtOffset(text, sourceOffset, blockStart = 0) {
+  const source = String(text || '');
+  const offset = Math.max(blockStart, Math.min(source.length, Number(sourceOffset) || 0));
+  if (offset <= blockStart) {
+    if (source.slice(blockStart - 2, blockStart) === '\n\n') return `${source.slice(0, blockStart - 2)}${source.slice(blockStart)}`;
+    if (source[blockStart - 1] === '\n') return `${source.slice(0, blockStart - 1)}${source.slice(blockStart)}`;
+    return null;
+  }
+  if (source[offset - 1] === '\n') return `${source.slice(0, offset - 1)}${source.slice(offset)}`;
+  const br = source.slice(Math.max(blockStart, offset - 7), offset).match(/<br\s*\/?\s*>$/i);
+  if (br) return `${source.slice(0, offset - br[0].length)}${source.slice(offset)}`;
+  return null;
+}
+
+function handleMarkdownPreviewBackspace(container, event = null) {
+  const selection = container.ownerDocument?.getSelection?.();
+  const context = markdownPreviewSelectionContext(container) || {
+    block: event?.target?.closest?.('[data-markdown-preview-editable="true"]') || container._markdownPreviewActiveBlock,
+    selectedText: '',
+  };
+  const block = context?.block;
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true || !selection?.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed || !block.contains(range.startContainer)) return false;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  const prefix = container.ownerDocument.createRange();
+  prefix.selectNodeContents(block);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const sourceOffset = offsets.start + markdownSourceOffsetAtVisibleOffset(
+    state.content.slice(offsets.start, offsets.end),
+    Math.min(prefix.toString().length, offsets.end - offsets.start),
+  );
+  const next = markdownTextWithBackspaceAtOffset(state.content, sourceOffset, offsets.start);
+  if (next === null) return false;
+  const nextCaret = Math.max(0, sourceOffset - 1);
+  if (!markdownPreviewSourceChange(container, panel, path, 0, state.content.length, next)) return false;
+  renderFileEditorPreviewSurface(panel, container, path, fileEditorPanelState(panel).content, {preserveSelection: false, force: true});
+  requestAnimationFrame(() => selectMarkdownPreviewSourceRange(path, line, state.content.slice(offsets.start, nextCaret)));
+  return true;
+}
+
+function handleMarkdownPreviewEnter(container, event = null) {
+  const selection = container.ownerDocument?.getSelection?.();
+  const eventBlock = event?.target?.closest?.('[data-markdown-preview-editable="true"]');
+  const context = markdownPreviewSelectionContext(container) || {
+    block: eventBlock || container._markdownPreviewActiveBlock,
+    selectedText: '',
+  };
+  const block = context?.block;
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  if (!block || !panel || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (/^H[1-6]$/.test(String(block.tagName || '').toUpperCase())) return false;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  if (!range && !container._markdownPreviewCaretOffset) return false;
+  if (!range) return false;
+  if (!block.contains(range.startContainer)) return false;
+  const prefix = container.ownerDocument.createRange();
+  prefix.selectNodeContents(block);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const visibleOffset = Math.min(
+    prefix.toString().length,
+    Math.max(0, offsets.end - offsets.start),
+  );
+  const sourceOffset = offsets.start + markdownSourceOffsetAtVisibleOffset(
+    state.content.slice(offsets.start, offsets.end),
+    visibleOffset,
+  );
+  const replacement = `${state.content.slice(offsets.start, sourceOffset)}<br>${state.content.slice(sourceOffset, offsets.end)}`;
+  if (!markdownPreviewSourceChange(container, panel, path, offsets.start, offsets.end, replacement)) return false;
+  const nextContent = fileEditorPanelState(panel).content;
+  renderFileEditorPreviewSurface(panel, container, path, nextContent, {preserveSelection: false, force: true});
+  requestAnimationFrame(() => {
+    const nextBlock = markdownPreviewBlockBySourceLine(container, line);
+    if (!nextBlock) return;
+    nextBlock.focus();
+    const target = markdownPreviewTextNodeAtOffset(nextBlock, prefix.toString().length + 1);
+    if (!target) return;
+    const nextSelection = container.ownerDocument.getSelection?.();
+    const nextRange = container.ownerDocument.createRange();
+    nextRange.setStart(target.node, target.offset);
+    nextRange.collapse(true);
+    nextSelection.removeAllRanges();
+    nextSelection.addRange(nextRange);
+  });
+  return true;
+}
+
+function handleMarkdownPreviewInput(container, block) {
+  if (!block) return false;
+  const panel = container.closest?.('.file-editor-panel');
+  const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+  const state = panel ? fileEditorPanelState(panel) : null;
+  const line = Number(block.dataset.sourceLine || 0);
+  const offsets = state && markdownEditableRangeOffsets(state.content, line, block.dataset.sourceEndLine, block);
+  if (!state || !offsets) return false;
+  const rendered = markdownInlineSourceFromNode(block).replace(/\n+/g, '\n\n').trim();
+  const next = `${state.content.slice(offsets.start, offsets.start + (offsets.prefix || '').length)}${rendered}`;
+  return markdownPreviewSourceChange(container, panel, path, offsets.start, offsets.end, next);
+}
+
+function markdownEditableSourceLine(line, block) {
+  const raw = String(line || '');
+  const tagName = String(block?.tagName || '').toUpperCase();
+  const heading = raw.match(/^(\s*#{1,6}\s+)(.*)$/);
+  const prefix = heading ? heading[1] : '';
+  const body = heading ? heading[2] : raw;
+  if (!body.trim() || (tagName !== 'P' && !heading)) return null;
+  if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(raw) || /^\s*[>|~]/.test(raw) || /[\[\]|]/.test(body)) return null;
+  if (block?.textContent || block?.childNodes) {
+    if (markdownInlinePlainText(body) !== markdownInlinePlainText(markdownPreviewVisibleText(block))) return null;
+  }
+  return {prefix, body, heading: Boolean(heading)};
+}
+
+function markdownTextWithInlineLineEdited(text, sourceLine, nextInline, blockKind = 'paragraph') {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length) return null;
+  const parsed = markdownEditableSourceRange(text, sourceLine, {
+    tagName: blockKind === 'heading' ? 'H1' : 'P',
+  }, {validateText: false});
+  if (!parsed) return null;
+  const replacement = `${parsed.prefix}${nextInline}`;
+  lines.splice(parsed.start, parsed.end - parsed.start + 1, replacement);
+  return lines.join('\n');
+}
+
+function markdownTextWithInlineFormat(text, sourceLine, selectedText, command) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length) return null;
+  const selected = String(selectedText || '').trim();
+  if (!selected) return null;
+  const inlineMarkers = [
+    {open: '**', close: '**', command: 'bold'},
+    {open: '__', close: '__', command: 'bold'},
+    {open: '*', close: '*', command: 'italic'},
+    {open: '_', close: '_', command: 'italic'},
+    {open: '~~', close: '~~', command: 'strike'},
+    {open: '<u>', close: '</u>', command: 'underline'},
+    {open: '`', close: '`', command: 'code'},
+  ];
+  const sourceTextLine = lines[index];
+  const directStart = sourceTextLine.indexOf(selected);
+  if (directStart < 0) return null;
+  const before = sourceTextLine.slice(0, directStart);
+  const after = sourceTextLine.slice(directStart + selected.length);
+  const active = new Set();
+  let left = before;
+  let right = after;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const marker of inlineMarkers) {
+      if (left.endsWith(marker.open) && right.startsWith(marker.close)) {
+        active.add(marker.command);
+        left = left.slice(0, -marker.open.length);
+        right = right.slice(marker.close.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (command !== 'clearInline' && !inlineMarkers.some(marker => marker.command === command)) return null;
+  if (command === 'clearInline') {
+    lines[index] = `${left}${selected}${right}`;
+    return lines.join('\n');
+  }
+  if (active.has(command)) active.delete(command);
+  else active.add(command);
+  const wrappers = [
+    ['bold', '**', '**'],
+    ['italic', '*', '*'],
+    ['strike', '~~', '~~'],
+    ['underline', '<u>', '</u>'],
+    ['code', '`', '`'],
+  ];
+  let formatted = selected;
+  for (const [kind, open, close] of wrappers.slice().reverse()) {
+    if (active.has(kind)) formatted = `${open}${formatted}${close}`;
+  }
+  lines[index] = `${left}${formatted}${right}`;
+  return lines.join('\n');
+  /* legacy implementation retained for reference:
+  if (command === 'clearInline') {
+    const start = lines[index].indexOf(selected);
+    if (start < 0) return null;
+    const before = lines[index].slice(0, start);
+    const after = lines[index].slice(start + selected.length);
+    const prefixes = ['**', '__', '*', '_', '~~', '<u>', '`'];
+    const suffixes = ['**', '__', '*', '_', '~~', '</u>', '`'];
+    let nextBefore = before;
+    let nextAfter = after;
+    let removed = true;
+    while (removed) {
+      removed = false;
+      for (let i = 0; i < prefixes.length; i += 1) {
+        if (nextBefore.endsWith(prefixes[i]) && nextAfter.startsWith(suffixes[i])) {
+          nextBefore = nextBefore.slice(0, -prefixes[i].length);
+          nextAfter = nextAfter.slice(suffixes[i].length);
+          removed = true;
+          break;
+        }
+      }
+    }
+    lines[index] = `${nextBefore}${selected}${nextAfter}`;
+    return lines.join('\n');
+  }
+  const plainLine = markdownInlinePlainText(lines[index]);
+  const plainStart = plainLine.indexOf(selected);
+  if (plainStart < 0 || plainLine.indexOf(selected, plainStart + selected.length) >= 0) return null;
+  const visibleSourceText = value => String(value || '')
+    .replace(/\\([\\`*_[\]{}()#+.!\-|>])/g, '$1')
+    .replace(/(`+)(.*?)\1/g, '$2')
+    .replace(/\*\*|__/g, '')
+    .replace(/~~/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[*_]/g, '');
+  const sourceOffsetAtVisible = visibleOffset => {
+    for (let offset = 0; offset <= lines[index].length; offset += 1) {
+      if (visibleSourceText(lines[index].slice(0, offset)).length >= visibleOffset) return offset;
+    }
+    return lines[index].length;
+  };
+  const directStart = lines[index].indexOf(selected);
+  const start = directStart >= 0 ? directStart : sourceOffsetAtVisible(plainStart);
+  const end = directStart >= 0 ? directStart + selected.length : sourceOffsetAtVisible(plainStart + selected.length);
+  const marker = command === 'bold' ? ['**', '**']
+    : command === 'italic' ? ['*', '*']
+    : command === 'strike' ? ['~~', '~~']
+        : command === 'underline' ? ['<u>', '</u>']
+          : command === 'code' ? ['`', '`'] : null;
+  if (!marker) return null;
+  const before = lines[index].slice(0, start);
+  const after = lines[index].slice(end);
+  const active = before.endsWith(marker[0]) && after.startsWith(marker[1])
+    && !(marker[0] === '*' && (before.endsWith('**') || after.startsWith('**')));
+  lines[index] = active
+    ? `${before.slice(0, -marker[0].length)}${selected}${after.slice(marker[1].length)}`
+    : `${before}${marker[0]}${selected}${marker[1]}${after}`;
+  return lines.join('\n');
+  */
+}
+
+function markdownTextWithBlockFormat(text, sourceLine, command) {
+  const lines = String(text || '').split('\n');
+  const index = Math.max(0, Math.floor(Number(sourceLine) || 1) - 1);
+  if (index >= lines.length || !lines[index].trim()) return null;
+  const current = lines[index];
+  const indent = current.match(/^\s*/)?.[0] || '';
+  if (command === 'bullet') {
+    if (/^\s*(?:[-+*]|\d+[.)])\s+/.test(current)) return null;
+    lines[index] = `${indent}- ${current.trim()}`;
+    return lines.join('\n');
+  }
+  if (command === 'pre') {
+    if (current.trim().startsWith('```')) return null;
+    lines.splice(index, 1, `${indent}__YOLOMUX_FENCE_START__`, current, `${indent}__YOLOMUX_FENCE_END__`);
+    return lines.join('\n').replace(/__YOLOMUX_FENCE_(?:START|END)__/g, '```');
+  }
+  const heading = command.match(/^h([1-6])$/);
+  if (!heading) return null;
+  const body = current.replace(/^\s*#{1,6}\s+/, '').trim();
+  if (!body || /[\[\]|]/.test(body)) return null;
+  lines[index] = `${indent}${'#'.repeat(Number(heading[1]))} ${body}`;
+  return lines.join('\n');
+}
+
+function markdownPreviewInlineBlockIsEditable(block) {
+  return !block?.querySelector?.('div,p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,pre,table');
+}
+
+function markdownPreviewSelectionContext(container, event = null) {
+  const selection = document.getSelection?.();
+  const selectionNode = selection?.anchorNode;
+  const selectionElement = selectionNode?.nodeType === 1 ? selectionNode : selectionNode?.parentElement;
+  const eventElement = event?.target?.nodeType === 1 ? event.target : event?.target?.parentElement;
+  const block = selectionElement?.closest?.('[data-markdown-preview-editable="true"]')
+    || eventElement?.closest?.('[data-markdown-preview-editable="true"]')
+    || container._markdownPreviewSelectionContext?.block;
+  if (!block || !container.contains(block) || !markdownPreviewInlineBlockIsEditable(block)) return null;
+  const selectedText = selection && !selection.isCollapsed
+    && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
+    ? selection.toString()
+    : container._markdownPreviewSelectionContext?.block === block
+      ? container._markdownPreviewSelectionContext.selectedText
+      : '';
+  return {block, selectedText: selectedText.trim()};
+}
+
+function markdownPreviewCaptureSelection(container) {
+  const selection = document.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const block = range.commonAncestorContainer?.parentElement?.closest?.('[data-markdown-preview-editable="true"]');
+  if (!block || !container.contains(block) || !block.contains(range.startContainer) || !block.contains(range.endContainer)) return null;
+  return {block, selectedText: selection.toString().trim()};
+}
+
+function markdownPreviewFormatActive(container, context, command) {
+  const path = container?.dataset?.mdPath || '';
+  const panel = container.closest?.('.file-editor-panel');
+  const state = panel ? fileEditorPanelState(panel) : fileState.get(path);
+  const sourceLine = Number(context?.block?.dataset?.sourceLine || 0);
+  if (!state || !sourceLine || !context?.selectedText) return false;
+  return markdownInlineFormatState(state.content, sourceLine, context.selectedText).has(command);
+}
+
+function markdownInlineFormatState(text, sourceLine, selectedText) {
+  const line = String(text || '').split('\n')[Math.max(0, Number(sourceLine || 1) - 1)] || '';
+  const selected = String(selectedText || '').trim();
+  const start = line.indexOf(selected);
+  if (start < 0 || !selected) return new Set();
+  let left = line.slice(0, start);
+  let right = line.slice(start + selected.length);
+  const markers = [
+    ['bold', '**', '**'], ['bold', '__', '__'], ['italic', '*', '*'], ['italic', '_', '_'],
+    ['strike', '~~', '~~'], ['underline', '<u>', '</u>'], ['code', '`', '`'],
+  ];
+  const active = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [kind, open, close] of markers) {
+      if (left.endsWith(open) && right.startsWith(close)) {
+        active.add(kind);
+        left = left.slice(0, -open.length);
+        right = right.slice(close.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return active;
+}
+
+function markdownPreviewBlockClass(block) {
+  const tag = String(block?.tagName || '').toUpperCase();
+  if (/^H[1-6]$/.test(tag)) return `h${tag.slice(1)}`;
+  if (block?.closest?.('pre')) return 'pre';
+  if (block?.closest?.('li')) return 'bullet';
+  return 'normal';
+}
+
+function markdownPreviewCopySelection(selectedText) {
+  if (!selectedText || !navigator.clipboard?.writeText) return false;
+  void navigator.clipboard.writeText(selectedText);
+  return true;
+}
+
+function markdownPreviewPasteSelection(container, context) {
+  if (!navigator.clipboard?.readText) return false;
+  void navigator.clipboard.readText().then(text => {
+    if (!text || !context?.block) return;
+    const selection = document.getSelection?.();
+    if (!selection?.rangeCount || !context.block.contains(selection.anchorNode)) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(document.createTextNode(text));
+    selection.collapseToEnd();
+    context.block.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  return true;
+}
+
+function markdownPreviewSelectionTransform(container, command, context = null) {
+  const selected = context || markdownPreviewSelectionContext(container);
+  if (!selected?.block) return false;
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(selected.block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
+    ? markdownTextWithInlineFormat(state.content, sourceLine, selected.selectedText, command)
+    : markdownTextWithBlockFormat(state.content, sourceLine, command);
+  if (next === null || next === state.content) return false;
+  const before = state.content;
+  container._markdownPreviewHistory = container._markdownPreviewHistory || {entries: [], index: -1};
+  container._markdownPreviewHistory.entries.splice(container._markdownPreviewHistory.index + 1);
+  container._markdownPreviewHistory.entries.push({before, after: next});
+  container._markdownPreviewHistory.index += 1;
+  container._markdownPreviewLastEdit = {before, after: next};
+  container._markdownPreviewSelectionContext = null;
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownEditorSelectionTransform(view, panel, path, command, context) {
+  const selectedText = String(context?.selectedText || '').trim();
+  const sourceLine = Number(context?.sourceLine || 0);
+  if (!view || !panel || !path || !sourceLine || !selectedText) return false;
+  const state = fileEditorPanelState(panel);
+  if (readOnlyMode || !state || state.kind !== 'text' || state.historical === true) return false;
+  const next = ['bold', 'italic', 'strike', 'underline', 'code', 'clearInline'].includes(command)
+    ? markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command)
+    : markdownTextWithBlockFormat(state.content, sourceLine, command);
+  if (next === null || next === state.content) return false;
+  handleFileEditorContentChanged(panel, path, next, {syntax: false});
+  syncCodeMirrorDocument(view, next, {path});
+  const line = view.state.doc.line(sourceLine);
+  const selectedStart = line.text.indexOf(selectedText);
+  if (selectedStart >= 0) {
+    view.dispatch({selection: {anchor: line.from + selectedStart, head: line.from + selectedStart + selectedText.length}});
+  }
+  return true;
+}
+
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
 const MARKDOWN_INLINE_NUMBERED_TASK_RE = /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+(\d+)([.)])\s+\S/;
 const MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS = 'markdown-rendered-task-checkbox';
@@ -69220,8 +69959,9 @@ function applyMarkdownSourceLines(container, source) {
   let searchFrom = 0;
   const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
   for (const block of blocks) {
-    const text = String(block.textContent || '').trim();
+    const text = markdownPreviewVisibleText(block).trim();
     let lineIndex = -1;
+    let lineEnd = -1;
     for (let index = searchFrom; index < lines.length; index += 1) {
       const trimmed = lines[index].trim();
       if (!trimmed) continue;
@@ -69233,18 +69973,29 @@ function applyMarkdownSourceLines(container, source) {
         lineIndex = index;
         break;
       }
-      if (text && trimmed.includes(text.slice(0, Math.min(text.length, 40)))) {
+      if (text && (trimmed.includes(text.slice(0, Math.min(text.length, 40)))
+        || markdownInlinePlainText(trimmed) === markdownInlinePlainText(text))) {
         lineIndex = index;
+        lineEnd = index;
+        if (block.tagName === 'P') {
+          let sourceText = trimmed;
+          while (lineEnd + 1 < lines.length && markdownSourceContinuationLine(lines[lineEnd + 1])) {
+            sourceText += ` ${lines[lineEnd + 1].trim()}`;
+            if (markdownInlinePlainText(sourceText) === markdownInlinePlainText(text)) break;
+            lineEnd += 1;
+          }
+        }
         break;
       }
     }
     if (lineIndex >= 0) {
       block.dataset.sourceLine = String(lineIndex + 1);
+      block.dataset.sourceEndLine = String((lineEnd >= lineIndex ? lineEnd : lineIndex) + 1);
       const anchor = document.createElement('span');
       anchor.className = 'markdown-source-anchor';
       anchor.dataset.sourceLine = String(lineIndex + 1);
       block.appendChild(anchor);
-      searchFrom = lineIndex + 1;
+      searchFrom = (lineEnd >= lineIndex ? lineEnd : lineIndex) + 1;
     }
   }
 }
@@ -69734,6 +70485,303 @@ function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
   return lines.join('\n');
 }
 
+function updateMarkdownInlineFromPreview(container, block) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (!markdownPreviewInlineBlockIsEditable(block)) {
+    renderFileEditorPreviewSurface(sourcePanel, container, path, state.content, {preserveSelection: false});
+    return false;
+  }
+  const nextInline = markdownInlineSourceFromNode(block).replace(/\n+/g, ' ').trim();
+  const kind = /^H[1-6]$/.test(String(block.tagName || '').toUpperCase()) ? 'heading' : 'paragraph';
+  const next = markdownTextWithInlineLineEdited(state.content, sourceLine, nextInline, kind);
+  if (next === null || next === state.content) return false;
+  container._markdownPreviewLastEdit = {before: state.content, after: next};
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) {
+      panel._previewEditContainer = container;
+      syncCodeMirrorDocument(panel._cmView, next, {path});
+      delete panel._previewEditContainer;
+    }
+  }
+  return true;
+}
+
+function updateMarkdownFormatFromPreview(container, block, command) {
+  const path = container?.dataset?.mdPath || '';
+  const sourceLine = Number(block?.dataset?.sourceLine || 0);
+  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)
+    .find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  const selection = document.getSelection?.();
+  const selectedText = selection && !selection.isCollapsed && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
+    ? selection.toString()
+    : '';
+  if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text' || state.historical === true) return false;
+  if (!markdownPreviewInlineBlockIsEditable(block)) return false;
+  const next = markdownTextWithInlineFormat(state.content, sourceLine, selectedText, command);
+  if (next === null || next === state.content) return false;
+  container._markdownPreviewLastEdit = {before: state.content, after: next};
+  handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
+    if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
+  }
+  return true;
+}
+
+function markdownPreviewEditorToolbar(container) {
+  const toolbar = document.createElement('div');
+  toolbar.className = 'markdown-preview-editor-toolbar';
+  toolbar.setAttribute('role', 'toolbar');
+  toolbar.setAttribute('aria-label', t('editor.toolbar.aria'));
+  for (const [command, label] of [['bold', 'B'], ['italic', 'I']]) {
+    const button = makeButton({
+      className: 'markdown-preview-editor-format-button',
+      label: command === 'bold' ? 'B' : 'I',
+      title: `${t('editor.toolbar.aria')}: ${label}`,
+      ariaLabel: `${t('editor.toolbar.aria')}: ${label}`,
+    });
+    button.dataset.markdownPreviewCommand = command;
+    toolbar.appendChild(button);
+  }
+  container.prepend(toolbar);
+  return toolbar;
+}
+
+function markdownFormattingContextMenu(event, context, options = {}) {
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu markdown-preview-context-menu';
+  menu.setAttribute('role', 'menu');
+  const closeMenu = () => markdownPreviewContextMenuController.close();
+  const apply = command => options.applyCommand?.(command, context) === true;
+  appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
+  appendContextMenuSeparator(menu);
+  const action = (label, command, disabled = false, checked = undefined) => {
+    const button = appendContextMenuButton(
+      menu,
+      label,
+      () => apply(command),
+      closeMenu,
+      {disabled, checked},
+    );
+    button.dataset.markdownCommand = command;
+    return button;
+  };
+  action('Bold', 'bold', !context.selectedText, options.isActive?.('bold', context) === true);
+  action('Italic', 'italic', !context.selectedText, options.isActive?.('italic', context) === true);
+  action('Strikethrough', 'strike', !context.selectedText, options.isActive?.('strike', context) === true);
+  action('Underline', 'underline', !context.selectedText, options.isActive?.('underline', context) === true);
+  action('Clear inline formatting', 'clearInline', !context.selectedText);
+  appendContextMenuSeparator(menu);
+  for (const [label, command] of [['Inline code', 'code'], ['Preformatted block', 'pre'], ['Bullet list', 'bullet'], ['Title / H1', 'h1'], ['Heading 2 / H2', 'h2'], ['Heading 3 / H3', 'h3'], ['Heading 4 / H4', 'h4'], ['Heading 5 / H5', 'h5']]) {
+    action(label, command, false);
+  }
+  action('Normal text', 'normal', false, markdownPreviewBlockClass(context.block) === 'normal');
+  markdownPreviewContextMenuController.open(menu, event.clientX, event.clientY);
+}
+
+function markdownPreviewContextMenu(container, event, context) {
+  markdownFormattingContextMenu(event, context, {
+    applyCommand: command => markdownPreviewSelectionTransform(container, command, context),
+    paste: () => markdownPreviewPasteSelection(container, context),
+    isActive: command => markdownPreviewFormatActive(container, context, command),
+  });
+}
+
+function markdownEditorContextMenu(view, panel, path, event, context) {
+  markdownFormattingContextMenu(event, context, {
+    applyCommand: command => markdownEditorSelectionTransform(view, panel, path, command, context),
+    isActive: command => markdownEditorFormatActive(panel, context, command),
+  });
+}
+
+function markdownEditorFormatActive(panel, context, command) {
+  const state = fileEditorPanelState(panel);
+  return state ? markdownInlineFormatState(state.content, context?.sourceLine, context?.selectedText).has(command) : false;
+}
+
+function bindMarkdownPreviewEditing(container, text, markdownPath) {
+  if (!markdownPath || container._markdownReadOnly === true || !container.closest?.('.file-editor-panel')) return;
+  const editableBlocks = [];
+  for (const block of Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p'))) {
+    const line = Number(block.dataset.sourceLine || 0);
+    if (!line || !markdownEditableSourceRange(text, line, block, {validateText: false})) continue;
+    block.dataset.markdownPreviewEditable = 'true';
+    block.contentEditable = 'true';
+    block.spellcheck = true;
+    block.setAttribute('role', 'textbox');
+    block.setAttribute('aria-label', t('common.edit'));
+    editableBlocks.push(block);
+  }
+  if (!editableBlocks.length) return;
+  container.dataset.markdownPreviewEditor = 'true';
+  const toolbar = markdownPreviewEditorToolbar(container);
+  toolbar.contentEditable = 'false';
+  container._markdownPreviewEditingDisposer = bindScopedOnce(container, 'markdown-preview-editing', scope => {
+    editableBlocks.forEach((block, index) => {
+      scope.ownEvent(`markdown-preview-enter-${index}`, block, 'keydown', event => {
+        if (event.key !== 'Enter') return;
+        if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+      });
+    });
+    scope.ownEvent('beforeinput-preview-enter', container, 'beforeinput', event => {
+      if (event.inputType !== 'insertParagraph' && event.inputType !== 'insertLineBreak') return;
+      if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('pointerdown', container, 'pointerdown', event => {
+      if (event.button !== 2) return;
+      const context = markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (context) container._markdownPreviewSelectionContext = context;
+    }, {capture: true});
+    scope.ownEvent('mousedown', container, 'mousedown', event => {
+      if (event.button !== 2) return;
+      const context = markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (context) container._markdownPreviewSelectionContext = context;
+    }, {capture: true});
+    scope.ownEvent('focusin', container, 'focusin', event => {
+      const block = event.target?.closest?.('[data-markdown-preview-editable="true"]');
+      if (block) {
+        container._markdownPreviewActiveBlock = block;
+        const state = fileEditorPanelState(container.closest?.('.file-editor-panel'));
+        container._markdownPreviewActiveBlockSource = state?.content || '';
+      }
+    });
+    scope.ownEvent('mousedown', container, 'mousedown', event => {
+      const button = event.target?.closest?.('[data-markdown-preview-command]');
+      if (!button) return;
+      event.preventDefault();
+    });
+    scope.ownEvent('click', container, 'click', event => {
+      const button = event.target?.closest?.('[data-markdown-preview-command]');
+      if (!button) return;
+      const selection = document.getSelection?.();
+      const block = selection?.anchorNode?.parentElement?.closest?.('[data-markdown-preview-editable="true"]');
+      if (block) updateMarkdownFormatFromPreview(container, block, button.dataset.markdownPreviewCommand);
+    });
+    scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const context = container._markdownPreviewSelectionContext || markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
+      if (!context || !context.block) return;
+      event.preventDefault();
+      event.stopPropagation();
+      markdownPreviewContextMenu(container, event, context);
+    }, {capture: true});
+    scope.ownEvent('keydown', container, 'keydown', event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || String(event.key).toLowerCase() !== 's') return;
+      event.preventDefault();
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || panel?.dataset?.filePath || '';
+      if (path && panel) void saveFileEditor(path, panel);
+    });
+    scope.ownEvent('input', container, 'input', event => {
+      if (event.target?.closest?.('.ProseMirror')) return;
+      const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
+        || container._markdownPreviewActiveBlock
+        || markdownPreviewSelectionContext(container)?.block;
+      if (!block || !container.contains(block)) return;
+      handleMarkdownPreviewInput(container, block);
+    });
+    scope.ownEvent('selectionchange', container.ownerDocument, 'selectionchange', () => {
+      const context = markdownPreviewCaptureSelection(container);
+      if (!context) return;
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || '';
+      const state = panel ? fileEditorPanelState(panel) : null;
+      const line = Number(context.block.dataset.sourceLine || 0);
+      const selection = container.ownerDocument.getSelection?.();
+      if (!state || !selection?.rangeCount) return;
+      const range = selection.getRangeAt(0);
+      const prefix = container.ownerDocument.createRange();
+      prefix.selectNodeContents(context.block);
+      prefix.setEnd(range.startContainer, range.startOffset);
+      const visibleStart = prefix.toString().length;
+      const offsets = markdownEditableRangeOffsets(state.content, line, context.block.dataset.sourceEndLine, context.block);
+      container._markdownPreviewSourceSelection = {
+        path,
+        sourceLine: line,
+        start: offsets.start + visibleStart,
+        end: offsets.start + visibleStart + context.selectedText.length,
+        text: context.selectedText,
+      };
+      if (panel?._cmView && context.selectedText) {
+        const lineInfo = panel._cmView.state.doc.line(line);
+        const visibleStart = prefix.toString().length;
+        const sourceOffset = markdownSourceOffsetAtVisibleOffset(lineInfo.text, visibleStart);
+        const sourceEnd = markdownSourceOffsetAtVisibleOffset(lineInfo.text, visibleStart + context.selectedText.length);
+        panel._cmView.dispatch({selection: {anchor: lineInfo.from + sourceOffset, head: lineInfo.from + sourceEnd}});
+      }
+    });
+    scope.ownEvent('keydown-preview-enter', container, 'keydown', event => {
+      if (event.key !== 'Enter') return;
+      if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('keydown-preview-backspace', container, 'keydown', event => {
+      if (event.key !== 'Backspace') return;
+      if (handleMarkdownPreviewBackspace(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('paste', container, 'paste', event => {
+      const context = markdownPreviewSelectionContext(container);
+      const pasted = event.clipboardData?.getData?.('text/plain') || '';
+      if (!context?.block || !pasted) return;
+      event.preventDefault();
+      const selection = document.getSelection?.();
+      if (!selection?.rangeCount || !context.block.contains(selection.anchorNode) || !context.block.contains(selection.focusNode)) return;
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(document.createTextNode(pasted));
+      selection.collapseToEnd();
+      context.block.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+    scope.ownEvent('beforeinput', container, 'beforeinput', event => {
+      if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+        if (handleMarkdownPreviewEnter(container, event)) event.preventDefault();
+        return;
+      }
+    });
+    scope.ownEvent('beforeinput-preview-backspace', container, 'beforeinput', event => {
+      if (event.inputType !== 'deleteContentBackward') return;
+      if (handleMarkdownPreviewBackspace(container, event)) event.preventDefault();
+    }, {capture: true});
+    scope.ownEvent('keydown', container, 'keydown-preview-history', event => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = String(event.key || '').toLowerCase();
+      const history = container._markdownPreviewHistory;
+      if (key !== 'z' || !history?.entries?.length) return;
+      event.preventDefault();
+      const panel = container.closest?.('.file-editor-panel');
+      const path = container.dataset.mdPath || '';
+      const nextIndex = event.shiftKey ? Math.min(history.entries.length - 1, history.index + 1) : history.index;
+      if (!event.shiftKey && history.index < 0) return;
+      if (event.shiftKey && nextIndex <= history.index) return;
+      const edit = history.entries[nextIndex];
+      const next = event.shiftKey ? edit.after : edit.before;
+      const state = panel ? fileEditorPanelState(panel) : fileState.get(path);
+      if (!state || state.content === next) return;
+      history.index = event.shiftKey ? nextIndex : history.index - 1;
+      container._markdownPreviewLastEdit = history.index >= 0 ? history.entries[history.index] : null;
+      handleFileEditorContentChanged(panel, path, next, {syntax: false, previewEdit: true, skipPreviewPanel: container});
+      for (const linked of fileEditorPanelsForPath(path)) {
+        if (linked?._cmView) syncCodeMirrorDocument(linked._cmView, next, {path});
+      }
+      if (container._markdownPreviewSourceSelection) {
+        selectMarkdownPreviewSourceRange(path, container._markdownPreviewSourceSelection.sourceLine, container._markdownPreviewSourceSelection.text);
+      }
+    });
+  });
+}
+
+function disposeMarkdownPreviewEditing(container) {
+  container?._markdownPreviewEditingDisposer?.();
+  if (container) delete container._markdownPreviewEditingDisposer;
+}
+
 function updateMarkdownTaskFromPreview(container, input) {
   const path = container?.dataset?.mdPath || '';
   const sourceLine = Number(input?.dataset?.sourceLine || 0);
@@ -70076,6 +71124,7 @@ function invalidateMarkdownPreviewArtifacts(container) {
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
   const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
+  disposeMarkdownPreviewEditing(container);
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
   applyMarkdownTaskListClasses(frag, text);
@@ -70090,6 +71139,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  if (options.readOnly !== true) bindMarkdownPreviewEditing(container, text, markdownPath);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
@@ -71866,7 +72916,7 @@ function cancelEditorPreviewRenderAfterUserScroll(container) {
 
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
-  if (previewScrollUserOwnsElementNow(container)) {
+  if (options.force !== true && previewScrollUserOwnsElementNow(container)) {
     scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options);
     return false;
   }
@@ -73505,6 +74555,35 @@ function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
 }
 
+function commitCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path || panel._cmSyncing) return false;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.historical === true) return false;
+  const next = panel._cmView.state.doc.toString();
+  if (next === state.content) return true;
+  handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor'});
+  return true;
+}
+
+function scheduleCodeMirrorSource(panel, path) {
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  const generation = Number(panel._cmSerializeGeneration || 0) + 1;
+  panel._cmSerializeGeneration = generation;
+  panel._cmSerializeTimer = setTimeout(() => {
+    if (generation !== panel._cmSerializeGeneration || panel._cmPath !== path || !panel._cmView?.dom?.isConnected) return;
+    panel._cmSerializeTimer = null;
+    commitCodeMirrorSource(panel, path);
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function flushCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path) return false;
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  panel._cmSerializeTimer = null;
+  panel._cmSerializeGeneration = Number(panel._cmSerializeGeneration || 0) + 1;
+  return commitCodeMirrorSource(panel, path);
+}
+
 function textFingerprint(text) {
   const source = String(text || '');
   let hash = 0;
@@ -73566,8 +74645,18 @@ function codeMirrorWorkingUpdateExtension(api, panel, path) {
       captureCodeMirrorPanelViewState(panel, path);
     }
     if (update.docChanged) {
-      handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
+      if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
     }
+  });
+}
+
+function codeMirrorSplitSyncExtension(api, panel, path) {
+  if (typeof api.EditorView?.domEventHandlers !== 'function') return [];
+  return api.EditorView.domEventHandlers({
+    blur(_event, view) {
+      flushCodeMirrorSource(panel, path);
+      return false;
+    },
   });
 }
 
@@ -73584,6 +74673,22 @@ function codeMirrorContextMenuSelectionExtension(api) {
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
         const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
         if (!clickedSelection) return false;
+        const panel = view.dom.closest('.file-editor-panel');
+        const path = panel?.dataset?.filePath || '';
+        if (previewKindForPath(path) === 'markdown') {
+          const range = selection.main;
+          const line = view.state.doc.lineAt(range.from);
+          const selectedText = view.state.sliceDoc(range.from, range.to);
+          if (selectedText.trim()) {
+            event.preventDefault();
+            event.stopPropagation();
+            markdownEditorContextMenu(view, panel, path, event, {
+              selectedText,
+              sourceLine: line.number,
+            });
+            return true;
+          }
+        }
         const captured = {selection};
         pending = captured;
         clearTimeout(clearTimer);
@@ -73630,13 +74735,19 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
-  updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
-    view.dispatch({
-      changes: {from: 0, to: view.state.doc.length, insert: next},
-      ...(preservedSelection ? {selection: preservedSelection} : {}),
-      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
-    });
-  }, {preserveSelection: selectionFits});
+  const panel = view.dom?.closest?.('.file-editor-panel');
+  if (panel) panel._cmSyncing = true;
+  try {
+    updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
+      view.dispatch({
+        changes: {from: 0, to: view.state.doc.length, insert: next},
+        ...(preservedSelection ? {selection: preservedSelection} : {}),
+        ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
+      });
+    }, {preserveSelection: selectionFits});
+  } finally {
+    if (panel) panel._cmSyncing = false;
+  }
 }
 
 function codeMirrorThemeExtensions(api, path) {
@@ -73702,6 +74813,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
     codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
+    codeMirrorSplitSyncExtension(api, panel, path),
   ];
 }
 
@@ -73712,7 +74824,7 @@ function codeMirrorEditorOptionExtensions(api, options = {}) {
     const activeLineGutter = safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.());
     extensions.push(...[lineNumbers, activeLineGutter].flat().filter(Boolean));
   }
-  if (options.wrap !== false && fileEditorWrapEnabled) {
+  if (options.wrap !== false && fileEditorWrapForPath(options.path || '', options.state || null)) {
     extensions.push(...[codeMirrorLineWrappingExtension(api), codeMirrorWrapMarkerExtension(api)].flat().filter(Boolean));
   }
   return extensions;
@@ -73734,11 +74846,14 @@ function codeMirrorLineWrappingExtension(api) {
 }
 
 function codeMirrorEditorOptionCompartmentExtensions(api, panel, options = {}) {
-  const extensions = codeMirrorEditorOptionExtensions(api, options);
+  const path = options.path || panel?.dataset?.filePath || '';
+  const state = options.state || (path ? fileState.get(path) : null);
+  const extensions = codeMirrorEditorOptionExtensions(api, {...options, path, state});
   if (!panel || !api.Compartment) return extensions;
   panel._cmEditorOptionCompartment = panel._cmEditorOptionCompartment || new api.Compartment();
   panel._cmEditorOptionConfig = {
     wrap: options.wrap !== false,
+    path,
     lineNumbers: options.lineNumbers !== false,
   };
   return panel._cmEditorOptionCompartment.of(extensions);
@@ -73749,7 +74864,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorExtensions(api, panel, path),
+        extensions: codeMirrorExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: false,
     };
@@ -73759,7 +74874,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorPlainEditableExtensions(api, panel, path),
+        extensions: codeMirrorPlainEditableExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: true,
       error,
@@ -74443,9 +75558,15 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           if (transaction.docChanged || transaction.selectionSet) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
+            if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
+              const selection = transaction.newSelection.main;
+              const line = transaction.newDoc.lineAt(selection.from);
+              const text = transaction.newDoc.sliceString(selection.from, selection.to);
+              selectMarkdownPreviewSourceRange(path, line.number, text);
+            }
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -74506,7 +75627,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
             captureCodeMirrorPanelViewState(panel, path);
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -74523,7 +75644,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
-    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
+    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
       panel._cmView.dispatch({
         changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
       });
@@ -74552,10 +75673,10 @@ function renderFileEditorRawPane(rawPane, path, content) {
   const language = syntaxLanguageForPath(path);
   rawPane.hidden = false;
   rawPane.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  rawPane.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  rawPane.classList.toggle('editor-wrap', fileEditorWrapForPath(path));
   code.className = `language-${language || 'text'}`;
   code.innerHTML = editorVisualHighlightHtml(language, content, {
-    wrap: fileEditorWrapEnabled,
+    wrap: fileEditorWrapForPath(path),
     lineNumbers: fileEditorLineNumbersEnabled,
   });
 }
@@ -74635,6 +75756,13 @@ function editorPanelParts(panel) {
     parts.uploadButton,
   ];
   return parts;
+}
+
+function labelSplitEditorSurfaces(panel) {
+  const textPane = panel?.querySelector?.('[data-editor-surface="text-editor"]');
+  const viewPane = panel?.querySelector?.('[data-editor-surface="view-editor"]');
+  if (textPane) textPane.setAttribute('aria-label', t('editor.surface.textEditor'));
+  if (viewPane) viewPane.setAttribute('aria-label', t('editor.surface.viewEditor'));
 }
 
 function hideTextEditorPanes(parts) {
@@ -74793,17 +75921,21 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
+    renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
 }
 
 function renderTextCodeMode(panel, item, path, state, parts, mode) {
+  if (mode !== 'split') {
+    destroyProseMirrorPanel(panel);
+    delete panel._pmRequired;
+  }
   const rawPane = parts.rawPane;
   const previewPane = parts.previewPane;
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -74819,9 +75951,10 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
 }
 
 function renderTextEditorMode(panel, item, path, state, parts, mode) {
+  labelSplitEditorSurfaces(panel);
   resetImagePreviewPane(parts);
   setEditorContentMode(parts.content, mode);
-  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-wrap', fileEditorWrapForPath(path, state));
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
   if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
   else renderTextCodeMode(panel, item, path, state, parts, mode);
@@ -75703,7 +76836,8 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (mode !== 'preview' && mode !== 'split') continue;
     const state = fileEditorPanelState(panel);
     const panelContent = state?.kind === 'text' ? state.content : content;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -75822,7 +76956,8 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      if (openPanel?._pmView) syncProseMirrorPanelSource(openPanel, path, panelState);
+      else renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
@@ -75888,6 +77023,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
+  flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
@@ -75904,6 +77040,15 @@ async function performFileEditorSave(path, panel, options = {}) {
       content: savedContent,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
+    // write_file truncates in place before writing the replacement bytes. Register the expected
+    // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
+    // external edit while the filesystem operation is still queued/in flight.
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: savedContent.length,
+      pending: true,
+      expiresAt: Date.now() + 10000,
+    });
     const payload = await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -75913,6 +77058,11 @@ async function performFileEditorSave(path, panel, options = {}) {
     applyFileIdentityMetadata(state, payload);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: state.size,
+      expiresAt: Date.now() + 5000,
+    });
     state.original = savedContent;
     state.dirty = state.content !== savedContent;
     if (state.dirty) delete state.lastCleanAt;
@@ -75934,6 +77084,7 @@ async function performFileEditorSave(path, panel, options = {}) {
     renderPaneTabStrips();
     return true;
   } catch (err) {
+    fileEditorSelfWriteAcks.delete(path);
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
       return {conflict: true, message: userMessageText(err, err.message)};
@@ -76012,6 +77163,702 @@ function saveFileEditor(path, panel, options = {}) {
     fileEditorSaveOwners.set(path, owner);
   }
   return queueFileEditorSave(path, owner, panel, options);
+}
+const prosemirrorLoadPromise = {value: null};
+const PROSEMIRROR_SERIALIZE_DELAY_MS = 1250;
+
+function prosemirrorFailureMessage(error) {
+  const raw = userMessageText(error, String(error?.message || error || 'unknown error'));
+  const detail = raw.replace(/^ProseMirror ViewEditor failed:\s*/i, '');
+  return t('editor.prosemirrorFailed', {error: detail});
+}
+
+function renderProseMirrorFailure(panel, path, parts, error) {
+  const pane = parts?.previewPane;
+  if (!pane) return false;
+  const message = prosemirrorFailureMessage(error);
+  panel._pmError = message;
+  panel._pmRequired = true;
+  renderMarkdownPreviewInto(pane, fileEditorPanelState(panel)?.content || '', path, {context: fileEditorPanelMode(panel), readOnly: true});
+  const failure = document.createElement('section');
+  failure.className = 'file-editor-prosemirror-error file-editor-prosemirror-watermark';
+  failure.setAttribute('role', 'alert');
+  const title = document.createElement('strong');
+  title.textContent = t('editor.prosemirrorErrorTitle');
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  const help = document.createElement('p');
+  help.textContent = t('editor.prosemirrorErrorHelp');
+  failure.append(title, detail, help);
+  pane.prepend(failure);
+  pane.hidden = false;
+  pane.dataset.prosemirrorState = 'error';
+  setFileEditorPanelStatus(panel, message, 'error');
+  statusErr(esc(message));
+  return true;
+}
+
+function renderProseMirrorLoading(parts) {
+  const pane = parts?.previewPane;
+  if (!pane || pane.querySelector('.file-editor-prosemirror-loading')) return;
+  disposeMarkdownPreviewEditing(pane);
+  cleanupStandardPreviewStrategy(pane);
+  pane.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'file-editor-prosemirror-loading';
+  loading.textContent = t('editor.prosemirrorLoading');
+  pane.append(loading);
+  pane.hidden = false;
+  pane.dataset.prosemirrorState = 'loading';
+}
+
+function loadProseMirrorApi() {
+  if (window.YOLOmuxProseMirror) return Promise.resolve(window.YOLOmuxProseMirror);
+  if (prosemirrorLoadPromise.value) return prosemirrorLoadPromise.value;
+  const asset = bootstrap.proseMirrorAssetUrl || '/static/prosemirror.js';
+  const promise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = asset;
+    script.onload = () => window.YOLOmuxProseMirror ? resolve(window.YOLOmuxProseMirror) : reject(new Error('ProseMirror bundle did not initialize'));
+    script.onerror = () => reject(new Error(`Unable to load ${asset}`));
+    document.head.appendChild(script);
+  });
+  prosemirrorLoadPromise.value = promise;
+  promise.catch(() => {
+    if (prosemirrorLoadPromise.value === promise) prosemirrorLoadPromise.value = null;
+  });
+  return promise;
+}
+
+function prosemirrorMarkdownSchema(api) {
+  let nodes = api.addListNodes(api.defaultMarkdownParser.schema.spec.nodes, 'paragraph block*', 'block');
+  nodes = nodes.addBefore('blockquote', 'details', {
+    group: 'block',
+    content: 'block+',
+    defining: true,
+    attrs: {summary: {default: ''}},
+    parseDOM: [{tag: 'details', getAttrs(dom) {
+      return {summary: dom.querySelector(':scope > summary')?.textContent || ''};
+    }}],
+    toDOM() { return ['details', 0]; },
+  });
+  nodes = nodes.addBefore('blockquote', 'table', {
+    group: 'block',
+    content: 'table_row+',
+    isolating: true,
+    parseDOM: [{tag: 'table'}],
+    toDOM() { return ['table', ['tbody', 0]]; },
+  }).addBefore('blockquote', 'table_row', {
+    content: '(table_header | table_cell)+',
+    parseDOM: [{tag: 'tr'}],
+    toDOM() { return ['tr', 0]; },
+  }).addBefore('blockquote', 'table_header', {
+    content: 'inline*',
+    attrs: {align: {default: null}},
+    parseDOM: [{tag: 'th', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
+    toDOM(node) { return ['th', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
+  }).addBefore('blockquote', 'table_cell', {
+    content: 'inline*',
+    attrs: {align: {default: null}},
+    parseDOM: [{tag: 'td', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
+    toDOM(node) { return ['td', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
+  });
+  nodes = nodes.addBefore('hard_break', 'soft_break', {
+    inline: true,
+    group: 'inline',
+    selectable: false,
+    parseDOM: [{tag: 'span[data-markdown-soft-break]'}],
+    toDOM() { return ['span', {'data-markdown-soft-break': 'true'}, ' ']; },
+  });
+  const marks = api.defaultMarkdownParser.schema.spec.marks.addToEnd('strike', {
+    parseDOM: [{tag: 's'}, {tag: 'del'}, {style: 'text-decoration: line-through'}],
+    toDOM() { return ['s', 0]; },
+  }).addToEnd('underline', {
+    parseDOM: [{tag: 'u'}, {style: 'text-decoration: underline'}],
+    toDOM() { return ['u', 0]; },
+  }).addToEnd('highlight', {
+    parseDOM: [{tag: 'mark'}],
+    toDOM() { return ['mark', 0]; },
+  }).addToEnd('kbd', {
+    parseDOM: [{tag: 'kbd'}],
+    toDOM() { return ['kbd', 0]; },
+  });
+  return new api.Schema({
+    nodes,
+    marks,
+  });
+}
+
+function prosemirrorMarkdownParser(api, schema) {
+  const parser = api.defaultMarkdownParser;
+  const tokenizer = new api.MarkdownIt({html: true, breaks: false});
+  tokenizer.enable('strikethrough');
+  const markdownItParse = tokenizer.parse.bind(tokenizer);
+  tokenizer.parse = (source, environment) => {
+    const htmlElement = html => {
+      const template = document.createElement('template');
+      template.innerHTML = String(html || '').trim();
+      return template.content.firstElementChild;
+    };
+    const imageAttrs = html => {
+      const image = htmlElement(html);
+      if (!image || image.tagName !== 'IMG' || !image.getAttribute('src')) return null;
+      return {
+        src: image.getAttribute('src'),
+        alt: image.getAttribute('alt'),
+        title: image.getAttribute('title'),
+      };
+    };
+    const unsupportedHtml = [];
+    const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
+      for (const token of tokens || []) {
+        const html = String(token.content || '').trim();
+        const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if (token.type === 'html_inline') {
+          const open = html.match(/^<(u|mark|kbd)(?:\s[^>]*)?>$/i)?.[1]?.toLowerCase();
+          const close = html.match(/^<\/(u|mark|kbd)\s*>$/i)?.[1]?.toLowerCase();
+          const markName = {u: 'underline', mark: 'highlight', kbd: 'kbd'};
+          if (open) token.type = `${markName[open]}_open`;
+          else if (close) token.type = `${markName[close]}_close`;
+          else if (/^<br\s*\/?>$/i.test(html)) token.type = 'html_break';
+          else {
+            const attrs = imageAttrs(html);
+            if (attrs) {
+              token.type = 'html_image';
+              token.meta = attrs;
+            }
+          }
+        } else if (token.type === 'html_block') {
+          const details = html.match(/^<details\s*>\s*<summary>([\s\S]*?)<\/summary>\s*$/i);
+          if (details) {
+            token.type = 'details_open';
+            token.meta = {summary: details[1].replace(/<[^>]+>/g, '').trim()};
+          } else if (/^<\/details>\s*$/i.test(html)) {
+            token.type = 'details_close';
+          } else {
+            const attrs = imageAttrs(html);
+            if (attrs) {
+              token.type = 'html_image';
+              token.meta = attrs;
+            }
+          }
+        }
+        if ((token.type === 'html_inline' || token.type === 'html_block') && html) {
+          unsupportedHtml.push({html: html.slice(0, 160), line: tokenLine || 1});
+        }
+        if (token.children) normalizeHtmlTokens(token.children, tokenLine);
+      }
+      return tokens;
+    };
+    const tokens = normalizeHtmlTokens(markdownItParse(source, environment));
+    // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
+    // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
+    const spacedTokens = [];
+    let previousBlockEnd = null;
+    for (const token of tokens) {
+      const blockStart = token.nesting === 1 && token.block && Array.isArray(token.map) ? token.map[0] : null;
+      if (blockStart !== null && previousBlockEnd !== null) {
+        const emptyParagraphs = Math.max(0, blockStart - previousBlockEnd - 1);
+        for (let index = 0; index < emptyParagraphs; index += 1) {
+          spacedTokens.push(
+            {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: [blockStart, blockStart], block: true, children: null, content: ''},
+            {type: 'inline', tag: '', nesting: 0, level: 1, map: [blockStart, blockStart], block: true, children: [], content: ''},
+            {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
+          );
+        }
+      }
+      spacedTokens.push(token);
+      if (token.nesting === 1 && token.block && Array.isArray(token.map)) previousBlockEnd = token.map[1];
+    }
+    const trailingNewlines = (String(source).match(/\n+$/) || [''])[0].length;
+    const trailingEmptyParagraphs = Math.max(0, trailingNewlines - 1);
+    for (let index = 0; index < trailingEmptyParagraphs; index += 1) {
+      spacedTokens.push(
+        {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: null, block: true, children: null, content: ''},
+        {type: 'inline', tag: '', nesting: 0, level: 1, map: null, block: true, children: [], content: ''},
+        {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
+      );
+    }
+    if (unsupportedHtml.length) {
+      const first = unsupportedHtml[0];
+      throw new Error(`Unsupported raw HTML at line ${first.line}: ${first.html}`);
+    }
+    return spacedTokens;
+  };
+  const tokens = {
+    ...parser.tokens,
+    softbreak: {node: 'soft_break'},
+    html_break: {node: 'hard_break'},
+    html_image: {node: 'image', getAttrs: token => token.meta},
+    details: {block: 'details', getAttrs: token => token.meta},
+    table: {block: 'table'},
+    thead: {ignore: true},
+    tbody: {ignore: true},
+    tr: {block: 'table_row'},
+    th: {block: 'table_header', getAttrs: token => ({align: token.attrGet('style')?.match(/text-align\s*:\s*(left|center|right)/i)?.[1]?.toLowerCase() || null})},
+    td: {block: 'table_cell', getAttrs: token => ({align: token.attrGet('style')?.match(/text-align\s*:\s*(left|center|right)/i)?.[1]?.toLowerCase() || null})},
+    s: {mark: 'strike'},
+    underline: {mark: 'underline'},
+    highlight: {mark: 'highlight'},
+    kbd: {mark: 'kbd'},
+  };
+  return new api.MarkdownParser(schema, tokenizer, tokens);
+}
+
+function prosemirrorMarkdownSerializer(api) {
+  return new api.MarkdownSerializer({
+    ...api.defaultMarkdownSerializer.nodes,
+    paragraph(state, node) {
+      if (node.content.size) {
+        state.renderInline(node);
+      } else {
+        // A Markdown paragraph separator is two newlines. Empty ViewEditor paragraphs need one
+        // additional source newline each or Markdown would collapse them on the next parse.
+        state.flushClose(1);
+        state.write('\n');
+      }
+      state.closeBlock(node);
+    },
+    soft_break(state) { state.write('\n'); },
+    // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
+    // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
+    hard_break(state) { state.write('\\\n'); },
+    details(state, node) {
+      state.write(`<details>\n<summary>${node.attrs.summary}</summary>\n\n`);
+      state.renderContent(node);
+      state.write('\n</details>');
+      state.closeBlock(node);
+    },
+    table(state, node) {
+      const inline = cell => {
+        const saved = {out: state.out, delim: state.delim, closed: state.closed, atBlockStart: state.atBlockStart, inTightList: state.inTightList};
+        state.out = '';
+        state.delim = '';
+        state.closed = null;
+        state.atBlockStart = true;
+        state.renderInline(cell);
+        const result = state.out.trim();
+        Object.assign(state, saved);
+        return result.replace(/\|/g, '\\|');
+      };
+      const cells = row => {
+        const result = [];
+        row.forEach(cell => result.push({text: inline(cell), align: cell.attrs.align || ''}));
+        return result;
+      };
+      const alignment = align => align === 'left' ? ':---' : align === 'right' ? '---:' : align === 'center' ? ':---:' : '---';
+      const rows = [];
+      node.forEach(row => rows.push(cells(row)));
+      if (!rows.length) return;
+      state.write(`| ${rows[0].map(cell => cell.text).join(' | ')} |`);
+      state.ensureNewLine();
+      state.write(`| ${rows[0].map(cell => alignment(cell.align)).join(' | ')} |`);
+      for (const row of rows.slice(1)) {
+        state.ensureNewLine();
+        state.write(`| ${row.map(cell => cell.text).join(' | ')} |`);
+      }
+      state.closeBlock(node);
+    },
+  }, {
+    ...api.defaultMarkdownSerializer.marks,
+    strike: {open: '~~', close: '~~', mixable: true},
+    underline: {open: '<u>', close: '</u>', mixable: true},
+    highlight: {open: '<mark>', close: '</mark>', mixable: true},
+    kbd: {open: '<kbd>', close: '</kbd>', mixable: true},
+  });
+}
+
+function prosemirrorDetailsNodeView(node) {
+  const dom = document.createElement('details');
+  dom.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = node.attrs.summary;
+  const contentDOM = document.createElement('div');
+  dom.append(summary, contentDOM);
+  return {dom, contentDOM};
+}
+
+function prosemirrorImageNodeView(node, panel, markdownPath) {
+  const image = document.createElement('img');
+  const original = String(node.attrs.src || '');
+  image.className = 'markdown-preview-image prosemirror-image';
+  image.alt = node.attrs.alt || '';
+  if (node.attrs.title) image.title = node.attrs.title;
+  image.dataset.originalSrc = original;
+  const target = markdownPreviewImageTarget(original, markdownPath);
+  if (!target) {
+    image.src = original;
+  } else if (target.external) {
+    image.src = target.src;
+  } else {
+    image.dataset.resolvedPath = target.path;
+    void installRawFileMediaSource(image, target.path, {
+      isCurrent: () => panel?._pmView?.dom?.isConnected && image.isConnected,
+      onFailure: error => {
+        image.classList.add('prosemirror-image-error');
+        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+      },
+      onDecodeFailure: () => {
+        image.classList.add('prosemirror-image-error');
+        image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+      },
+    });
+  }
+  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function normalizeProseMirrorEndBreakSource(text) {
+  return String(text || '').replace(/\\\n(?=\S)/g, '\n');
+}
+
+function normalizeLegacyBreakMarkup(text) {
+  // Files produced by the earlier adapter may contain literal `<br>` markers. Treat only the
+  // standalone marker as a Markdown hard break; ordinary prose containing that text stays text.
+  return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\s*(?=\n|$)/gi, '$1$2\\\n');
+}
+
+function destroyProseMirrorPanel(panel) {
+  const view = panel?._pmView;
+  if (!view) return;
+  flushProseMirrorSource(panel, panel._pmPath);
+  releaseRawFileMediaSources(view.dom);
+  view.destroy();
+  delete panel._pmView;
+  delete panel._pmPath;
+  delete panel._pmSource;
+  delete panel._pmPlugins;
+}
+
+function syncProseMirrorPanelSource(panel, path, state) {
+  if (!panel?._pmView || panel._pmPath !== path || !state) return false;
+  const next = normalizeLegacyBreakMarkup(state.content || '');
+  if (panel._pmSource === next) return true;
+  if (panel._pmSerializeTimer) return true;
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  panel._pmSerializeTimer = null;
+  panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+  try {
+    const doc = panel._pmParser.parse(next);
+    const selection = panel._pmView.state.selection;
+    const max = doc.content.size;
+    const anchor = Math.min(selection.anchor, max);
+    const head = Math.min(selection.head, max);
+    const api = window.YOLOmuxProseMirror;
+    const nextSelection = api.TextSelection.create(doc, anchor, head);
+    panel._pmView.updateState(api.EditorState.create({doc, selection: nextSelection, plugins: panel._pmPlugins || []}));
+    panel._pmSource = next;
+    return true;
+  } catch (error) {
+    renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
+    return false;
+  }
+}
+
+function prosemirrorSupportedSource(path, state) {
+  return state?.kind === 'text' && previewKindForPath(path) === 'markdown' && state.historical !== true;
+}
+
+function clearProseMirrorFallback(parts) {
+  const fallback = parts?.previewPane?.querySelector('.file-editor-preview-fallback');
+  fallback?.remove();
+}
+
+function serializeProseMirrorSource(panel) {
+  if (!panel?._pmSerializer || !panel._pmView) return null;
+  return panel._pmSerializer.serialize(panel._pmView.state.doc);
+}
+
+function commitProseMirrorSource(panel, path, options = {}) {
+  if (!panel?._pmView || panel._pmPath !== path) return false;
+  const next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
+  if (next === null) return false;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.historical === true) return false;
+  if (next === state.content) {
+    panel._pmSource = next;
+    return true;
+  }
+  panel._pmSource = next;
+  handleFileEditorContentChanged(panel, path, next, {
+    syntax: false,
+    previewEdit: true,
+    sourceSurface: 'view-editor',
+    skipPreviewPanel: panel.querySelector('.file-editor-preview-pane-panel'),
+    deferAutosave: options.deferAutosave === true,
+  });
+  syncCodeMirrorToCanonicalPanels(path, next, panel, 'view-editor');
+  return true;
+}
+
+function syncCodeMirrorToCanonicalPanels(path, content, sourcePanel = null, sourceSurface = '') {
+  for (const linked of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(linked)?.historical === true) continue;
+    if (linked._cmView && !(linked === sourcePanel && sourceSurface === 'text-editor')) {
+      syncCodeMirrorDocument(linked._cmView, content, {path});
+    }
+    if (linked._pmView && !(linked === sourcePanel && sourceSurface === 'view-editor')) {
+      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked));
+    }
+  }
+}
+
+function updateProseMirrorSource(panel, path) {
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  const generation = Number(panel._pmSerializeGeneration || 0) + 1;
+  panel._pmSerializeGeneration = generation;
+  panel._pmSerializeTimer = setTimeout(() => {
+    if (generation !== panel._pmSerializeGeneration || panel._pmPath !== path || !panel._pmView?.dom?.isConnected) return;
+    panel._pmSerializeTimer = null;
+    commitProseMirrorSource(panel, path, {deferAutosave: true});
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function scheduleProseMirrorAutosave(panel, path) {
+  if (panel._pmAutosaveTimer) clearTimeout(panel._pmAutosaveTimer);
+  panel._pmAutosaveTimer = setTimeout(() => {
+    panel._pmAutosaveTimer = null;
+    if (panel._pmPath !== path || !panel._pmView?.dom?.isConnected) return;
+    const state = fileEditorPanelState(panel);
+    if (state?.dirty) scheduleFileAutosave(path);
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function flushProseMirrorSource(panel, path) {
+  if (!panel?._pmView || panel._pmPath !== path) return false;
+  if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+  panel._pmSerializeTimer = null;
+  panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+  if (panel._pmAutosaveTimer) clearTimeout(panel._pmAutosaveTimer);
+  panel._pmAutosaveTimer = null;
+  return commitProseMirrorSource(panel, path);
+}
+
+function insertProseMirrorHardBreak(api, schema) {
+  return (state, dispatch) => {
+    const {$from, $to} = state.selection;
+    if (!$from.sameParent($to) || !$from.parent.isTextblock) return false;
+    const type = schema.nodes.hard_break;
+    if (!type) return false;
+    if (dispatch) {
+      dispatch(state.tr.replaceSelectionWith(type.create()).scrollIntoView());
+    }
+    return true;
+  };
+}
+
+function clearLinkedCodeMirrorSelection(panel, path) {
+  for (const linked of fileEditorPanelsForPath(path)) {
+    const view = linked._cmView;
+    const main = view?.state?.selection?.main;
+    if (!view || !main || main.empty) continue;
+    view.dispatch({selection: {anchor: main.head}});
+  }
+}
+
+function prosemirrorSelectionContext(view) {
+  const {from, to} = view.state.selection;
+  const domNode = view.domAtPos(from)?.node;
+  const domElement = domNode?.nodeType === 1 ? domNode : domNode?.parentElement;
+  return {
+    selectedText: from === to ? '' : view.state.doc.textBetween(from, to, '\n'),
+    from,
+    to,
+    block: domElement?.closest?.('p,h1,h2,h3,h4,h5,h6') || null,
+  };
+}
+
+function prosemirrorSelectionAtClientPoint(view, event) {
+  const selection = view.state.selection;
+  if (!selection.empty) return prosemirrorSelectionContext(view);
+  const point = view.posAtCoords({left: event.clientX, top: event.clientY});
+  if (!point) return prosemirrorSelectionContext(view);
+  const {$from} = view.state.doc.resolve(point.pos);
+  const text = $from.parent.textContent || '';
+  if (!text) return prosemirrorSelectionContext(view);
+  const offset = Math.max(0, Math.min($from.parentOffset, text.length));
+  let start = offset;
+  let end = offset;
+  while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+  while (end < text.length && !/\s/.test(text[end])) end += 1;
+  const base = $from.start();
+  view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, base + start, base + end)));
+  return prosemirrorSelectionContext(view);
+}
+
+function prosemirrorSelectionHasMark(view, mark) {
+  if (!mark || view.state.selection.empty) return false;
+  let sawText = false;
+  let covered = true;
+  view.state.doc.nodesBetween(view.state.selection.from, view.state.selection.to, node => {
+    if (!node.isText || !node.nodeSize) return;
+    sawText = true;
+    if (!mark.isInSet(node.marks)) covered = false;
+  });
+  return sawText && covered;
+}
+
+function applyProseMirrorFormat(api, view, schema, command) {
+  const marks = schema.marks;
+  const nodes = schema.nodes;
+  const run = command === 'bold' ? api.toggleMark(marks.strong)
+    : command === 'italic' ? api.toggleMark(marks.em)
+    : command === 'code' ? api.toggleMark(marks.code)
+      : command === 'strike' ? api.toggleMark(marks.strike)
+        : command === 'underline' ? api.toggleMark(marks.underline)
+      : command === 'bullet' ? api.wrapInList(nodes.bullet_list)
+          : command === 'normal' ? api.setBlockType(nodes.paragraph)
+            : /^h[1-5]$/.test(command) ? api.setBlockType(nodes.heading, {level: Number(command.slice(1))})
+              : null;
+  return run ? run(view.state, view.dispatch, view) : false;
+}
+
+function installProseMirrorInteractions(panel, path, view, schema, api) {
+  view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
+  view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
+  view.dom.addEventListener('contextmenu', event => {
+    const context = prosemirrorSelectionAtClientPoint(view, event);
+    if (!context.block) return;
+    event.preventDefault();
+    event.stopPropagation();
+    markdownFormattingContextMenu(event, context, {
+      applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
+      isActive: command => {
+        const mark = command === 'bold' ? schema.marks.strong
+          : command === 'italic' ? schema.marks.em
+            : command === 'code' ? schema.marks.code
+              : command === 'strike' ? schema.marks.strike
+                : command === 'underline' ? schema.marks.underline
+                  : null;
+        return prosemirrorSelectionHasMark(view, mark);
+      },
+    });
+  });
+}
+
+function createProseMirrorPanel(panel, item, path, state, parts, api) {
+  if (!parts?.previewPane) return false;
+  const schema = prosemirrorMarkdownSchema(api);
+  const parser = prosemirrorMarkdownParser(api, schema);
+  const serializer = prosemirrorMarkdownSerializer(api);
+  const doc = parser.parse(state.content || '');
+  const container = document.createElement('div');
+  container.className = 'prosemirror-editor markdown-body';
+  container.setAttribute('data-prosemirror-editor', 'true');
+  const plugins = [
+    api.keymap({
+      'Mod-s': () => {
+        flushProseMirrorSource(panel, path);
+        void saveFileEditor(path, panel);
+        return true;
+      },
+      'Shift-Enter': insertProseMirrorHardBreak(api, schema),
+    }),
+    api.history(),
+    api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
+    api.keymap(api.baseKeymap),
+  ];
+  const editorState = api.EditorState.create({doc, plugins});
+  if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) {
+    return false;
+  }
+  if (panel._pmView) panel._pmView.destroy();
+  cleanupStandardPreviewStrategy(parts.previewPane);
+  disposeMarkdownPreviewEditing(parts.previewPane);
+  parts.previewPane._previewRendererId = null;
+  parts.previewPane.replaceChildren(container);
+  clearProseMirrorFallback(parts);
+  const view = new api.EditorView(container, {
+    state: editorState,
+    nodeViews: {
+      details: prosemirrorDetailsNodeView,
+      image: node => prosemirrorImageNodeView(node, panel, path),
+    },
+    dispatchTransaction(transaction) {
+      const nextState = view.state.apply(transaction);
+      view.updateState(nextState);
+      if (transaction.docChanged) {
+        panel._pmSource = null;
+        updateProseMirrorSource(panel, path);
+        scheduleProseMirrorAutosave(panel, path);
+      }
+    },
+  });
+  container._prosemirrorView = view;
+  panel._pmView = view;
+  panel._pmPath = path;
+  panel._pmSchema = schema;
+  panel._pmParser = parser;
+  panel._pmSerializer = serializer;
+  panel._pmPlugins = plugins;
+  panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  delete panel._pmError;
+  parts.previewPane.dataset.prosemirrorState = 'ready';
+  installProseMirrorInteractions(panel, path, view, schema, api);
+  return true;
+}
+
+async function ensureProseMirrorPanel(panel, item, path, state, parts) {
+  if (!prosemirrorSupportedSource(path, state)) return false;
+  if (panel._pmView && panel._pmPath === path) return syncProseMirrorPanelSource(panel, path, state);
+  if (panel._pmEnsurePromise) return panel._pmEnsurePromise;
+  destroyProseMirrorPanel(panel);
+  const promise = (async () => {
+    try {
+      const api = await loadProseMirrorApi();
+      if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
+      try {
+        const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
+        if (ready) {
+          delete panel._pmUnsupportedSource;
+          delete panel._pmError;
+        }
+        return ready;
+      } catch (error) {
+        renderProseMirrorFailure(panel, path, parts, error);
+        return false;
+      }
+    } catch (error) {
+      renderProseMirrorFailure(panel, path, parts, error);
+      return false;
+    }
+  })();
+  panel._pmEnsurePromise = promise;
+  promise.finally(() => {
+    if (panel._pmEnsurePromise === promise) delete panel._pmEnsurePromise;
+  });
+  return promise;
+}
+
+function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
+  if (!prosemirrorSupportedSource(path, state)) return false;
+  if (parts.previewPane) parts.previewPane.hidden = false;
+  panel._pmRequired = true;
+  const ensureGeneration = Number(panel._pmEnsureGeneration || 0) + 1;
+  panel._pmEnsureGeneration = ensureGeneration;
+  if (!panel._pmView) {
+    renderProseMirrorLoading(parts);
+  }
+  if (panel._pmError) {
+    renderProseMirrorFailure(panel, path, parts, panel._pmError);
+    return true;
+  }
+  void ensureProseMirrorPanel(panel, item, path, state, parts).then(ready => {
+    if (ensureGeneration !== panel._pmEnsureGeneration) return;
+    if (!ready && panel.dataset.filePath === path) {
+      renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
+    }
+  });
+  return true;
+}
+
+function prosemirrorViewEditorHealth(panel) {
+  const container = panel?.querySelector?.('[data-editor-surface="view-editor"]');
+  return {
+    connected: Boolean(panel?._pmView?.dom?.isConnected),
+    roots: container?.querySelectorAll?.('.ProseMirror').length || 0,
+    text: panel?._pmView?.state?.doc?.textContent || '',
+    error: panel?._pmError || '',
+  };
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -77116,21 +78963,21 @@ function createPanel(session) {
       bodyAttributes: `id="terminal-pane-${esc(session)}"`,
       bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
       toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
-      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
+      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
           <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
       </div>
-      <div id="summary-pane-${session}" class="tab-pane">
+      <div id="summary-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
           <div id="summary-context-${session}" class="summary-context" data-locale-text-key="summary.loadingContext">${esc(t('summary.loadingContext'))}</div>
           <div id="summary-${session}" class="summary-preview markdown-body" data-locale-text-key="summary.emptyPrompt">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
-      <div id="events-pane-${session}" class="tab-pane">
+      <div id="events-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="summary">
           <div class="transcript-head">${esc(t('events.title'))}</div>
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
@@ -79757,6 +81604,10 @@ function bindClipboardPaste() {
     event.preventDefault();
     event.stopPropagation();
     if (editorTarget) {
+      if (editorTarget.surface === 'view-editor-unavailable') {
+        statusErr(esc(editorTarget.panel?._pmError || t('editor.prosemirrorDidNotInitialize')));
+        return;
+      }
       const files = dataTransferImageFiles(event.clipboardData);
       if (!files.length) {
         statusErr(localizedHtml('status.selectPaneForImagePaste'));
@@ -79789,13 +81640,34 @@ function bindClipboardPaste() {
 
 function markdownEditorPasteTarget(event) {
   const eventPanel = event.target?.closest?.('.file-editor-panel') || null;
-  const focusedPanel = !eventPanel && !focusedTerminal && isFileEditorItem(focusedPanelItem) ? panelNodes.get(focusedPanelItem) || null : null;
-  const panel = eventPanel || focusedPanel;
+  const focusedPanel = !eventPanel && isFileEditorItem(focusedPanelItem) ? panelNodes.get(focusedPanelItem) || null : null;
+  const activePanel = !eventPanel && !focusedPanel ? document.querySelector('.file-editor-panel.active-pane') : null;
+  const panel = eventPanel || focusedPanel || activePanel;
   const view = panel?._cmView || null;
-  if (!panel || !view || panel._cmMode === 'diff') return null;
+  const proseMirrorView = panel?._pmView || null;
+  if (!panel || panel._cmMode === 'diff') return null;
   const path = fileEditorPanelPath(panel) || fileItemPath(fileEditorPanelItem(panel) || focusedPanelItem);
   if (!path || previewRendererForPath(path)?.id !== 'markdown') return null;
-  return {panel, view, path};
+  const previewContainer = event.target?.closest?.('.file-editor-preview-pane-panel') || null;
+  const codeMirrorContainer = event.target?.closest?.('.file-editor-codemirror-panel') || null;
+  const viewPane = previewContainer || panel.querySelector?.('.file-editor-preview-pane-panel') || null;
+  const targetInViewPane = Boolean(previewContainer || (!codeMirrorContainer && document.activeElement && viewPane?.contains?.(document.activeElement)));
+  const surface = proseMirrorView && targetInViewPane && viewPane?.contains?.(proseMirrorView.dom)
+    ? 'view-editor'
+    : view && (codeMirrorContainer || !targetInViewPane)
+      ? 'text-editor'
+      : viewPane && panel._pmRequired
+        ? 'view-editor-unavailable'
+        : previewContainer
+          ? 'legacy-preview'
+        : null;
+  if (!surface) return null;
+  const selection = surface === 'view-editor'
+    ? {from: proseMirrorView.state.selection.from, to: proseMirrorView.state.selection.to}
+    : surface === 'text-editor'
+      ? {from: view.state.selection.main.from, to: view.state.selection.main.to}
+      : null;
+  return {panel, view, proseMirrorView, path, previewContainer, surface, selection};
 }
 
 // ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
@@ -80137,9 +82009,37 @@ function pasteUploadReferences(files) {
 function insertEditorPasteUploadReferences(editorTarget, files) {
   const references = markdownImageUploadReferences(files);
   if (!references.length) return false;
+  const proseMirrorView = editorTarget?.surface === 'view-editor' ? editorTarget.proseMirrorView : null;
+  if (proseMirrorView?.state?.doc && typeof proseMirrorView.dispatch === 'function') {
+    const parser = editorTarget.panel?._pmParser;
+    const fragments = references.map(reference => parser?.parse?.(reference)?.firstChild?.content).filter(Boolean);
+    if (fragments.length === references.length) {
+      let content = fragments[0];
+      for (const fragment of fragments.slice(1)) content = content.append(fragment);
+      const currentSize = proseMirrorView.state.doc.content.size;
+      const from = Math.max(0, Math.min(currentSize, Number(editorTarget.selection?.from ?? proseMirrorView.state.selection.from)));
+      const to = Math.max(from, Math.min(currentSize, Number(editorTarget.selection?.to ?? from)));
+      proseMirrorView.dispatch(proseMirrorView.state.tr.replaceWith(from, to, content).scrollIntoView());
+      proseMirrorView.focus?.();
+      return true;
+    }
+    return false;
+  }
   const view = editorTarget?.view;
-  if (!view?.state?.doc || typeof view.dispatch !== 'function') return false;
-  const selection = view.state.selection?.main || {};
+  if (!view?.state?.doc || typeof view.dispatch !== 'function') {
+    const container = editorTarget?.previewContainer;
+    const panel = editorTarget?.panel;
+    const state = panel ? fileEditorPanelState(panel) : null;
+    if (!container || !state || state.kind !== 'text') return false;
+    const context = markdownPreviewSelectionContext(container);
+    const line = Number(context?.block?.dataset?.sourceLine || 0);
+    const offsets = context?.block
+      ? markdownEditableRangeOffsets(state.content, line, context.block.dataset.sourceEndLine, context.block)
+      : {start: state.content.length, end: state.content.length};
+    const insert = references.join('\n');
+    return markdownPreviewSourceChange(container, panel, editorTarget.path, offsets.start, offsets.start, `${insert}\n\n`);
+  }
+  const selection = editorTarget?.selection || view.state.selection?.main || {};
   const docLength = Number(view.state.doc.length) || 0;
   const from = Math.max(0, Math.min(docLength, Number.isFinite(selection.from) ? selection.from : docLength));
   const to = Math.max(from, Math.min(docLength, Number.isFinite(selection.to) ? selection.to : from));
@@ -80154,9 +82054,12 @@ function insertEditorPasteUploadReferences(editorTarget, files) {
 
 function markdownImageUploadReferences(files) {
   return (files || []).map(file => {
-    const path = file.path || file.relative_path || file.saved_name || '';
+    const path = file.relative_path || file.path || file.saved_name || '';
     if (!path) return '';
-    return `![image](${markdownLinkTarget(path)})`;
+    const original = file.name || file.original_name || file.filename || file.saved_name || pathBasename(path);
+    const alt = String(original || 'image').replace(/\.[^.]+$/, '').replace(/[\[\]]/g, '') || 'image';
+    const target = file.relative_path || file.path || path;
+    return `![${alt}](${markdownLinkTarget(target)})`;
   }).filter(Boolean);
 }
 
@@ -84605,6 +86508,11 @@ function handleGlobalShortcutKeydown(event) {
     return;
   }
   if (mod && platformActionAllowed) {
+    if (key === 's' && isFileEditorItem(currentActiveMenuItem())) {
+      event.preventDefault();
+      void saveFileEditor(fileItemPath(currentActiveMenuItem()), panelNodes.get(currentActiveMenuItem()));
+      return;
+    }
     if (key === 'k' && event.shiftKey) {
       event.preventDefault();
       event.stopPropagation();

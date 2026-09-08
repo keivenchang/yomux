@@ -1,0 +1,21 @@
+{
+  "private": true,
+  "name": "yolomux-prosemirror-bundle",
+  "description": "Pinned dependency manifest for rebuilding static/prosemirror.js.",
+  "scripts": {
+    "build": "esbuild prosemirror-entry.js --bundle --format=iife --global-name=YOLOmuxProseMirrorBundle --outfile=../../static/prosemirror.js --minify"
+  },
+  "dependencies": {
+    "esbuild": "0.28.2",
+    "prosemirror-markdown": "1.13.7",
+    "prosemirror-commands": "1.7.2",
+    "prosemirror-history": "1.5.0",
+    "markdown-it": "14.1.0",
+    "prosemirror-keymap": "1.2.2",
+    "prosemirror-model": "1.25.11",
+    "prosemirror-schema-list": "1.5.1",
+    "prosemirror-state": "1.4.4",
+    "prosemirror-transform": "1.12.1",
+    "prosemirror-view": "1.42.3"
+  }
+}

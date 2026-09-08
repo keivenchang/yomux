@@ -12,12 +12,12 @@ flowchart LR
   server -->|"dirty batch"| owner["Owner"]
   owner -->|"Unix socket"| indexer["Indexer"]
   indexer -->|"WAL deltas"| db["SQLite"]
-  server -->|"read-only"| db
+  server -->|"fenced read-only snapshot"| db
 ```
 
 - The existing background-owner election chooses the server that supervises the indexer child.
 - When the owner is elected it leases `indexd` for every configured indexed root (`file_explorer.indexed_dirs`) and enqueues one `startup-depth-1` item per root, so a configured deployment starts indexing without waiting for a query. With no configured root the child still starts lazily on the first Quick Open/index invalidation request. Either way it is long-lived and owns every SQLite write connection; it exits after 60 seconds only when no lease, client, or queued work remains.
-- Any server can read the latest committed SQLite snapshot with a read-only connection.
+- `indexd` is the sole index writer. Servers may read a fenced committed SQLite snapshot directly, and use its RPC service for lifecycle and unavailable-state handling; no HTTP server becomes a writer.
 - If ownership changes, the new owner starts/reuses one indexer and re-leases the configured roots on the new daemon; no HTTP server becomes a database writer.
 
 Quick Open request modes are separate from index ownership. An empty Cmd-P query does not consult the index or filesystem; it lists the newest opened file paths from the bounded browser-memory history, newest first, with each row's last-opened date/time. An absolute or `~` query uses the authorized containing directory only, never recursive index search; the browser obtains one direct listing through `GET /api/fs/fast/list`, caches it, and filters names locally. A non-absolute query searches the configured indexed roots through the committed SQLite snapshots and may stream bounded result chunks. Indexed admission must prioritize exact and prefix basename matches and must not fill the bounded result page with matches assembled only from unrelated absolute-path fragments. The browser merges roots by path, rejects rows outside the producing root, and applies the visible priority order: currently open tabs, the newest 100 browser-memory file-history paths, files under the active Claude or Codex working directory, then the remaining indexed matches.
@@ -39,7 +39,7 @@ flowchart TB
 
 ## SQLite model
 
-The on-disk schema is `INDEX_FORMAT_VERSION=5`: `entries` carries a `generation` column, and durable `directory_coverage` and `frontier` tables persist per-directory breadth-first coverage and the pending queue so a restart resumes at the shallowest pending directory instead of rediscovering the tree. A v4 database migrates in place; its rows stay searchable as a stale generation rather than being dropped, and partial rows from an abandoned generation cannot overwrite a newer one.
+The on-disk schema is `INDEX_FORMAT_VERSION=6`: `entries` carries a `generation` column; metadata binds every published snapshot to the `(st_dev, st_ino)` identity of the authorized root descriptor; and durable `directory_coverage` and `frontier` tables persist per-directory breadth-first coverage and the pending queue so a restart resumes at the shallowest pending directory instead of rediscovering the tree. Version 4 and 5 stores are rebuilt because they do not prove the descriptor identity that produced their rows; partial rows from an abandoned generation cannot overwrite a newer one.
 
 `entries.path` is the primary key. The indexer applies one transaction per coalesced root batch:
 

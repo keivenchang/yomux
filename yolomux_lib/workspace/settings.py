@@ -245,12 +245,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "terminal_editor": {
         "scrollback": 5000,
-        "word_wrap": False,
+        "word_wrap": True,
         "line_numbers": False,
     },
     "editor": {
         "autosave": True,
-        "autosave_delay_seconds": 2.5,
+        "autosave_delay_seconds": 6,
         "blame_all_lines": False,
         "trim_trailing_whitespace_on_save": False,
         "ensure_final_newline_on_save": False,

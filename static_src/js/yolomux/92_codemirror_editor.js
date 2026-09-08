@@ -38,6 +38,35 @@ function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
 }
 
+function commitCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path || panel._cmSyncing) return false;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.historical === true) return false;
+  const next = panel._cmView.state.doc.toString();
+  if (next === state.content) return true;
+  handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor'});
+  return true;
+}
+
+function scheduleCodeMirrorSource(panel, path) {
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  const generation = Number(panel._cmSerializeGeneration || 0) + 1;
+  panel._cmSerializeGeneration = generation;
+  panel._cmSerializeTimer = setTimeout(() => {
+    if (generation !== panel._cmSerializeGeneration || panel._cmPath !== path || !panel._cmView?.dom?.isConnected) return;
+    panel._cmSerializeTimer = null;
+    commitCodeMirrorSource(panel, path);
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function flushCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path) return false;
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  panel._cmSerializeTimer = null;
+  panel._cmSerializeGeneration = Number(panel._cmSerializeGeneration || 0) + 1;
+  return commitCodeMirrorSource(panel, path);
+}
+
 function textFingerprint(text) {
   const source = String(text || '');
   let hash = 0;
@@ -99,8 +128,18 @@ function codeMirrorWorkingUpdateExtension(api, panel, path) {
       captureCodeMirrorPanelViewState(panel, path);
     }
     if (update.docChanged) {
-      handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
+      if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
     }
+  });
+}
+
+function codeMirrorSplitSyncExtension(api, panel, path) {
+  if (typeof api.EditorView?.domEventHandlers !== 'function') return [];
+  return api.EditorView.domEventHandlers({
+    blur(_event, view) {
+      flushCodeMirrorSource(panel, path);
+      return false;
+    },
   });
 }
 
@@ -117,6 +156,22 @@ function codeMirrorContextMenuSelectionExtension(api) {
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
         const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
         if (!clickedSelection) return false;
+        const panel = view.dom.closest('.file-editor-panel');
+        const path = panel?.dataset?.filePath || '';
+        if (previewKindForPath(path) === 'markdown') {
+          const range = selection.main;
+          const line = view.state.doc.lineAt(range.from);
+          const selectedText = view.state.sliceDoc(range.from, range.to);
+          if (selectedText.trim()) {
+            event.preventDefault();
+            event.stopPropagation();
+            markdownEditorContextMenu(view, panel, path, event, {
+              selectedText,
+              sourceLine: line.number,
+            });
+            return true;
+          }
+        }
         const captured = {selection};
         pending = captured;
         clearTimeout(clearTimer);
@@ -163,13 +218,19 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
-  updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
-    view.dispatch({
-      changes: {from: 0, to: view.state.doc.length, insert: next},
-      ...(preservedSelection ? {selection: preservedSelection} : {}),
-      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
-    });
-  }, {preserveSelection: selectionFits});
+  const panel = view.dom?.closest?.('.file-editor-panel');
+  if (panel) panel._cmSyncing = true;
+  try {
+    updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
+      view.dispatch({
+        changes: {from: 0, to: view.state.doc.length, insert: next},
+        ...(preservedSelection ? {selection: preservedSelection} : {}),
+        ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
+      });
+    }, {preserveSelection: selectionFits});
+  } finally {
+    if (panel) panel._cmSyncing = false;
+  }
 }
 
 function codeMirrorThemeExtensions(api, path) {
@@ -235,6 +296,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
     codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
+    codeMirrorSplitSyncExtension(api, panel, path),
   ];
 }
 
@@ -245,7 +307,7 @@ function codeMirrorEditorOptionExtensions(api, options = {}) {
     const activeLineGutter = safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.());
     extensions.push(...[lineNumbers, activeLineGutter].flat().filter(Boolean));
   }
-  if (options.wrap !== false && fileEditorWrapEnabled) {
+  if (options.wrap !== false && fileEditorWrapForPath(options.path || '', options.state || null)) {
     extensions.push(...[codeMirrorLineWrappingExtension(api), codeMirrorWrapMarkerExtension(api)].flat().filter(Boolean));
   }
   return extensions;
@@ -267,11 +329,14 @@ function codeMirrorLineWrappingExtension(api) {
 }
 
 function codeMirrorEditorOptionCompartmentExtensions(api, panel, options = {}) {
-  const extensions = codeMirrorEditorOptionExtensions(api, options);
+  const path = options.path || panel?.dataset?.filePath || '';
+  const state = options.state || (path ? fileState.get(path) : null);
+  const extensions = codeMirrorEditorOptionExtensions(api, {...options, path, state});
   if (!panel || !api.Compartment) return extensions;
   panel._cmEditorOptionCompartment = panel._cmEditorOptionCompartment || new api.Compartment();
   panel._cmEditorOptionConfig = {
     wrap: options.wrap !== false,
+    path,
     lineNumbers: options.lineNumbers !== false,
   };
   return panel._cmEditorOptionCompartment.of(extensions);
@@ -282,7 +347,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorExtensions(api, panel, path),
+        extensions: codeMirrorExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: false,
     };
@@ -292,7 +357,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorPlainEditableExtensions(api, panel, path),
+        extensions: codeMirrorPlainEditableExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: true,
       error,
@@ -976,9 +1041,15 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           if (transaction.docChanged || transaction.selectionSet) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
+            if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
+              const selection = transaction.newSelection.main;
+              const line = transaction.newDoc.lineAt(selection.from);
+              const text = transaction.newDoc.sliceString(selection.from, selection.to);
+              selectMarkdownPreviewSourceRange(path, line.number, text);
+            }
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -1039,7 +1110,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
             captureCodeMirrorPanelViewState(panel, path);
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -1056,7 +1127,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
-    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
+    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
       panel._cmView.dispatch({
         changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
       });
@@ -1085,10 +1156,10 @@ function renderFileEditorRawPane(rawPane, path, content) {
   const language = syntaxLanguageForPath(path);
   rawPane.hidden = false;
   rawPane.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  rawPane.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  rawPane.classList.toggle('editor-wrap', fileEditorWrapForPath(path));
   code.className = `language-${language || 'text'}`;
   code.innerHTML = editorVisualHighlightHtml(language, content, {
-    wrap: fileEditorWrapEnabled,
+    wrap: fileEditorWrapForPath(path),
     lineNumbers: fileEditorLineNumbersEnabled,
   });
 }
@@ -1168,6 +1239,13 @@ function editorPanelParts(panel) {
     parts.uploadButton,
   ];
   return parts;
+}
+
+function labelSplitEditorSurfaces(panel) {
+  const textPane = panel?.querySelector?.('[data-editor-surface="text-editor"]');
+  const viewPane = panel?.querySelector?.('[data-editor-surface="view-editor"]');
+  if (textPane) textPane.setAttribute('aria-label', t('editor.surface.textEditor'));
+  if (viewPane) viewPane.setAttribute('aria-label', t('editor.surface.viewEditor'));
 }
 
 function hideTextEditorPanes(parts) {
@@ -1326,17 +1404,21 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
+    renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
 }
 
 function renderTextCodeMode(panel, item, path, state, parts, mode) {
+  if (mode !== 'split') {
+    destroyProseMirrorPanel(panel);
+    delete panel._pmRequired;
+  }
   const rawPane = parts.rawPane;
   const previewPane = parts.previewPane;
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -1352,9 +1434,10 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
 }
 
 function renderTextEditorMode(panel, item, path, state, parts, mode) {
+  labelSplitEditorSurfaces(panel);
   resetImagePreviewPane(parts);
   setEditorContentMode(parts.content, mode);
-  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-wrap', fileEditorWrapForPath(path, state));
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
   if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
   else renderTextCodeMode(panel, item, path, state, parts, mode);
@@ -2236,7 +2319,8 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (mode !== 'preview' && mode !== 'split') continue;
     const state = fileEditorPanelState(panel);
     const panelContent = state?.kind === 'text' ? state.content : content;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -2355,7 +2439,8 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      if (openPanel?._pmView) syncProseMirrorPanelSource(openPanel, path, panelState);
+      else renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
@@ -2421,6 +2506,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
+  flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
@@ -2437,6 +2523,15 @@ async function performFileEditorSave(path, panel, options = {}) {
       content: savedContent,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
+    // write_file truncates in place before writing the replacement bytes. Register the expected
+    // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
+    // external edit while the filesystem operation is still queued/in flight.
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: savedContent.length,
+      pending: true,
+      expiresAt: Date.now() + 10000,
+    });
     const payload = await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -2446,6 +2541,11 @@ async function performFileEditorSave(path, panel, options = {}) {
     applyFileIdentityMetadata(state, payload);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: state.size,
+      expiresAt: Date.now() + 5000,
+    });
     state.original = savedContent;
     state.dirty = state.content !== savedContent;
     if (state.dirty) delete state.lastCleanAt;
@@ -2467,6 +2567,7 @@ async function performFileEditorSave(path, panel, options = {}) {
     renderPaneTabStrips();
     return true;
   } catch (err) {
+    fileEditorSelfWriteAcks.delete(path);
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
       return {conflict: true, message: userMessageText(err, err.message)};

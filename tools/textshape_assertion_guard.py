@@ -50,6 +50,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_common.py:test_main_process_cpu_work_has_named_allowlist": "The process-accounting allowlist is an explicit static inventory.",
     "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready": "The boot script's listener sequencing is an operator safety contract best checked before execution.",
     "tests/test_dev_restart_script.py:test_boot_restart_requires_old_listener_to_stop_before_launch": "The boot script's old-listener shutdown protocol is an operator safety contract best checked before execution.",
+    "tests/test_dev_restart_script.py:test_boot_ignore_load_is_explicit_and_preserves_other_startup_guards": "The explicit operator override must skip only the load wait while preserving the startup lock, restart path, and normal guarded wait wiring.",
     "tests/test_dev_restart_script.py:test_startup_capacity_uses_portable_eight_cpu_macos_ceiling": "The startup load predicate is an operator safety contract best checked against the launch script source and its measured output.",
     "tests/test_filesystem.py:test_filesystem_implementations_leave_os_error_normalization_to_package_facade": "The package facade is the deliberate sole owner of OS-error normalization.",
     "tests/test_gate_stats_range.py:test_debug_stats_sample_endpoint_is_not_a_live_client_contract": "The debug endpoint must stay absent from shipped client source.",
@@ -115,7 +116,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "ae0c099b20b4b9c8594d97ab8f318521a56a47a3f10dff9eadaad29354d1f61e"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "b5424136e82e6f5ca53a85be978914462becc92e14ec396c5c36c4682180349f"
 
 
 @dataclass(frozen=True, slots=True)

@@ -2489,6 +2489,7 @@ function dispatchTouchContextMenu(target, x, y) {
     clientX: x,
     clientY: y,
   });
+  event.yolomuxTouchLongPress = true;
   touchContextMenuSyntheticEvents.add(event);
   return !target.dispatchEvent(event);
 }
@@ -3312,7 +3313,7 @@ function writeStoredInfoSubTab(value) {
 }
 
 function readStoredEditorWrap() {
-  return storageGet(fileEditorWrapStorageKey) === '1';
+  return storageGet(fileEditorWrapStorageKey) !== '0';
 }
 
 function writeStoredEditorWrap(value) {
@@ -6565,7 +6566,9 @@ function dedupeInflight(inflight, key, canReuse, makeRequest) {
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
-  const iconHtml = options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
+  const iconHtml = options.checked !== undefined
+    ? `<span class="context-menu-check" aria-hidden="true">${options.checked ? '✓' : ''}</span>`
+    : options.iconHtml ? stripTitleAttrs(options.iconHtml) : '';
   const shortcutHtml = options.shortcut ? `<span class="context-menu-shortcut">${esc(options.shortcut)}</span>` : '';
   const buttonHtml = iconHtml || shortcutHtml
     ? `<span class="context-menu-line">${iconHtml ? `<span class="context-menu-icon">${iconHtml}</span>` : ''}<span class="context-menu-label">${esc(label)}</span>${shortcutHtml}</span>`
@@ -6598,7 +6601,8 @@ function appendContextMenuSeparator(menu) {
 }
 
 function contextMenuIsOpen() {
-  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen();
+  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen()
+    || markdownPreviewContextMenuController.isOpen();
 }
 
 function rootCssLengthPx(name) {
@@ -6666,6 +6670,7 @@ function closeContextMenus() {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeLinkContextMenu();
+  markdownPreviewContextMenuController.close();
 }
 
 function normalizedExternalHttpUrl(value, options = {}) {

@@ -2320,6 +2320,7 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
             "errors": [],
         },
         "codeMirrorAssetUrl": fixture_asset_url("static", "codemirror.js"),
+        "proseMirrorAssetUrl": fixture_asset_url("static", "prosemirror.js"),
         "locale": "en",
         "localeRegistry": locale_registry_payload(),
         "strings": {"en": dict(app_english_strings())},

@@ -167,7 +167,7 @@ def test_active_browser_window_workload_source_contract():
     assert "panelSelector" in source
     assert "await new Promise(requestAnimationFrame)" in source
     assert "sourceTab" in source
-    assert "sourceGroup?.querySelector('.pane-drag-handle')" in source
+    assert "const source = sourceTab;" in source
     assert "settle_browser_frames" in source
     assert "Drag YO!cost and retain only the interaction's own paint evidence" in source
     assert 'workload["drag"] = drag_yocost_pane(driver)' in source

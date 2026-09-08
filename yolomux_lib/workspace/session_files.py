@@ -67,6 +67,7 @@ from ..tmux.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from ..tmux.sessions import find_recent_codex_transcript
 from ..tmux.sessions import recent_claude_transcript_candidates  # noqa: F401 - compatibility export for transcript consumers
 from ..tmux.sessions import recent_codex_transcript_candidates
+from ..stats_current import opencode as opencode_stats
 from ..infra.types import RepoPayload
 from ..infra.types import SessionFileEntry
 from ..infra.types import SessionFilesPayload
@@ -78,6 +79,7 @@ CODEX_PATCH_RE = re.compile(r"\*\*\* (Add|Update|Delete) File: ([^\"\\\n]+)")
 CODEX_USAGE_VALUE_RE = re.compile(r'"(?:output_tokens|outputTokens|completion_tokens|completionTokens|generated_tokens|generatedTokens|reasoning_output_tokens|reasoningOutputTokens)"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
 CODEX_PATCH_STATUS = {"Add": "A", "Update": "M", "Delete": "D"}
 CODEX_SHELL_TOOL_NAMES = {"exec_command", "shell_command", "shell"}
+OPENCODE_EDIT_TOOLS = frozenset({"apply_patch", "edit", "write"})
 SHELL_COMMAND_BREAK_TOKENS = {"&&", "||", ";", "|"}
 SHELL_RUNNERS = {"bash", "sh", "zsh"}
 SESSION_FILES_MAX_HOURS = 24 * 14
@@ -2507,6 +2509,53 @@ def scan_codex_tool_call_changes_from_record(record: Any, cwd: str | None = None
     return scan_shell_command_changes(command, effective_cwd)
 
 
+def scan_opencode_tool_changes_with_mtime(agent: AgentInfo, cutoff: float | None = None) -> tuple[dict[str, set[str]], dict[str, float], str]:
+    """Extract edited paths from OpenCode's bounded local tool history for one exact session."""
+
+    if not agent.session_id:
+        return {}, {}, "opencode-session-id-missing"
+    result = opencode_stats.read_tool_inputs(session_id=agent.session_id, after=cutoff)
+    if not isinstance(result, tuple):
+        return {}, {}, str(getattr(result, "reason", "opencode-tool-history-unavailable"))
+    changes: dict[str, set[str]] = {}
+    mtimes: dict[str, float] = {}
+    def record(path: Path, markers: set[str], observed_at: float) -> None:
+        path_text = str(path)
+        record_transcript_change(changes, path_text, markers)
+        mtimes[path_text] = max(mtimes.get(path_text, 0.0), observed_at)
+    for tool_call in result:
+        if cutoff is not None and tool_call.observed_at < cutoff:
+            continue
+        if tool_call.tool == "apply_patch":
+            for raw_path, operation in tool_call.changed_files:
+                resolved = resolved_change_path(raw_path, agent.cwd)
+                if resolved is not None:
+                    record(resolved, {"add": "A", "update": "M", "delete": "D"}[operation], tool_call.observed_at)
+            if tool_call.changed_files:
+                continue
+            for verb, raw_path in CODEX_PATCH_RE.findall(tool_call.patch_text):
+                resolved = resolved_change_path(raw_path, agent.cwd)
+                if resolved is not None:
+                    record(resolved, {CODEX_PATCH_STATUS[verb]}, tool_call.observed_at)
+            continue
+        if tool_call.tool in OPENCODE_EDIT_TOOLS:
+            raw_path = tool_call.file_path
+            resolved = resolved_change_path(raw_path, agent.cwd)
+            if resolved is not None:
+                record(resolved, {"A" if tool_call.tool == "write" and tool_call.file_exists is False else "M"}, tool_call.observed_at)
+            continue
+        if tool_call.tool == "bash":
+            effective_cwd = tool_call.workdir or agent.cwd
+            if tool_call.command:
+                for path_text, markers in scan_shell_command_changes(tool_call.command, effective_cwd).items():
+                    record(Path(path_text), markers, tool_call.observed_at)
+    return changes, mtimes, ""
+
+
+def scan_opencode_tool_changes(agent: AgentInfo, cutoff: float | None = None) -> dict[str, set[str]]:
+    return scan_opencode_tool_changes_with_mtime(agent, cutoff)[0]
+
+
 def shell_tokens(command: str) -> list[str]:
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -2636,7 +2685,9 @@ def git_path_args(tokens: list[str]) -> list[str]:
     return paths
 
 
-def scan_agent_changes(agent: AgentInfo) -> dict[str, set[str]]:
+def scan_agent_changes(agent: AgentInfo, cutoff: float | None = None) -> dict[str, set[str]]:
+    if agent.kind == "opencode":
+        return scan_opencode_tool_changes(agent, cutoff)
     if not agent.transcript:
         return {}
     path = Path(agent.transcript).expanduser()
@@ -3779,7 +3830,8 @@ def touched_files_for_info(
 ) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
-        if not agent.transcript:
+        has_opencode_history = agent.kind == "opencode" and bool(agent.session_id)
+        if not agent.transcript and not has_opencode_history:
             # D2: a missing/undiscoverable transcript is inherently a PER-AGENT condition (e.g. an inactive
             # background Codex pane that never wrote a discoverable rollout). It is NOT a session-level
             # failure: the other agents and git-derived repo data in the same session are still valid. Surface
@@ -3789,11 +3841,18 @@ def touched_files_for_info(
             if agent.error and warnings is not None:
                 warnings.append(message_descriptor("diff.warning.agentDiscovery", agent.error, {"error": agent.error}))
             continue
-        transcript = Path(agent.transcript).expanduser()
-        transcript_mtime = file_mtime(transcript)
-        if transcript_mtime < cutoff:
+        transcript = Path(agent.transcript).expanduser() if agent.transcript else None
+        source_mtime = file_mtime(transcript) if transcript is not None else time.time()
+        if source_mtime < cutoff:
             continue
-        for path_text, markers in scan_agent_changes(agent).items():
+        changes, mtimes, warning = (
+            scan_opencode_tool_changes_with_mtime(agent, cutoff)
+            if agent.kind == "opencode"
+            else (scan_agent_changes(agent, cutoff), {}, "")
+        )
+        if warning and warnings is not None:
+            warnings.append(message_descriptor("diff.warning.agentDiscovery", warning, {"error": warning}))
+        for path_text, markers in changes.items():
             # C5: accumulate every agent that touched this path instead of overwriting, so a file edited
             # by both Claude and Codex keeps both attributions (rendered as two icons).
             entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
@@ -3801,7 +3860,7 @@ def touched_files_for_info(
                 entry["agents"].append(agent.kind)
             entry["agent_windows"] = merge_agent_window_lists(entry.get("agent_windows", []), [agent_window_attribution(info, agent)])
             entry["status"] = classify_change(markers)
-            entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
+            entry["mtime"] = max(float(entry.get("mtime") or 0.0), mtimes.get(path_text, source_mtime))
     for path_text, metadata in historical_codex_changes_for_info(info, cutoff).items():
         entry = touched.setdefault(path_text, {"agents": [], "agent_windows": [], "status": "", "mtime": 0.0})
         if "codex" not in entry["agents"]:

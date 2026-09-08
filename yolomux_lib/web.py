@@ -13,7 +13,6 @@ from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import MANAGED_CHAT_AGENT_KINDS
-from .common import path_mtime_or_zero
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
@@ -59,6 +58,7 @@ STATIC_CONTENT_TYPES = {
     "setup-auth.js": "application/javascript; charset=utf-8",
     "preauth-locale.js": "application/javascript; charset=utf-8",
     "codemirror.js": "application/javascript; charset=utf-8",
+    "prosemirror.js": "application/javascript; charset=utf-8",
     "emoji-data.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
@@ -186,9 +186,15 @@ def server_plural(locale: str, key: str, count: object, **params: object) -> str
     return value
 
 
-def static_asset_version(asset: str) -> int:
+def static_asset_version(asset: str) -> str:
     path = static_asset_path(asset)
-    return int(path_mtime_or_zero(path)) if path is not None else 0
+    if path is None:
+        return "0-0"
+    try:
+        stat = path.stat()
+    except OSError:
+        return "0-0"
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
 def static_asset_url(asset: str) -> str:
@@ -355,6 +361,7 @@ def html_page(
         "strings": bootstrap_locale_catalogs(locale),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
+        "proseMirrorAssetUrl": static_asset_url("prosemirror.js"),
     }
     # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
     # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the

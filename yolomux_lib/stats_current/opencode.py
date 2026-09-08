@@ -15,6 +15,7 @@ import time
 from contextlib import contextmanager
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote
@@ -36,6 +37,10 @@ MAX_CURSOR_ENTRIES = 100_000
 MAX_SAFE_CURSOR_VALUE = (1 << 53) - 1
 MAX_INCREMENTAL_PARTS = 100_000
 MAX_EVENT_ID_BYTES = 512
+MAX_TOOL_INPUT_BYTES = 64 * 1024
+MAX_TOOL_PATHS = 256
+MAX_TOOL_HISTORY_PARTS = 100_000
+_EDIT_TOOL_NAMES = ("apply_patch", "bash", "edit", "write")
 
 _SESSION_COLUMNS = (
     "id", "directory", "agent", "model", "time_created", "time_updated", "cost",
@@ -109,6 +114,22 @@ class OpenCodeReadSuccess:
     status: Literal["ok"] = "ok"
 
 
+@dataclass(frozen=True, slots=True)
+class OpenCodeToolInput:
+    """One completed OpenCode tool invocation without its potentially sensitive output."""
+
+    part_id: str
+    session_id: str
+    tool: str
+    observed_at: float
+    patch_text: str = ""
+    command: str = ""
+    workdir: str = ""
+    file_path: str = ""
+    file_exists: bool | None = None
+    changed_files: tuple[tuple[str, str], ...] = ()
+
+
 OpenCodeSessionState = Literal["working", "paused", "idle"]
 OpenCodeState = Literal["working", "paused", "idle", "unavailable"]
 
@@ -165,6 +186,7 @@ class OpenCodeAmbiguousSession:
 
 OpenCodeReadResult = OpenCodeReadSuccess | OpenCodeUnavailable | OpenCodeSchemaMismatch | OpenCodeAmbiguousSession
 OpenCodeStateReadResult = OpenCodeStateSuccess | OpenCodeStateUnavailable | OpenCodeStateSchemaMismatch
+OpenCodeToolReadResult = tuple[OpenCodeToolInput, ...] | OpenCodeUnavailable | OpenCodeSchemaMismatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +667,155 @@ def read_usage(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _read_tool_inputs_uncached(
+    database: Path = DEFAULT_DATABASE_PATH,
+    *,
+    session_id: str,
+    max_parts: int = MAX_TOOL_HISTORY_PARTS,
+    after: float | None = None,
+) -> OpenCodeToolReadResult:
+    """Read a bounded newest slice of completed OpenCode edit inputs for one exact session."""
+
+    if max_parts <= 0:
+        raise ValueError("OpenCode SQLite bounds must be positive")
+    if not _bounded_text(session_id):
+        return OpenCodeUnavailable("invalid-session-id")
+    if after is not None and (not isinstance(after, (int, float)) or not math.isfinite(float(after)) or after < 0):
+        return OpenCodeUnavailable("invalid-tool-start-time")
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{quote(str(database.expanduser().resolve(strict=False)), safe='/')}?mode=ro",
+            uri=True,
+            timeout=1.0,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        schema_error = _validate_schema(connection)
+        if schema_error is not None:
+            return OpenCodeSchemaMismatch(schema_error)
+        query = (
+            'SELECT id, session_id, time_updated, '
+            "json_extract(data, '$.tool') AS tool, "
+            "CASE WHEN length(json_extract(data, '$.state.input.patchText')) <= ? "
+            "THEN json_extract(data, '$.state.input.patchText') ELSE '' END AS patch_text, "
+            "CASE WHEN length(json_extract(data, '$.state.input.command')) <= ? "
+            "THEN json_extract(data, '$.state.input.command') ELSE '' END AS command, "
+            "CASE WHEN length(json_extract(data, '$.state.input.workdir')) <= ? "
+            "THEN json_extract(data, '$.state.input.workdir') ELSE '' END AS workdir, "
+            "json_extract(data, '$.state.metadata.exists') AS file_exists, "
+            "json_extract(data, '$.state.input.filePath') AS file_path "
+            'FROM "part" WHERE session_id = ? '
+            "AND json_valid(data) = 1 AND json_extract(data, '$.type') = 'tool' "
+            "AND json_extract(data, '$.state.status') = 'completed' "
+            "AND json_extract(data, '$.tool') IN (?, ?, ?, ?) "
+        )
+        parameters: list[object] = [MAX_TOOL_INPUT_BYTES, MAX_TOOL_INPUT_BYTES, MAX_TOOL_INPUT_BYTES, session_id, *_EDIT_TOOL_NAMES]
+        if after is not None:
+            query += "AND time_updated >= ? "
+            parameters.append(int(float(after) * 1000))
+        query += "ORDER BY time_updated DESC, id DESC LIMIT ?"
+        parameters.append(max_parts)
+        rows = connection.execute(query, parameters).fetchall()
+        tools: list[OpenCodeToolInput] = []
+        for row in rows:
+            tool = _bounded_text(row["tool"])
+            observed_at = _milliseconds(row["time_updated"])
+            part_id = _bounded_text(row["id"])
+            row_session_id = _bounded_text(row["session_id"])
+            if not part_id or row_session_id != session_id or not tool or observed_at is None:
+                return OpenCodeUnavailable("malformed-tool-part")
+            patch_text = _bounded_tool_text(row["patch_text"])
+            command = _bounded_tool_text(row["command"])
+            workdir = _bounded_tool_text(row["workdir"])
+            file_path = _bounded_tool_text(row["file_path"])
+            changed_files = _read_tool_changed_files(connection, part_id) if tool == "apply_patch" else ()
+            if changed_files is None:
+                return OpenCodeUnavailable("malformed-tool-files")
+            tools.append(OpenCodeToolInput(
+                part_id=part_id,
+                session_id=row_session_id,
+                tool=tool,
+                observed_at=observed_at,
+                patch_text=patch_text,
+                command=command,
+                workdir=workdir,
+                file_path=file_path,
+                file_exists=(row["file_exists"] == 1) if row["file_exists"] in (0, 1) else None,
+                changed_files=changed_files or ((file_path, "update"),) if file_path else changed_files,
+            ))
+        return tuple(reversed(tools))
+    except OSError:
+        return OpenCodeUnavailable("database-unavailable")
+    except sqlite3.OperationalError as error:
+        detail = str(error).casefold()
+        return OpenCodeUnavailable("database-locked" if "locked" in detail or "busy" in detail else "database-unavailable")
+    except sqlite3.DatabaseError:
+        return OpenCodeUnavailable("database-malformed")
+    except ValueError:
+        return OpenCodeUnavailable("malformed-tool-part")
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def tool_database_revision(database: Path = DEFAULT_DATABASE_PATH) -> tuple[int, int, int, int, int, int, int, int] | None:
+    """Return the SQLite and WAL identities that invalidate cached OpenCode tool attribution."""
+
+    try:
+        database_stat = database.expanduser().stat()
+    except OSError:
+        return None
+    try:
+        wal_stat = database.expanduser().with_name(f"{database.name}-wal").stat()
+        wal_identity = (int(wal_stat.st_dev), int(wal_stat.st_ino), int(wal_stat.st_mtime_ns), int(wal_stat.st_size))
+    except OSError:
+        wal_identity = (0, 0, 0, 0)
+    return (
+        int(database_stat.st_dev), int(database_stat.st_ino), int(database_stat.st_mtime_ns), int(database_stat.st_size),
+        *wal_identity,
+    )
+
+
+@lru_cache(maxsize=64)
+def _cached_tool_inputs(
+    database_text: str,
+    session_id: str,
+    max_parts: int,
+    after_milliseconds: int | None,
+    revision: tuple[int, int, int, int, int, int, int, int] | None,
+) -> tuple[OpenCodeToolInput, ...] | None:
+    result = _read_tool_inputs_uncached(
+        Path(database_text),
+        session_id=session_id,
+        max_parts=max_parts,
+        after=None if after_milliseconds is None else after_milliseconds / 1000.0,
+    )
+    return result if isinstance(result, tuple) else None
+
+
+def read_tool_inputs(
+    database: Path = DEFAULT_DATABASE_PATH,
+    *,
+    session_id: str,
+    max_parts: int = MAX_TOOL_HISTORY_PARTS,
+    after: float | None = None,
+) -> OpenCodeToolReadResult:
+    """Read cached bounded OpenCode edit inputs, invalidated by the database/WAL identity."""
+
+    database_path = database.expanduser().resolve(strict=False)
+    after_milliseconds = None if after is None else int(float(after) * 1000)
+    cached = _cached_tool_inputs(
+        str(database_path), session_id, max_parts, after_milliseconds, tool_database_revision(database_path),
+    )
+    if cached is not None:
+        return cached
+    return _read_tool_inputs_uncached(
+        database_path, session_id=session_id, max_parts=max_parts, after=after,
+    )
 
 
 def session_id_for_terminal_title(
@@ -1354,6 +1525,40 @@ def _json_object(value: object) -> dict[str, object]:
     return parsed
 
 
+def _bounded_tool_text(value: object) -> str:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_TOOL_INPUT_BYTES:
+        return ""
+    return value
+
+
+def _read_tool_changed_files(connection: sqlite3.Connection, part_id: str) -> tuple[tuple[str, str], ...] | None:
+    # OpenCode stores a complete patch for each file in this metadata array. Project only the
+    # finished path/type fields inside SQLite so a large diff or tool output cannot reject a
+    # valid edit or enter the in-memory attribution cache.
+    rows = connection.execute(
+        "SELECT json_extract(value, '$.filePath'), json_extract(value, '$.type'), json_extract(value, '$.movePath') "
+        "FROM part, json_each(part.data, '$.state.metadata.files') WHERE part.id = ? LIMIT ?",
+        (part_id, MAX_TOOL_PATHS + 1),
+    ).fetchall()
+    if len(rows) > MAX_TOOL_PATHS:
+        return None
+    result: list[tuple[str, str]] = []
+    for row in rows:
+        operation = _bounded_text(row[1])
+        if operation == "move":
+            old_path = _bounded_tool_text(row[0])
+            new_path = _bounded_tool_text(row[2])
+            if not old_path or not new_path:
+                return None
+            result.extend(((old_path, "delete"), (new_path, "add")))
+            continue
+        path = _bounded_tool_text(row[0])
+        if not path or operation not in {"add", "update", "delete"}:
+            return None
+        result.append((path, operation))
+    return tuple(result)
+
+
 def _bounded_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -1420,9 +1625,9 @@ __all__ = (
     "DEFAULT_DATABASE_PATH", "DEFAULT_MAX_PARTS", "DEFAULT_MAX_SESSIONS",
     "OpenCodeAmbiguousSession", "OpenCodeReadResult", "OpenCodeReadSuccess",
     "OpenCodeSchemaMismatch", "OpenCodeSession", "OpenCodeUnavailable",
-    "OpenCodeUsageComponent", "OpenCodeCursorState", "OpenCodeCursorStore",
+    "OpenCodeToolInput", "OpenCodeToolReadResult", "OpenCodeUsageComponent", "OpenCodeCursorState", "OpenCodeCursorStore",
     "OpenCodeState", "OpenCodeStateReadResult", "OpenCodeStateSchemaMismatch", "OpenCodeStateSuccess",
     "OpenCodeStateUnavailable", "OpenCodeSessionState", "TokenDimension", "read_state", "read_usage",
     "source_id_for_agent", "source_id_for_session", "source_id_for_directory",
-    "source_id_for_selector", "delta_event_id",
+    "source_id_for_selector", "delta_event_id", "read_tool_inputs",
 )

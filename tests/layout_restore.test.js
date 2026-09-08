@@ -1620,7 +1620,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
     assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
     const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
+    assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); font-weight: 700; }'), 'Markdown table headers get a readable preview background');
     assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }'), 'Markdown thematic breaks render as preview rules');
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
@@ -2436,7 +2436,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(focusedPanelBody.includes('focusPreferencesSearch'), false, 'shared pane focus does not steal focus into Preferences search');
     assert.ok(focusedPanelBody.includes('updateFocusOnlyChrome()'), 'shared pane focus refreshes every pane focus ring through the shared focus-chrome parent');
     const panelShellStart = source.indexOf('function bindPanelShell(');
-    const panelShellEnd = source.indexOf('const head = panel.querySelector', panelShellStart);
+    const panelShellEnd = source.indexOf('function eventTargetIsTerminalFocusSurface(', panelShellStart);
     assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
     const panelShellBody = source.slice(panelShellStart, panelShellEnd);
     assert.equal(panelShellBody.includes('focusPreferencesSearch'), false, 'panel pointer/focus events do not steal focus into Preferences search');
@@ -4420,7 +4420,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/async function renderMermaidSourceInto[\s\S]*previewZoomOptionsForKind\(fullPreview \? 'mermaidFull' : 'mermaidInline'/.test(source), 'Mermaid previews use shared renderer zoom policy');
     assert.ok(/function disconnectPreviewZoomSurface\(shell, options = \{\}\)[\s\S]*resetPreviewZoomSurfaceClasses/.test(source), 'visual preview zoom cleanup uses one reset helper');
     assert.ok(/function hydratePreviewZoomSurface[\s\S]*data-preview-zoom-action[\s\S]*setPreviewZoomSurfaceState/.test(source), 'visual preview zoom controls can hydrate existing markup');
-    assert.ok(source.includes("renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'})"), 'Split Preview keeps its own preview zoom context through the shared selection/find-preserving renderer');
+    assert.ok(source.includes("renderProseMirrorPreviewMode(panel, item, path, state, parts)"), 'Split Preview keeps its own preview zoom context through the ProseMirror renderer');
     assert.ok(source.includes("hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc)"), 'preview pop-out rehydrates zoom controls after snapshot writes');
     assert.ok(source.includes('.file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell'), 'preview pop-out preserves zoom-shell layout');
     assert.equal(source.includes('fileEditorImageModeForPath'), false, 'visual previews do not keep the obsolete imageMode state path');

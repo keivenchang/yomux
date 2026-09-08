@@ -171,4 +171,89 @@ test('numbered Markdown task labels are a post-parse presentation transform', ()
   assert.match(taskLabelCss, /min-width:\s*0/, 'long task prose can wrap within the label column');
 });
 
+test('Markdown Preview editing converts plain paragraph and inline emphasis changes back to source', () => {
+  const source = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(sourceBetween(
+    source,
+    'function markdownInlinePlainText',
+    'const MARKDOWN_TASK_LINE_RE'
+  ), context);
+
+  const textNode = value => ({nodeType: 3, nodeValue: value});
+  const element = (tagName, ...children) => ({
+    nodeType: 1,
+    tagName,
+    childNodes: children,
+    classList: {contains: () => false},
+  });
+  const formatted = element('P', element('STRONG', textNode('bold')), textNode(' words'));
+  const previewSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+  assert.equal(context.markdownInlineSourceFromNode(formatted), '**bold** words');
+  assert.deepEqual(
+    [...context.markdownTextWithInlineLineEdited('Intro\n\n**old** words\n\nTail', 3, '**new** words', 'paragraph').split('\n')],
+    ['Intro', '', '**new** words', '', 'Tail'],
+  );
+  assert.deepEqual(
+    [...context.markdownTextWithInlineLineEdited('# Old title\nBody', 1, 'New title', 'heading').split('\n')],
+    ['# New title', 'Body'],
+  );
+  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'bold'), 'Say **hello** here');
+  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'italic'), 'Say *hello* here');
+  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'strike'), 'Say ~~hello~~ here');
+  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'underline'), 'Say <u>hello</u> here');
+  assert.equal(context.markdownTextWithInlineFormat('Say **hello** here', 1, 'hello', 'bold'), 'Say hello here');
+  assert.equal(context.markdownTextWithInlineFormat('Say *hello* here', 1, 'hello', 'italic'), 'Say hello here');
+  assert.equal(context.markdownTextWithBlockFormat('A paragraph', 1, 'bullet'), '- A paragraph');
+  assert.equal(context.markdownTextWithBlockFormat('A paragraph', 1, 'h2'), '## A paragraph');
+  assert.equal(context.markdownTextWithInlineFormat('Say hello here', 1, 'hello', 'bold'), 'Say **hello** here');
+  assert.equal(context.markdownTextWithInlineFormat('Say **hello** here', 1, 'hello', 'bold'), 'Say hello here');
+  assert.equal(context.markdownTextWithInlineLineEdited('Title\nFirst line\nsecond line\n\nNext', 2, 'Changed', 'paragraph'), 'Title\nChanged\n\nNext');
+  assert.equal(context.markdownTextWithInlineFormat('Say `hello` here', 1, 'hello', 'bold'), 'Say **`hello`** here');
+  assert.equal(context.markdownTextWithInlineFormat('***~~<u>*product*</u>~~***', 1, 'product', 'clearInline'), 'product');
+  const formats = ['bold', 'italic', 'strike', 'underline', 'code'];
+  for (const command of formats) {
+    const once = context.markdownTextWithInlineFormat('product', 1, 'product', command);
+    assert.equal(context.markdownTextWithInlineFormat(once, 1, 'product', command), 'product', `${command} toggles off`);
+  }
+  let combined = 'product';
+  for (const command of formats) combined = context.markdownTextWithInlineFormat(combined, 1, 'product', command);
+  assert.equal(combined, '** * ~~ <u>`product`</u> ~~ * **'.replaceAll(' ', ''), 'format combinations use canonical nesting');
+  assert.match(previewSource, /markdownPreviewLastEdit/, 'Preview keeps a source-level undo transaction');
+  assert.equal(context.markdownTextWithInlineLineEdited('- list item', 1, 'changed', 'paragraph'), null);
+  assert.match(previewSource, /block\.contentEditable = 'true'/, 'simple Markdown blocks are editable in Preview');
+  assert.match(previewSource, /updateMarkdownFormatFromPreview/, 'Preview formatting uses the source transform');
+  assert.match(previewSource, /handleFileEditorContentChanged\(sourcePanel, path, next/, 'Preview edits use the canonical content owner');
+  assert.match(previewSource, /scope\.ownEvent\('contextmenu'/, 'Preview owns the browser context menu for editable blocks');
+  assert.match(previewSource, /markdownPreviewContextMenuController\.open/, 'Preview opens the formatting context menu');
+  assert.match(previewSource, /skipPreviewPanel: container/, 'Preview edits do not redraw the active editable surface while typing');
+  assert.match(previewSource, /markdownPreviewSourceChange/, 'Preview edits use an explicit source transaction helper');
+  assert.match(previewSource, /keydown-preview-enter/, 'Preview Enter has an explicit source split path');
+  assert.match(previewSource, /Heading 4 \/ H4/);
+  assert.match(previewSource, /Heading 5 \/ H5/);
+  assert.doesNotMatch(previewSource, /inlineHeading\.textContent = t\('editor\.toolbar\.aria'\)/);
+  assert.doesNotMatch(previewSource, /blockHeading\.textContent = t\('editor\.toolbar\.aria'\)/);
+  assert.match(previewSource, /checked\}/);
+  assert.match(fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8'), /context-menu-check/);
+  assert.match(previewSource, /function markdownInlineFormatState/);
+  assert.match(previewSource, /function markdownPreviewSourceChange/);
+  assert.match(previewSource, /function handleMarkdownPreviewEnter/);
+  assert.match(previewSource, /function handleMarkdownPreviewInput/);
+  assert.match(previewSource, /<br>/);
+  assert.match(previewSource, /markdownSourceOffsetAtVisibleOffset/);
+  assert.match(previewSource, /function markdownTextWithBackspaceAtOffset/);
+  assert.match(previewSource, /deleteContentBackward/);
+  assert.equal(context.markdownTextWithBackspaceAtOffset('one\n\ntwo', 5, 0), 'one\ntwo');
+  assert.equal(context.markdownTextWithBackspaceAtOffset('one\n\ntwo', 5, 0), 'one\ntwo');
+  assert.equal(context.markdownTextWithBackspaceAtOffset('one<br>two', 7, 0), 'onetwo');
+  assert.equal(context.markdownSourceOffsetAtVisibleOffset('one<br>two', 4), 7);
+  assert.equal(context.markdownTextWithBackspaceAtOffset('one two', 4, 0), null);
+  assert.match(previewSource, /insertParagraph|insertLineBreak/);
+  assert.match(previewSource, /markdownPreviewCaptureSelection/, 'Preview captures the selection before context-menu collapse');
+  assert.match(previewSource, /function markdownFormattingContextMenu/, 'Editor and Preview share one formatting context-menu owner');
+  assert.match(previewSource, /markdownEditorContextMenu\(view, panel, path/, 'Markdown CodeMirror selection opens the shared formatting menu');
+  assert.match(previewSource, /clearInlineFormatting|markdownTextWithInlineFormat/, 'Preview formatting has a source-level toggle path');
+});
+
 runSuites([() => runEditorPreviewSuite({shardIndex: 0, shardCount: 3})]);

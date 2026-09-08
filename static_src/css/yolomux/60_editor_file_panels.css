@@ -76,6 +76,16 @@ body.editor-theme-light .file-editor-image-panel {
   height: auto;
   object-fit: contain;
 }
+.ProseMirror img.prosemirror-image-error {
+  outline: 2px solid var(--code-invalid);
+  outline-offset: 2px;
+}
+.markdown-body .ProseMirror img.prosemirror-image {
+  display: inline-block;
+  max-inline-size: min(100%, 32rem);
+  vertical-align: text-bottom;
+}
+.ProseMirror [data-markdown-soft-break] { white-space: pre; }
 .mermaid-preview-image {
   max-height: min(340px, 48vh);
 }
@@ -92,6 +102,38 @@ body.editor-theme-light .file-editor-image-panel {
   padding: var(--space-12);
   border-radius: var(--radius-md);
   overflow-wrap: anywhere;
+}
+.file-editor-prosemirror-loading,
+.file-editor-prosemirror-error {
+  display: grid;
+  align-content: center;
+  gap: var(--space-10);
+  min-height: 180px;
+  margin: var(--space-12);
+  padding: var(--space-12);
+  border: 2px solid var(--code-invalid);
+  border-radius: var(--radius-md);
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 14%, var(--bg));
+  font: 650 var(--ui-font-size-sm)/1.45 var(--ui-font);
+}
+.file-editor-prosemirror-error strong {
+  font-size: var(--ui-font-size-lg);
+}
+.file-editor-prosemirror-error p {
+  margin: 0;
+}
+.file-editor-prosemirror-watermark {
+  position: sticky;
+  inset-block-start: var(--space-8);
+  z-index: var(--z-file-editor-layer);
+  margin-block-end: var(--space-12);
+  box-shadow: 0 var(--space-4) var(--space-12) var(--paint-black-45);
+}
+.file-editor-prosemirror-loading {
+  border-color: var(--line);
+  color: var(--muted);
+  background: var(--bg);
 }
 .markdown-image-error {
   margin: var(--space-8) 0;
@@ -694,6 +736,52 @@ body.editor-theme-light .file-editor-image {
   font-size: var(--editor-preview-font-size);
   line-height: 1.35;
 }
+.prosemirror-editor {
+  min-height: 100%;
+  padding: var(--space-8) var(--space-10);
+  outline: none;
+}
+.prosemirror-editor > .ProseMirror {
+  min-height: 100%;
+  outline: none;
+  cursor: text;
+  white-space: pre-wrap;
+}
+.prosemirror-editor .ProseMirror-selectednode { outline: 2px solid var(--active-control-border); }
+.prosemirror-editor p { min-height: 1.4em; }
+.markdown-preview-editor-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-file-editor-preview-layer);
+  display: flex;
+  gap: var(--space-2);
+  width: fit-content;
+  margin: calc(var(--space-8) * -1) 0 var(--space-8) auto;
+  padding: var(--space-2);
+  background: var(--editor-preview-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+.markdown-preview-editor-toolbar button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 var(--space-4);
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.markdown-preview-editor-toolbar button:hover,
+.markdown-preview-editor-toolbar button:focus-visible { box-shadow: var(--active-control-focus-shadow-compact); }
+.file-editor-preview-pane-panel [data-markdown-preview-editable="true"] {
+  outline: 1px dashed transparent;
+  outline-offset: 3px;
+}
+.file-editor-preview-pane-panel [data-markdown-preview-editable="true"]:hover,
+.file-editor-preview-pane-panel [data-markdown-preview-editable="true"]:focus {
+  outline-color: var(--line);
+}
 .file-editor-preview-pane {
   position: absolute;
   inset: 0;
@@ -714,6 +802,10 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
 .markdown-body h3 { font-size: 1.2em; }
 .markdown-body p { margin: var(--space-4) 0 var(--space-6); }
 .markdown-body a { color: var(--markdown-link); text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
+.markdown-body mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: var(--radius-sm); padding-inline: 0.1em; }
+.markdown-body kbd { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); padding: 0.05em 0.3em; font: 700 0.85em var(--mono-font); box-shadow: inset 0 -1px 0 var(--line); }
+.markdown-body details { margin: var(--space-8) 0; padding: var(--space-8); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.markdown-body details > summary { cursor: pointer; font-weight: 700; }
 .markdown-body strong {
   color: var(--markdown-strong, var(--text));
 }
@@ -935,9 +1027,9 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote.mar
   background: var(--markdown-alert-caution-dark-bg);
 }
 body:not(.editor-theme-light) .file-editor-content .markdown-body blockquote:is(.markdown-alert-warning, .markdown-alert-caution) :is(strong, em) { color: var(--markdown-html-dark-text); }
-.markdown-body table { border-collapse: collapse; margin: var(--space-8) 0; }
-.markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: var(--space-4) var(--space-8); }
-.markdown-body th { background: var(--panel2); }
+.markdown-body table { width: max-content; max-width: 100%; border-collapse: collapse; margin: var(--space-8) 0; }
+.markdown-body th, .markdown-body td { min-width: 5ch; border: 1px solid var(--line); padding: var(--space-6) var(--space-8); vertical-align: top; }
+.markdown-body th { background: var(--panel2); font-weight: 700; }
 .markdown-body .markdown-html-light-bg,
 .markdown-body table.markdown-html-light-bg :is(th, td),
 .markdown-body table[bgcolor],
@@ -1180,9 +1272,11 @@ body.file-explorer-mode-diff .file-explorer-mode-files-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-only,
 body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only,
 body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only,
+body.file-explorer-mode-files .file-explorer-mode-files-diff-only,
 .file-explorer-panel[data-file-explorer-mode="diff"] .file-explorer-mode-files-only,
 .file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-only,
 .file-explorer-panel:not([data-file-explorer-mode="diff"]) .file-explorer-mode-diff-only,
+.file-explorer-panel[data-file-explorer-view="finder"].file-explorer-root-mode-fixed .file-explorer-mode-files-diff-only,
 .file-explorer-panel[data-file-explorer-mode="tabber"] .file-explorer-mode-files-diff-only {
   display: none;
 }

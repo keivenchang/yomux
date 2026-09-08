@@ -79,12 +79,18 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
   if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
   const userInitiated = options.userInitiated === true || pendingUserGesture;
-  if (isTmuxSession(panelItem) && userInitiated && focusedPanelItem !== panelItem) {
+  if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
+    scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
   }
   setFocusedPanelItem(panelItem, {userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
   return true;
+}
+
+function dockviewCommitTouchTabActivation(event) {
+  const state = dockviewLayoutState.tabPointerDrag;
+  return Boolean(state) && state.dragged !== true && event?.type === 'touchend';
 }
 
 function dockviewCore() {
@@ -131,9 +137,11 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 }
 
 function dockviewRootBoundaryDropIntent(event) {
+  if (event?.kind === 'tab') return null;
   if (narrowSingleColumnMode()) return null;
   const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
   if (event?.nativeEvent && tabPointerDrag?.item) {
+    if (dockviewTabDropTargetActive(event)) return null;
     // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
     // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
     // The pointer gesture owns the decision while it is live: it only returns a root intent when
@@ -162,8 +170,28 @@ function dockviewRootBoundaryDropIntent(event) {
   };
 }
 
+function dockviewContentDropRegionForEvent(event) {
+  const nativeEvent = event?.nativeEvent || event;
+  const group = event?.group || dockviewGroupForPoint(Number(nativeEvent?.clientX), Number(nativeEvent?.clientY));
+  const targetSlot = group ? dockviewSlotForGroupElement(group) : '';
+  const targetRect = group?.getBoundingClientRect?.() || null;
+  if (!group || !targetSlot || !targetRect) return null;
+  const headerRect = group.querySelector?.('.dv-tabs-and-actions-container')?.getBoundingClientRect?.();
+  if (headerRect && Number(nativeEvent?.clientY) <= headerRect.bottom) return null;
+  const content = Array.from(group.querySelectorAll?.('[data-dockview-region="content"]') || [])
+    .find(node => {
+      const rect = node.getBoundingClientRect?.();
+      const x = Number(nativeEvent?.clientX);
+      const y = Number(nativeEvent?.clientY);
+      return rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+  if (!content) return null;
+  return {group, slot: targetSlot, rect: content.getBoundingClientRect()};
+}
+
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
+  if (dockviewTabDropTargetActive(event)) return null;
   const targetSlot = dockviewSlotForGroupId(event.group.id || '');
   const targetRect = targetSlot ? layoutSlotScreenRect(targetSlot) : null;
   const fileSurfaceContent = event.nativeEvent?.target?.closest?.(
@@ -197,6 +225,7 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
   if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return null;
+  if (dockviewTabDropTargetActive(event)) return null;
   const dx = Math.abs(pointerX - (Number(state.x) || 0));
   const dy = Math.abs(pointerY - (Number(state.y) || 0));
   const explicitZone = ['top', 'bottom'].includes(event?.position) ? event.position : null;
@@ -303,6 +332,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 }
 
 function dockviewTrackRootBoundaryOverlay(event) {
+  if (dockviewTabDropTargetActive(event)) {
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearRootBoundaryPreview();
+    event.preventDefault?.();
+    return;
+  }
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
   const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
@@ -562,7 +597,41 @@ function dockviewTabEdgeReorderIntent(event) {
 function dockviewTabForPoint(x, y) {
   const node = document.elementFromPoint?.(x, y);
   const tab = node?.closest?.('.dv-tab');
-  return tab?.querySelector?.('.dockview-pane-tab') || node?.closest?.('.dockview-pane-tab') || null;
+  if (tab) return tab.querySelector?.('.dockview-pane-tab') || null;
+  const tabNodes = dockviewLayoutState.host?.querySelectorAll?.('.dv-tab') || [];
+  for (const candidate of tabNodes) {
+    const rect = candidate.getBoundingClientRect?.();
+    if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      return candidate.querySelector?.('.dockview-pane-tab') || null;
+    }
+  }
+  return node?.closest?.('.dockview-pane-tab') || null;
+}
+
+function dockviewTabPointerOverTab(event) {
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  const node = document.elementFromPoint?.(x, y);
+  if (node?.closest?.('.dv-tab, .dockview-pane-tab')) return true;
+  const padding = 16;
+  const tabNodes = [
+    ...(dockviewLayoutState.host?.querySelectorAll?.('.dv-tab, .dockview-pane-tab') || []),
+    ...(document.querySelectorAll?.('.dv-tab, .dockview-pane-tab') || []),
+  ];
+  return [...new Set(tabNodes)].some(tab => {
+    const rect = tab.getBoundingClientRect?.();
+    return rect
+      && x >= rect.left - padding
+      && x <= rect.right + padding
+      && y >= rect.top - padding
+      && y <= rect.bottom + padding;
+  });
+}
+
+function dockviewTabDropTargetActive(event) {
+  return event?.kind === 'tab'
+    || Boolean(dockviewLayoutState.tabPointerDrag?.item && dockviewTabPointerOverTab(event?.nativeEvent || event));
 }
 
 function dockviewSuppressPanePointerDrag(ms = PANE_DRAG_SUPPRESS_MS) {
@@ -630,6 +699,7 @@ function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
 
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
+  if (dockviewTabPointerOverTab(event)) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
@@ -689,6 +759,7 @@ function dockviewTrackTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  state.dragged = true;
   beginLayoutMutationCompletion(state);
   const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) {
@@ -735,13 +806,13 @@ function dockviewFinishTabPointerDrag(event) {
     }, 0);
     return;
   }
-  const targetGroup = dockviewGroupForPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
-  const contentTargetSlot = dockviewSlotForGroupElement(targetGroup);
+  const contentRegion = dockviewContentDropRegionForEvent(event);
+  const contentTargetSlot = contentRegion?.slot || '';
   const contentIntent = contentTargetSlot ? {
     item: state.item,
     sourceSlot: state.slot,
     targetSlot: contentTargetSlot,
-    targetRect: layoutSlotScreenRect(contentTargetSlot),
+    targetRect: contentRegion?.rect || null,
     zone: 'middle',
     createsPane: false,
   } : null;
@@ -1113,6 +1184,10 @@ function dockviewInstallTabPointerReorderFallback() {
     dockviewTrackPanePointerDrag(event);
   };
   const finish = event => {
+    if (dockviewCommitTouchTabActivation(event)) {
+      const state = dockviewLayoutState.tabPointerDrag;
+      dockviewCommitPanelActivation(state.item, {userInitiated: true});
+    }
     dockviewFinishTabPointerDrag(event);
     dockviewFinishPanePointerDrag(event);
   };
@@ -2146,6 +2221,9 @@ function createDockviewTabRenderer() {
   let item = '';
   let api = null;
   let disposables = [];
+  const bindDrag = () => {
+    bindPaneTabNativeDragSource(element, () => item, () => slotForItem(item));
+  };
   const render = () => {
     if (dockviewLayoutState.applyingFromLayout) return;
     if (!item) return;
@@ -2164,6 +2242,7 @@ function createDockviewTabRenderer() {
     }
     cleanupDetachedPaneTabPopover(element);
     element.innerHTML = dockviewPaneTabHtml(item);
+    bindDrag();
     if (isFileEditorItem(item)) {
       bindFilePopoverActions(element);
       bindPaneTabPopover(element, item);

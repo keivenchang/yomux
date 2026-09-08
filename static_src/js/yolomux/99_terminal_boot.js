@@ -934,21 +934,21 @@ function createPanel(session) {
       bodyAttributes: `id="terminal-pane-${esc(session)}"`,
       bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
       toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
-      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
+      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
           <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
       </div>
-      <div id="summary-pane-${session}" class="tab-pane">
+      <div id="summary-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
           <div id="summary-context-${session}" class="summary-context" data-locale-text-key="summary.loadingContext">${esc(t('summary.loadingContext'))}</div>
           <div id="summary-${session}" class="summary-preview markdown-body" data-locale-text-key="summary.emptyPrompt">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
-      <div id="events-pane-${session}" class="tab-pane">
+      <div id="events-pane-${session}" class="tab-pane" data-dockview-region="content">
         <div class="summary">
           <div class="transcript-head">${esc(t('events.title'))}</div>
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
@@ -3575,6 +3575,10 @@ function bindClipboardPaste() {
     event.preventDefault();
     event.stopPropagation();
     if (editorTarget) {
+      if (editorTarget.surface === 'view-editor-unavailable') {
+        statusErr(esc(editorTarget.panel?._pmError || t('editor.prosemirrorDidNotInitialize')));
+        return;
+      }
       const files = dataTransferImageFiles(event.clipboardData);
       if (!files.length) {
         statusErr(localizedHtml('status.selectPaneForImagePaste'));
@@ -3607,13 +3611,34 @@ function bindClipboardPaste() {
 
 function markdownEditorPasteTarget(event) {
   const eventPanel = event.target?.closest?.('.file-editor-panel') || null;
-  const focusedPanel = !eventPanel && !focusedTerminal && isFileEditorItem(focusedPanelItem) ? panelNodes.get(focusedPanelItem) || null : null;
-  const panel = eventPanel || focusedPanel;
+  const focusedPanel = !eventPanel && isFileEditorItem(focusedPanelItem) ? panelNodes.get(focusedPanelItem) || null : null;
+  const activePanel = !eventPanel && !focusedPanel ? document.querySelector('.file-editor-panel.active-pane') : null;
+  const panel = eventPanel || focusedPanel || activePanel;
   const view = panel?._cmView || null;
-  if (!panel || !view || panel._cmMode === 'diff') return null;
+  const proseMirrorView = panel?._pmView || null;
+  if (!panel || panel._cmMode === 'diff') return null;
   const path = fileEditorPanelPath(panel) || fileItemPath(fileEditorPanelItem(panel) || focusedPanelItem);
   if (!path || previewRendererForPath(path)?.id !== 'markdown') return null;
-  return {panel, view, path};
+  const previewContainer = event.target?.closest?.('.file-editor-preview-pane-panel') || null;
+  const codeMirrorContainer = event.target?.closest?.('.file-editor-codemirror-panel') || null;
+  const viewPane = previewContainer || panel.querySelector?.('.file-editor-preview-pane-panel') || null;
+  const targetInViewPane = Boolean(previewContainer || (!codeMirrorContainer && document.activeElement && viewPane?.contains?.(document.activeElement)));
+  const surface = proseMirrorView && targetInViewPane && viewPane?.contains?.(proseMirrorView.dom)
+    ? 'view-editor'
+    : view && (codeMirrorContainer || !targetInViewPane)
+      ? 'text-editor'
+      : viewPane && panel._pmRequired
+        ? 'view-editor-unavailable'
+        : previewContainer
+          ? 'legacy-preview'
+        : null;
+  if (!surface) return null;
+  const selection = surface === 'view-editor'
+    ? {from: proseMirrorView.state.selection.from, to: proseMirrorView.state.selection.to}
+    : surface === 'text-editor'
+      ? {from: view.state.selection.main.from, to: view.state.selection.main.to}
+      : null;
+  return {panel, view, proseMirrorView, path, previewContainer, surface, selection};
 }
 
 // ONE shared image-payload contract for BOTH paste (clipboardData) and drop (dataTransfer). A browser may
@@ -3955,9 +3980,37 @@ function pasteUploadReferences(files) {
 function insertEditorPasteUploadReferences(editorTarget, files) {
   const references = markdownImageUploadReferences(files);
   if (!references.length) return false;
+  const proseMirrorView = editorTarget?.surface === 'view-editor' ? editorTarget.proseMirrorView : null;
+  if (proseMirrorView?.state?.doc && typeof proseMirrorView.dispatch === 'function') {
+    const parser = editorTarget.panel?._pmParser;
+    const fragments = references.map(reference => parser?.parse?.(reference)?.firstChild?.content).filter(Boolean);
+    if (fragments.length === references.length) {
+      let content = fragments[0];
+      for (const fragment of fragments.slice(1)) content = content.append(fragment);
+      const currentSize = proseMirrorView.state.doc.content.size;
+      const from = Math.max(0, Math.min(currentSize, Number(editorTarget.selection?.from ?? proseMirrorView.state.selection.from)));
+      const to = Math.max(from, Math.min(currentSize, Number(editorTarget.selection?.to ?? from)));
+      proseMirrorView.dispatch(proseMirrorView.state.tr.replaceWith(from, to, content).scrollIntoView());
+      proseMirrorView.focus?.();
+      return true;
+    }
+    return false;
+  }
   const view = editorTarget?.view;
-  if (!view?.state?.doc || typeof view.dispatch !== 'function') return false;
-  const selection = view.state.selection?.main || {};
+  if (!view?.state?.doc || typeof view.dispatch !== 'function') {
+    const container = editorTarget?.previewContainer;
+    const panel = editorTarget?.panel;
+    const state = panel ? fileEditorPanelState(panel) : null;
+    if (!container || !state || state.kind !== 'text') return false;
+    const context = markdownPreviewSelectionContext(container);
+    const line = Number(context?.block?.dataset?.sourceLine || 0);
+    const offsets = context?.block
+      ? markdownEditableRangeOffsets(state.content, line, context.block.dataset.sourceEndLine, context.block)
+      : {start: state.content.length, end: state.content.length};
+    const insert = references.join('\n');
+    return markdownPreviewSourceChange(container, panel, editorTarget.path, offsets.start, offsets.start, `${insert}\n\n`);
+  }
+  const selection = editorTarget?.selection || view.state.selection?.main || {};
   const docLength = Number(view.state.doc.length) || 0;
   const from = Math.max(0, Math.min(docLength, Number.isFinite(selection.from) ? selection.from : docLength));
   const to = Math.max(from, Math.min(docLength, Number.isFinite(selection.to) ? selection.to : from));
@@ -3972,9 +4025,12 @@ function insertEditorPasteUploadReferences(editorTarget, files) {
 
 function markdownImageUploadReferences(files) {
   return (files || []).map(file => {
-    const path = file.path || file.relative_path || file.saved_name || '';
+    const path = file.relative_path || file.path || file.saved_name || '';
     if (!path) return '';
-    return `![image](${markdownLinkTarget(path)})`;
+    const original = file.name || file.original_name || file.filename || file.saved_name || pathBasename(path);
+    const alt = String(original || 'image').replace(/\.[^.]+$/, '').replace(/[\[\]]/g, '') || 'image';
+    const target = file.relative_path || file.path || path;
+    return `![${alt}](${markdownLinkTarget(target)})`;
   }).filter(Boolean);
 }
 

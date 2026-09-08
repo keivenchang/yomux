@@ -16,6 +16,7 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 ## Generated Browser Bundles
 
 - CodeMirror 6 packages and `esbuild` are used to rebuild `static/codemirror.js` from `tools/codemirror-bundle/codemirror-entry.js`; `tools/codemirror-bundle/package-lock.json` records MIT license metadata for those packages.
+- ProseMirror packages and `esbuild` are used to rebuild `static/prosemirror.js` from `tools/prosemirror-bundle/prosemirror-entry.js`; `tools/prosemirror-bundle/package-lock.json` records MIT license metadata for those packages and their Markdown parser dependencies.
 
 ## Development/Test Dependencies
 

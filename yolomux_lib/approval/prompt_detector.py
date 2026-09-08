@@ -26,6 +26,10 @@ _OPENCODE_BUILD_LINE_RE = re.compile(r"^\s*[│┃▣]\s*Build(?:\s|$)", re.IGNO
 _OPENCODE_IDLE_HINT_RE = re.compile(r"Ask anything|tab agents|ctrl\+p cmd(?:s|ands)?", re.IGNORECASE)
 _OPENCODE_TOOL_ROW_RE = re.compile(r"^\s*[│┃]?\s*(?:[⠋-⠿]|~)\s+\S", re.IGNORECASE)
 _OPENCODE_PERMISSION_RE = re.compile(r"\bPermission\s+required\b", re.IGNORECASE)
+_OPENCODE_VISIBLE_ERROR_RE = re.compile(
+    r"(?:\b(?:Error|Exception|Failure|Failed|Fatal)\b|\b(?:BadRequestError|InternalServerError)\b|\bHTTP\s+[45]\d\d\b|\b(?:status|code)\s*[:=]\s*[45]\d\d\b)",
+    re.IGNORECASE,
+)
 _OPENCODE_FOOTER_BUILD_RE = re.compile(r"^\s*[│┃▣]?\s*Build\s*[·•]", re.IGNORECASE)
 _OPENCODE_FOOTER_BUILD_START_RE = re.compile(r"^\s*[│┃▣]?\s*(?:Build|Bui)(?:\s|[·•]|$)", re.IGNORECASE)
 _OPENCODE_RESPONSE_BUILD_RE = re.compile(r"^\s*▣\s+Build(?:\s|$)", re.IGNORECASE)
@@ -1756,6 +1760,38 @@ def _opencode_bounded_question(lines: list[str], bounds: tuple[int, int, int] | 
     return question, options
 
 
+def _opencode_visible_error(lines: list[str], bounds: tuple[int, int, int] | None) -> str:
+    """Return a current visible error, excluding old scrollback and UI chrome."""
+    if bounds is not None:
+        composer_start, _composer_end, _build_index = bounds
+        response_build_index = max(
+            (
+                index for index in range(composer_start)
+                if _OPENCODE_RESPONSE_BUILD_RE.match(lines[index])
+            ),
+            default=-1,
+        )
+    else:
+        response_build_index = max(
+            (
+                index for index, line in enumerate(lines[-24:], start=max(0, len(lines) - 24))
+                if _OPENCODE_RESPONSE_BUILD_RE.match(line)
+            ),
+            default=-1,
+        )
+        composer_start = len(lines)
+    if response_build_index < 0:
+        return ""
+    candidates = lines[response_build_index:composer_start]
+    for line in reversed(candidates):
+        normalized = line.strip().strip("│┃").strip()
+        if not normalized or _is_separator_or_footer(line) or _OPENCODE_IDLE_HINT_RE.search(normalized):
+            continue
+        if _OPENCODE_VISIBLE_ERROR_RE.search(normalized):
+            return normalized
+    return ""
+
+
 def _opencode_working_state(line: str) -> dict[str, object]:
     return {
         "key": "working",
@@ -1912,6 +1948,9 @@ def _opencode_visible_screen_state(
     question = _opencode_bounded_question(lines, bounds)
     if question is not None:
         return _opencode_question_state(*question)
+    visible_error = _opencode_visible_error(lines, bounds)
+    if visible_error:
+        return _opencode_blocked_state(visible_error)
     if bounds is None:
         # OpenCode has no generic approval fallback. An incomplete or unfamiliar capture is
         # not evidence that the agent is blocked, and must not create a false attention badge.

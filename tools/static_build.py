@@ -769,6 +769,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/90_pane_popout.js",
         "static_src/js/yolomux/91_preview_popout.js",
         "static_src/js/yolomux/92_codemirror_editor.js",
+        "static_src/js/yolomux/93_prosemirror_editor.js",
         "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
         "static_src/js/yolomux/99_client_event_transport.js",

@@ -748,6 +748,23 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .context-menu-label {
   min-width: 0;
 }
+.terminal-context-menu .context-menu-check {
+  display: inline-flex;
+  flex: 0 0 1.1em;
+  width: 1.1em;
+  height: 1.1em;
+  align-items: center;
+  justify-content: center;
+  color: var(--active-control-text);
+  font: 700 var(--ui-font-size)/1 var(--ui-font);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.terminal-context-menu button[aria-checked="true"] .context-menu-check {
+  color: var(--active-control-text);
+  background: color-mix(in srgb, var(--active-control-bg) 85%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--active-control-border);
+}
 .context-menu-shortcut {
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);

@@ -280,6 +280,10 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["yolo"]["prompt_source"] == "hybrid"
 
 
+def test_editor_autosave_delay_defaults_to_six_seconds():
+    assert sanitize_settings({})["editor"]["autosave_delay_seconds"] == 6
+
+
 def test_legacy_yoagent_auto_refresh_and_interval_are_dropped():
     disabled = sanitize_settings({"yoagent": {"auto_refresh": False, "refresh_interval_seconds": 120}})
     enabled = sanitize_settings({"yoagent": {"auto_refresh": True, "refresh_interval_seconds": 45}})

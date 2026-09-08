@@ -4419,10 +4419,10 @@ function commandPaletteKeybinding(label, detail = '') {
 
 // a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
-  if (mode === 'preview') return t('common.preview');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
   if (mode === 'split') return t('editor.mode.split');
   if (mode === 'diff') return t('common.diff');
-  return t('common.edit');
+  return t('editor.mode.textEdit');
 }
 
 function commandPaletteNumericTime(value) {

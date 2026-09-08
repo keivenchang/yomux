@@ -412,7 +412,7 @@ async function runLayoutAsyncSuite() {
     Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=10'], 'one request carries five viewport pages');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=200'], 'one request carries five viewport pages');
     assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
     assert.equal(requests.length, 2, 'reaching the second visible page starts the next five-page fetch');
@@ -465,7 +465,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=5$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=200$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -502,8 +502,8 @@ async function runLayoutAsyncSuite() {
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
     assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
     assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=5&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=5',
+      '/api/fs/git-history?path=%2Frepo&limit=200&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=200',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });
@@ -2705,6 +2705,33 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.currentFileStateForTest(path).dirty, false);
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
+  });
+
+  await testAsync('editor acknowledges an in-flight zero-byte self-write before its response', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/in-flight-zero-byte.md';
+    let release;
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      assert.deepStrictEqual(JSON.parse(options.body || '{}'), {path, content: 'edited\n', expected_mtime: 10});
+      return new Promise(resolve => {
+        release = () => resolve(jsonResponse({path, size: 7, mtime: 11, mtime_ns: 11, realpath: path, file_id: 'dev:1:ino:2'}));
+      });
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'edited\n', dirty: true});
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.refreshOpenFileFromFetchedStatusForTest(path, api.currentFileStateForTest(path), {
+      path,
+      entry: {kind: 'file', name: 'in-flight-zero-byte.md', size: 0, mtime_ns: 11},
+      missing: false,
+      error: null,
+      network: false,
+    });
+    assert.equal(api.currentFileStateForTest(path).externalChanged, undefined);
+    release();
+    assert.equal(await save, true);
+    assert.equal(api.currentFileStateForTest(path).dirty, false);
   });
 
   await testAsync('editor moves pending saves to a renamed path without changing the active request', async () => {
@@ -8856,7 +8883,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
     }
 
-    // Markdown editor image paste inserts the server-owned absolute central-upload paths into CodeMirror.
+    // Markdown editor image paste inserts file-directory paths returned by the server into CodeMirror.
     {
       const api = loadYolomux('', ['1']);
       const sent = [];
@@ -8891,8 +8918,8 @@ async function runLayoutAsyncSuite() {
         calls.push({url: String(url), method: options.method || 'GET', body: options.body});
         if (String(url).startsWith('/api/upload')) {
           return Promise.resolve(jsonResponse({files: [
-            {path: '/tmp/yolomux.alice/uploads/editor/one.png', relative_path: '/tmp/yolomux.alice/uploads/editor/one.png'},
-            {path: '/tmp/yolomux.alice/uploads/editor/two file.png', relative_path: '/tmp/yolomux.alice/uploads/editor/two file.png'},
+            {path: '/repo/docs/note/one.png', relative_path: 'note/one.png'},
+            {path: '/repo/docs/note/two file.png', relative_path: 'note/two file.png'},
           ]}));
         }
         return Promise.resolve(jsonResponse({items: [], session: '1'}));
@@ -8915,7 +8942,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].url, `/api/upload?editor_path=${encodeURIComponent(path)}`, 'Markdown editor paste uploads with the editor path');
       assert.equal(calls[0].method, 'POST');
       assert.equal(calls[0].body.fields.length, 2, 'Markdown editor paste uploads every image');
-      assert.equal(content, 'hello\n![image](/tmp/yolomux.alice/uploads/editor/one.png)\n![image](/tmp/yolomux.alice/uploads/editor/two%20file.png)', 'Markdown editor paste inserts absolute central-upload links at the cursor');
+      assert.equal(content, 'hello\n![one](note/one.png)\n![two file](note/two%20file.png)', 'Markdown editor paste preserves original image filenames as alt text and inserts file-directory links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
     }
@@ -9008,6 +9035,8 @@ async function runLayoutAsyncSuite() {
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
       assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
+      assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
+      assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
     }
 
     {

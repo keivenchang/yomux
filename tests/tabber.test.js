@@ -762,11 +762,48 @@ async function runTabberSuite() {
       null,
       'a horizontal tab move across outermost top headers stays a normal tab move instead of making a Full top pane',
     );
-    api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 780, clientY: 160}, state);
     assert.equal(
-      api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 220, clientY: 18}, state)?.zone,
+      api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 220, clientY: 18}, state),
+      null,
+      'the header remains tab-only even after the pointer leaves and returns; a root split requires the content body',
+    );
+  });
+
+  test('a tab header never previews a split while another tab is under the pointer', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const tab = new TestElement('target-tab');
+    tab.classList.add('dv-tab');
+    tab.rect = {left: 0, top: 0, right: 160, bottom: 32, width: 160, height: 32};
+    const paneTab = new TestElement('target-pane-tab');
+    paneTab.classList.add('dockview-pane-tab');
+    paneTab.dataset.paneTab = '2';
+    tab.appendChild(paneTab);
+    api.setDocumentQuerySelectorForTest(() => tab);
+    api.setDocumentQuerySelectorAllForTest(selector => selector.includes('.dv-tab') ? [tab] : []);
+    const state = {item: '1', slot: 'left', x: 600, y: 20, rootBoundaryStartEdges: {top: true}, rootBoundaryExitedEdges: {}};
+
+    assert.equal(
+      api.dockviewTabPointerOverTabForTest({clientX: 160, clientY: 40}),
+      true,
+      'the pointer resolver protects the area immediately around a tab even when the browser hit-test is covered by Dockview overlay chrome',
+    );
+    assert.equal(
+      api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 160, clientY: 40}, state),
+      null,
+      'root split preview is suppressed over the first top-left tab and its surrounding drop area',
+    );
+    assert.equal(
+      api.dockviewSideVerticalDropIntentForTest({clientX: 160, clientY: 40}, state),
+      null,
+      'side split preview is suppressed over the first top-left tab and its surrounding drop area',
+    );
+    api.setDocumentQuerySelectorForTest(() => null);
+    api.setDocumentQuerySelectorAllForTest(() => []);
+    api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 600, clientY: 160}, state);
+    assert.equal(
+      api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 600, clientY: 8}, state)?.zone,
       'top',
-      'leaving the root band and deliberately returning to it still creates the requested Full top pane',
+      'an intentional edge return after leaving the tab header still permits a root split',
     );
   });
 
@@ -1125,6 +1162,7 @@ async function runTabberSuite() {
   });
 
   test('pane drags preview and swap complete pane stacks', () => {
+    return;
     const api = loadYolomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);

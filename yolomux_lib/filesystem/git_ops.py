@@ -805,7 +805,7 @@ def pinned_file_git_metadata(
                     [
                         "log",
                         "--follow",
-                        f"--max-count={max(1, min(int(history_limit), 100))}",
+                        f"--max-count={max(1, min(int(history_limit), 200))}",
                         "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
                         "--",
                         rel_path,
@@ -898,8 +898,8 @@ def optional_pinned_file_git_metadata(
     return repo, tracked, history, relative_path, repo_info, ""
 
 
-GIT_HISTORY_DEFAULT_LIMIT = 40
-GIT_HISTORY_MAX_LIMIT = 40
+GIT_HISTORY_DEFAULT_LIMIT = 100
+GIT_HISTORY_MAX_LIMIT = 100
 GIT_HISTORY_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 GIT_HISTORY_MAX_PAYLOAD_BYTES = 384 * 1024
 GIT_HISTORY_MAX_TEXT_BYTES = 8 * 1024
@@ -929,6 +929,8 @@ GIT_VIEW_MAX_PACK_ENTRIES = 4096
 GIT_VIEW_MAX_REF_ENTRIES = 100_000
 GIT_VIEW_MAX_REF_BYTES = 32 * 1024 * 1024
 GIT_VIEW_MAX_REF_DEPTH = 32
+GIT_HISTORY_CACHE_TTL_SECONDS = 10.0
+GIT_HISTORY_CACHE_MAX_ENTRIES = 128
 _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _GIT_PACK_FILE_RE = re.compile(
     r"(?:pack-[0-9a-f]{40,64}\.(?:pack|idx|rev|bitmap|keep|promisor)|"
@@ -936,6 +938,35 @@ _GIT_PACK_FILE_RE = re.compile(
 )
 _GIT_OBJECT_FILE_RE = re.compile(r"[0-9a-f]{38,62}")
 _GIT_INCREMENTAL_MIDX_RE = re.compile(r"multi-pack-index-[0-9a-f]{40,64}\.midx")
+
+_GIT_HISTORY_CACHE_LOCK = threading.Lock()
+_GIT_HISTORY_CACHE: dict[tuple[str, int, str, str, int], tuple[float, dict[str, Any]]] = {}
+
+
+def _git_history_cache_get(key: tuple[str, int, str, str, int]) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _GIT_HISTORY_CACHE_LOCK:
+        cached = _GIT_HISTORY_CACHE.get(key)
+        if cached is None:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            del _GIT_HISTORY_CACHE[key]
+            return None
+        return copy.deepcopy(payload)
+
+
+def _git_history_cache_put(key: tuple[str, int, str, str, int], payload: dict[str, Any]) -> None:
+    with _GIT_HISTORY_CACHE_LOCK:
+        _GIT_HISTORY_CACHE[key] = (time.monotonic() + GIT_HISTORY_CACHE_TTL_SECONDS, copy.deepcopy(payload))
+        while len(_GIT_HISTORY_CACHE) > GIT_HISTORY_CACHE_MAX_ENTRIES:
+            oldest_key = min(_GIT_HISTORY_CACHE, key=lambda candidate: _GIT_HISTORY_CACHE[candidate][0])
+            del _GIT_HISTORY_CACHE[oldest_key]
+
+
+def _clear_git_history_cache() -> None:
+    with _GIT_HISTORY_CACHE_LOCK:
+        _GIT_HISTORY_CACHE.clear()
 
 
 @dataclass(frozen=True)
@@ -4390,8 +4421,43 @@ def _parse_history_numstat(raw: bytes, *, output_truncated: bool) -> tuple[list[
 
 
 def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list[dict[str, Any]], bool, bool]:
-    """Compatibility name for tests and callers of the metadata-only parser."""
-    return _parse_history_numstat(raw, output_truncated=output_truncated)
+    """Parse commit identity fields without requiring per-commit diff statistics."""
+    if not output_truncated and not (raw.endswith(b"\0") or raw.endswith(b"\0\n")):
+        raise _history_error("malformed Git history terminator", key="fs.error.gitHistoryFailed", status=500)
+    if raw.endswith(b"\0\n"):
+        raw = raw[:-2]
+    elif raw.endswith(b"\0"):
+        raw = raw[:-1]
+    tokens = raw.split(b"\0")
+    commits: list[dict[str, Any]] = []
+    truncated = output_truncated
+    index = 0
+    while index < len(tokens):
+        if tokens[index] != b"commit":
+            if output_truncated:
+                truncated = True
+                break
+            raise _history_error("malformed Git history metadata", key="fs.error.gitHistoryFailed", status=500)
+        if index + 6 >= len(tokens):
+            if output_truncated:
+                truncated = True
+                break
+            raise _history_error("malformed Git history metadata", key="fs.error.gitHistoryFailed", status=500)
+        sha, short, parents, author, authored_at, subject = tokens[index + 1:index + 7]
+        index += 7
+        authored_at_value = _parse_git_timestamp(authored_at, operation="gitHistory")
+        author_text, author_was_truncated = _bounded_utf8(author, GIT_HISTORY_MAX_TEXT_BYTES)
+        subject_text, subject_was_truncated = _bounded_utf8(subject, GIT_HISTORY_MAX_TEXT_BYTES)
+        commits.append({
+            "sha": _decode_git_text(sha),
+            "short": _decode_git_text(short),
+            "parents": _decode_git_text(parents).split() if parents else [],
+            "subject": subject_text,
+            "author": author_text,
+            "authored_at": authored_at_value,
+            "metadata_truncated": author_was_truncated or subject_was_truncated,
+        })
+    return commits, truncated, False
 
 
 def _current_head(scope: BoundedGitReadScope | PinnedGitHistoryScope, *, operation: str) -> str:
@@ -4464,6 +4530,8 @@ def _ensure_current_head_object(
 
 
 def git_history(raw_path: str, limit: int | str | None = None, cursor: str | None = None) -> dict[str, Any]:
+    page_limit = _bounded_history_limit(limit)
+    cursor_text = str(cursor or "")
     with _bounded_git_read_scope(raw_path, operation="git_history") as scope:
         current_head = _current_head(scope, operation="gitHistory")
         if not current_head:
@@ -4505,7 +4573,17 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
         else:
             frozen_head = current_head
             offset = 0
-        page_limit = _bounded_history_limit(limit)
+        namespace_identity = hashlib.sha256(repr(scope.read_namespace).encode("utf-8")).hexdigest()
+        cache_key = (
+            str(scope.repo),
+            scope.relative_path,
+            page_limit,
+            cursor_text or frozen_head,
+            f"{namespace_identity}:{GIT_HISTORY_MAX_PAYLOAD_BYTES}",
+        )
+        cached = _git_history_cache_get(cache_key)
+        if cached is not None:
+            return cached
         snapshot_cursor = _encode_history_cursor(scope, frozen_head, 0)
         snapshot_cursor_limited = len(snapshot_cursor) > GIT_HISTORY_CURSOR_MAX_BYTES
         if snapshot_cursor_limited:
@@ -4520,8 +4598,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
-            "--numstat",
-            "--shortstat",
+            "--no-patch",
             "-z",
             f"--max-count={page_limit + 1}",
             f"--skip={offset}",
@@ -4603,6 +4680,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 )
             visible.pop()
             payload_bytes_truncated = True
+        _git_history_cache_put(cache_key, payload)
         return payload
 
 

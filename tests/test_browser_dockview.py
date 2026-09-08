@@ -2352,7 +2352,7 @@ def test_dockview_virtual_pane_actions_stay_unshrunk_at_physical_top_right(brows
             const rail = group?.querySelector('.dv-right-actions-container');
             const actions = group?.querySelector('.dockview-pane-header-actions:not([hidden])');
             const controls = [...(actions?.querySelectorAll('button') || [])].filter(button => !button.hidden);
-            if (!header || !rail || !actions || controls.length < 4) return false;
+            if (!header || !rail || !actions || controls.length < 3) return false;
             const box = node => {
               const rect = node.getBoundingClientRect();
               return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height};
@@ -4939,6 +4939,45 @@ def test_dockview_drag_reorders_two_tab_pane(browser, tmp_path):
     assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1"]
 
 
+def test_dockview_drag_reorders_into_first_top_left_tab_without_root_split(browser, tmp_path):
+    """A real drag onto the first tab of the top-left pane reorders; it never becomes an edge split."""
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=col@50(top,bottom)&tabs=top:1,2,3;bottom:4",
+        sessions=["1", "2", "3", "4"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_dockview_tab_geometry(browser, min_tabs=4)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.2, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('top', layoutSlots).join(',');") == "3,1,2"
+    )
+    metrics = dockview_layout_metrics(browser)
+    assert metrics["slots"]["top"]["tabs"] == ["3", "1", "2"], metrics
+    assert metrics["slots"]["bottom"]["tabs"] == ["4"], metrics
+    assert len([group for group in metrics["groups"] if group["tabs"]]) == 2, metrics
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_real_close_button_hides_only_clicked_tmux_tab(browser, tmp_path):
+    """The browser's physical click on a tmux tab dismiss control removes that tab, not its sibling."""
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=deleteme,DELETEME1&layout=left&tabs=left:deleteme,DELETEME1",
+        sessions=["deleteme", "DELETEME1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="deleteme"] [data-pane-tab-close]')
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return !itemInLayout('deleteme') && itemInLayout('DELETEME1');")
+    )
+    assert dockview_layout_metrics(browser)["slots"]["left"]["tabs"] == ["DELETEME1"]
+
+
 def test_dockview_drag_reorders_two_pinned_tabs(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -5434,7 +5473,7 @@ def test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes(browser,
     assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
 
 
-def test_dockview_pane_drag_handle_swaps_whole_panes(browser, tmp_path):
+def test_dockview_pane_header_has_no_whole_pane_drag_handle(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -5445,37 +5484,135 @@ def test_dockview_pane_drag_handle_swaps_whole_panes(browser, tmp_path):
     )
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
-    before = dockview_layout_metrics(browser)
-    assert [group["tabs"] for group in sorted(before["groups"], key=lambda item: item["rect"]["left"])] == [["1", "2"], ["3"]], before
-    points = browser.execute_script(
+    assert browser.execute_script("return document.querySelectorAll('.pane-drag-handle').length") == 0
+
+
+def test_dockview_drag_regions_are_coordinate_exclusive(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    regions = browser.execute_script(
         """
-        const rectPoint = (rect, x = 0.5, y = 0.5) => ({x: Math.round(rect.left + rect.width * x), y: Math.round(rect.top + rect.height * y)});
-        const sourceGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
-        const targetGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="3"]').closest('.dv-groupview');
-        const handle = sourceGroup.querySelector('.pane-drag-handle');
+        const group = document.querySelector('.dv-groupview');
+        const point = node => {
+          const rect = node.getBoundingClientRect();
+          return [Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2)];
+        };
+        const header = group.querySelector('.dv-tabs-and-actions-container');
+        const chrome = group.querySelector('.panel-detail-row');
+        const content = group.querySelector('[data-dockview-region="content"]');
         return {
-          start: rectPoint(handle.getBoundingClientRect()),
-          end: rectPoint(targetGroup.getBoundingClientRect()),
-          handleSlot: handle.dataset.paneDrag || '',
-          canSwap: paneSwapAllowed(dockviewSlotForGroupElement(sourceGroup), dockviewSlotForGroupElement(targetGroup)),
+          tabs: dockviewDragRegionForPoint(...point(header)).kind,
+          chrome: dockviewDragRegionForPoint(...point(chrome)).kind,
+          content: dockviewDragRegionForPoint(...point(content)).kind,
         };
         """
     )
-    assert points["handleSlot"] == "left"
-    assert points["canSwap"] is True
-    cdp_drag(browser, points["start"], points["end"], steps=28)
-    WebDriverWait(browser, 5).until(
-        lambda driver: [group["tabs"] for group in sorted(dockview_layout_metrics(driver)["groups"], key=lambda item: item["rect"]["left"])] == [["3"], ["1", "2"]]
+    assert regions == {"tabs": "tabs", "chrome": "chrome", "content": "content"}, regions
+
+
+def test_dockview_terminal_alternate_views_keep_the_content_region(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_script(
+        """
+        const panel = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const ids = ['transcript-pane-1', 'summary-pane-1', 'events-pane-1'];
+        return {
+          terminal: panel.querySelector('#terminal-pane-1')?.dataset.dockviewRegion || '',
+          alternate: ids.map(id => ({id, region: document.getElementById(id)?.dataset.dockviewRegion || ''})),
+        };
+        """
     )
+    assert result == {"terminal": "content", "alternate": [
+        {"id": "transcript-pane-1", "region": "content"},
+        {"id": "summary-pane-1", "region": "content"},
+        {"id": "events-pane-1", "region": "content"},
+    ]}, result
+
+
+@pytest.mark.parametrize("selector", (".dv-tabs-and-actions-container", ".panel-detail-row", ".file-editor-toolbar"))
+def test_dockview_tab_and_panel_chrome_are_drag_inert(browser, tmp_path, selector):
+    encoded_file = "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FDONE.md"
+    session_query = "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2"
+    if selector == ".file-editor-toolbar":
+        session_query = f"?sessions=2,{encoded_file}&layout=row@50(left,right)&tabs=left:{encoded_file};right:2"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        session_query,
+        sessions=["1", "2"],
+        grid_width=1200,
+        grid_height=620,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    points = browser.execute_script(
+        """
+        const sourceTab = Array.from(document.querySelectorAll('.dockview-pane-tab')).find(tab => tab.dataset.paneTab === arguments[0]);
+        const source = sourceTab.closest('.dv-groupview');
+        const target = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
+        const rectPoint = node => {
+          const rect = node.getBoundingClientRect();
+          return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+        };
+        return {start: rectPoint(source.querySelector(arguments[1])), end: rectPoint(target)};
+        """,
+        "file:/home/test/yolomux.dev/DONE.md" if selector == ".file-editor-toolbar" else "__git_diff__" if selector.startswith(".git-diff") else "1",
+        selector,
+    )
+    cdp_drag(browser, points["start"], points["end"], steps=28)
+    assert browser.execute_script("return !document.querySelector('.pane-drag-image.drag-image')")
     after = dockview_layout_metrics(browser)
-    assert after["slots"]["left"]["tabs"] == ["3"], after
-    assert after["slots"]["right"]["tabs"] == ["1", "2"], after
-    assert after["slots"]["__tree"]["split"] == "row", after
-    assert round(after["slots"]["__tree"]["pct"]) == 50, after
+    expected_left = ["file:/home/test/yolomux.dev/DONE.md"] if selector == ".file-editor-toolbar" else ["1"]
+    assert after["slots"]["left"]["tabs"] == expected_left, after
+    assert after["slots"]["right"]["tabs"] == ["2"], after
+
+
+def test_dockview_tab_drag_over_panel_chrome_shows_no_split_or_tab_preview(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=left&tabs=left:1,2,3",
+        sessions=["1", "2", "3"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = group.querySelector('.panel-detail-row').getBoundingClientRect();
+        return {x: Math.round(rect.left + 8), y: Math.round(rect.top + rect.height / 2)};
+        """
+    )
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        settle_browser_frames(browser, 3)
+        preview = browser.execute_script(
+            """
+            const grid = document.getElementById('grid');
+            return {
+              root: grid.classList.contains('drop-preview-root'),
+              pane: Boolean(document.querySelector('.dv-groupview.drop-preview')),
+              tab: Boolean(document.querySelector('.dv-tab.dv-drop-target .dv-drop-target-selection')),
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview == {"root": False, "pane": False, "tab": False}, preview
+    assert browser.execute_script("return paneTabs('left', layoutSlots).join(',');") == "1,2,3"
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
-def test_dockview_pane_drag_shows_dotted_pane_preview(browser, tmp_path):
+def test_dockview_pane_drag_removed(browser, tmp_path):
+    assert browser.execute_script("return document.querySelectorAll('.pane-drag-handle, .pane-drag-source').length") == 0
+
+
+def _retired_pane_drag_shows_dotted_pane_preview(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -5536,7 +5673,7 @@ def test_dockview_pane_drag_shows_dotted_pane_preview(browser, tmp_path):
     )
 
 
-def test_dockview_panel_detail_row_drags_whole_pane(browser, tmp_path):
+def _retired_panel_detail_row_drags_whole_pane(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -5592,7 +5729,7 @@ def test_dockview_panel_detail_row_drags_whole_pane(browser, tmp_path):
     )
 
 
-def test_dockview_file_editor_toolbar_drags_whole_pane(browser, tmp_path):
+def _retired_file_editor_toolbar_drags_whole_pane(browser, tmp_path):
     encoded_file = "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FDONE.md"
     file_item = "file:/home/test/yolomux.dev/DONE.md"
     load_dockview_runtime_boot_fixture(
@@ -5659,7 +5796,7 @@ def test_dockview_file_editor_toolbar_drags_whole_pane(browser, tmp_path):
     )
 
 
-def test_dockview_tab_container_background_swaps_whole_panes(browser, tmp_path):
+def _retired_tab_container_background_swaps_whole_panes(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -5769,6 +5906,8 @@ def test_dockview_tab_drag_preview_is_between_tabs(browser, tmp_path):
               selectionClass: selection.className,
               backgroundColor: selectionStyle.backgroundColor,
               borderLeftWidth: selectionStyle.borderLeftWidth,
+              splitPreviews: Array.from(document.querySelectorAll('.dv-groupview.drop-preview')).map(node => node.className),
+              rootPreview: document.getElementById('grid')?.classList.contains('drop-preview-root') || false,
             };
             """
         )
@@ -5781,6 +5920,157 @@ def test_dockview_tab_drag_preview_is_between_tabs(browser, tmp_path):
     assert metrics["selection"]["right"] >= metrics["tab2"]["right"] + 10, metrics
     assert metrics["backgroundColor"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     assert metrics["borderLeftWidth"] == "2px", metrics
+    assert metrics["splitPreviews"] == [], metrics
+    assert metrics["rootPreview"] is False, metrics
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('left', layoutSlots).join(',');") == "2,1,3"
+    )
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_very_top_header_drag_stays_tab_reorder_not_top_split(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const tabRect = tab.getBoundingClientRect();
+        const groupRect = tab.closest('.dv-groupview').getBoundingClientRect();
+        return {x: Math.round(tabRect.left + tabRect.width * .68), y: Math.round(groupRect.top + 1)};
+        """
+    )
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return document.querySelector('.dv-tab.dv-drop-target .dv-drop-target-selection')?.getBoundingClientRect().width >= 22"
+            )
+        )
+        preview = browser.execute_script(
+            """
+            const selection = document.querySelector('.dv-tab.dv-drop-target .dv-drop-target-selection');
+            const grid = document.getElementById('grid');
+            const group = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]').closest('.dv-groupview');
+            return {
+              selectionClass: selection.className,
+              selectionWidth: Math.round(selection.getBoundingClientRect().width),
+              splitPreviews: Array.from(document.querySelectorAll('.dv-groupview.drop-preview')).map(node => node.className),
+              rootPreview: grid.classList.contains('drop-preview-root'),
+              groupTop: Math.round(group.getBoundingClientRect().top),
+              headerBottom: Math.round(group.querySelector('.dv-tabs-and-actions-container').getBoundingClientRect().bottom),
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert 22 <= preview["selectionWidth"] <= 26, preview
+    assert "dv-drop-target-right" in preview["selectionClass"], preview
+    assert preview["splitPreviews"] == [] and preview["rootPreview"] is False, preview
+    assert preview["groupTop"] < preview["headerBottom"], preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return paneTabs('left', layoutSlots).join(',');") == "2,1,3"
+    )
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_top_split_begins_below_tab_header(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(rect.left + rect.width * .5), y: Math.round(rect.top + 8)};
+        """,
+    )
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top')?.getBoundingClientRect().height > 100"
+            )
+        )
+        preview = browser.execute_script(
+            """
+            const selection = document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top');
+            const tabInsertion = document.querySelector('[data-yolomux-tab-insertion-preview]');
+            const grid = document.getElementById('grid');
+            return {
+              selectionHeight: Math.round(selection.getBoundingClientRect().height),
+              tabInsertion: Boolean(tabInsertion),
+              rootPreview: grid.classList.contains('drop-preview-root'),
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview["selectionHeight"] > 100, preview
+    assert preview["tabInsertion"] is False and preview["rootPreview"] is False, preview
+
+
+def test_dockview_upper_pane_header_to_body_is_local_top_split_not_full_top(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=col@50(top,bottom)&tabs=top:1,3;bottom:2",
+        sessions=["1", "2", "3"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = group.getBoundingClientRect();
+        const header = group.querySelector('.dv-tabs-and-actions-container').getBoundingClientRect();
+        return {x: Math.round(rect.left + rect.width * .5), y: Math.round(header.bottom + 24)};
+        """
+    )
+    preview = {}
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top')?.getBoundingClientRect().height > 40"
+            )
+        )
+        preview = browser.execute_script(
+            """
+            return {
+              rootPreview: document.getElementById('grid').classList.contains('drop-preview-root'),
+              panePreview: Boolean(document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top')),
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, end)
+    assert preview == {"rootPreview": False, "panePreview": True}, preview
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const groups = Array.from(document.querySelectorAll('.dv-groupview')).map(group => {
+              const rect = group.getBoundingClientRect();
+              return {
+                tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab),
+                top: rect.top,
+                bottom: rect.bottom,
+              };
+            }).filter(group => group.tabs.length);
+            const moved = groups.find(group => group.tabs.join(',') === '3');
+            const formerTop = groups.find(group => group.tabs.join(',') === '1');
+            const bottom = groups.find(group => group.tabs.join(',') === '2');
+            return groups.length === 3 && moved && formerTop && bottom
+              && moved.bottom <= formerTop.top + 3
+              && formerTop.bottom <= bottom.top + 3;
+            """
+        )
+    )
 
 
 def test_dockview_adjacent_same_tab_drag_hides_noop_preview(browser, tmp_path):
@@ -5985,7 +6275,13 @@ def test_dockview_drag_to_root_left_of_stacked_panes_creates_full_height_pane(br
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
-    end = dockview_point(browser, "#dockviewRoot", 0.03, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(content.left + 8), y: Math.round(content.top + content.height / 2)};
+        """
+    )
     cdp_drag(browser, start, end, steps=32)
     WebDriverWait(browser, 5).until(
         lambda driver: (
@@ -6021,7 +6317,13 @@ def test_dockview_drag_to_root_right_of_stacked_panes_creates_full_height_pane(b
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
-    end = dockview_point(browser, "#dockviewRoot", 0.97, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(content.right - 8), y: Math.round(content.top + content.height / 2)};
+        """
+    )
     cdp_drag(browser, start, end, steps=32)
     WebDriverWait(browser, 5).until(
         lambda driver: (
@@ -6060,7 +6362,7 @@ def test_dockview_drag_to_pane_edge_splits_only_that_pane(browser, tmp_path):
     end = browser.execute_script(
         """
         const topGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
-        const rect = topGroup.getBoundingClientRect();
+        const rect = topGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
         return {
           x: Math.round(rect.left + rect.width * 0.12),
           y: Math.round(rect.top + rect.height * 0.55),
@@ -6104,7 +6406,14 @@ def test_dockview_root_left_drag_shows_full_span_preview_before_drop(browser, tm
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
-    end = dockview_point(browser, "#dockviewRoot", 0.03, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        const root = document.getElementById('dockviewRoot').getBoundingClientRect();
+        return {x: Math.round(root.left + 8), y: Math.round(content.top + content.height / 2)};
+        """
+    )
     preview = {}
     try:
         cdp_drag_hold(browser, start, end, steps=32)
@@ -6144,7 +6453,13 @@ def test_dockview_root_right_drag_shows_full_span_preview_before_drop(browser, t
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
-    end = dockview_point(browser, "#dockviewRoot", 0.97, 0.5)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(content.right - 8), y: Math.round(content.top + content.height / 2)};
+        """
+    )
     preview = {}
     try:
         cdp_drag_hold(browser, start, end, steps=32)
@@ -6206,7 +6521,14 @@ def test_dockview_root_right_drop_is_easy_and_preserves_triplet_home_width(
     content_right = max(group["rect"]["right"] for group in content_before)
     content_width = content_right - content_left
     start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
-    end = dockview_point(browser, "#dockviewRoot", 0.985, 0.20)
+    end = browser.execute_script(
+        """
+        const group = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`).closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(content.right - 8), y: Math.round(content.top + content.height * .2)};
+        """,
+        remaining_items[0],
+    )
     preview = {}
     try:
         cdp_drag_hold(browser, start, end, steps=32)
@@ -6266,6 +6588,8 @@ def test_dockview_touch_root_preview_commits_when_release_loses_coordinates(brow
         const item = debugPaneItemId;
         const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
         const host = document.querySelector('#dockviewRoot');
+        const group = tab.closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
         const sourceSlot = slotForItem(item);
         const tabRect = tab.getBoundingClientRect();
         const hostRect = host.getBoundingClientRect();
@@ -6282,8 +6606,8 @@ def test_dockview_touch_root_preview_commits_when_release_loses_coordinates(brow
           rootBoundaryExitedEdges: {},
         };
         const edgeEvent = {
-          clientX: zone === 'right' ? hostRect.right - 2 : hostRect.left + hostRect.width / 2,
-          clientY: zone === 'bottom' ? hostRect.bottom - 2 : hostRect.top + hostRect.height / 2,
+          clientX: zone === 'right' ? content.right - 2 : content.left + content.width / 2,
+          clientY: zone === 'bottom' ? content.bottom - 2 : content.top + content.height / 2,
         };
         dockviewTrackTabPointerDrag(edgeEvent);
         const preview = {
@@ -6338,6 +6662,7 @@ def test_dockview_touchend_finishes_root_drag_when_pointerup_is_missing(browser,
         const host = document.querySelector('#dockviewRoot');
         const tabRect = tab.getBoundingClientRect();
         const hostRect = host.getBoundingClientRect();
+        const contentRect = tab.closest('.dv-groupview').querySelector('[data-dockview-region="content"]').getBoundingClientRect();
         const start = {
           clientX: tabRect.left + tabRect.width / 2,
           clientY: tabRect.top + tabRect.height / 2,
@@ -6352,8 +6677,8 @@ def test_dockview_touchend_finishes_root_drag_when_pointerup_is_missing(browser,
           lastRootBoundaryIntent: null,
         };
         dockviewTrackTabPointerDrag({
-          clientX: hostRect.left + hostRect.width / 2,
-          clientY: hostRect.bottom - 2,
+          clientX: contentRect.left + contentRect.width / 2,
+          clientY: contentRect.bottom - 2,
         });
         const preview = {
           root: grid.classList.contains('drop-preview-root'),
@@ -6431,9 +6756,10 @@ def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tm
             const host = document.querySelector('#dockviewRoot');
             const tabRect = tab.getBoundingClientRect();
             const hostRect = host.getBoundingClientRect();
+            const contentRect = tab.closest('.dv-groupview').querySelector('[data-dockview-region="content"]').getBoundingClientRect();
             return {
               start: {x: tabRect.left + tabRect.width / 2, y: tabRect.top + tabRect.height / 2},
-              end: {x: hostRect.left + hostRect.width / 2, y: hostRect.bottom - 2},
+              end: {x: contentRect.left + contentRect.width / 2, y: contentRect.bottom - 2},
             };
             """
         )
@@ -6522,8 +6848,9 @@ def test_dockview_tab_header_drag_to_root_right_stays_beside_stacked_panes(brows
     end = browser.execute_script(
         """
         const host = document.querySelector('#dockviewRoot').getBoundingClientRect();
-        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').getBoundingClientRect();
-        return {x: Math.round(host.right - 3), y: Math.round(tab.top + tab.height / 2)};
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(host.right - 3), y: Math.round(content.top + content.height / 2)};
         """
     )
     preview = {}
@@ -6586,8 +6913,9 @@ def test_dockview_shared_tab_header_drag_to_root_right_leaves_stacked_panes(
     end = browser.execute_script(
         """
         const host = document.querySelector('#dockviewRoot').getBoundingClientRect();
-        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`).getBoundingClientRect();
-        return {x: Math.round(host.right - arguments[1]), y: Math.round(tab.top + tab.height / 2)};
+        const group = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`).closest('.dv-groupview');
+        const content = group.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        return {x: Math.round(host.right - arguments[1]), y: Math.round(content.top + content.height / 2)};
         """,
         "1" if source_slot == "top" else "2",
         edge_offset,
@@ -6919,7 +7247,8 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
         const hostRect = host.getBoundingClientRect();
         const gridRect = gridNode.getBoundingClientRect();
         const finderRect = finderGroup.getBoundingClientRect();
-        const contentRect = contentGroup.getBoundingClientRect();
+        const targetRect = contentGroup.getBoundingClientRect();
+        const contentRect = contentGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
         const eventAt = (rect, xRatio, y) => ({
           kind: 'content',
           position: 'bottom',
@@ -6929,7 +7258,7 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
             clientY: Math.round(y),
           },
         });
-        const contentIntent = dockviewRootBoundaryDropIntent(eventAt(contentRect, 0.5, hostRect.bottom - 2));
+        const contentIntent = dockviewRootBoundaryDropIntent(eventAt(contentRect, 0.5, contentRect.bottom - 2));
         dockviewShowRootBoundaryPreview(contentIntent);
         const previewStyle = getComputedStyle(gridNode, '::before');
         const preview = {
@@ -6944,13 +7273,15 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
           separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
         };
         clearDropPreview();
-        const finderIntent = dockviewRootBoundaryDropIntent(eventAt(finderRect, 0.5, hostRect.bottom - 2));
+        const finderContent = finderGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        const finderIntent = dockviewRootBoundaryDropIntent(eventAt(finderContent, 0.5, finderContent.bottom - 2));
         return {
       contentIntent: contentIntent ? {zone: contentIntent.zone} : null,
       finderIntent: finderIntent ? {zone: finderIntent.zone} : null,
           preview,
           gridRect: {left: gridRect.left, width: gridRect.width},
           finderRect: {left: finderRect.left, right: finderRect.right, width: finderRect.width},
+          targetRect: {left: targetRect.left, right: targetRect.right, width: targetRect.width},
           contentRect: {left: contentRect.left, right: contentRect.right, width: contentRect.width},
         };
         """
@@ -6961,8 +7292,8 @@ def test_dockview_root_bottom_preview_preserves_docked_finder_column(browser, tm
     assert metrics["preview"]["bottom"] is True, metrics
     assert metrics["preview"]["label"] == "Full bottom", metrics
     assert metrics["preview"]["borderColor"] == metrics["preview"]["separatorHover"], metrics
-    expected_left = metrics["contentRect"]["left"] - metrics["gridRect"]["left"] + 6
-    expected_width = metrics["contentRect"]["width"] - 12
+    expected_left = metrics["targetRect"]["left"] - metrics["gridRect"]["left"] + 6
+    expected_width = metrics["targetRect"]["width"] - 12
     assert abs(metrics["preview"]["left"] - expected_left) <= 2, metrics
     assert abs(metrics["preview"]["width"] - expected_width) <= 2, metrics
     assert metrics["preview"]["left"] >= metrics["finderRect"]["right"] - metrics["gridRect"]["left"] + 4, metrics
@@ -6991,10 +7322,11 @@ def test_dockview_root_top_drag_preview_preserves_docked_finder_column(browser, 
         const host = document.querySelector('#dockviewRoot');
         const contentGroup = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
         const hostRect = host.getBoundingClientRect();
-        const contentRect = contentGroup.getBoundingClientRect();
+        const contentRect = contentGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+        const headerRect = contentGroup.querySelector('.dv-tabs-and-actions-container').getBoundingClientRect();
         return {
           x: Math.round(contentRect.left + contentRect.width * 0.5),
-          y: Math.round(hostRect.top + 3),
+          y: Math.round(Math.min(hostRect.top + 48, headerRect.bottom + 24)),
         };
         """
     )
@@ -7097,14 +7429,15 @@ def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser,
         const hostRect = host.getBoundingClientRect();
         const gridRect = gridNode.getBoundingClientRect();
         const finderRect = finderGroup.getBoundingClientRect();
-        const contentRect = contentGroup.getBoundingClientRect();
+        const targetRect = contentGroup.getBoundingClientRect();
+        const contentRect = contentGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
         const eventAt = (rect, zone, x) => ({
           kind: 'content',
           position: zone,
           getData() { return {panelId: '2', groupId: dockviewSlotForGroupElement(contentGroup)}; },
           nativeEvent: {
             clientX: Math.round(x),
-            clientY: zone === 'top' ? Math.round(hostRect.top + 2) : Math.round(hostRect.bottom - 2),
+            clientY: zone === 'top' ? Math.round(rect.top + 2) : Math.round(rect.bottom - 2),
           },
         });
         const finderOnLeft = finderRect.left < contentRect.left;
@@ -7123,7 +7456,8 @@ def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser,
             separatorHover: getComputedStyle(document.documentElement).getPropertyValue('--pane-resizer-hover-bg').trim(),
           };
           clearDropPreview();
-          const finderIntent = dockviewRootBoundaryDropIntent(eventAt(finderRect, zone, finderRect.left + finderRect.width / 2));
+              const finderContent = finderGroup.querySelector('[data-dockview-region="content"]').getBoundingClientRect();
+              const finderIntent = dockviewRootBoundaryDropIntent(eventAt(finderContent, zone, finderContent.left + finderContent.width / 2));
           return {
             contentIntent: contentIntent ? {zone: contentIntent.zone} : null,
             finderIntent: finderIntent ? {zone: finderIntent.zone} : null,
@@ -7136,6 +7470,7 @@ def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser,
           finderOnLeft,
           gridRect: {left: gridRect.left, width: gridRect.width},
           finderRect: {left: finderRect.left, right: finderRect.right, width: finderRect.width},
+          targetRect: {left: targetRect.left, right: targetRect.right, width: targetRect.width},
           contentRect: {left: contentRect.left, right: contentRect.right, width: contentRect.width},
         };
         """
@@ -7149,8 +7484,8 @@ def test_dockview_root_top_bottom_preview_preserves_nested_triplet_home(browser,
         assert item["preview"]["zone"] is True, metrics
         assert item["preview"]["label"] == f"Full {zone}", metrics
         assert item["preview"]["borderColor"] == item["preview"]["separatorHover"], metrics
-        expected_left = metrics["contentRect"]["left"] - metrics["gridRect"]["left"] + 6
-        expected_width = metrics["contentRect"]["width"] - 12
+        expected_left = metrics["targetRect"]["left"] - metrics["gridRect"]["left"] + 6
+        expected_width = metrics["targetRect"]["width"] - 12
         assert abs(item["preview"]["left"] - expected_left) <= 2, metrics
         assert abs(item["preview"]["width"] - expected_width) <= 2, metrics
         assert item["preview"]["left"] >= metrics["finderRect"]["right"] - metrics["gridRect"]["left"] + 4, metrics

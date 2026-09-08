@@ -3063,6 +3063,82 @@ def test_session_touched_dirs_collects_edited_dirs(tmp_path):
     assert dirs == {str(tmp_path / "repo" / "a"), str(tmp_path / "repo" / "b")}
 
 
+def test_opencode_changes_share_claude_and_codex_path_attribution(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "src" / "tracked.py"
+    tracked.parent.mkdir()
+    tracked.write_text("before\n", encoding="utf-8")
+    git(repo, "add", "src/tracked.py")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("after\n", encoding="utf-8")
+    added = repo / "docs" / "added.md"
+    added.parent.mkdir()
+    added.write_text("new\n", encoding="utf-8")
+
+    tool_calls = (
+        session_files.opencode_stats.OpenCodeToolInput(
+            "patch", "ses-opencode", "apply_patch", time.time(),
+            changed_files=((str(tracked), "update"), (str(added), "add")),
+        ),
+        session_files.opencode_stats.OpenCodeToolInput(
+            "stage", "ses-opencode", "bash", time.time(), command="git add src/tracked.py",
+        ),
+    )
+    monkeypatch.setattr(session_files.opencode_stats, "read_tool_inputs", lambda **_kwargs: tool_calls)
+    opencode_agent = AgentInfo(
+        session="s1", kind="opencode", pid=1, pane_target="%1", command="opencode", cwd=str(repo),
+        status=None, session_id="ses-opencode", transcript=None, error=None,
+    )
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[opencode_agent])
+
+    changes = session_files.scan_agent_changes(opencode_agent)
+    assert changes == {str(tracked): {"M"}, str(added): {"A"}}
+    assert set(session_files.session_touched_dirs(info)) == {str(tracked.parent), str(added.parent)}
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    by_path = {item["path"]: item for item in payload["files"]}
+    assert by_path["src/tracked.py"]["agents"] == ["opencode"]
+    assert by_path["docs/added.md"]["agents"] == ["opencode"]
+
+
+def test_opencode_change_scanner_rejects_reads_and_unexpanded_paths(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls = (
+        session_files.opencode_stats.OpenCodeToolInput("read", "ses-opencode", "read", time.time()),
+        session_files.opencode_stats.OpenCodeToolInput("patch", "ses-opencode", "apply_patch", time.time(), patch_text="*** Begin Patch\n*** Update File: ${root}/hidden.py\n"),
+        session_files.opencode_stats.OpenCodeToolInput("shell", "ses-opencode", "bash", time.time(), command="git add ${root}/hidden.py"),
+    )
+    monkeypatch.setattr(session_files.opencode_stats, "read_tool_inputs", lambda **_kwargs: calls)
+    agent_info = AgentInfo("s1", "opencode", 1, "%1", "opencode", str(repo), None, "ses-opencode", None, None)
+
+    assert session_files.scan_agent_changes(agent_info) == {}
+
+
+def test_opencode_attribution_uses_tool_timestamp_for_lookback_and_mtime(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    old_path = repo / "old.py"
+    new_path = repo / "new.py"
+    old_path.write_text("old\n", encoding="utf-8")
+    new_path.write_text("new\n", encoding="utf-8")
+    calls = (
+        session_files.opencode_stats.OpenCodeToolInput("old", "ses-opencode", "apply_patch", 10.0, changed_files=((str(old_path), "update"),)),
+        session_files.opencode_stats.OpenCodeToolInput("new", "ses-opencode", "apply_patch", 20.0, changed_files=((str(new_path), "update"),)),
+    )
+    monkeypatch.setattr(session_files.opencode_stats, "read_tool_inputs", lambda **_kwargs: calls)
+    agent_info = AgentInfo("s1", "opencode", 1, "%1", "opencode", str(repo), None, "ses-opencode", None, None)
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent_info])
+
+    touched = session_files.touched_files_for_info(info, cutoff=15.0)
+
+    assert str(old_path) not in touched
+    assert touched[str(new_path)]["mtime"] == 20.0
+
+
 def test_session_files_hours_controls_transcript_cutoff(tmp_path):
     touched = tmp_path / "older.py"
     touched.write_text("print('old edit')\n", encoding="utf-8")

@@ -83,7 +83,7 @@ test('Dockview keeps the group tab strip for singleton file surfaces', () => {
 test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
   assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewPaneContentDropAllowed\(paneInfo\)[\s\S]*moveSessionToSlot\(paneInfo\.item, paneInfo\.intent\.targetSlot/);
   assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
-  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewGroupForPoint[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
+  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewContentDropRegionForEvent\(event\)[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
@@ -99,9 +99,16 @@ test('Finder and Differ render shared selectors with independent selected-sessio
   assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
 
+test('Finder hides its Session control outside Sync mode', () => {
+  assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*fileExplorerRootMode === 'sync'[\s\S]*control\.hidden = !visible/);
+  assert.match(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
+  assert.match(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed/);
+  assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
+});
+
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
   assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
-  assert.match(dockview, /function dockviewHeaderActionsHtml\(item, slot = slotForItem\(item\)\)[\s\S]*if \(!isLayoutItem\(item\)\) return ''[\s\S]*if \(slotIsSidePane\(slot\)\)[\s\S]*if \(isVirtualItem\(item\)\) return `\$\{paneHandle\}\$\{virtualPanelControlsHtml\(item/);
+  assert.ok(dockview.includes('function dockviewHeaderActionsHtml(item, slot = slotForItem(item))') && dockview.includes('if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item'), 'Dockview virtual panels use the shared outer header controls');
   assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
   assert.match(shell, /function paneTabDismissControlHtml\(item\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(isLegacyFiles \|\| \(tabIsPinned\(item\) && !isEditor\)\) return ''/);
   assert.match(shell, /function paneTabInnerHtml\(item, rowOptions = \{\}\)[\s\S]*html \+= paneTabDismissControlHtml\(item\)/);

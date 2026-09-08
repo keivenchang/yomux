@@ -2245,7 +2245,14 @@ def session_files_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
     return (
         info.session,
         tuple(sorted(str(pane.current_path or "") for pane in info.panes if pane.current_path)),
-        tuple(sorted(str(agent.cwd or "") for agent in info.agents if agent.cwd)),
+        tuple(sorted(
+            (
+                str(agent.cwd or ""),
+                str(agent.session_id or "") if agent.kind == "opencode" else "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
+            for agent in info.agents if agent.cwd or (agent.kind == "opencode" and agent.session_id)
+        )),
     )
 
 
@@ -2264,7 +2271,14 @@ def metadata_warm_session_signature(info: SessionInfo) -> tuple[Any, ...]:
     )
     agents = tuple(
         sorted(
-            (agent.pane_target, agent.cwd or "", agent.kind, agent.command, agent.session_id or "")
+            (
+                agent.pane_target,
+                agent.cwd or "",
+                agent.kind,
+                agent.command,
+                agent.session_id or "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
             for agent in info.agents
         )
     )
@@ -14040,7 +14054,14 @@ class TmuxWebtermApp:
         graph: dict[str, Any] | None,
     ) -> tuple[Any, ...]:
         """Name every source that can change one session's canonical work graph."""
-        session_generation = self.client_event_payload_signature(asdict(info))
+        session_generation = (
+            self.client_event_payload_signature(asdict(info)),
+            tuple(
+                stats_current_opencode.tool_database_revision()
+                for agent in info.agents
+                if agent.kind == "opencode"
+            ),
+        )
         repository_generations = self.metadata_warm_repository_signature(graph)
         provider_generation = self.metadata_cache.source_generation()
         worktrees = graph.get("git_worktrees") if isinstance(graph, dict) else None
@@ -16691,10 +16712,17 @@ class TmuxWebtermApp:
         if not raw_base and not raw_editor_path:
             diagnostic = "missing editor_path or base_dir"
             return user_message_payload("upload.error.editorTargetRequired", diagnostic), HTTPStatus.BAD_REQUEST
-        base = Path(raw_base).expanduser() if raw_base else Path(raw_editor_path).expanduser().parent
+        editor = Path(raw_editor_path).expanduser() if raw_editor_path else None
+        base = Path(raw_base).expanduser() if raw_base else editor.parent
+        requested_target = base if editor is None else base / editor.stem
         try:
-            target_dir, target_source = self.upload_target_dir(session or "editor", auth_username=auth_username)
-        except UploadTargetError as exc:
+            with filesystem.paths.safe_path(str(base), flags=filesystem.paths.metadata_descriptor_flags(), operation="editor_upload") as base_handle:
+                target_dir = base_handle.resolved if editor is None else base_handle.resolved / editor.stem
+                target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target_dir = target_dir.resolve()
+                filesystem.paths._authorize_requested_path(requested_target, target_dir, operation="editor_upload")
+            target_source = "editor_file_directory" if editor is not None else "editor_base_directory"
+        except (filesystem.FilesystemError, OSError) as exc:
             diagnostic = str(exc)
             return {
                 "base_dir": str(base),
@@ -16705,7 +16733,7 @@ class TmuxWebtermApp:
             error["base_dir"] = str(base)
             return error, status
         for item in saved:
-            item["relative_path"] = item["path"]
+            item["relative_path"] = item["saved_name"] if editor is None else f"{editor.stem}/{item['saved_name']}"
         self.log_event(
             "",
             "editor_upload",

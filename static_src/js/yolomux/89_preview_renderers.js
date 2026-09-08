@@ -1388,7 +1388,7 @@ function cancelEditorPreviewRenderAfterUserScroll(container) {
 
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
-  if (previewScrollUserOwnsElementNow(container)) {
+  if (options.force !== true && previewScrollUserOwnsElementNow(container)) {
     scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options);
     return false;
   }

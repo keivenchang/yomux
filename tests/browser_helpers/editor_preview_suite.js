@@ -9285,11 +9285,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(api.sessionFileRelativeTimeText(1000, 1014), catalog['relative.compact.lessThan15Sec'], `${locale} Finder/Differ sub-15-second Ago text is localized`);
       assert.equal(api.sessionFileRelativeTimeText(1000, 19720), catalog['relative.compact.hour.other'].replace('{count}', '5.2'), `${locale} Finder/Differ compact Ago text is localized`);
       assert.equal(/\bago\b|hrs?|days?|min\b/i.test(api.sessionFileRelativeTimeText(1000, 217000)), false, `${locale} Finder/Differ compact Ago text does not leak English units`);
-      assert.equal(api.editorModeLabel('edit'), catalog['common.edit'], `${locale} editor Edit mode label is localized`);
-      assert.equal(api.editorModeLabel('preview'), catalog['common.preview'], `${locale} editor Preview mode label is localized`);
+      assert.equal(api.editorModeLabel('edit'), catalog['editor.mode.textEdit'], `${locale} editor TextEdit mode label is localized`);
+      assert.equal(api.editorModeLabel('preview'), catalog['editor.mode.viewEdit'], `${locale} editor ViewEdit mode label is localized`);
       assert.equal(api.editorModeLabel('split'), catalog['editor.mode.split'], `${locale} editor Split View mode label is localized`);
-      assert.notEqual(api.editorModeLabel('edit'), 'Edit', `${locale} editor Edit mode label does not fall back to English`);
-      assert.notEqual(api.editorModeLabel('preview'), 'Preview', `${locale} editor Preview mode label does not fall back to English`);
+      assert.notEqual(api.editorModeLabel('edit'), 'Edit', `${locale} editor TextEdit mode label does not use the retired Edit name`);
+      assert.notEqual(api.editorModeLabel('preview'), 'Preview', `${locale} editor ViewEdit mode label does not use the retired Preview name`);
       assert.notEqual(api.editorModeLabel('split'), 'Split view', `${locale} editor Split View mode label does not fall back to English`);
       // The YOLO-toggle menu labels + the YOLO submenu header use the localized brand glyph (優/优 and
       // 優樂/优乐), not a Latin "YO"/"YOLO" (images #57 / #59).

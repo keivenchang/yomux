@@ -3,12 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  platform_default_port=8880
-else
-  platform_default_port=7770
-fi
-primary_port="${YOLOMUX_PORT:-$platform_default_port}"
+primary_port="${YOLOMUX_PORT:-${YOLOMUX_DEFAULT_PORT:-}}"
 # An explicit port names this launcher's primary owner. Do not let an inherited server's owner
 # port redirect a separately configured test/dev launch; without YOLOMUX_PORT, retain the override.
 if [[ -n "${YOLOMUX_PORT:-}" ]]; then
@@ -23,19 +18,21 @@ restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
 print_command=0
 check_assets=0
+ignore_load=0
 ports=()
 python_bin="${PYTHON:-python3}"
 server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7770 on Linux. Non-primary ports use --dev by default.
+Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh
   ./boot.sh <dev-port>
+  ./boot.sh --ignore-load <dev-port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
 }
@@ -65,6 +62,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --check-assets)
       check_assets=1
+      shift
+      ;;
+    --ignore-load)
+      ignore_load=1
       shift
       ;;
     --host)
@@ -108,7 +109,16 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [[ "${#ports[@]}" -eq 0 ]]; then
-  add_port "$default_port"
+  if [[ "$check_assets" -eq 1 ]]; then
+    add_port "${primary_port:-7110}"
+  else
+    [[ -n "$primary_port" ]] || die "no port selected; set YOLOMUX_DEFAULT_PORT or pass an explicit port"
+    add_port "$default_port"
+  fi
+elif [[ -z "$primary_port" ]]; then
+  primary_port="${ports[0]}"
+  background_owner_primary_port="$primary_port"
+  default_port="$primary_port"
 fi
 
 path_entries=()
@@ -570,10 +580,16 @@ fi
 preflight_log_sinks
 yolomux_acquire_start_lock || die "startup lock unavailable"
 trap yolomux_release_start_lock EXIT
-yolomux_wait_for_system_capacity "$python_bin"
+if [[ "$ignore_load" -eq 1 ]]; then
+  printf 'WARNING: --ignore-load requested; skipping only the startup CPU/load capacity wait\n' >&2
+else
+  yolomux_wait_for_system_capacity "$python_bin"
+fi
 ensure_xterm_assets
 
 for port in "${ports[@]}"; do
-  yolomux_wait_for_system_capacity "$python_bin"
+  if [[ "$ignore_load" -ne 1 ]]; then
+    yolomux_wait_for_system_capacity "$python_bin"
+  fi
   restart_port "$port"
 done

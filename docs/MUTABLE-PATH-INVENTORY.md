@@ -1,6 +1,6 @@
 # Mutable path inventory
 
-> **STATUS 2026-08-12: HISTORICAL.** This inventory was taken against the `phase2-infrastructure` baseline, which landed on 2026-08-01. Path ownership has since moved through the 0.7.3 root-isolation work and the 0.7.4 package split; `yolomux_lib/infra/root_paths.py` is the current resolver and this table has not been re-derived from it. Use it for migration history, not to look up where a path lives today.
+> **STATUS 2026-08-12: HISTORICAL.** This inventory was taken against the `phase2-infrastructure` baseline, which landed on 2026-08-01. Path ownership has since moved through the 0.7.3 root-isolation work and the 0.7.4 package split; `yolomux_lib/infra/root_paths.py` is the current resolver. The runtime-root corrections below record the current path family; use the remaining table for migration history rather than as a complete path catalog.
 
 This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE_DIR` currently conflates runtime, durable state, and cache data; matrix classifications below are migration targets, not claims that the current layout already meets them.
 
@@ -10,11 +10,11 @@ This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE
 | shared config | `~/.config/yolomux/settings.yaml` | settings serializer | `yolomux_lib/workspace/settings.py:29`, `yolomux_lib/workspace/settings.py:1164` |
 | shared config | `~/.config/yolomux/yolo-rules.yaml` | approval rules bootstrap | `yolomux_lib/approval/yolo_rules.py:27`, `yolomux_lib/approval/yolo_rules.py:246-248` |
 | shared config | `~/.config/yolomux/state.json` | event preference state | `yolomux_lib/infra/common.py:69`, `yolomux_lib/observability/events.py:36-51` |
-| host-local runtime | `STATE_DIR/server-leases/<port>.lock` | port lease/flock record | `yolomux_lib/server_lease.py:32-58` |
-| host-local runtime | `STATE_DIR/services/*.sock`, locks, aliases | local RPC runtime | `yolomux_lib/local_services/runtime.py:180-209`, `yolomux_lib/local_services/registry.py:404-405` |
-| host-local runtime | `STATE_DIR/background-owner/` | generation/owner records and lock | `yolomux_lib/infra/background_owner.py:27`, `:197-200`, `:341-346` |
-| host-local runtime | `STATE_DIR/locks/auto-approve-*.lock` | approval target lock | `yolomux_lib/infra/common.py:77`, `yolomux_lib/approval/auto_approve_worker.py:28`, `:50` |
-| host-local runtime | `STATE_DIR/control/` | local Unix control endpoint | `yolomux_lib/infra/common.py:78` |
+| host-local runtime | `RUNTIME_DIR/server-leases/<host>/<port>.lock` | port lease/flock record | `yolomux_lib/server_lease.py`, `yolomux_lib/infra/common.py` |
+| host-local runtime | `RUNTIME_DIR/services/*.sock`, locks, aliases | local RPC runtime | `yolomux_lib/local_services/runtime.py`, `yolomux_lib/local_services/registry.py` |
+| host-local runtime | `RUNTIME_DIR/background-owner/` | generation/owner records and lock | `yolomux_lib/infra/background_owner.py` |
+| host-local runtime | `RUNTIME_DIR/locks/auto-approve-*.lock` | approval target lock | `yolomux_lib/infra/common.py`, `yolomux_lib/approval/auto_approve_worker.py` |
+| host-local runtime | `RUNTIME_DIR/control/` | local Unix control endpoint | `yolomux_lib/infra/common.py` |
 | host-local runtime | `/tmp/yolomux.<user>/uploads/<session>/` | upload reservation and retention sweep | `yolomux_lib/workspace/uploads.py:22`, `:45-61`, `:81-128` |
 | host-local durable | `STATE_DIR/hosts/<stable-host-id>/events-v*.jsonl` | event append log; legacy shared history is retained and never adopted | `yolomux_lib/infra/common.py:event_log_path`, `yolomux_lib/observability/events.py:207-213` |
 | host-local durable | `STATE_DIR/hosts/<stable-host-id>/run-history.json` | run-history truncation/atomic rewrite; legacy shared history is retained and never adopted | `yolomux_lib/infra/common.py:run_history_path`, `yolomux_lib/observability/events.py:377`, `:413` |

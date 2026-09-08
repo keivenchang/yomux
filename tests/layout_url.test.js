@@ -18,6 +18,7 @@ const allSuiteFiles = [
   'tests/side_panes.test.js',
   'tests/cross_surface_state.test.js',
   'tests/editor_preview_core.test.js',
+  'tests/editor_preview_prosemirror.test.js',
   'tests/editor_preview_tmux.test.js',
   'tests/editor_preview_settings.test.js',
   'tests/stats_current_ui.test.js',

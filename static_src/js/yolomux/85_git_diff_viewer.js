@@ -41,6 +41,7 @@ function newGitDiffTabState(item, defaults = {}) {
     focusedFilePaths: new Map(),
     historyGuard: makeGenerationGuard(),
     historyController: null,
+    historyRefreshTimer: null,
     focusedSha: '',
     ...defaults,
   };
@@ -68,10 +69,32 @@ function invalidateGitDiffDetailRequests(state) {
 
 function cleanupGitDiffTab(item) {
   const state = gitDiffTabState.get(item);
+  if (state?.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
   state?.historyController?.abort?.();
   state?.historyGuard?.invalidate?.();
   invalidateGitDiffDetailRequests(state);
   gitDiffTabState.delete(item);
+}
+
+const gitDiffHistoryRefreshIntervalMs = 10000;
+
+function scheduleGitDiffHistoryRefresh(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return;
+  if (state.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
+  state.historyRefreshTimer = setTimeout(() => {
+    state.historyRefreshTimer = null;
+    const panel = panelNodes.get(item);
+    if (!panel?.isConnected || !state.loaded || state.loading || state.loadingOlder) {
+      if (panel?.isConnected && state.loaded) scheduleGitDiffHistoryRefresh(item);
+      return;
+    }
+    if (state.nextCursor || state.visibleCommitCount < state.commits.length) {
+      scheduleGitDiffHistoryRefresh(item);
+      return;
+    }
+    void refreshGitDiffHistory(item, {refresh: true});
+  }, gitDiffHistoryRefreshIntervalMs);
 }
 
 function gitDiffHistoryPageSize(body) {
@@ -174,7 +197,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     const panel = panelNodes.get(item);
     const body = panel?.querySelector?.('.git-diff-panel-body');
        const pageSize = gitDiffHistoryPageSize(body);
-    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize * (gitDiffHistoryPagesPrefetched + 1)), {
+      const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, 200), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
     });
@@ -199,6 +222,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.truncationReason = String(payload.truncation_reason || '');
     state.loaded = true;
     state.error = null;
+    scheduleGitDiffHistoryRefresh(item);
     renderPaneTabStrips();
     refreshPaneTabLabel(item);
     if (itemInLayout(tabberItemId)) refreshTabberPanels();
@@ -208,6 +232,12 @@ async function refreshGitDiffHistory(item, options = {}) {
     return true;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
+    if (append && error?.code === 'git_history_stale') {
+      state.nextCursor = '';
+      state.snapshotCursor = '';
+      state.error = null;
+      return refreshGitDiffHistory(item, {refresh: true});
+    }
     if (!append && cursor && gitDiffHistoryCursorIsInvalid(error)) {
       // A saved layout can outlive the server's cursor format. Drop that opaque cursor once and
       // reload the current snapshot instead of leaving the restored Diff tab permanently failed.
@@ -217,6 +247,7 @@ async function refreshGitDiffHistory(item, options = {}) {
       return refreshGitDiffHistory(item, {refresh: true});
     }
     state.error = gitDiffErrorSnapshot(error);
+    if (state.loaded) scheduleGitDiffHistoryRefresh(item);
     return false;
   } finally {
     if (isCurrent()) {
@@ -729,6 +760,7 @@ function createGitDiffPanel(item) {
   meta.className = 'git-diff-meta';
   const body = document.createElement('div');
   body.className = 'git-diff-panel-body';
+  body.dataset.dockviewRegion = 'content';
   body.setAttribute('aria-label', gitDiffTabLabel(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);

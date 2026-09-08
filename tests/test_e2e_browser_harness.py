@@ -7,9 +7,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import time
 from typing import Any
 
 import pytest
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
@@ -105,6 +109,419 @@ def test_real_page_harness_owns_7900s_runtime_and_user_action_helpers(e2e_browse
     panel = e2e_browser.switch_session(session)
     session_state = e2e_browser.assert_reaches_terminal_state(panel, bound=12)
     assert session_state["terminal"] is True
+
+
+def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -> None:
+    """Drive the actual page and both editor surfaces with native Chromium input."""
+
+    target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-e2e.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("helloworld\n", encoding="utf-8")
+    e2e_browser.load(tabs=("files",))
+    wait_for_browser_boot(
+        e2e_browser.driver,
+        globals_required={
+            "openFileInEditor": "function",
+            "fileEditorItemFor": "function",
+            "fileEditorPanelState": "function",
+        },
+        dom_anchors=("#grid",),
+        timeout=12,
+    )
+
+    opened = e2e_browser.driver.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const item = await openFileInEditor(
+              path,
+              {name: 'markdown-e2e.md'},
+              {userInitiated: true, viewMode: 'split'},
+            );
+            const panel = await window.__yolomuxTestWaitFor(() => {
+              const candidate = [...document.querySelectorAll('.file-editor-panel')]
+                .find(node => node.isConnected && node.dataset.filePath === path);
+              return candidate?._cmView && candidate?._pmView
+                && candidate.querySelector('[data-editor-surface="text-editor"] .cm-content')
+                && candidate.querySelector('[data-editor-surface="view-editor"] .ProseMirror')
+                && candidate.querySelectorAll('[data-editor-surface="view-editor"] .ProseMirror').length === 1
+                ? candidate : null;
+            }, {timeoutMs: 15000, description: 'real Chromium Markdown Split editor'});
+            done({
+              item,
+              path: panel.dataset.filePath,
+              mode: editorViewModeFor(path, item),
+              textLabel: panel.querySelector('[data-editor-surface="text-editor"]')?.getAttribute('aria-label') || '',
+              viewLabel: panel.querySelector('[data-editor-surface="view-editor"]')?.getAttribute('aria-label') || '',
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error)});
+          }
+        })();
+        """
+        ,
+        str(target),
+    )
+    assert "error" not in opened, opened
+    assert opened["path"] == str(target), opened
+    assert opened["mode"] == "split", opened
+    assert opened["textLabel"] == "TextEditor", opened
+    assert opened["viewLabel"] == "ViewEditor", opened
+
+    panel = WebDriverWait(e2e_browser.driver, 15).until(
+        lambda driver: driver.find_element(
+            By.CSS_SELECTOR,
+            f'.file-editor-panel[data-file-path="{str(target).replace(chr(34), "\\\\\\\"")}"]',
+        )
+    )
+    view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
+    view.click()
+    view.send_keys("typed")
+    immediate_view_state = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {source:fileEditorPanelState(p)?.content || '', cm:p._cmView?.state.doc.toString() || '', pm:p._pmView?.state.doc.textContent || ''};",
+        panel,
+    )
+    assert immediate_view_state["source"] == "helloworld\n", immediate_view_state
+    assert immediate_view_state["cm"] == "helloworld\n", immediate_view_state
+    assert "typed" in immediate_view_state["pm"], immediate_view_state
+
+    view_state = WebDriverWait(e2e_browser.driver, 12).until(
+        lambda driver: driver.execute_script(
+            """
+            const path = arguments[0];
+            const panel = [...document.querySelectorAll('.file-editor-panel')]
+              .find(node => node.isConnected && node.dataset.filePath === path);
+            const source = String(fileEditorPanelState(panel)?.content || '');
+            const cm = panel?._cmView?.state?.doc?.toString?.() || '';
+            const pm = panel?._pmView?.state?.doc?.textContent || '';
+            return source.includes('typed') && cm === source && pm.includes('typed')
+              ? {source, cm, pm, active: document.activeElement === panel._pmView.dom}
+              : false;
+            """,
+            str(target),
+        )
+    )
+    assert "<br>" not in view_state["source"], view_state
+    assert "typed" in view_state["source"], view_state
+
+    text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
+    text.click()
+    text.send_keys(Keys.END, " source")
+    immediate_text_state = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {source:fileEditorPanelState(p)?.content || '', cm:p._cmView?.state.doc.toString() || '', pm:p._pmView?.state.doc.textContent || ''};",
+        panel,
+    )
+    assert immediate_text_state["source"] == view_state["source"], immediate_text_state
+    assert immediate_text_state["pm"] == view_state["pm"], immediate_text_state
+    assert immediate_text_state["cm"].endswith(" source"), immediate_text_state
+    text_state = WebDriverWait(e2e_browser.driver, 12).until(
+        lambda driver: driver.execute_script(
+            """
+            const path = arguments[0];
+            const panel = [...document.querySelectorAll('.file-editor-panel')]
+              .find(node => node.isConnected && node.dataset.filePath === path);
+            const source = String(fileEditorPanelState(panel)?.content || '');
+            const pm = panel?._pmView?.state?.doc?.textContent || '';
+            const pmJson = panel?._pmView?.state?.doc?.toJSON?.() || null;
+            return source.endsWith(' source') && pm.includes('source')
+              ? {source, pm, pmJson, connected: panel._pmView.dom.isConnected}
+              : false;
+            """,
+            str(target),
+        )
+    )
+    assert text_state["connected"] is True, text_state
+    assert text_state["source"].endswith("typed source"), text_state
+    assert text_state["pm"].endswith("typed source"), text_state
+    assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
+
+
+def test_real_chromium_markdown_vieweditor_double_enter_never_writes_backslash(e2e_browser: Any) -> None:
+    """Ordinary Enter creates Markdown paragraphs; only Shift-Enter may create a hard break."""
+
+    target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-double-enter.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("before", encoding="utf-8")
+    e2e_browser.load(tabs=("files",))
+    wait_for_browser_boot(
+        e2e_browser.driver,
+        globals_required={"openFileInEditor": "function", "fileEditorPanelState": "function"},
+        dom_anchors=("#grid",),
+        timeout=12,
+    )
+    opened = e2e_browser.driver.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: 'markdown-double-enter.md'}, {userInitiated: true, viewMode: 'split'});
+            await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+              .find(node => node.isConnected && node.dataset.filePath === path && node._pmView && node._cmView),
+              {timeoutMs: 15000, description: 'double Enter ViewEditor'});
+            done(true);
+          } catch (error) {
+            done({error: String(error?.stack || error)});
+          }
+        })();
+        """,
+        str(target),
+    )
+    assert opened is True, opened
+    panel = WebDriverWait(e2e_browser.driver, 15).until(
+        lambda driver: driver.find_element(By.CSS_SELECTOR, f'.file-editor-panel[data-file-path="{str(target)}"]')
+    )
+    view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
+    view.click()
+    view.send_keys(Keys.END, Keys.ENTER, Keys.ENTER, "after")
+    settled = WebDriverWait(e2e_browser.driver, 12).until(
+        lambda driver: driver.execute_script(
+            """
+            const p = arguments[0];
+            const source = fileEditorPanelState(p)?.content || '';
+            return source.includes('after')
+              ? {source, cm: p._cmView?.state.doc.toString() || '', pm: p._pmView?.state.doc.toJSON() || null}
+              : false;
+            """,
+            panel,
+        )
+    )
+    assert "\\\n" not in settled["source"], settled
+    assert settled["source"] == "before\n\n\nafter", settled
+    assert settled["cm"] == settled["source"], settled
+    assert [node["type"] for node in settled["pm"]["content"]] == ["paragraph", "paragraph", "paragraph"], settled
+    view.send_keys(Keys.END, Keys.ENTER, Keys.ENTER)
+    trailing = WebDriverWait(e2e_browser.driver, 12).until(
+        lambda driver: driver.execute_script(
+            "const p=arguments[0], source=fileEditorPanelState(p)?.content || ''; return source.endsWith('after\\n\\n\\n') ? {source, pm:p._pmView?.state.doc.toJSON() || null} : false;",
+            panel,
+        )
+    )
+    assert "\\\n" not in trailing["source"], trailing
+    assert trailing["source"].endswith("after\n\n\n"), trailing
+    assert [node["type"] for node in trailing["pm"]["content"]][-2:] == ["paragraph", "paragraph"], trailing
+    assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
+
+
+def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_browser: Any) -> None:
+    """Every native key stays on its editing surface until the trailing idle commit."""
+
+    target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-idle-sync.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("444", encoding="utf-8")
+    e2e_browser.load(tabs=("files",))
+    wait_for_browser_boot(
+        e2e_browser.driver,
+        globals_required={"openFileInEditor": "function", "fileEditorPanelState": "function"},
+        dom_anchors=("#grid",),
+        timeout=12,
+    )
+    opened = e2e_browser.driver.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: 'markdown-idle-sync.md'}, {userInitiated: true, viewMode: 'split'});
+            const panel = await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+              .find(node => node.isConnected && node.dataset.filePath === path && node._cmView && node._pmView),
+              {timeoutMs: 15000, description: 'idle synchronization editor'});
+            done(true);
+          } catch (error) {
+            done({error: String(error?.stack || error)});
+          }
+        })();
+        """,
+        str(target),
+    )
+    assert opened is True, opened
+    panel = WebDriverWait(e2e_browser.driver, 15).until(
+        lambda driver: driver.find_element(By.CSS_SELECTOR, f'.file-editor-panel[data-file-path="{str(target)}"]')
+    )
+    view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
+    view.click()
+    view.send_keys("a")
+    first_view_key = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert first_view_key == {"pm": "444a", "cm": "444", "source": "444"}, first_view_key
+    view.send_keys("b")
+    second_view_key = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert second_view_key == {"pm": "444ab", "cm": "444", "source": "444"}, second_view_key
+    time.sleep(2.4)
+    view_idle = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert view_idle == {"pm": "444ab", "cm": "444ab", "source": "444ab"}, view_idle
+
+    text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
+    text.click()
+    text.send_keys("c")
+    first_text_key = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert first_text_key == {"pm": "444ab", "cm": "444abc", "source": "444ab"}, first_text_key
+    text.send_keys("d")
+    second_text_key = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert second_text_key == {"pm": "444ab", "cm": "444abcd", "source": "444ab"}, second_text_key
+    time.sleep(2.4)
+    text_idle = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
+        panel,
+    )
+    assert text_idle == {"pm": "444abcd", "cm": "444abcd", "source": "444abcd"}, text_idle
+    assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
+
+
+def test_real_chromium_markdown_view_shows_prosemirror_failure_without_legacy_preview(e2e_browser: Any) -> None:
+    """A ProseMirror parse failure is an explicit ViewEditor error, never an editable legacy preview."""
+
+    target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-preview-fallback.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "# Direct Editing In Preview\n\n"
+        "***~~<span class=\"unsupported\">hello</span>~~***\n\n"
+        "| Preview type | Decision |\n"
+        "| --- | --- |\n"
+        "| Markdown | Keep rendered |\n\n"
+        + "\n\n".join(f"## Section {index}\n\nRendered paragraph {index}." for index in range(80))
+        + "\n",
+        encoding="utf-8",
+    )
+    e2e_browser.load(tabs=("files",))
+    wait_for_browser_boot(
+        e2e_browser.driver,
+        globals_required={"openFileInEditor": "function", "fileEditorPanelState": "function"},
+        dom_anchors=("#grid",),
+        timeout=12,
+    )
+    metrics = e2e_browser.driver.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: 'markdown-preview-fallback.md'}, {userInitiated: true, viewMode: 'preview'});
+            const panel = await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+              .find(node => node.isConnected && node.dataset.filePath === path),
+              {timeoutMs: 12000, description: 'complex Markdown ViewEditor panel'});
+            const samples = [];
+            for (const delay of [0, 100, 300, 700]) {
+              await new Promise(resolve => setTimeout(resolve, delay));
+              const pane = panel.querySelector('[data-editor-surface="view-editor"]');
+              samples.push({
+                text: pane?.textContent || '',
+                error: pane?.querySelector('.file-editor-prosemirror-error')?.textContent || '',
+                errorBox: pane?.querySelector('.file-editor-prosemirror-error')?.getBoundingClientRect().toJSON() || null,
+                prosemirrorRoots: pane?.querySelectorAll('.ProseMirror').length || 0,
+                legacyEditable: pane?.querySelectorAll('[data-markdown-preview-editable="true"]').length || 0,
+                state: pane?.dataset.prosemirrorState || '',
+              });
+            }
+            done({samples, error: panel._pmError || '', status: document.getElementById('status')?.textContent || ''});
+          } catch (error) {
+            done({failure: String(error?.stack || error)});
+          }
+        })();
+        """,
+        str(target),
+    )
+    assert "failure" not in metrics, metrics
+    assert "ProseMirror ViewEditor failed: Unsupported raw HTML at line 3: <span class=\"unsupported\">" in metrics["error"], metrics
+    assert "ProseMirror ViewEditor failed" in metrics["status"], metrics
+    assert any("ProseMirror ViewEditor failed" in sample["error"] and "Direct Editing In Preview" in sample["text"] for sample in metrics["samples"]), metrics
+    terminal = metrics["samples"][-1]
+    assert terminal["state"] == "error" and terminal["prosemirrorRoots"] == 0 and terminal["legacyEditable"] == 0, metrics
+    assert terminal["errorBox"]["height"] >= 180 and "Direct Editing In Preview" in terminal["text"], metrics
+    assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
+
+
+def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any) -> None:
+    """Cover the complete user-reported TextEditor/ViewEditor contract in real Chromium."""
+
+    target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-full-e2e.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("helloworld\n", encoding="utf-8")
+    e2e_browser.load(tabs=("files",))
+    wait_for_browser_boot(
+        e2e_browser.driver,
+        globals_required={"openFileInEditor": "function", "fileEditorPanelState": "function"},
+        dom_anchors=("#grid",),
+        timeout=12,
+    )
+    opened = e2e_browser.driver.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: 'markdown-full-e2e.md'}, {userInitiated: true, viewMode: 'split'});
+            const panel = await window.__yolomuxTestWaitFor(() => {
+              const candidate = [...document.querySelectorAll('.file-editor-panel')]
+                .find(node => node.isConnected && node.dataset.filePath === path);
+              return candidate?._cmView && candidate?._pmView
+                && candidate.querySelector('[data-editor-surface="text-editor"] .cm-content')
+                && candidate.querySelector('[data-editor-surface="view-editor"] .ProseMirror')
+                && candidate.querySelectorAll('[data-editor-surface="view-editor"] .ProseMirror').length === 1
+                ? candidate : null;
+            }, {timeoutMs: 15000, description: 'full real Chromium Split contract'});
+            done({path: panel.dataset.filePath, mode: editorViewModeFor(path, fileEditorItemFor(path)), textLabel: panel.querySelector('[data-editor-surface="text-editor"]')?.getAttribute('aria-label'), viewLabel: panel.querySelector('[data-editor-surface="view-editor"]')?.getAttribute('aria-label')});
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+        ,
+        str(target),
+    )
+    assert "error" not in opened, opened
+    assert opened["mode"] == "split" and opened["textLabel"] == "TextEditor" and opened["viewLabel"] == "ViewEditor", opened
+    panel = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.find_element(By.CSS_SELECTOR, f'.file-editor-panel[data-file-path="{str(target)}"]'))
+    view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
+    text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
+
+    view.click()
+    view.send_keys(Keys.HOME, Keys.DELETE, "hello")
+    view.send_keys(Keys.END, Keys.ENTER, "world")
+    view_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("const p=arguments[0]; const s=fileEditorPanelState(p).content; return s.includes('hello') && s.endsWith('world') && p._cmView.state.doc.toString()===s ? {source:s, pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString()} : false", panel))
+    assert "<br>" not in view_state["source"], view_state
+    assert view_state["source"].endswith("world"), view_state
+
+    text.click()
+    text.send_keys(Keys.END, " from-text")
+    text_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("const p=arguments[0]; const s=fileEditorPanelState(p).content; return s.endsWith('from-text') && p._pmView.state.doc.textContent.includes('from-text') ? {source:s, pm:p._pmView.state.doc.textContent, connected:p._pmView.dom.isConnected} : false", panel))
+    assert text_state["connected"] is True, text_state
+    e2e_browser.driver.execute_script("window.dispatchEvent(new Event('load'))")
+    visible_after_refresh = WebDriverWait(e2e_browser.driver, 4).until(lambda driver: driver.execute_script("return arguments[0]._pmView?.dom?.isConnected === true && arguments[0].querySelectorAll('.ProseMirror').length === 1", panel))
+    assert visible_after_refresh is True
+    e2e_browser.driver.execute_script("refreshOpenEditorThemePanels(); applyEditorWrapPreference(); refreshEditorPreviews();")
+    visible_after_all_refreshes = WebDriverWait(e2e_browser.driver, 4).until(lambda driver: driver.execute_script("return arguments[0]._pmView?.dom?.isConnected === true && arguments[0].querySelector('[data-editor-surface=\\\"view-editor\\\"] .ProseMirror')?.textContent.includes('from-text')", panel))
+    assert visible_after_all_refreshes is True
+
+    def open_context_and_read() -> dict[str, Any]:
+        e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); p.dom.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,cancelable:true,clientX:30,clientY:30}));", panel)
+        return WebDriverWait(e2e_browser.driver, 4).until(lambda driver: driver.execute_script("const m=document.querySelector('.markdown-preview-context-menu'); return m ? {bold:m.querySelector('[data-markdown-command=bold]')?.getAttribute('aria-checked'), strike:m.querySelector('[data-markdown-command=strike]')?.getAttribute('aria-checked'), underline:m.querySelector('[data-markdown-command=underline]')?.getAttribute('aria-checked')} : false"))
+
+    first_menu = open_context_and_read()
+    assert first_menu["bold"] != "true", first_menu
+    e2e_browser.driver.execute_script("document.querySelector('.markdown-preview-context-menu')?.querySelector('[data-markdown-command=bold]')?.click()")
+    second_menu = open_context_and_read()
+    assert second_menu["bold"] == "true", second_menu
+    e2e_browser.driver.execute_script("document.querySelector('.markdown-preview-context-menu')?.remove()")
+
+    mobile_menu = e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); const e=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:30}); e.yolomuxTouchLongPress=true; const prevented=!p.dom.dispatchEvent(e); return {prevented, menu:Boolean(document.querySelector('.markdown-preview-context-menu'))};", panel)
+    assert mobile_menu == {"prevented": True, "menu": True}, mobile_menu
+    e2e_browser.driver.execute_script("document.querySelector('.markdown-preview-context-menu')?.remove()")
+    assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
 
 def test_pre_fix_real_page_content_assertion_and_spinner_assertion_are_independent(

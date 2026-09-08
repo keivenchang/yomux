@@ -2,6 +2,8 @@
 
 Lightweight, powerful browser workspace for managing AI work.
 
+Text files provide TextEdit for raw source editing. Markdown also provides ProseMirror-powered ViewEdit. In Split mode the left surface is labeled TextEditor and the right rendered Markdown WYSIWYG surface is labeled ViewEditor. Typing stays local to the active surface, then synchronizes both surfaces and canonical Markdown after 1.25 seconds without further input; saving, blur, mode changes, and close flush immediately. In ViewEditor, ordinary Enter creates a Markdown paragraph break; Shift-Enter alone creates an explicit hard break. Markdown image paste saves the image in a directory named for the Markdown file without its extension, then inserts a relative image reference at the original caret or selected range: `/a/b/file.md` becomes `/a/b/file/upload.png` and `![upload](file/upload.png)`.
+
 `yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `tools/auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tools/tmux_wall.py` (a read-only snapshot wall).
 
 Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), detailed product behavior lives under [`docs/specs/`](docs/specs/), and peer findings live in [`docs/RESEARCH.md`](docs/RESEARCH.md).
@@ -35,7 +37,7 @@ Open `https://localhost:9998/`. The first launch shows a setup page — see [Fir
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. On one host, shared work moves to a small fixed set of local Unix RPC services under the same local `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `batchd` broker with bounded spawn-based worker slots, one lazy `statusd`, and zero or one `approvald` while YO targets are enabled. Do not point servers on different hosts at one shared state directory; the current owner, service, tmux-status, watch-root, and activity paths are not fully host-qualified. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in a schema-versioned database, builds immutable resolution layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema/fence/path literals. A restarted `statsd` serves from a bounded aggregate ring persisted beside the originals rather than decoding retained history, and rebuilds the buckets an invalidation ledger records as owed, so cold cost follows ring capacity instead of store size. A listening socket is not readiness. `/readyz` requires authentication and fails closed until statsd can serve a correct snapshot, naming every failing condition rather than the first; `/livez` is public and answers only whether the statsd process is making progress, because a process supervisor polls it before any operator cookie exists. The detailed resource projection is on `/readyz` and is not exposed to unauthenticated callers. Both routes are implemented and not yet integrated: they exist on the branch that adds them and are absent from the current candidate tree, and no live HTTP request has been made against either one, so their routing is proven by construction rather than observed. `statusd` is the sole owner of the same-host public session/agent-status snapshot (lightweight tmux discovery, pane classification, encoded auto-approve bytes) and a private session-inventory contract that other daemon-owned products key work on; web processes only forward its bytes. Pane capture stays at the existing active cadence for sessions with activity in the last five minutes, then backs off by measured `tmux` session activity to approximately 10 seconds, 30 seconds, and 120 seconds for recent, quiet, and day-old sessions; new activity promotes a session on the next active reconciliation rather than waiting for its old deadline. `batchd` is a bounded CPU broker for stateless registered tasks and typed materialized products (`transcript_view`, `session_files_view`, `tabber_activity_view`, `metadata_warm_view`) that serve last-known-good bytes while a newer generation builds. Each lane has independently replaceable one-worker slots: after a deadline backstop, a kernel-stuck slot is quarantined, late results are generation-fenced, and at most two unreaped predecessors exist across the broker. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `indexd`, `statusd`); a CPU job burst adds `batchd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports on that host add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. On one host, shared work moves to six local Unix RPC services: supervised `statsd`; lazy `indexd`, `batchd`, `statusd`, and `watchd`; and zero or one `approvald` while YO targets are enabled. Service sockets, transport locks, control endpoints, and background-owner records live under `YOLOMUX_RUNTIME_DIR`; the default runtime layout is host- and boot-scoped, while an explicit `YOLOMUX_ROOT` uses that root's private `runtime/` directory. Durable databases, caches, and journals live under the local `YOLOMUX_STATE_DIR`. Do not point servers on different hosts at one shared runtime or state directory. `statsd` is the sole YO!stats database writer and history-serving owner. It stores originals, usage atoms, coverage epochs, unavailable spans, and bounded aggregate rings in a schema-versioned database, then serves exact cached snapshots and deltas while web processes authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema, fence, and path literals. A restarted `statsd` serves from the persisted ring and rebuilds only buckets an invalidation ledger records as owed. `/readyz` requires authentication and fails closed until statsd can serve a correct snapshot; `/livez` is public and answers only whether statsd can make progress; and `boot.sh` uses the separate public `/healthz` listener probe for restart readiness. `statusd` owns the same-host public session/agent-status snapshot and private session inventory; web processes forward its bytes. `batchd` is the bounded CPU broker for stateless registered tasks and typed materialized products that serve last-known-good bytes while a newer generation builds. Extra ports reuse services only when they share a runtime root; normal isolated ports use private runtime roots and therefore private services.
 
 The broker gives terminal candidate probes and base file reads a bounded foreground point path ahead of freshness and maintenance work. File bytes do not wait for optional Git history/capability enrichment. Its runtime rows name the accepting instance and state root, queue/phase, active task, broker and worker memory, journal bytes, and file-backed artifact bytes. A malformed queued-operation journal is preserved, reported once, and circuit-broken for that physical source generation instead of retrying it forever.
 
@@ -52,7 +54,7 @@ flowchart TB
     http["HTTPS/auth/SSE\nrequest threads"]
     app["TmuxWebtermApp\ncoordination only"]
     bridge["WebSocket PTY bridge\none request thread"]
-    control["Control RPC\nSTATE_DIR/control/yolomux-<pid>-<token>.sock\nmode 0600"]
+    control["Control RPC\nRUNTIME_DIR/control/yolomux-<pid>-<token>.sock\nmode 0600"]
 
     subgraph schedulers["Small in-process schedulers"]
       direction LR
@@ -65,14 +67,15 @@ flowchart TB
     end
   end
 
-  subgraph services["Same-host local services per YOLOMUX_STATE_DIR"]
+  subgraph services["Same-host local services per YOLOMUX_RUNTIME_DIR"]
     direction TB
     statsd["statsd\nversioned state socket\nsole SQLite writer\nasync four-layer materializer\nexact snapshot/delta cache"]
-    indexd["indexd\nSTATE_DIR/hosts/<host-id>/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
-    batchd["batchd broker\nSTATE_DIR/services/batchd.sock\ninteractive/freshness/maintenance queues\nlast-known-good product store\n60s idle when queue empty"]
+    indexd["indexd\nRUNTIME_DIR/services/indexd.sock\nowns per-root SQLite WAL in STATE_DIR\n60s idle after leases"]
+    batchd["batchd broker\nRUNTIME_DIR/services/batchd.sock\ninteractive/freshness/maintenance queues\nlast-known-good product store\n60s idle when queue empty"]
     execs["batchd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
-    statusd["statusd\nSTATE_DIR/services/statusd.sock\nshared session/agent-status snapshot\nprivate session-inventory contract\n60s idle after leases"]
-    approvald["approvald\nSTATE_DIR/services/approvald.sock\ntarget AutoApproveWorker threads\n60s idle after targets stop"]
+    statusd["statusd\nRUNTIME_DIR/services/statusd.sock\nshared session/agent-status snapshot\nprivate session-inventory contract\n60s idle after leases"]
+    watchd["watchd\nRUNTIME_DIR/services/watchd.sock\nfilesystem watch revisions\n60s idle without descriptors or leases"]
+    approvald["approvald\nRUNTIME_DIR/services/approvald.sock\ntarget AutoApproveWorker threads\n60s idle after targets stop"]
     batchd --> execs
   end
 
@@ -89,7 +92,7 @@ flowchart TB
     direction TB
     statsdb["versioned stats database\noriginals + usage + coverage\nschema/min-writer fence"]
     indexdb["STATE_DIR/hosts/<host-id>/search_index/<digest>.sqlite3\nindexd is sole writer"]
-    locks["STATE_DIR/background-owner/*\nSTATE_DIR/services/*.service.json\nSTATE_DIR/locks/auto-approve-*.lock"]
+    locks["RUNTIME_DIR/background-owner/*\nRUNTIME_DIR/services/*.service.json\nRUNTIME_DIR/locks/auto-approve-*.lock"]
     caches_state["STATE_DIR/session-files-cache\nSTATE_DIR/activity-cache\nSTATE_DIR/watch-index.json"]
   end
 
@@ -109,6 +112,7 @@ flowchart TB
   app <--> indexd
   app <--> batchd
   app <--> statusd
+  app <--> watchd
   app <--> approvald
   statsd <--> statsdb
   indexd --> indexdb
@@ -133,7 +137,7 @@ flowchart TB
   class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control,statsd,indexd,batchd,execs,statusd,approvald local
+  class control,statsd,indexd,batchd,execs,statusd,watchd,approvald local
   class statsdb,indexdb,locks,caches_state database
 ```
 
@@ -165,29 +169,32 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-  subgraph p1["yolomux.py :8880"]
+  subgraph p1["yolomux.py :<configured-port-a>"]
     app1["web app"]
-    sock1["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
+    sock1["control sock\nRUNTIME_DIR/control/yolomux-<pid>-*.sock"]
   end
-  subgraph p2["yolomux.py :7770"]
+  subgraph p2["yolomux.py :<configured-port-b>"]
     app2["web app"]
-    sock2["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
+    sock2["control sock\nRUNTIME_DIR/control/yolomux-<pid>-*.sock"]
   end
 
-  subgraph state["One host's local state directory"]
+  subgraph runtime["One host's local runtime directory"]
     ownerlock["background-owner/owner.lock"]
     ownerjson["background-owner/owner.json\ngenerations/*.json"]
     records["services/*.service.json\nservices/*.service.lock"]
-    statsdb["versioned stats database\noriginals + usage + coverage\nschema/min-writer fence"]
-    indexes["search_index/<digest>.sqlite3\none indexd writer"]
+  end
+  subgraph state["One host's local state directory"]
+    statsdb["versioned stats database\noriginals + usage + coverage + aggregate rings\nschema/min-writer fence"]
+    indexes["hosts/<host-id>/search_index/<digest>.sqlite3\none indexd writer"]
     caches["session-files-cache\nactivity-cache\nwatch-index.json"]
   end
   subgraph svc["Same-host service PIDs"]
     statsd2["statsd\nversioned state socket\nsole writer + materializer\nexact cache"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     batchd2["batchd\nservices/batchd.sock\n60s empty-queue idle"]
-    statusd3["statusd\nservices/statusd.sock\nshared status snapshot\n60s idle"]
-    approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
+    statusd3["statusd\nruntime services/statusd.sock\nshared status snapshot\n60s idle"]
+    watchd2["watchd\nruntime services/watchd.sock\nfilesystem watch revisions"]
+    approvald2["approvald\nruntime services/approvald.sock\nexits when no targets"]
   end
 
   app1 <--> sock1
@@ -208,6 +215,8 @@ flowchart TB
   app2 --> batchd2
   app1 --> statusd3
   app2 --> statusd3
+  app1 --> watchd2
+  app2 --> watchd2
   app1 --> approvald2
   app2 --> approvald2
   statsd2 <--> statsdb
@@ -221,8 +230,9 @@ flowchart TB
   classDef localChild fill:#b45309,stroke:#fcd34d,color:#fffbeb
   class app1,app2 process
   class sock1,sock2 socket
-  class ownerlock,ownerjson,records,statsdb,indexes,caches durable
-  class statsd2,indexer,batchd2,statusd3,approvald2 localChild
+  class ownerlock,ownerjson,records localChild
+  class statsdb,indexes,caches durable
+  class statsd2,indexer,batchd2,statusd3,watchd2,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
@@ -244,11 +254,11 @@ flowchart TB
 
 | Flow | Concrete mechanism |
 | --- | --- |
-| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:7770` in the standard Linux launch, `:8880` in the standard macOS launch, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
+| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener. Direct `yolomux.py` launches default to `:9998`; `boot.sh` requires `YOLOMUX_PORT`, an explicit port argument, or `YOLOMUX_DEFAULT_PORT`. |
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
-| Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
-| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Each service owns a state-directory socket; the current stats socket name is version-scoped with the stats protocol and schema, while the indexer, job, and approval services use their service-local paths. `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include current stats observation writes/exact snapshots, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. Stats snapshot bodies are encoded and cached by statsd, then forwarded without web-process database access or re-aggregation. |
+| Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_RUNTIME_DIR/yolomux/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets under the runtime directory. The stats socket name is version-scoped with the stats protocol and schema, while indexd, batchd, statusd, watchd, and approvald use service-local paths. `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include current stats observation writes/exact snapshots, index enqueue/search/unindex, batch submit/result/cancel, watch descriptor/revision work, and approval target start/status/stop. Stats snapshot bodies are encoded and cached by statsd, then forwarded without web-process database access or re-aggregation. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
 The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, an older incompatible peer may be replaced only by a compatible current caller, and a newer peer makes the caller stop with `upgrade_required`. Repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
@@ -302,7 +312,8 @@ python3 yolomux.py --dang
 | --- | --- | --- |
 | `YOLOMUX_HOST_ID` | Optional stable host-ID override; otherwise YOLOmux reads `/etc/machine-id`. The value is fixed on first use and a late change fails closed. | Set a unique stable value before startup for containers or cloned machine images. Hostname is display-only and is not a durable key. |
 | `YOLOMUX_CONFIG_DIR` | Owns `auth.yaml`, `settings.yaml`, `state.json`, YOLO rules, and user skill/context files. | Use a local directory today. A shared read-only directory or one designated writer is possible, but concurrent cross-host writes are not supported. |
-| `YOLOMUX_STATE_DIR` | Owns same-host services, sockets, locks, activity/status files, histories, and host-partitioned database paths. | Must resolve to a local filesystem and must be distinct per host. Partition subdirectories do not make the remaining unqualified runtime files safe to share. |
+| `YOLOMUX_STATE_DIR` | Owns durable activity/status files, histories, and host-partitioned database paths. | Must resolve to a local filesystem and must be distinct per host. |
+| `YOLOMUX_RUNTIME_DIR` | Owns boot-scoped service sockets, locks, control endpoints, leases, and background-owner records. | Must resolve to a local filesystem and must be distinct per host and running deployment. |
 | `YOLOMUX_CACHE_DIR` | Owns reconstructible caches such as model pricing. | Must resolve to a local filesystem and must be distinct per host. |
 | `YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1` | Changes a WAL/socket preflight refusal into a warning. | Emergency escape hatch only. It does not make SQLite WAL or Unix sockets safe on a network filesystem and is not the supported shared-home setup. |
 
@@ -313,7 +324,7 @@ python3 yolomux.py --dang
 | Stable host/process identity | Implemented: stable host ID, display hostname, boot ID, PID start identity/ticks, and process nonce are available, and a late `YOLOMUX_HOST_ID` change is rejected. | Give cloned/containerized hosts different overrides before startup. Do not use hostname, PID, port, or an absolute path alone as identity. |
 | Local services, leases, owners, sockets | Partial: records carry host/process identity and several destructive paths fail closed, but the principal two-host owner/lease/service-root gate is still a strict expected failure. | Use a different local `YOLOMUX_STATE_DIR` on each host. Sharing one state directory across hosts is not supported. |
 | Login throttle, YO!stats, Quick Open, model-pricing databases | Their default helpers select a `hosts/<stable-host-id>/` partition, and each WAL opener rejects network or undetermined filesystems before creating the database unless the escape hatch is set. | Keep the containing state/cache roots local. A host-ID subdirectory on NFS prevents filename collision but does not make WAL-on-NFS supported. |
-| YO!chat | Not multi-host safe in this build: the partitioned helper exists, but the production web app still opens the legacy unpartitioned `YOLOMUX_STATE_DIR/yochat.sqlite3`. The product decision on whether conversations should roam remains open. | Run chat only inside one host's local state root. Do not share its database or journal between hosts and do not infer global-chat support. |
+| YO!chat | Host-partitioned: the production app opens `YOLOMUX_STATE_DIR/hosts/<stable-host-id>/yochat.sqlite3` and matching history/cursor paths. Conversations do not roam between hosts. | Run chat only inside one host's local state root. Do not share its database or journal between hosts. |
 | Shared preferences and authentication | Production settings and state mutations now use the POSIX record-lock parent; auth and YO rules use its complete-document writer and can reject stale revisions. Same-host tests cover exclusion, crash release, key-level merge, concurrent settings updates, and stale auth/rules refusal, but the exporter-local versus NFS-client acceptance run has not happened. | Use local configuration on each host, mount shared configuration read-only, or designate exactly one writer. Do not claim cross-host lock safety from the same-host tests. |
 | Transcript reads | Incremental scans tolerate partial final JSONL records and inode replacement. Cached read failures preserve the last-known-good result with typed reasons; an initial ENOENT remains a deletion. The shared-root reader polls active remote files every five seconds for appended bytes while local roots wait for native invalidation, and logical identity is `(shared_root_id, relative_path)`. | The reader contracts are implemented and fixture-tested, but shared-root discovery/path mapping is not wired into operator configuration. Treat mounted transcript trees as read-only and do not assume multi-host transcript federation is available. |
 | Tmux identities, attention acknowledgements, `tmux-AI-status`, watch-root interest, activity rows | Alerts, errors, and notifications are host-local. The contract requires every record and acknowledgement to use the stable host ID: acknowledging an alert on `lin1` must not clear an identically named pane on `lin2`. When multiple hosts are visible, the UI displays the source hostname without using it as the durable key. The implementation remains strict expected failure: these isolation and attribution contracts are not built. | Keep each host's state and UI separate. Cross-host tmux display and acknowledgement isolation are not supported yet. |
@@ -344,10 +355,10 @@ Adoption choices differ by store:
 
 | Store | Legacy data guidance |
 | --- | --- |
-| YO!stats | Adopt only the confirmed source host's `stats-v6.sqlite3` into that host's empty partition with the SQLite backup procedure. Do not merge histories from two hosts. |
+| YO!stats | Adopt only the confirmed source host's legacy stats database into that host's empty current `stats-v<schema>.sqlite3` partition with the SQLite backup procedure. Do not merge histories from two hosts. |
 | Login throttle | Starting fresh is usually safer. If counters must be retained, adopt the validated database and its matching `login-throttle.key` together before first start. |
 | Quick Open and model pricing | Rebuild these reconstructible caches instead of adopting them. Preserve the old files until the new host is verified. |
-| YO!chat | Do not perform a multi-host partition migration in this build: the production app still opens the legacy path and the roaming semantics remain undecided. Preserve the database and `yochat-history/` journal unchanged. |
+| YO!chat | The production app uses a host-partitioned room. Preserve legacy unpartitioned database and `yochat-history/` artifacts unchanged; they are not auto-adopted. |
 
 Implementation details, exact unresolved gates, and developer-facing path owners are documented in [Multi-host shared-home implementation status](docs/DEVELOPMENT.md#multi-host-shared-home-implementation-status).
 

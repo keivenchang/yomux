@@ -535,6 +535,62 @@ def test_opencode_old_exact_permission_card_above_newer_idle_composer_is_not_blo
     assert state["key"] == "idle"
 
 
+def test_opencode_visible_error_is_blocked_and_surfaces_error_line():
+    visible_text = "\n".join([
+        "▣ Build · Model default",
+        "litellm.BadRequestError: string_above_max_length",
+        "The request body exceeded the provider limit.",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "blocked"
+    assert "BadRequestError" in state["text"]
+
+
+def test_opencode_visible_error_after_current_build_row_is_blocked():
+    visible_text = "\n".join([
+        "▣ Build · Model default",
+        "Error: provider returned HTTP 500",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃ Build · Model default",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "blocked"
+    assert state["text"] == "Error: provider returned HTTP 500"
+
+
+def test_opencode_old_error_above_newer_idle_composer_is_not_blocked():
+    visible_text = "\n".join([
+        "old output: litellm.BadRequestError: string_above_max_length",
+        "╭────────────────────────────────────────────────────────────╮",
+        "│ Ask anything...                                            │",
+        "╰────────────────────────────────────────────────────────────╯",
+        "┃ Build · Model default · 14.4s",
+        "BUILD                                                     ctrl+p cmd",
+    ])
+
+    state = prompt_detector.agent_screen_state(
+        visible_text, pane_target="%opencode", agent_kind="opencode",
+    )
+
+    assert state["key"] == "idle"
+
+
 def test_opencode_meter_requires_newest_bottom_state():
     stale_meter = "\n".join([
         "unrelated audit output",

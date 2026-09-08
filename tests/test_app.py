@@ -242,7 +242,7 @@ def test_stats_agent_token_rows_keeps_existing_transcript_rows_when_enriching_mi
 
 
 def test_stats_agent_token_rows_stop_re_enriching_a_permanently_unresolvable_roster(monkeypatch, tmp_path):
-    """Session yo7770 runs in a tree with no matching Codex rollout, so its statusd row can never
+    """Session yo7110 runs in a tree with no matching Codex rollout, so its statusd row can never
     carry a transcript. That made `any(not row["transcript"])` permanently true and forced a full
     discover_sessions (measured 1.53-2.05s CPU) on every collector sample."""
 
@@ -260,7 +260,7 @@ def test_stats_agent_token_rows_stop_re_enriching_a_permanently_unresolvable_ros
     monkeypatch.setattr(webapp.stats_agent_token_enrich_memo(), "clock", clock)
     statusd_rows = [
         {"session": "s", "window_index": 3, "kind": "codex", "transcript": ""},
-        {"session": "yo7770", "window_index": 1, "kind": "codex", "transcript": ""},
+        {"session": "yo7110", "window_index": 1, "kind": "codex", "transcript": ""},
     ]
 
     first = webapp.stats_agent_token_rows(list(statusd_rows))
@@ -1969,7 +1969,7 @@ def test_server_cpu_budget_warning_spans_the_breach_window_and_states_its_covera
     # The warning explained a 300s breach with a 60s slice of profiling and no denominator, so a
     # consumer worth 0.4% of the CPU read as the cause. Two defects, one message: the summary
     # window must be the breach window, and the report must say what share of the measured CPU it
-    # actually accounts for. A live 7771 breach burned ~267 CPU-s and attributed 0.9ms of it.
+    # actually accounts for. A live 7111 breach burned ~267 CPU-s and attributed 0.9ms of it.
     webapp = app_module.TmuxWebtermApp([])
     logs = []
     events = []
@@ -7443,25 +7443,25 @@ def test_input_heartbeat_parallel_lifecycle_attributes_are_retired():
 
 def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp(["7770"])
+    webapp = app_module.TmuxWebtermApp(["7110"])
     refreshes = []
 
     def fail_tmux(*_args, **_kwargs):
         raise AssertionError("record_user_input must not call tmux")
 
     try:
-        webapp.set_transcripts_payload_cache({"sessions": {"7770": {"panes": []}}})
+        webapp.set_transcripts_payload_cache({"sessions": {"7110": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fail_tmux)
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
 
-        webapp.record_user_input("7770", 1, data="x")
+        webapp.record_user_input("7110", 1, data="x")
         assert webapp.flush_input_heartbeats()
         activity = webapp.activity_snapshot_with_recency()
 
-        assert activity["7770"]["last_user_input_ts"] == 2000.0
-        assert "7770:0" not in activity
+        assert activity["7110"]["last_user_input_ts"] == 2000.0
+        assert "7110:0" not in activity
         assert refreshes == [(False, True)]
     finally:
         webapp.stop_input_heartbeat_worker()
@@ -7470,17 +7470,17 @@ def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monk
 
 def test_active_window_for_can_refresh_live_tmux_window_off_input_path(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp(["7770"])
+    webapp = app_module.TmuxWebtermApp(["7110"])
 
     def fake_tmux(args, timeout=5.0):
-        assert args == ["display-message", "-p", "-t", "=7770:", "#{window_index}"]
+        assert args == ["display-message", "-p", "-t", "=7110:", "#{window_index}"]
         return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
 
     try:
-        webapp.set_transcripts_payload_cache({"sessions": {"7770": {"panes": []}}})
+        webapp.set_transcripts_payload_cache({"sessions": {"7110": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fake_tmux)
 
-        assert webapp.active_window_for("7770") == "0"
+        assert webapp.active_window_for("7110") == "0"
     finally:
         webapp.control_server.stop()
 
@@ -18165,7 +18165,7 @@ def test_terminal_upload_uses_authenticated_users_central_session_tree(monkeypat
     assert not (worktree / ".uploads").exists()
 
 
-def test_editor_upload_uses_absolute_central_path_not_document_relative(monkeypatch, tmp_path):
+def test_editor_upload_uses_document_file_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(uploads_module, "UPLOAD_TMP_BASE", tmp_path / "tmp")
     (tmp_path / "tmp").mkdir()
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"retention_days": 7, "filename_template": "{name}{ext}"}}})
@@ -18183,13 +18183,13 @@ def test_editor_upload_uses_absolute_central_path_not_document_relative(monkeypa
     finally:
         webapp.control_server.stop()
 
-    target = tmp_path / "tmp" / "yolomux.alice" / "uploads" / "editor" / "screen.png"
+    target = docs / "note" / "screen.png"
     assert status == HTTPStatus.OK
     assert payload["target_dir"] == str(target.parent)
     assert payload["base_dir"] == str(docs)
-    assert payload["files"][0]["relative_path"] == str(target)
+    assert payload["target_source"] == "editor_file_directory"
+    assert payload["files"][0]["relative_path"] == "note/screen.png"
     assert target.read_bytes() == b"png"
-    assert not (docs / ".uploads").exists()
 
 
 def test_multiple_servers_reserve_shared_upload_names_atomically(monkeypatch, tmp_path):

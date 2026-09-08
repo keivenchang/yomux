@@ -43,15 +43,14 @@ The manifest is an executable ownership contract, not a comment. The production 
 cohort_id:
 deployment_environment:
 source_fingerprint:
-required_daemon_domains:
-required_storaged_namespaces:
+required_service_domains:
+required_service_namespaces:
 config_dir:
 state_dir:
 cache_dir:
 service_dir:
 upload_dir:
-daemon_socket:
-storaged_socket:
+service_sockets:
 tmux_socket:
 browser_profile_dirs:
 http_listeners:
@@ -94,7 +93,7 @@ Every diagnosis records one row per crossed boundary. Production STATUS exposes 
 | Client transport | One correlation is written on the expected mux; unrelated correlations remain live. | Transport connection/write defect. | Add a transport-level regression; do not change product workers or browser code. |
 | Listener dispatch and reply | The named method is accepted, starts, completes within its deadline, and returns one typed reply. | Listener dispatch/deadline defect. | Inspect active/queued/expired/rejected counters for that method; do not infer saturation from an HTTP status. |
 | Product state | The reply is exactly READY, QUEUED, or typed unavailable with the expected source identity and one ticket. | Product/precondition/coalescing defect. | Reproduce at the product adapter. Do not retry the HTTP route or reconnect transport. |
-| Storaged completion | The exact current ticket/source generation is accepted once and advances the retained published generation or is explicitly fenced as stale. | Completion/fence/ownership defect. | Test the storage state machine directly before SSE/browser work. |
+| Service completion | The exact current ticket/source generation is accepted once and advances the retained published generation or is explicitly fenced as stale. | Completion/fence/ownership defect. | Test the owning service state machine directly before SSE/browser work. |
 | Mux generation delivery and ACK | The subscribed exact client receives the exact event once with monotonic delivery generation and ACKs it; an unacknowledged event remains replayable. | Delivery, subscription, connection binding, or ACK defect. | Test first delivery on the original stream; do not reopen it. |
 | SSE publication | The web follower forwards the same ticket/key/generation once on the already-open client-events stream. | Web event-adapter/broker defect. | Test the follower publisher directly; do not refetch the product. |
 | Browser pending/accepted transaction | Only the exact pending completion triggers one final read; accepted LKG/DOM/terminal/socket/focus remain until a newer valid payload commits. | Browser transaction/classifier/rekey defect. | Test state transaction then real browser; do not accept timer refresh or destructive loading data. |
@@ -143,10 +142,10 @@ The rule forbids using a second attempt to hide a failed first attempt. It does 
 
 The canonical queued-product first-delivery sequence is exact:
 
-1. Start fixture-owned daemon/storaged/follower resources and wait only for their distinct readiness signals.
+1. Start fixture-owned service and follower resources and wait only for their distinct readiness signals.
 2. Open and verify the one subject SSE stream before issuing the subject request.
 3. Issue the subject HTTP request exactly once and require the expected bounded immediate response, normally one 202/QUEUED ticket or one READY LKG with a pending ticket.
-4. Complete the exact daemon work once and require storaged to accept that ticket/source generation once.
+4. Complete the exact service work once and require the owning service to accept that ticket/source generation once.
 5. Read the already-open SSE stream until the exact ticket/key/generation event or the fixed deadline; unrelated events may be ignored but cannot reset or extend the deadline.
 6. Perform exactly one event-authorized final read and require READY with the expected generation/body.
 7. Assert request count, product submission count, EventSource open count, reconnect count, event count, browser accepted generation, LKG preservation, and cleanup.
@@ -167,15 +166,15 @@ Before implementing a broad box, list every required row. Mark a row evidenced o
 
 | Lifecycle row | Initial state | Immediate result | Completion/recovery | Invariants that must remain true |
 | --- | --- | --- | --- | --- |
-| Cold start, no LKG | Empty fixture-owned storaged state and current daemon. | One bounded READY or QUEUED; never destructive fake data. | Exact completion event then one READY read, or explicit terminal error. | No web discovery/worker/SQLite; no infinite loading; exact cleanup. |
+| Cold start, no LKG | Empty fixture-owned service state and current service. | One bounded READY or QUEUED; never destructive fake data. | Exact completion event then one READY read, or explicit terminal error. | No web discovery/worker/SQLite; no infinite loading; exact cleanup. |
 | Warm LKG plus refresh | Retained accepted bytes and a newer source generation. | READY stale/LKG with one pending ticket or bounded READY current. | Exact newer completion replaces LKG once. | Accepted browser rows, terminal, focus, and sockets remain until commit. |
-| Daemon down | Storaged/LKG available; daemon absent. | READY LKG or typed unavailable within deadline. | No spawn from web; later recovery is a separate named action/event. | Storaged remains responsive; no local fallback owner. |
+| Service down | Retained LKG available; owning service absent. | READY LKG or typed unavailable within deadline. | No spawn from web; later recovery is a separate named action/event. | Retained state remains responsive; no local fallback owner. |
 | Daemon starting | Socket/process exists but required domains are not ready. | READY LKG, QUEUED, or typed unavailable within deadline. | Event-driven transition or explicit terminal error. | No join without fingerprint/domain match; no repeated startup. |
 | Daemon saturated/held work | One named lane/worker is held by the fixture. | Unrelated cached/storage work stays READY; subject work is bounded QUEUED or READY. | One coalesced completion after release. | No extra worker/process, retry, or listener starvation assumption. |
-| Daemon replacement | Current LKG in storaged and old daemon deliberately stopped. | Web remains bounded. | New exact-identity daemon republishes/finishes once. | LKG preserved; old child/socket gone; no duplicate owner. |
-| Storaged replacement | Durable namespace/checkpoint exists and old owner is deliberately stopped. | Clients get bounded unavailable/upgrade-required during the named window. | One exact replacement restores its durability contract. | No web/daemon SQLite fallback; stale client cannot clobber new state. |
+| Service replacement | Current LKG in service state and old service deliberately stopped. | Web remains bounded. | New exact-identity service republishes/finishes once. | LKG preserved; old child/socket gone; no duplicate owner. |
+| Durable-state replacement | Durable namespace/checkpoint exists and old owner is deliberately stopped. | Clients get bounded unavailable/upgrade-required during the named window. | One exact replacement restores its durability contract. | No web/service SQLite fallback; stale client cannot clobber new state. |
 | SSE disconnect | Pending or accepted generation exists before one deliberate disconnect. | UI preserves accepted state. | One replacement stream repairs exact generation then one final read. | No timer/poll/request retry; one reconnect only. |
-| Web-only restart | Shared current children and retained storaged state remain. | New follower joins exact cohort and reads LKG/current state. | Subscriptions restore once. | Children are not duplicated/replaced; no web-owned background work. |
+| Web-only restart | Shared current children and retained service state remain. | New follower joins exact cohort and reads LKG/current state. | Subscriptions restore once. | Children are not duplicated/replaced; no web-owned background work. |
 | Source supersession | Older work remains pending when a newer generation arrives. | Contract explicitly retains, cancels, or supersedes the older ticket. | Only the accepted current generation becomes authoritative. | Stale completion cannot overwrite; delivery sequence remains monotonic. |
 | Malformed/old protocol | Invalid fields or incompatible protocol/fingerprint. | Typed invalid/upgrade-required within deadline. | Replacement/takeover only through the lifecycle owner. | No partial mutation, fallback database, hidden traceback, or socket-gap data loss. |
 
@@ -205,7 +204,7 @@ Did two parallel runs share a mutable resource?
           no  -> transport/listener boundary regression.
           yes -> was the reply READY/QUEUED/typed unavailable as expected?
                   no  -> product/precondition/coalescing regression.
-                  yes -> was the exact completion accepted by storaged?
+                  yes -> was the exact completion accepted by the owning service?
                           no  -> ticket/source-generation/fence regression.
                           yes -> did the original subscribed mux client receive and ACK it?
                                   no  -> delivery/subscription/connection-binding regression.
@@ -283,7 +282,7 @@ Forbidden shortcuts for this action:
 ### Non-Fixes
 
 - Do not call another web-only restart a backend rollout. Either the joined children prove the exact required deployment identity or the start fails/replaces them deliberately.
-- Do not add richer placeholder sessions, preserve `self.sessions` as a second roster, or teach Tabber to invent agent facts. The daemon roster and its storaged LKG are the parent.
+- Do not add richer placeholder sessions, preserve `self.sessions` as a second roster, or teach Tabber to invent agent facts. The statusd roster and its retained snapshot are the parent.
 - Do not treat 202 as an empty successful payload, accept `READY or QUEUED forever`, increase sleeps/backoff, add request polling, or equate a presentation timer with a new stored CPU sample.
 - Do not hide retired daemon names in CSS, delete stale service files by hand, or kill broad process patterns. Retire the lifecycle and verify the exact PID/socket/artifact owner.
 - Do not claim release coverage from fixture fetch/EventSource/WebSocket data or `/api/tmux-session-exists`. Release assertions inspect real visible rows, real sockets, real generations, and real current child identities.
