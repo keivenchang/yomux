@@ -190,6 +190,7 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   });
   const formatted = element('P', element('STRONG', textNode('bold')), textNode(' words'));
   const previewSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+  const prosemirrorSource = fs.readFileSync('static_src/js/yolomux/93_prosemirror_editor.js', 'utf8');
   assert.equal(context.markdownInlineSourceFromNode(formatted), '**bold** words');
   assert.deepEqual(
     [...context.markdownTextWithInlineLineEdited('Intro\n\n**old** words\n\nTail', 3, '**new** words', 'paragraph').split('\n')],
@@ -253,6 +254,9 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.match(previewSource, /markdownPreviewCaptureSelection/, 'Preview captures the selection before context-menu collapse');
   assert.match(previewSource, /function markdownFormattingContextMenu/, 'Editor and Preview share one formatting context-menu owner');
   assert.match(previewSource, /markdownEditorContextMenu\(view, panel, path/, 'Markdown CodeMirror selection opens the shared formatting menu');
+  assert.ok(prosemirrorSource.includes("const link = event.target?.closest?.('a[href]')"), 'ViewEdit links own the shared URL context menu before formatting selection handling');
+  assert.match(prosemirrorSource, /href: link && view\.dom\.contains\(link\) \? link\.href : ''/, 'ViewEdit link context menus include URL actions in the full formatting menu');
+  assert.match(prosemirrorSource, /href: link && view\.dom\.contains\(link\) \? link\.href : ''/, 'ViewEdit links include URL actions in the full formatting menu');
   assert.match(previewSource, /clearInlineFormatting|markdownTextWithInlineFormat/, 'Preview formatting has a source-level toggle path');
 });
 

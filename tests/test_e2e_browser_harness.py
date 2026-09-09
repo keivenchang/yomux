@@ -384,14 +384,14 @@ def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_br
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
 
-def test_real_chromium_markdown_view_shows_prosemirror_failure_without_legacy_preview(e2e_browser: Any) -> None:
-    """A ProseMirror parse failure is an explicit ViewEditor error, never an editable legacy preview."""
+def test_real_chromium_markdown_view_renders_unknown_html_without_legacy_preview(e2e_browser: Any) -> None:
+    """Unknown raw HTML remains visible literal text in the ProseMirror ViewEditor."""
 
     target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-preview-fallback.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         "# Direct Editing In Preview\n\n"
-        "***~~<span class=\"unsupported\">hello</span>~~***\n\n"
+        "***~~<think>hello</think>~~***\n\n"
         "| Preview type | Decision |\n"
         "| --- | --- |\n"
         "| Markdown | Keep rendered |\n\n"
@@ -438,12 +438,12 @@ def test_real_chromium_markdown_view_shows_prosemirror_failure_without_legacy_pr
         str(target),
     )
     assert "failure" not in metrics, metrics
-    assert "ProseMirror ViewEditor failed: Unsupported raw HTML at line 3: <span class=\"unsupported\">" in metrics["error"], metrics
-    assert "ProseMirror ViewEditor failed" in metrics["status"], metrics
-    assert any("ProseMirror ViewEditor failed" in sample["error"] and "Direct Editing In Preview" in sample["text"] for sample in metrics["samples"]), metrics
+    assert metrics["error"] == "", metrics
+    assert "ProseMirror ViewEditor failed" not in metrics["status"], metrics
+    assert any("<think>hello</think>" in sample["text"] for sample in metrics["samples"]), metrics
     terminal = metrics["samples"][-1]
-    assert terminal["state"] == "error" and terminal["prosemirrorRoots"] == 0 and terminal["legacyEditable"] == 0, metrics
-    assert terminal["errorBox"]["height"] >= 180 and "Direct Editing In Preview" in terminal["text"], metrics
+    assert terminal["state"] == "ready" and terminal["prosemirrorRoots"] == 1 and terminal["legacyEditable"] == 0, metrics
+    assert "<think>hello</think>" in terminal["text"], metrics
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
 

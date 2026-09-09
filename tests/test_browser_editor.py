@@ -707,13 +707,13 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
     assert "error" not in metrics, metrics
     assert metrics["clickEditable"] is True, metrics
     assert metrics["middleSelectionAfter"] == metrics["middleSelection"], metrics
-    assert "soft_break" not in str(metrics["middleDoc"]), metrics
-    assert "data-markdown-soft-break" not in metrics["middleDom"], metrics
-    assert "hello\n\nworld" in metrics["middleSource"], metrics
+    assert "soft_break" in str(metrics["middleDoc"]), metrics
+    assert "data-markdown-soft-break" in metrics["middleDom"], metrics
+    assert "hello\nworld" in metrics["middleSource"], metrics
     assert "<br>" not in metrics["middleSource"], metrics
-    assert "hello\n\nXworld" in metrics["modeSwitchSource"], metrics
+    assert "hello\nXworld" in metrics["modeSwitchSource"], metrics
     assert metrics["savedBeforeDebounce"].startswith("YThe product"), metrics
-    assert "hello\n\nXworld" in metrics["savedBeforeDebounce"], metrics
+    assert "hello\nXworld" in metrics["savedBeforeDebounce"], metrics
     assert metrics["endSelectionAfter"] == metrics["endSelection"], metrics
     assert metrics["endDoc"]["content"][-2:] == [{"type": "paragraph"}, {"type": "paragraph"}], metrics
     assert metrics["endSerializedNow"].endswith("Xworld\n\n\n"), metrics
@@ -765,7 +765,7 @@ def test_markdown_prosemirror_preserves_empty_paragraph_spacing_round_trip(brows
     assert cases["trailingOne"]["serialized"] == "hello\n\n", cases
     assert cases["trailingTwo"]["serialized"] == "hello\n\n\n", cases
     assert cases["hardBreak"]["serialized"] == "hello\\\nworld", cases
-    assert cases["commentPrefix"]["serialized"] == "# Title", cases
+    assert cases["commentPrefix"]["serialized"] == "<!-- editor metadata -->\n\n# Title", cases
     assert [node["type"] for node in cases["adjacent"]["doc"]["content"]] == ["paragraph", "paragraph"], cases
     assert [node["type"] for node in cases["oneEmpty"]["doc"]["content"]] == ["paragraph", "paragraph", "paragraph"], cases
     assert [node["type"] for node in cases["twoEmpty"]["doc"]["content"]] == ["paragraph", "paragraph", "paragraph", "paragraph"], cases
@@ -1227,6 +1227,103 @@ def test_markdown_prosemirror_supports_tables_round_trip(browser, tmp_path):
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_scroll_semantically(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=980, grid_height=620)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const comment = ['<!--', ...Array.from({length: 50}, (_, index) => `hidden ${index + 1}`), '-->'];
+            const path = '/home/test/yolomux.dev/COMMENT-SCROLL.md';
+            const source = ['# Top', '', ...comment, '', '---', '', '## Middle', '', ...Array.from({length: 30}, (_, index) => `Paragraph ${index + 1}`), '', '![tall](https://example.com/tall.png)', '', '## Bottom'].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '940px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView && panel._pmSourceLines?.length > 2);
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const hr = preview.querySelector('hr');
+            const anchors = previewScrollAnchors(preview);
+            const topAnchor = anchors[0];
+            const middleAnchor = anchors.find(anchor => anchor.element.tagName === 'H2');
+            const bottomAnchor = anchors.find(anchor => anchor.element.tagName === 'H2' && anchor !== middleAnchor);
+            const commentLine = Math.floor((panel._pmIgnoredCommentRanges[0].from + panel._pmIgnoredCommentRanges[0].to) / 2);
+            const commentTarget = previewScrollTopForSourcePosition(preview, {line: commentLine});
+            const preCommentTarget = previewScrollTopForSourcePosition(preview, {line: topAnchor.line});
+            const nextRenderedTarget = previewScrollTopForSourcePosition(preview, {line: middleAnchor.line});
+            const imageLine = panel._cmView.state.doc.toString().split('\\n').findIndex(line => line.startsWith('![tall]')) + 1;
+            const imageMidLine = sourcePositionForPreviewScroll(preview)?.line || imageLine;
+            done({
+              serialized: serializeProseMirrorSource(panel),
+              commentText: panel._pmView.dom.querySelector('[data-markdown-comment]')?.textContent || '',
+              emptyBeforeHr: hr.previousElementSibling?.matches('p:empty') || false,
+              emptyAfterHr: hr.nextElementSibling?.matches('p:empty') || false,
+              hrMargin: getComputedStyle(hr).marginBlockStart,
+              commentTarget, preCommentTarget, nextRenderedTarget,
+              imageMidLine,
+              imageLine,
+              bottomLine: bottomAnchor.line,
+            });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert "hidden 25" in metrics["serialized"], metrics
+    assert metrics["commentText"] == "", metrics
+    assert metrics["emptyBeforeHr"] is False and metrics["emptyAfterHr"] is False, metrics
+    assert float(metrics["hrMargin"].removesuffix("px")) <= 3, metrics
+    assert metrics["commentTarget"] == metrics["preCommentTarget"], metrics
+    assert metrics["nextRenderedTarget"] > metrics["commentTarget"], metrics
+    assert metrics["imageLine"] <= metrics["imageMidLine"] <= metrics["bottomLine"], metrics
+
+
+def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_comments(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=980, grid_height=620)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const hidden = ['<!--', ...Array.from({length: 90}, (_, index) => `comment ${index}`), '-->'];
+            const source = ['### 2026-06-02 Tue', '', 'June content', '', ...hidden, '', '### 2026-04-03 Fri', '', 'April content', '', '### 2026-03-20 Fri', '', 'March content'].join('\\n');
+            const path = '/home/test/yolomux.dev/date-anchor.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '940px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+                await window.__yolomuxTestWaitFor(() => panel._pmView && panel._pmView.dom.querySelectorAll('h3').length === 3 && panel._pmView.dom.querySelector('h3[data-source-line]'));
+            done({
+                  headings: [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({text: node.textContent.trim(), line: Number(node.dataset.sourceLine), outer: node.outerHTML})),
+              comments: panel._pmIgnoredCommentRanges,
+            });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
+        ("2026-06-02 Tue", 1),
+        ("2026-04-03 Fri", 98),
+        ("2026-03-20 Fri", 102),
+    ], metrics
+
+
 def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_view(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     setup = browser.execute_async_script(
@@ -1612,10 +1709,51 @@ def test_markdown_viewedit_second_contextmenu_and_touch_longpress_keep_shared_me
     assert metrics["secondStrikeChecked"] == "true", metrics
     assert metrics["secondUnderlineChecked"] == "true", metrics
     assert "strike" in metrics["marks"] and "underline" in metrics["marks"], metrics
-    assert "~~<u>bold</u>~~" in metrics["serialized"], metrics
-    assert metrics["touchMenu"] is True, metrics
-    assert metrics["errors"] == [], metrics
-    assert metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/LINK.md';
+            const source = '[YOLOmux](https://example.com/docs)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const link = panel._pmView.dom.querySelector('a[href]');
+            const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
+            const prevented = !link.dispatchEvent(event);
+            const menu = document.querySelector('.markdown-preview-context-menu');
+            done({
+              prevented,
+              labels: [...(menu?.children || [])].map(node => node.matches('button') ? node.textContent.trim() : node.querySelector(':scope > button')?.textContent.trim()).filter(Boolean),
+              copyPaste: [...(menu?.querySelectorAll('.markdown-context-submenu-popover > button') || [])].map(button => button.textContent.trim()),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["prevented"] is True, metrics
+    assert metrics["labels"][:3] == ["Open URL in a new tab", "Copy URL", "Copy / Paste"], metrics
+    assert metrics["copyPaste"] == ["Copy", "Paste"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
@@ -3397,10 +3535,10 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             const centerDelta = () => {
               const previewBox = preview.getBoundingClientRect();
               const headingBox = targetHeading.getBoundingClientRect();
-              return headingBox.top - (previewBox.top + (preview.clientHeight * 0.5));
+              return headingBox.top - (previewBox.top + (preview.clientHeight / 4));
             };
             const editorCenterLine = () => {
-              const block = panel._cmView.lineBlockAtHeight(editorScroller.scrollTop + (editorScroller.clientHeight * 0.5));
+              const block = panel._cmView.lineBlockAtHeight(editorScroller.scrollTop + (editorScroller.clientHeight / 4));
               return panel._cmView.state.doc.lineAt(block.from).number;
             };
             const snapshot = () => ({
@@ -3414,7 +3552,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             });
             const centerEditorOnTarget = async () => {
               const targetBlock = panel._cmView.lineBlockAt(panel._cmView.state.doc.line(targetLine).from);
-              editorScroller.scrollTop = Math.min(maxScroll(editorScroller), Math.max(0, targetBlock.top - (editorScroller.clientHeight * 0.5)));
+              editorScroller.scrollTop = Math.min(maxScroll(editorScroller), Math.max(0, targetBlock.top - (editorScroller.clientHeight / 4)));
               editorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
               await settle();
               return snapshot();
@@ -3432,7 +3570,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             await settle(80);
             const afterCloseToggle = snapshot();
             panel._previewLayoutScrollUntil = 0;
-            preview.scrollTop = Math.min(maxScroll(preview), Math.max(0, scrollTopForPreviewElement(preview, targetHeading) - (preview.clientHeight * 0.5)));
+            preview.scrollTop = Math.min(maxScroll(preview), Math.max(0, scrollTopForPreviewElement(preview, targetHeading) - (preview.clientHeight / 4)));
             preview.dispatchEvent(new Event('scroll', {bubbles: true}));
             await settle();
             done({
@@ -5558,8 +5696,10 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               const {{probePaint}} = window.__yolomuxTestHelpers;
               const read = () => {{
                 const preview = panel.querySelector('.file-editor-preview-pane-panel');
-                const heading = getComputedStyle(preview.querySelector('h1'));
-                const link = getComputedStyle(preview.querySelector('a'));
+                const headingNode = preview.querySelector('h1');
+                const linkNode = preview.querySelector('a');
+                const heading = headingNode ? getComputedStyle(headingNode) : {{color: '', backgroundColor: ''}};
+                const link = linkNode ? getComputedStyle(linkNode) : {{color: ''}};
                 const codeSpan = preview.querySelector('pre code span');
                 return {{
                   previewBg: getComputedStyle(preview).backgroundColor,

@@ -3505,6 +3505,8 @@ def assert_api_journey_error_free(
             "transport": str(record.get("transport") or ""),
             "error": str(record.get("error") or ""),
         }
+        if status == 0 and failure["transport"] == "fetch" and failure["error"].startswith("AbortError: session-files request superseded"):
+            continue
         # A long-lived SSE/WebSocket route that has neither settled nor reported an error is still
         # connecting, not a failed response. Classify it from the same production route registry the
         # fixture HTTP tracker uses so streaming and finite requests never diverge between the two.

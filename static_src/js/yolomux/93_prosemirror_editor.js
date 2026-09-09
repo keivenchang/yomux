@@ -97,6 +97,29 @@ function prosemirrorMarkdownSchema(api) {
     parseDOM: [{tag: 'td', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
     toDOM(node) { return ['td', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
   });
+  nodes = nodes.addBefore('blockquote', 'markdown_comment_block', {
+    group: 'block',
+    atom: true,
+    attrs: {source: {default: '<!---->'}},
+    toDOM() { return ['div', {'data-markdown-comment': 'block', hidden: 'hidden'}]; },
+  }).addBefore('hard_break', 'markdown_comment_inline', {
+    inline: true,
+    group: 'inline',
+    atom: true,
+    attrs: {source: {default: '<!---->'}},
+    toDOM() { return ['span', {'data-markdown-comment': 'inline', hidden: 'hidden'}]; },
+  }).addBefore('blockquote', 'markdown_literal_block', {
+    group: 'block',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['div', {'data-markdown-literal': 'block'}, node.attrs.source]; },
+  }).addBefore('hard_break', 'markdown_literal_inline', {
+    inline: true,
+    group: 'inline',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['span', {'data-markdown-literal': 'inline'}, node.attrs.source]; },
+  });
   nodes = nodes.addBefore('hard_break', 'soft_break', {
     inline: true,
     group: 'inline',
@@ -132,6 +155,7 @@ function prosemirrorMarkdownParser(api, schema) {
   tokenizer.enable('strikethrough');
   const markdownItParse = tokenizer.parse.bind(tokenizer);
   tokenizer.parse = (source, environment) => {
+    environment = environment || {};
     const htmlElement = html => {
       const template = document.createElement('template');
       template.innerHTML = String(html || '').trim();
@@ -146,14 +170,25 @@ function prosemirrorMarkdownParser(api, schema) {
         title: image.getAttribute('title'),
       };
     };
-    const unsupportedHtml = [];
+    const ignoredCommentLines = new Set();
+    const ignoredCommentRanges = [];
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
       const normalized = [];
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
         if ((token.type === 'html_inline' || token.type === 'html_block') && /^<!--[\s\S]*-->$/.test(html)) {
-          // Markdown comments are authoring metadata, not editable document content.
+          // Keep comments in the document as hidden atoms so ViewEditor never paints them but a
+          // later edit/save can serialize their exact contents instead of deleting user metadata.
+          if (Array.isArray(token.map)) {
+            ignoredCommentRanges.push({from: Number(token.map[0]) + 1, to: Number(token.map[1] ?? token.map[0] + 1)});
+            for (let line = Number(token.map[0]); line < Number(token.map[1] ?? token.map[0] + 1); line += 1) {
+              ignoredCommentLines.add(line);
+            }
+          }
+          token.type = token.type === 'html_block' ? 'markdown_comment_block' : 'markdown_comment_inline';
+          token.meta = {source: String(token.content || '').replace(/\n$/, '')};
+          normalized.push(token);
           continue;
         }
         if (token.type === 'html_inline') {
@@ -186,7 +221,9 @@ function prosemirrorMarkdownParser(api, schema) {
           }
         }
         if ((token.type === 'html_inline' || token.type === 'html_block') && html) {
-          unsupportedHtml.push({html: html.slice(0, 160), line: tokenLine || 1});
+          // Preserve unrecognized XML-like tags as ordinary visible text.
+          token.type = token.type === 'html_block' ? 'markdown_literal_block' : 'markdown_literal_inline';
+          token.meta = {source: html};
         }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
@@ -198,10 +235,19 @@ function prosemirrorMarkdownParser(api, schema) {
     // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
     const spacedTokens = [];
     let previousBlockEnd = null;
+    let previousBlockType = '';
     for (const token of tokens) {
-      const blockStart = token.nesting === 1 && token.block && Array.isArray(token.map) ? token.map[0] : null;
+        const topLevelBlock = token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type));
+      const blockStart = topLevelBlock && Array.isArray(token.map) ? token.map[0] : null;
       if (blockStart !== null && previousBlockEnd !== null) {
-        const emptyParagraphs = Math.max(0, blockStart - previousBlockEnd - 1);
+        let visibleGapLines = 0;
+        for (let line = previousBlockEnd; line < blockStart; line += 1) {
+          if (!ignoredCommentLines.has(line)) visibleGapLines += 1;
+        }
+        const emptyParagraphs = ['hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)
+          || ['hr', 'markdown_comment_block'].includes(previousBlockType)
+          ? 0
+          : Math.max(0, visibleGapLines - 1);
         for (let index = 0; index < emptyParagraphs; index += 1) {
           spacedTokens.push(
             {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: [blockStart, blockStart], block: true, children: null, content: ''},
@@ -211,9 +257,14 @@ function prosemirrorMarkdownParser(api, schema) {
         }
       }
       spacedTokens.push(token);
-      if (token.nesting === 1 && token.block && Array.isArray(token.map)) previousBlockEnd = token.map[1];
+      if (topLevelBlock && Array.isArray(token.map)) {
+        previousBlockEnd = token.map[1];
+        previousBlockType = token.type;
+      }
     }
-    const trailingNewlines = (String(source).match(/\n+$/) || [''])[0].length;
+    const sourceLines = String(source).split('\n');
+    while (sourceLines.length && ignoredCommentLines.has(sourceLines.length - 1)) sourceLines.pop();
+    const trailingNewlines = (sourceLines.join('\n').match(/\n+$/) || [''])[0].length;
     const trailingEmptyParagraphs = Math.max(0, trailingNewlines - 1);
     for (let index = 0; index < trailingEmptyParagraphs; index += 1) {
       spacedTokens.push(
@@ -222,10 +273,10 @@ function prosemirrorMarkdownParser(api, schema) {
         {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
       );
     }
-    if (unsupportedHtml.length) {
-      const first = unsupportedHtml[0];
-      throw new Error(`Unsupported raw HTML at line ${first.line}: ${first.html}`);
-    }
+    environment.yolomuxTopLevelSourceLines = spacedTokens
+      .filter(token => token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)))
+      .map(token => Array.isArray(token.map) ? Number(token.map[0]) + 1 : null);
+    environment.yolomuxIgnoredCommentRanges = ignoredCommentRanges;
     return spacedTokens;
   };
   const tokens = {
@@ -233,6 +284,10 @@ function prosemirrorMarkdownParser(api, schema) {
     softbreak: {node: 'soft_break'},
     html_break: {node: 'hard_break'},
     html_image: {node: 'image', getAttrs: token => token.meta},
+    markdown_comment_block: {node: 'markdown_comment_block', getAttrs: token => token.meta},
+    markdown_comment_inline: {node: 'markdown_comment_inline', getAttrs: token => token.meta},
+    markdown_literal_block: {node: 'markdown_literal_block', getAttrs: token => token.meta},
+    markdown_literal_inline: {node: 'markdown_literal_inline', getAttrs: token => token.meta},
     details: {block: 'details', getAttrs: token => token.meta},
     table: {block: 'table'},
     thead: {ignore: true},
@@ -267,6 +322,13 @@ function prosemirrorMarkdownSerializer(api) {
     // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
     // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
     hard_break(state) { state.write('\\\n'); },
+    markdown_comment_block(state, node) {
+      state.write(node.attrs.source || '<!---->');
+      state.closeBlock(node);
+    },
+    markdown_comment_inline(state, node) { state.write(node.attrs.source || '<!---->'); },
+    markdown_literal_block(state, node) { state.write(node.attrs.source || ''); state.closeBlock(node); },
+    markdown_literal_inline(state, node) { state.write(node.attrs.source || ''); },
     details(state, node) {
       state.write(`<details>\n<summary>${node.attrs.summary}</summary>\n\n`);
       state.renderContent(node);
@@ -337,19 +399,27 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
     image.src = target.src;
   } else {
     image.dataset.resolvedPath = target.path;
-    void installRawFileMediaSource(image, target.path, {
-      isCurrent: () => panel?._pmView?.dom?.isConnected && image.isConnected,
+  }
+  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function startProseMirrorImageLoads(panel, markdownPath) {
+  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image[data-resolved-path]') || [])) {
+    if (image._rawFileAbortController || image._rawFileObjectUrl || Number(image.naturalWidth || 0) > 0) continue;
+    const path = String(image.dataset.resolvedPath || '');
+    if (!path) continue;
+    void installRawFileMediaSource(image, path, {
+      isCurrent: () => panel?._pmPath === markdownPath && panel?._pmView?.dom?.contains(image) && image.isConnected,
       onFailure: error => {
         image.classList.add('prosemirror-image-error');
-        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path}));
       },
       onDecodeFailure: () => {
         image.classList.add('prosemirror-image-error');
-        image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+        image.title = t('preview.markdown.imageUnavailable', {path});
       },
     });
   }
-  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -491,6 +561,27 @@ function insertProseMirrorHardBreak(api, schema) {
   };
 }
 
+function insertProseMirrorSoftBreak(api, schema) {
+  return (state, dispatch) => {
+    const {$from, $to} = state.selection;
+    if (!$from.sameParent($to) || !$from.parent.isTextblock || !schema.nodes.soft_break) return false;
+    if ($from.parentOffset >= $from.parent.content.size) return false;
+    if (dispatch) dispatch(state.tr.replaceSelectionWith(schema.nodes.soft_break.create()).scrollIntoView());
+    return true;
+  };
+}
+
+function insertProseMirrorEnter(api, schema) {
+  return (state, dispatch) => {
+    const {$from} = state.selection;
+    if ($from.parentOffset >= $from.parent.content.size) {
+      if (dispatch) dispatch(state.tr.split($from.pos).scrollIntoView());
+      return true;
+    }
+    return insertProseMirrorSoftBreak(api, schema)(state, dispatch);
+  };
+}
+
 function clearLinkedCodeMirrorSelection(panel, path) {
   for (const linked of fileEditorPanelsForPath(path)) {
     const view = linked._cmView;
@@ -561,11 +652,13 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
   view.dom.addEventListener('contextmenu', event => {
+    const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
     event.preventDefault();
     event.stopPropagation();
     markdownFormattingContextMenu(event, context, {
+      href: link && view.dom.contains(link) ? link.href : '',
       applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
       isActive: command => {
         const mark = command === 'bold' ? schema.marks.strong
@@ -585,7 +678,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const schema = prosemirrorMarkdownSchema(api);
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
-  const doc = parser.parse(state.content || '');
+  const parseEnvironment = {};
+  const doc = parser.parse(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
   container.setAttribute('data-prosemirror-editor', 'true');
@@ -597,6 +691,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
         return true;
       },
       'Shift-Enter': insertProseMirrorHardBreak(api, schema),
+      Enter: insertProseMirrorEnter(api, schema),
     }),
     api.history(),
     api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
@@ -628,6 +723,33 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       }
     },
   });
+  const attachSourceLines = () => Array.from(view.dom.children).forEach((element, index) => {
+    const sourceLine = Number(parseEnvironment.yolomuxTopLevelSourceLines?.[index]);
+    if (Number.isFinite(sourceLine) && sourceLine > 0) element.dataset.sourceLine = String(sourceLine);
+  });
+  attachSourceLines();
+  requestAnimationFrame(attachSourceLines);
+  const sourceLines = String(state.content || '').split('\n');
+  const sourceHeadings = sourceLines.map((line, index) => {
+    const match = line.match(/^\s*#{1,6}\s+(.+?)\s*$/);
+    return match ? {line: index + 1, text: match[1].trim()} : null;
+  }).filter(Boolean);
+  const attachHeadingSourceLines = () => {
+    let headingSearchFrom = 0;
+    for (const heading of Array.from(view.dom.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
+      const headingText = String(heading.textContent || '').trim();
+      if (!headingText) continue;
+      const sourceHeading = sourceHeadings.find(candidate => candidate.line > headingSearchFrom && candidate.text === headingText);
+      if (!sourceHeading) continue;
+      heading.dataset.sourceLine = String(sourceHeading.line);
+      headingSearchFrom = sourceHeading.line - 1;
+    }
+  };
+  attachHeadingSourceLines();
+  setTimeout(attachHeadingSourceLines, 0);
+  requestAnimationFrame(attachHeadingSourceLines);
+  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
+  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   container._prosemirrorView = view;
   panel._pmView = view;
   panel._pmPath = path;
@@ -636,6 +758,13 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  startProseMirrorImageLoads(panel, path);
+  attachSourceLines();
+  attachHeadingSourceLines();
+  requestAnimationFrame(() => {
+    attachSourceLines();
+    attachHeadingSourceLines();
+  });
   delete panel._pmError;
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);

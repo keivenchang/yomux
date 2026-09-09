@@ -1080,6 +1080,12 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   color: var(--markdown-html-dark-text);
 }
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }
+.markdown-body .ProseMirror hr { margin: var(--space-3) 0; }
+.markdown-context-submenu { position: relative; }
+.markdown-context-submenu > button.has-submenu::after { content: ">"; float: inline-end; margin-inline-start: var(--space-8); }
+.markdown-context-submenu-popover { display: none; position: absolute; inset-block-start: 0; inset-inline-start: 100%; min-width: 10rem; }
+.markdown-context-submenu:hover > .markdown-context-submenu-popover,
+.markdown-context-submenu:focus-within > .markdown-context-submenu-popover { display: block; }
 .file-editor-preview-pane.vanilla-preview-body,
 .file-editor-preview-pane-panel.vanilla-preview-body {
   background: var(--paint-white);

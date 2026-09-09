@@ -2398,6 +2398,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
+    assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
     assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');

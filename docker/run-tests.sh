@@ -73,6 +73,13 @@ worktree_mount=()
 if [ -f "$REPO_ROOT/.git" ]; then
   git_common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)"
   git_mount=(-v "$git_common:$git_common:ro")
+  # The .git file can retain the alternate /home spelling of the same NFS checkout. Git resolves
+  # that literal path before consulting commondir, so expose the same common metadata at both
+  # canonical spellings instead of making tests care which mount spelling they received.
+  git_common_alt="${git_common/\/nfs\/keivenc/\/home\/keivenc}"
+  if [ "$git_common_alt" != "$git_common" ] && [ -d "$git_common_alt" ]; then
+    git_mount+=(-v "$git_common_alt:$git_common_alt:ro")
+  fi
   # Linked-worktree config stores the checkout's host path. Mount the checkout at
   # that path too, so Git can honor core.worktree inside the /w test mount.
   recorded_worktree="$(git -C "$REPO_ROOT" config --get core.worktree || true)"

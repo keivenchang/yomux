@@ -1894,8 +1894,14 @@ function syntaxLanguageForPath(path) {
 }
 
 function previewSourceLineAnchors(previewPane) {
-  return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
+  const explicit = Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
     .map(element => ({element, line: Number(element.dataset.sourceLine)}))
+    .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
+  if (explicit.length) return explicit;
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const sourceLines = panel?._pmSourceLines || [];
+  return Array.from(panel?._pmView?.dom?.children || [])
+    .map((element, index) => ({element, line: Number(sourceLines[index])}))
     .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
 }
 
@@ -1986,7 +1992,7 @@ function clampScrollTop(element, value) {
   return Math.min(max, Math.max(0, Number(value || 0)));
 }
 
-const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollFocusRatio = 1 / 4;
 const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
@@ -2005,6 +2011,20 @@ function previewScrollAnchors(previewPane) {
     .sort((a, b) => a.line - b.line || a.top - b.top);
 }
 
+function sourceSpanIsIgnoredComment(previewPane, fromLine, toLine) {
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  return (panel?._pmIgnoredCommentRanges || []).some(range => (
+    Number(range?.from) <= Number(fromLine) + 1 && Number(range?.to) >= Number(toLine) - 1
+  ));
+}
+
+function semanticSourceLineAnchors(previewPane) {
+  const anchors = previewScrollAnchors(previewPane);
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const comments = panel?._pmIgnoredCommentRanges || [];
+  return anchors.filter(anchor => !comments.some(range => Number(anchor.line) >= Number(range.from) && Number(anchor.line) < Number(range.to)));
+}
+
 function sourcePositionForEditorScroll(cmView) {
   if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
   try {
@@ -2020,14 +2040,14 @@ function sourcePositionForEditorScroll(cmView) {
 }
 
 function sourcePositionForPreviewScroll(previewPane) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length) return null;
   const y = Math.max(0, Number(previewPane?.scrollTop || 0)) + (Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
   let previous = anchors[0];
-  for (let index = 1; index < anchors.length; index += 1) {
-    const next = anchors[index];
+  for (const next of anchors.slice(1)) {
     if (next.top > y) {
       if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) return {line: previous.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -2038,7 +2058,7 @@ function sourcePositionForPreviewScroll(previewPane) {
 }
 
 function previewScrollTopForSourcePosition(previewPane, position) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length || !position) return null;
   const targetOffset = Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
   const line = Math.max(1, Number(position.line || 1));
@@ -2047,6 +2067,12 @@ function previewScrollTopForSourcePosition(previewPane, position) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (line <= next.line) {
+      // Source-only spans such as HTML comments have no rendered height. Keep the rendered pane
+      // pinned to the preceding semantic block until the editor reaches the next rendered block.
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) {
+        const anchor = line < next.line ? previous : next;
+        return clampScrollTop(previewPane, anchor.top - targetOffset);
+      }
       const span = Math.max(1, next.line - previous.line);
       const fraction = Math.min(1, Math.max(0, (line - previous.line) / span));
       return clampScrollTop(previewPane, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
@@ -2080,7 +2106,7 @@ function editorScrollTopForSourcePosition(cmView, position) {
 }
 
 function previewPaneNeedsSourceAnchorScroll(previewPane) {
-  return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
+  return previewSourceLineAnchors(previewPane).length > 0;
 }
 
 function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) {

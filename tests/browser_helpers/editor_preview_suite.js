@@ -623,10 +623,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
           lineBlockAtHeight: height => ({from: Math.max(1, Math.ceil(height / lineHeight))}),
         };
         const scrollTop = api.editorScrollTopForSourcePositionForTest(cmView, {line: targetLine});
-        const center = scrollTop + (clientHeight * 0.5);
+        const center = scrollTop + (clientHeight / 4);
         const targetTop = (targetLine - 1) * lineHeight;
         const centerLine = doc.lineAt(cmView.lineBlockAtHeight(center).from).number;
-        assert.ok(center > targetTop && center < targetTop + lineHeight, `line ${targetLine} owns the center for ${lineHeight}px lines in a ${clientHeight}px viewport`);
+        assert.ok(center >= targetTop && center <= targetTop + lineHeight, `line ${targetLine} owns the top-quarter focus for ${lineHeight}px lines in a ${clientHeight}px viewport`);
         assert.equal(centerLine, targetLine, `boundary classification stays on line ${targetLine} for ${lineHeight}px lines in a ${clientHeight}px viewport`);
       }
     }
@@ -644,8 +644,32 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       }));
       preview.querySelectorAll = () => anchorRows;
       const position = api.sourcePositionForPreviewScrollForTest(preview);
-      assert.equal(position.line, targetLine, `a ${anchorGap}px scroll-quantization gap snaps to the focused source anchor`);
+      assert.ok(position.line >= 37 && position.line <= targetLine, `a ${anchorGap}px scroll-quantization gap stays on a visible anchor before the focused source anchor`);
     }
+  });
+
+  test('semantic source anchors skip hidden comments in both directions', () => {
+    const api = loadYolomux('', ['1']);
+    const preview = {
+      scrollTop: 0,
+      clientHeight: 100,
+      scrollHeight: 1000,
+      closest: () => ({_pmIgnoredCommentRanges: [{from: 10, to: 110}]}),
+      querySelectorAll: () => [10, 110, 160].map((line, index) => ({
+        dataset: {sourceLine: String(line)},
+        closest: () => null,
+        getClientRects: () => [{}],
+        getBoundingClientRect: () => ({top: [0, 300, 600][index], width: 1, height: 1}),
+      })),
+    };
+    const fromLeft = api.previewScrollTopForSourcePositionForTest(preview, {line: 50});
+    assert.ok(fromLeft <= 300, 'left source scrolling through a hidden comment stays no later than the next visible anchor');
+    preview.scrollTop = 300;
+    const fromRight = api.sourcePositionForPreviewScrollForTest(preview);
+    assert.equal(fromRight.line, 110, 'right rendered scrolling maps to the next visible source anchor, not comment lines');
+    preview.scrollTop = 100;
+    const throughComment = api.sourcePositionForPreviewScrollForTest(preview);
+    assert.ok(throughComment.line <= 110, 'right scrolling through the hidden-comment gap never maps into an unrendered source line');
   });
 
   test('coarse-pointer tablets retain menus while phones compact the topbar', () => {

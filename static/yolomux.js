@@ -5778,6 +5778,7 @@ function cycleSessionRepoDisplay(session, info, direction) {
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
 function resetLayoutStatusSurface() {
+  if (!statusEl) return;
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
   statusEl.removeAttribute('title');
@@ -5791,15 +5792,18 @@ function layoutStatusSurfaceOwnsMessage() {
 
 function statusErr(html) {
   resetLayoutStatusSurface();
+  if (!statusEl) return;
   statusEl.innerHTML = `<span class="err">${html}</span>`;
 }
 
 function statusOk(html) {
   resetLayoutStatusSurface();
+  if (!statusEl) return;
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
 }
 
 function showLayoutStatus(message, kind = '') {
+  if (!statusEl) return;
   const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
   statusEl.textContent = String(message || '');
   resetLayoutStatusSurface();
@@ -37737,6 +37741,13 @@ function compactHomePath(path) {
   return text;
 }
 
+function projectMetaPathHtml(path) {
+  const fullPath = String(path || '');
+  return fullPath
+    ? `<button type="button" class="meta-path meta-path-action" data-info-open-path="${esc(fullPath)}" title="${esc(fullPath)}">${esc(compactHomePath(fullPath))}</button>`
+    : '';
+}
+
 function projectMetaParts(session, info, options = {}) {
   const summary = sessionWorkSummary(session, info);
   const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
@@ -37753,7 +37764,7 @@ function projectMetaParts(session, info, options = {}) {
     </span>`;
   })() : '';
   if (!git) {
-    if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+    if (fullPath) metadataParts.push(projectMetaPathHtml(fullPath));
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
@@ -37767,7 +37778,7 @@ function projectMetaParts(session, info, options = {}) {
     }
   }
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
-  if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+  if (fullPath) metadataParts.push(projectMetaPathHtml(fullPath));
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
@@ -76423,8 +76434,14 @@ function syntaxLanguageForPath(path) {
 }
 
 function previewSourceLineAnchors(previewPane) {
-  return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
+  const explicit = Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
     .map(element => ({element, line: Number(element.dataset.sourceLine)}))
+    .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
+  if (explicit.length) return explicit;
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const sourceLines = panel?._pmSourceLines || [];
+  return Array.from(panel?._pmView?.dom?.children || [])
+    .map((element, index) => ({element, line: Number(sourceLines[index])}))
     .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
 }
 
@@ -76515,7 +76532,7 @@ function clampScrollTop(element, value) {
   return Math.min(max, Math.max(0, Number(value || 0)));
 }
 
-const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollFocusRatio = 1 / 4;
 const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
@@ -76534,6 +76551,20 @@ function previewScrollAnchors(previewPane) {
     .sort((a, b) => a.line - b.line || a.top - b.top);
 }
 
+function sourceSpanIsIgnoredComment(previewPane, fromLine, toLine) {
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  return (panel?._pmIgnoredCommentRanges || []).some(range => (
+    Number(range?.from) <= Number(fromLine) + 1 && Number(range?.to) >= Number(toLine) - 1
+  ));
+}
+
+function semanticSourceLineAnchors(previewPane) {
+  const anchors = previewScrollAnchors(previewPane);
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const comments = panel?._pmIgnoredCommentRanges || [];
+  return anchors.filter(anchor => !comments.some(range => Number(anchor.line) >= Number(range.from) && Number(anchor.line) < Number(range.to)));
+}
+
 function sourcePositionForEditorScroll(cmView) {
   if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
   try {
@@ -76549,14 +76580,14 @@ function sourcePositionForEditorScroll(cmView) {
 }
 
 function sourcePositionForPreviewScroll(previewPane) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length) return null;
   const y = Math.max(0, Number(previewPane?.scrollTop || 0)) + (Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
   let previous = anchors[0];
-  for (let index = 1; index < anchors.length; index += 1) {
-    const next = anchors[index];
+  for (const next of anchors.slice(1)) {
     if (next.top > y) {
       if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) return {line: previous.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -76567,7 +76598,7 @@ function sourcePositionForPreviewScroll(previewPane) {
 }
 
 function previewScrollTopForSourcePosition(previewPane, position) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length || !position) return null;
   const targetOffset = Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
   const line = Math.max(1, Number(position.line || 1));
@@ -76576,6 +76607,12 @@ function previewScrollTopForSourcePosition(previewPane, position) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (line <= next.line) {
+      // Source-only spans such as HTML comments have no rendered height. Keep the rendered pane
+      // pinned to the preceding semantic block until the editor reaches the next rendered block.
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) {
+        const anchor = line < next.line ? previous : next;
+        return clampScrollTop(previewPane, anchor.top - targetOffset);
+      }
       const span = Math.max(1, next.line - previous.line);
       const fraction = Math.min(1, Math.max(0, (line - previous.line) / span));
       return clampScrollTop(previewPane, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
@@ -76609,7 +76646,7 @@ function editorScrollTopForSourcePosition(cmView, position) {
 }
 
 function previewPaneNeedsSourceAnchorScroll(previewPane) {
-  return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
+  return previewSourceLineAnchors(previewPane).length > 0;
 }
 
 function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) {
@@ -77275,6 +77312,29 @@ function prosemirrorMarkdownSchema(api) {
     parseDOM: [{tag: 'td', getAttrs(dom) { return {align: dom.style.textAlign || null}; }}],
     toDOM(node) { return ['td', node.attrs.align ? {style: `text-align:${node.attrs.align}`} : {}, 0]; },
   });
+  nodes = nodes.addBefore('blockquote', 'markdown_comment_block', {
+    group: 'block',
+    atom: true,
+    attrs: {source: {default: '<!---->'}},
+    toDOM() { return ['div', {'data-markdown-comment': 'block', hidden: 'hidden'}]; },
+  }).addBefore('hard_break', 'markdown_comment_inline', {
+    inline: true,
+    group: 'inline',
+    atom: true,
+    attrs: {source: {default: '<!---->'}},
+    toDOM() { return ['span', {'data-markdown-comment': 'inline', hidden: 'hidden'}]; },
+  }).addBefore('blockquote', 'markdown_literal_block', {
+    group: 'block',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['div', {'data-markdown-literal': 'block'}, node.attrs.source]; },
+  }).addBefore('hard_break', 'markdown_literal_inline', {
+    inline: true,
+    group: 'inline',
+    atom: true,
+    attrs: {source: {default: ''}},
+    toDOM(node) { return ['span', {'data-markdown-literal': 'inline'}, node.attrs.source]; },
+  });
   nodes = nodes.addBefore('hard_break', 'soft_break', {
     inline: true,
     group: 'inline',
@@ -77310,6 +77370,7 @@ function prosemirrorMarkdownParser(api, schema) {
   tokenizer.enable('strikethrough');
   const markdownItParse = tokenizer.parse.bind(tokenizer);
   tokenizer.parse = (source, environment) => {
+    environment = environment || {};
     const htmlElement = html => {
       const template = document.createElement('template');
       template.innerHTML = String(html || '').trim();
@@ -77324,14 +77385,25 @@ function prosemirrorMarkdownParser(api, schema) {
         title: image.getAttribute('title'),
       };
     };
-    const unsupportedHtml = [];
+    const ignoredCommentLines = new Set();
+    const ignoredCommentRanges = [];
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
       const normalized = [];
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
         if ((token.type === 'html_inline' || token.type === 'html_block') && /^<!--[\s\S]*-->$/.test(html)) {
-          // Markdown comments are authoring metadata, not editable document content.
+          // Keep comments in the document as hidden atoms so ViewEditor never paints them but a
+          // later edit/save can serialize their exact contents instead of deleting user metadata.
+          if (Array.isArray(token.map)) {
+            ignoredCommentRanges.push({from: Number(token.map[0]) + 1, to: Number(token.map[1] ?? token.map[0] + 1)});
+            for (let line = Number(token.map[0]); line < Number(token.map[1] ?? token.map[0] + 1); line += 1) {
+              ignoredCommentLines.add(line);
+            }
+          }
+          token.type = token.type === 'html_block' ? 'markdown_comment_block' : 'markdown_comment_inline';
+          token.meta = {source: String(token.content || '').replace(/\n$/, '')};
+          normalized.push(token);
           continue;
         }
         if (token.type === 'html_inline') {
@@ -77364,7 +77436,9 @@ function prosemirrorMarkdownParser(api, schema) {
           }
         }
         if ((token.type === 'html_inline' || token.type === 'html_block') && html) {
-          unsupportedHtml.push({html: html.slice(0, 160), line: tokenLine || 1});
+          // Preserve unrecognized XML-like tags as ordinary visible text.
+          token.type = token.type === 'html_block' ? 'markdown_literal_block' : 'markdown_literal_inline';
+          token.meta = {source: html};
         }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
@@ -77376,10 +77450,19 @@ function prosemirrorMarkdownParser(api, schema) {
     // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
     const spacedTokens = [];
     let previousBlockEnd = null;
+    let previousBlockType = '';
     for (const token of tokens) {
-      const blockStart = token.nesting === 1 && token.block && Array.isArray(token.map) ? token.map[0] : null;
+        const topLevelBlock = token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type));
+      const blockStart = topLevelBlock && Array.isArray(token.map) ? token.map[0] : null;
       if (blockStart !== null && previousBlockEnd !== null) {
-        const emptyParagraphs = Math.max(0, blockStart - previousBlockEnd - 1);
+        let visibleGapLines = 0;
+        for (let line = previousBlockEnd; line < blockStart; line += 1) {
+          if (!ignoredCommentLines.has(line)) visibleGapLines += 1;
+        }
+        const emptyParagraphs = ['hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)
+          || ['hr', 'markdown_comment_block'].includes(previousBlockType)
+          ? 0
+          : Math.max(0, visibleGapLines - 1);
         for (let index = 0; index < emptyParagraphs; index += 1) {
           spacedTokens.push(
             {type: 'paragraph_open', tag: 'p', nesting: 1, level: 0, map: [blockStart, blockStart], block: true, children: null, content: ''},
@@ -77389,9 +77472,14 @@ function prosemirrorMarkdownParser(api, schema) {
         }
       }
       spacedTokens.push(token);
-      if (token.nesting === 1 && token.block && Array.isArray(token.map)) previousBlockEnd = token.map[1];
+      if (topLevelBlock && Array.isArray(token.map)) {
+        previousBlockEnd = token.map[1];
+        previousBlockType = token.type;
+      }
     }
-    const trailingNewlines = (String(source).match(/\n+$/) || [''])[0].length;
+    const sourceLines = String(source).split('\n');
+    while (sourceLines.length && ignoredCommentLines.has(sourceLines.length - 1)) sourceLines.pop();
+    const trailingNewlines = (sourceLines.join('\n').match(/\n+$/) || [''])[0].length;
     const trailingEmptyParagraphs = Math.max(0, trailingNewlines - 1);
     for (let index = 0; index < trailingEmptyParagraphs; index += 1) {
       spacedTokens.push(
@@ -77400,10 +77488,10 @@ function prosemirrorMarkdownParser(api, schema) {
         {type: 'paragraph_close', tag: 'p', nesting: -1, level: 0, map: null, block: true, children: null, content: ''},
       );
     }
-    if (unsupportedHtml.length) {
-      const first = unsupportedHtml[0];
-      throw new Error(`Unsupported raw HTML at line ${first.line}: ${first.html}`);
-    }
+    environment.yolomuxTopLevelSourceLines = spacedTokens
+      .filter(token => token.level === 0 && (token.nesting === 1 || ['code_block', 'fence', 'hr', 'markdown_comment_block', 'markdown_literal_block'].includes(token.type)))
+      .map(token => Array.isArray(token.map) ? Number(token.map[0]) + 1 : null);
+    environment.yolomuxIgnoredCommentRanges = ignoredCommentRanges;
     return spacedTokens;
   };
   const tokens = {
@@ -77411,6 +77499,10 @@ function prosemirrorMarkdownParser(api, schema) {
     softbreak: {node: 'soft_break'},
     html_break: {node: 'hard_break'},
     html_image: {node: 'image', getAttrs: token => token.meta},
+    markdown_comment_block: {node: 'markdown_comment_block', getAttrs: token => token.meta},
+    markdown_comment_inline: {node: 'markdown_comment_inline', getAttrs: token => token.meta},
+    markdown_literal_block: {node: 'markdown_literal_block', getAttrs: token => token.meta},
+    markdown_literal_inline: {node: 'markdown_literal_inline', getAttrs: token => token.meta},
     details: {block: 'details', getAttrs: token => token.meta},
     table: {block: 'table'},
     thead: {ignore: true},
@@ -77445,6 +77537,13 @@ function prosemirrorMarkdownSerializer(api) {
     // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
     // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
     hard_break(state) { state.write('\\\n'); },
+    markdown_comment_block(state, node) {
+      state.write(node.attrs.source || '<!---->');
+      state.closeBlock(node);
+    },
+    markdown_comment_inline(state, node) { state.write(node.attrs.source || '<!---->'); },
+    markdown_literal_block(state, node) { state.write(node.attrs.source || ''); state.closeBlock(node); },
+    markdown_literal_inline(state, node) { state.write(node.attrs.source || ''); },
     details(state, node) {
       state.write(`<details>\n<summary>${node.attrs.summary}</summary>\n\n`);
       state.renderContent(node);
@@ -77515,19 +77614,27 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
     image.src = target.src;
   } else {
     image.dataset.resolvedPath = target.path;
-    void installRawFileMediaSource(image, target.path, {
-      isCurrent: () => panel?._pmView?.dom?.isConnected && image.isConnected,
+  }
+  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function startProseMirrorImageLoads(panel, markdownPath) {
+  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image[data-resolved-path]') || [])) {
+    if (image._rawFileAbortController || image._rawFileObjectUrl || Number(image.naturalWidth || 0) > 0) continue;
+    const path = String(image.dataset.resolvedPath || '');
+    if (!path) continue;
+    void installRawFileMediaSource(image, path, {
+      isCurrent: () => panel?._pmPath === markdownPath && panel?._pmView?.dom?.contains(image) && image.isConnected,
       onFailure: error => {
         image.classList.add('prosemirror-image-error');
-        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path}));
       },
       onDecodeFailure: () => {
         image.classList.add('prosemirror-image-error');
-        image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+        image.title = t('preview.markdown.imageUnavailable', {path});
       },
     });
   }
-  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -77669,6 +77776,27 @@ function insertProseMirrorHardBreak(api, schema) {
   };
 }
 
+function insertProseMirrorSoftBreak(api, schema) {
+  return (state, dispatch) => {
+    const {$from, $to} = state.selection;
+    if (!$from.sameParent($to) || !$from.parent.isTextblock || !schema.nodes.soft_break) return false;
+    if ($from.parentOffset >= $from.parent.content.size) return false;
+    if (dispatch) dispatch(state.tr.replaceSelectionWith(schema.nodes.soft_break.create()).scrollIntoView());
+    return true;
+  };
+}
+
+function insertProseMirrorEnter(api, schema) {
+  return (state, dispatch) => {
+    const {$from} = state.selection;
+    if ($from.parentOffset >= $from.parent.content.size) {
+      if (dispatch) dispatch(state.tr.split($from.pos).scrollIntoView());
+      return true;
+    }
+    return insertProseMirrorSoftBreak(api, schema)(state, dispatch);
+  };
+}
+
 function clearLinkedCodeMirrorSelection(panel, path) {
   for (const linked of fileEditorPanelsForPath(path)) {
     const view = linked._cmView;
@@ -77739,11 +77867,13 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
   view.dom.addEventListener('contextmenu', event => {
+    const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
     event.preventDefault();
     event.stopPropagation();
     markdownFormattingContextMenu(event, context, {
+      href: link && view.dom.contains(link) ? link.href : '',
       applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
       isActive: command => {
         const mark = command === 'bold' ? schema.marks.strong
@@ -77763,7 +77893,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const schema = prosemirrorMarkdownSchema(api);
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
-  const doc = parser.parse(state.content || '');
+  const parseEnvironment = {};
+  const doc = parser.parse(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
   container.setAttribute('data-prosemirror-editor', 'true');
@@ -77775,6 +77906,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
         return true;
       },
       'Shift-Enter': insertProseMirrorHardBreak(api, schema),
+      Enter: insertProseMirrorEnter(api, schema),
     }),
     api.history(),
     api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
@@ -77806,6 +77938,33 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       }
     },
   });
+  const attachSourceLines = () => Array.from(view.dom.children).forEach((element, index) => {
+    const sourceLine = Number(parseEnvironment.yolomuxTopLevelSourceLines?.[index]);
+    if (Number.isFinite(sourceLine) && sourceLine > 0) element.dataset.sourceLine = String(sourceLine);
+  });
+  attachSourceLines();
+  requestAnimationFrame(attachSourceLines);
+  const sourceLines = String(state.content || '').split('\n');
+  const sourceHeadings = sourceLines.map((line, index) => {
+    const match = line.match(/^\s*#{1,6}\s+(.+?)\s*$/);
+    return match ? {line: index + 1, text: match[1].trim()} : null;
+  }).filter(Boolean);
+  const attachHeadingSourceLines = () => {
+    let headingSearchFrom = 0;
+    for (const heading of Array.from(view.dom.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
+      const headingText = String(heading.textContent || '').trim();
+      if (!headingText) continue;
+      const sourceHeading = sourceHeadings.find(candidate => candidate.line > headingSearchFrom && candidate.text === headingText);
+      if (!sourceHeading) continue;
+      heading.dataset.sourceLine = String(sourceHeading.line);
+      headingSearchFrom = sourceHeading.line - 1;
+    }
+  };
+  attachHeadingSourceLines();
+  setTimeout(attachHeadingSourceLines, 0);
+  requestAnimationFrame(attachHeadingSourceLines);
+  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
+  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   container._prosemirrorView = view;
   panel._pmView = view;
   panel._pmPath = path;
@@ -77814,6 +77973,13 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  startProseMirrorImageLoads(panel, path);
+  attachSourceLines();
+  attachHeadingSourceLines();
+  requestAnimationFrame(() => {
+    attachSourceLines();
+    attachHeadingSourceLines();
+  });
   delete panel._pmError;
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);
