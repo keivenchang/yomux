@@ -223,7 +223,6 @@
   "contextmenu.openNewTab": "Открыть в новой вкладке",
   "contextmenu.openUrl": "Открыть URL в новой вкладке",
   "contextmenu.modifyUrl": "Изменить URL",
-  "contextmenu.removeUrl": "Удалить URL",
   "contextmenu.zipDownload": "Заархивировать и скачать",
   "debug.apiCalls": "API звонки",
   "debug.cleared": "события отладки удалены",

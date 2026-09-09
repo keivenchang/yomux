@@ -228,7 +228,6 @@
   "contextmenu.openNewTab": "Open in new tab",
   "contextmenu.openUrl": "Open URL in a new tab",
   "contextmenu.modifyUrl": "Modify URL",
-  "contextmenu.removeUrl": "Remove URL",
   "contextmenu.previewNewTab": "Preview in new tab",
   "contextmenu.readOnlyUnavailable": "Filesystem content is unavailable in read-only mode",
   "contextmenu.zipDownload": "Zip & download",

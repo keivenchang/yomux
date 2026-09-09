@@ -211,7 +211,6 @@
   "contextmenu.openNewTab": "新しいタブで開く",
   "contextmenu.openUrl": "新しいタブでURLを開く",
   "contextmenu.modifyUrl": "URLを変更",
-  "contextmenu.removeUrl": "URLを削除",
   "contextmenu.zipDownload": "圧縮してダウンロード",
   "debug.apiCalls": "API呼び出し",
   "debug.cleared": "デバッグ イベントがクリアされました",

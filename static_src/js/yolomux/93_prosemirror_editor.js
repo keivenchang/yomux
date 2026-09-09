@@ -672,16 +672,16 @@ function applyProseMirrorFormat(api, view, schema, command) {
   return run ? run(view.state, view.dispatch, view) : false;
 }
 
-async function markdownLinkUrlDialog(view, currentUrl, title) {
+async function modifyMarkdownLinkUrl(view, link) {
+  const currentUrl = link?.getAttribute?.('href') || '';
   const action = await showFileEditorDecisionDialog({
-    title,
-    bodyHtml: `<label class="markdown-link-url-field">${esc(title)}<input type="url" data-markdown-link-url-input value="${esc(currentUrl)}" /></label>`,
+    title: t('contextmenu.modifyUrl'),
+    bodyHtml: `<label class="markdown-link-url-field">${esc(t('contextmenu.modifyUrl'))}<input type="url" data-markdown-link-url-input value="${esc(currentUrl)}" /></label>`,
     actions: [
       {id: 'cancel', label: t('common.cancel')},
       {id: 'save', label: t('common.save')},
     ],
     className: 'markdown-link-url-dialog',
-    focusSelector: '[data-markdown-link-url-input]',
     onMount: backdrop => {
       const input = backdrop.querySelector('[data-markdown-link-url-input]');
       input?.focus?.();
@@ -691,13 +691,7 @@ async function markdownLinkUrlDialog(view, currentUrl, title) {
   });
   const nextUrl = view._markdownLinkUrlDialogValue || currentUrl;
   delete view._markdownLinkUrlDialogValue;
-  return action === 'save' ? nextUrl : null;
-}
-
-async function modifyMarkdownLinkUrl(view, link) {
-  const currentUrl = link?.getAttribute?.('href') || '';
-  const nextUrl = await markdownLinkUrlDialog(view, currentUrl, t('contextmenu.modifyUrl'));
-  if (nextUrl === null) return false;
+  if (action !== 'save') return false;
   if (nextUrl === currentUrl) return false;
   const textNode = link?.firstChild;
   const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
@@ -722,38 +716,6 @@ async function modifyMarkdownLinkUrl(view, link) {
   return true;
 }
 
-function removeMarkdownLinkUrl(view, link) {
-  const currentUrl = link?.getAttribute?.('href') || '';
-  const textNode = link?.firstChild;
-  const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
-  if (!Number.isFinite(position)) return false;
-  const linkMark = view.state.doc.resolve(position + 1).marks().find(
-    mark => mark.type.name === 'link' && mark.attrs.href === currentUrl,
-  );
-  if (!linkMark) return false;
-  let from = position;
-  let to = position;
-  view.state.doc.nodesBetween(position, position + Math.max(1, link.textContent.length + 1), (node, nodePosition) => {
-    if (!node.isText || !node.marks.some(mark => mark.eq(linkMark))) return;
-    from = Math.min(from, nodePosition);
-    to = Math.max(to, nodePosition + node.nodeSize);
-  });
-  if (from === to) return false;
-  view.dispatch(view.state.tr.removeMark(from, to, linkMark.type));
-  return true;
-}
-
-async function addMarkdownLinkUrl(view) {
-  const {from, to} = view.state.selection;
-  if (from === to) return false;
-  const label = t('contextmenu.addUrl');
-  const nextUrl = await markdownLinkUrlDialog(view, '', label === 'contextmenu.addUrl' ? 'Add URL' : label);
-  if (!nextUrl) return false;
-  const link = view.state.schema.marks.link;
-  view.dispatch(view.state.tr.addMark(from, to, link.create({href: nextUrl})));
-  return true;
-}
-
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
@@ -766,8 +728,6 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
     markdownFormattingContextMenu(event, context, {
       href: link && view.dom.contains(link) ? link.href : '',
       modifyUrl: link && view.dom.contains(link) ? () => modifyMarkdownLinkUrl(view, link) : null,
-      removeUrl: link && view.dom.contains(link) ? () => removeMarkdownLinkUrl(view, link) : null,
-      addUrl: !link && context.selectedText ? () => addMarkdownLinkUrl(view) : null,
       applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
       isActive: command => {
         const mark = command === 'bold' ? schema.marks.strong

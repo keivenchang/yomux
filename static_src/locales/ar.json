@@ -235,7 +235,6 @@
   "contextmenu.openNewTab": "افتح في علامة تبويب جديدة",
   "contextmenu.openUrl": "فتح الرابط في علامة تبويب جديدة",
   "contextmenu.modifyUrl": "تعديل الرابط",
-  "contextmenu.removeUrl": "إزالة الرابط",
   "contextmenu.zipDownload": "الرمز البريدي والتنزيل",
   "debug.apiCalls": "مكالمات API",
   "debug.cleared": "تم مسح أحداث التصحيح",

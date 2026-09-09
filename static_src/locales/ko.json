@@ -211,7 +211,6 @@
   "contextmenu.openNewTab": "새 탭에서 열기",
   "contextmenu.openUrl": "새 탭에서 URL 열기",
   "contextmenu.modifyUrl": "URL 수정",
-  "contextmenu.removeUrl": "URL 제거",
   "contextmenu.zipDownload": "우편번호 및 다운로드",
   "debug.apiCalls": "API 통화",
   "debug.cleared": "디버그 이벤트가 지워졌습니다.",

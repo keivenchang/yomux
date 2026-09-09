@@ -211,7 +211,6 @@
   "contextmenu.openNewTab": "在新选项卡中打开",
   "contextmenu.openUrl": "在新标签页中打开网址",
   "contextmenu.modifyUrl": "修改网址",
-  "contextmenu.removeUrl": "移除网址",
   "contextmenu.zipDownload": "压缩下载",
   "debug.apiCalls": "API 调用",
   "debug.cleared": "已清除调试事件",

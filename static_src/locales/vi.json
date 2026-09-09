@@ -211,7 +211,6 @@
   "contextmenu.openNewTab": "Mở trong tab mới",
   "contextmenu.openUrl": "Mở URL trong tab mới",
   "contextmenu.modifyUrl": "Sửa URL",
-  "contextmenu.removeUrl": "Xóa URL",
   "contextmenu.zipDownload": "Zip và tải xuống",
   "debug.apiCalls": "cuộc gọi API",
   "debug.cleared": "sự kiện gỡ lỗi bị xóa",
