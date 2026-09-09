@@ -223,6 +223,7 @@
   "contextmenu.openNewTab": "Otwórz w nowej karcie",
   "contextmenu.openUrl": "Otwórz URL w nowej karcie",
   "contextmenu.modifyUrl": "Zmień URL",
+  "contextmenu.removeUrl": "Usuń URL",
   "contextmenu.zipDownload": "Zip & pobierz",
   "debug.apiCalls": "API dzwoni",
   "debug.cleared": "wyczyszczenie zdarzeń debugowania",

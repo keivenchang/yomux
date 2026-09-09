@@ -211,6 +211,7 @@
   "contextmenu.openNewTab": "Openen in nieuw tabblad",
   "contextmenu.openUrl": "URL openen in nieuw tabblad",
   "contextmenu.modifyUrl": "URL wijzigen",
+  "contextmenu.removeUrl": "URL verwijderen",
   "contextmenu.zipDownload": "Comprimeren en downloaden",
   "debug.apiCalls": "API roept",
   "debug.cleared": "debug-events verwijderd",

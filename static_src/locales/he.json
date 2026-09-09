@@ -217,6 +217,7 @@
   "contextmenu.openNewTab": "פתח בכרטיסייה חדשה",
   "contextmenu.openUrl": "פתח כתובת בלשונית חדשה",
   "contextmenu.modifyUrl": "ערוך כתובת",
+  "contextmenu.removeUrl": "הסר כתובת",
   "contextmenu.zipDownload": "מיקוד והורד",
   "debug.apiCalls": "שיחות API",
   "debug.cleared": "אירועי ניפוי באגים נוקו",

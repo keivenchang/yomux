@@ -9194,10 +9194,17 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
-  appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
+  const label = (key, fallback) => {
+    const translated = t(key);
+    return translated === key ? fallback : translated;
+  };
+  appendContextMenuButton(menu, label('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, label('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
-    appendContextMenuButton(menu, t('contextmenu.modifyUrl'), action('modify-url', options.modifyUrl), closeMenu);
+    appendContextMenuButton(menu, label('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
+  }
+  if (typeof options.removeUrl === 'function') {
+    appendContextMenuButton(menu, label('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
   }
   if (options.includeSelectedText && selectedText && selectedText !== url) {
     appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', button => copyTextWithFeedback(selectedText, {button})), closeMenu);
@@ -70831,7 +70838,11 @@ function markdownFormattingContextMenu(event, context, options = {}) {
   const closeMenu = () => markdownPreviewContextMenuController.close();
   const apply = command => options.applyCommand?.(command, context) === true;
   if (options.href) {
-    appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl});
+    appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
+    appendContextMenuSeparator(menu);
+  } else if (context.selectedText && typeof options.addUrl === 'function') {
+    const label = t('contextmenu.addUrl');
+    appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
   appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
@@ -78143,16 +78154,16 @@ function applyProseMirrorFormat(api, view, schema, command) {
   return run ? run(view.state, view.dispatch, view) : false;
 }
 
-async function modifyMarkdownLinkUrl(view, link) {
-  const currentUrl = link?.getAttribute?.('href') || '';
+async function markdownLinkUrlDialog(view, currentUrl, title) {
   const action = await showFileEditorDecisionDialog({
-    title: t('contextmenu.modifyUrl'),
-    bodyHtml: `<label class="markdown-link-url-field">${esc(t('contextmenu.modifyUrl'))}<input type="url" data-markdown-link-url-input value="${esc(currentUrl)}" /></label>`,
+    title,
+    bodyHtml: `<label class="markdown-link-url-field">${esc(title)}<input type="url" data-markdown-link-url-input value="${esc(currentUrl)}" /></label>`,
     actions: [
       {id: 'cancel', label: t('common.cancel')},
       {id: 'save', label: t('common.save')},
     ],
     className: 'markdown-link-url-dialog',
+    focusSelector: '[data-markdown-link-url-input]',
     onMount: backdrop => {
       const input = backdrop.querySelector('[data-markdown-link-url-input]');
       input?.focus?.();
@@ -78162,7 +78173,13 @@ async function modifyMarkdownLinkUrl(view, link) {
   });
   const nextUrl = view._markdownLinkUrlDialogValue || currentUrl;
   delete view._markdownLinkUrlDialogValue;
-  if (action !== 'save') return false;
+  return action === 'save' ? nextUrl : null;
+}
+
+async function modifyMarkdownLinkUrl(view, link) {
+  const currentUrl = link?.getAttribute?.('href') || '';
+  const nextUrl = await markdownLinkUrlDialog(view, currentUrl, t('contextmenu.modifyUrl'));
+  if (nextUrl === null) return false;
   if (nextUrl === currentUrl) return false;
   const textNode = link?.firstChild;
   const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
@@ -78187,6 +78204,38 @@ async function modifyMarkdownLinkUrl(view, link) {
   return true;
 }
 
+function removeMarkdownLinkUrl(view, link) {
+  const currentUrl = link?.getAttribute?.('href') || '';
+  const textNode = link?.firstChild;
+  const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
+  if (!Number.isFinite(position)) return false;
+  const linkMark = view.state.doc.resolve(position + 1).marks().find(
+    mark => mark.type.name === 'link' && mark.attrs.href === currentUrl,
+  );
+  if (!linkMark) return false;
+  let from = position;
+  let to = position;
+  view.state.doc.nodesBetween(position, position + Math.max(1, link.textContent.length + 1), (node, nodePosition) => {
+    if (!node.isText || !node.marks.some(mark => mark.eq(linkMark))) return;
+    from = Math.min(from, nodePosition);
+    to = Math.max(to, nodePosition + node.nodeSize);
+  });
+  if (from === to) return false;
+  view.dispatch(view.state.tr.removeMark(from, to, linkMark.type));
+  return true;
+}
+
+async function addMarkdownLinkUrl(view) {
+  const {from, to} = view.state.selection;
+  if (from === to) return false;
+  const label = t('contextmenu.addUrl');
+  const nextUrl = await markdownLinkUrlDialog(view, '', label === 'contextmenu.addUrl' ? 'Add URL' : label);
+  if (!nextUrl) return false;
+  const link = view.state.schema.marks.link;
+  view.dispatch(view.state.tr.addMark(from, to, link.create({href: nextUrl})));
+  return true;
+}
+
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
@@ -78199,6 +78248,8 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
     markdownFormattingContextMenu(event, context, {
       href: link && view.dom.contains(link) ? link.href : '',
       modifyUrl: link && view.dom.contains(link) ? () => modifyMarkdownLinkUrl(view, link) : null,
+      removeUrl: link && view.dom.contains(link) ? () => removeMarkdownLinkUrl(view, link) : null,
+      addUrl: !link && context.selectedText ? () => addMarkdownLinkUrl(view) : null,
       applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
       isActive: command => {
         const mark = command === 'bold' ? schema.marks.strong

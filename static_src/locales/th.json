@@ -211,6 +211,7 @@
   "contextmenu.openNewTab": "เปิดในแท็บใหม่",
   "contextmenu.openUrl": "เปิด URL ในแท็บใหม่",
   "contextmenu.modifyUrl": "แก้ไข URL",
+  "contextmenu.removeUrl": "ลบ URL",
   "contextmenu.zipDownload": "ซิปและดาวน์โหลด",
   "debug.apiCalls": "API การโทร",
   "debug.cleared": "ล้างเหตุการณ์การแก้ไขข้อบกพร่อง",

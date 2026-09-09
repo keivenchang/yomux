@@ -211,6 +211,7 @@
   "contextmenu.openNewTab": "Yeni sekmede aç",
   "contextmenu.openUrl": "URL'yi yeni sekmede aç",
   "contextmenu.modifyUrl": "URL'yi değiştir",
+  "contextmenu.removeUrl": "URL'yi kaldır",
   "contextmenu.zipDownload": "Zip ve indir",
   "debug.apiCalls": "API çağrılar",
   "debug.cleared": "hata hata alma etkinlikleri temizlendi",

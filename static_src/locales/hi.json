@@ -211,6 +211,7 @@
   "contextmenu.openNewTab": "नए टैब में खोलें",
   "contextmenu.openUrl": "URL को नए टैब में खोलें",
   "contextmenu.modifyUrl": "URL संशोधित करें",
+  "contextmenu.removeUrl": "URL हटाएं",
   "contextmenu.zipDownload": "ज़िप करें और डाउनलोड करें",
   "debug.apiCalls": "API कॉल",
   "debug.cleared": "डिबग इवेंट साफ़ हो गए",

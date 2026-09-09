@@ -217,6 +217,7 @@
   "contextmenu.openNewTab": "Abrir en nueva pestaña",
   "contextmenu.openUrl": "Abrir URL en una pestaña nueva",
   "contextmenu.modifyUrl": "Modificar URL",
+  "contextmenu.removeUrl": "Eliminar URL",
   "contextmenu.zipDownload": "Comprimir y descargar",
   "debug.apiCalls": "llamadas API",
   "debug.cleared": "eventos de depuración borrados",
