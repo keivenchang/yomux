@@ -24,6 +24,7 @@ from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .common import yolomux_dev_bundle_revision
+from .common import yolomux_version_metadata
 from .locales import LANGUAGE_PREFERENCES
 from .locales import LOCALE_ENDONYMS
 from .locales import FALLBACK_LOCALE
@@ -201,13 +202,17 @@ def static_asset_url(asset: str) -> str:
     return f"/static/{asset}?v={static_asset_version(asset)}"
 
 
-def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
+def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None, version_metadata: tuple[str, list[str]] | None = None) -> str:
     active_locale = normalize_locale(locale)
     commit_count = yolomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
+    version_status, post_release_commits = version_metadata or yolomux_version_metadata()
     version_title = html.escape(
-        f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
-        f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
+        f"{version_status}\n"
+        + "\n".join(post_release_commits)
+        + ("\n" if post_release_commits else "")
+        + f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
+        + f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
         quote=True,
     )
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
@@ -227,7 +232,7 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
         '<span class="brand-blue">m</span>'
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
-        f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
+        f'<span class="brand-version" title="{version_title}">{html.escape(version_status)}</span>'
         '<button type="button" class="brand-update-badge" data-update-badge hidden '
         f'title="{update_title}" aria-label="{update_aria}">{update_label}</button>'
         f"</{tag}>"
@@ -298,6 +303,7 @@ def html_page(
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
+    version_metadata = yolomux_version_metadata()
     bootstrap = {
         "sessions": sessions,
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
@@ -339,6 +345,8 @@ def html_page(
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
         "version": YOLOMUX_VERSION,
+        "versionStatus": version_metadata[0],
+        "postReleaseCommits": version_metadata[1],
         "clientRevision": yolomux_client_revision(),
         "devBundleRevision": yolomux_dev_bundle_revision(),
         "versionCommit": yolomux_commit_sha(),
@@ -394,7 +402,7 @@ def html_page(
 <div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
-    {brand_html("brand brand-title title", "div", locale=locale)}
+    {brand_html("brand brand-title title", "div", locale=locale, version_metadata=version_metadata)}
     <span id="httpsWarning" class="transport-warning" hidden aria-label="{html.escape(server_string(locale, "app.noHttps"), quote=True)}"></span>
   </div>
   <div id="sessionButtons" class="app-menu-area" aria-label="{html.escape(server_string(locale, "app.menusAria"), quote=True)}"></div>

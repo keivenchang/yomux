@@ -2307,6 +2307,8 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "serverHostname": "localhost",
         "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
         "version": "test",
+        "versionStatus": "test",
+        "postReleaseCommits": [],
         "versionCommitTime": "test",
         "settingsPayload": {"settings": settings, "defaults": settings_module.default_settings(), "mtime_ns": 0},
         "statsWriterFence": {

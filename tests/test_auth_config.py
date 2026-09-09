@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 import threading
 from pathlib import Path
 
@@ -211,6 +212,56 @@ def test_commit_count_display_uses_git_head(monkeypatch):
     assert common.yolomux_commit_count() == 1234
 
 
+def test_version_status_displays_post_release_commits_and_dirty_worktree(monkeypatch):
+    commits = "2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n"
+    results = iter((type("GitResult", (), {"stdout": commits})(), type("GitResult", (), {"stdout": " M app.py\n"})()))
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
+
+    assert common.yolomux_version_metadata()[0] == "0.8.1(3)*"
+
+
+@pytest.mark.parametrize(
+    ("commit_count", "status_output", "expected"),
+    [("", "", "0.8.1"), ("", "?? new.txt\n", "0.8.1*"), ("2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n", "", "0.8.1(3)"),],
+)
+def test_version_status_formats_clean_and_dirty_variants(monkeypatch, commit_count, status_output, expected):
+    results = iter((type("GitResult", (), {"stdout": commit_count})(), type("GitResult", (), {"stdout": status_output})()))
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
+
+    assert common.yolomux_version_metadata()[0] == expected
+
+
+def test_post_release_commits_format_pt_date_time_and_subject(monkeypatch):
+    result = type("GitResult", (), {"stdout": "2026-09-09T12:34:56+00:00\tFix the thing\n"})()
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: result)
+
+    assert common.yolomux_version_metadata()[1] == ["2026-09-09 05:34:56 PT Fix the thing"]
+
+
+def test_version_status_uses_peeled_release_tag_and_fails_closed_on_status_error(monkeypatch):
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 1:
+            return type("GitResult", (), {"stdout": "2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n"})()
+        raise subprocess.TimeoutExpired(args[0], 1.0)
+
+    monkeypatch.setattr(common.subprocess, "run", run)
+
+    assert common.yolomux_version_metadata()[0] == "0.8.1(3)*"
+    assert "v0.8.1^{}..HEAD" in calls[0]
+
+
+def test_post_release_commits_use_peeled_release_tag(monkeypatch):
+    calls = []
+    result = type("GitResult", (), {"stdout": ""})()
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: calls.append(args[0]) or result)
+
+    assert common.yolomux_version_metadata()[1] == []
+    assert "v0.8.1^{}..HEAD" in calls[0]
+
+
 def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "available_agent_commands", lambda: [])
@@ -220,6 +271,7 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
     monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
     monkeypatch.setattr(web, "yolomux_commit_count", lambda: 1234)
+    monkeypatch.setattr(web, "yolomux_version_metadata", lambda: ("0.8.1(3)*", ["2026-09-09 05:34:56 PT Fix the thing"]))
     monkeypatch.setattr(web, "yolomux_client_revision", lambda: "client-rev-test")
     monkeypatch.setattr(web, "yolomux_dev_bundle_revision", lambda: "bundle-rev-test")
     monkeypatch.setattr(web, "SERVER_STARTED_AT", 1234.5)
@@ -230,6 +282,10 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     payload = json.loads(match.group(1))
     assert payload["versionCommit"] == "abcdef123456"
     assert payload["versionCommitCount"] == 1234
+    assert payload["versionStatus"] == "0.8.1(3)*"
+    assert payload["postReleaseCommits"] == ["2026-09-09 05:34:56 PT Fix the thing"]
+    assert ">0.8.1(3)*</span>" in page
+    assert '2026-09-09 05:34:56 PT Fix the thing' in page
     assert payload["clientRevision"] == "client-rev-test"
     assert payload["devBundleRevision"] == "bundle-rev-test"
     assert payload["serverStartedAt"] == 1234.5

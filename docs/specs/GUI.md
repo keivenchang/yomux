@@ -115,6 +115,10 @@ Section order follows the reading path: capabilities and terms, layout and tab m
 - Resizing a Vertical Side Pane sash changes its 22%-seeded edge share up to the one-third cap and preserves nested generic-content percentages. Closing the final tab in one stacked Vertical Side leaf removes and compacts that leaf while preserving the other leaf's width; it must not retain an empty Side leaf or reveal an obsolete Generic source placeholder left by an earlier cross-role move. Pane `_` removes the complete Vertical Side Pane without migrating its tabs; closing the final tab removes the empty Vertical Side Pane. A generic placeholder remains between two Vertical Side Panes or when Vertical Side Pane content is otherwise the only content.
 - The pane-header Info Bar toggle controls the pane metadata strip only. It must be labeled as `show Info Bar` or `hide Info Bar` based on state and must not reuse the YO!info pane label.
 
+### Version Display
+
+- The top-left version directly shows the release version followed by the number of commits after its matching `v<version>` tag in parentheses when nonzero, and an asterisk when the worktree is dirty: `0.8.1`, `0.8.1(3)`, `0.8.1*`, or `0.8.1(3)*`. Hovering the version shows the post-release commits first, one per line as `YYYY-MM-DD HH:MM:SS PT subject`, followed by the existing commit SHA, commit time, and total history details.
+
 ## Tab Strip Behavior
 
 - Clicking a tab activates it in its current pane.

@@ -857,6 +857,40 @@ def yolomux_commit_count() -> int:
     return _YOLOMUX_COMMIT_COUNT
 
 
+def yolomux_version_metadata() -> tuple[str, list[str]]:
+    """Return one consistent release status and post-release commit list for a page render."""
+    version = YOLOMUX_VERSION
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "log", f"v{version}^{{}}..HEAD", "--format=%cI%x09%s"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        commits: list[str] = []
+        for line in result.stdout.splitlines():
+            timestamp, separator, subject = line.partition("\t")
+            if not separator or not subject:
+                raise ValueError("malformed commit metadata")
+            commit_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            commits.append(f"{commit_time.astimezone(PACIFIC_TIME).strftime('%Y-%m-%d %H:%M:%S PT')} {subject}")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        return f"{version}*", []
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return f"{version}{f'({len(commits)})' if commits else ''}*", commits
+    suffix = f"({len(commits)})" if commits else ""
+    return f"{version}{suffix}{'*' if status.stdout else ''}", commits
+
+
 def positive_env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:

@@ -2360,7 +2360,7 @@ async function runLayoutRestoreSuite() {
     // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
     assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.marker'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
     assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarServerUptimeTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows server uptime and version hover shows the commit SHA');
-    assert.ok(/function topbarVersionTitle\(\)[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title localizes the SHA and commit count');
+    assert.ok(/function topbarVersionTitle\(\)[\s\S]*bootstrap\.versionStatus[\s\S]*bootstrap\.postReleaseCommits[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title shows release status, post-release commits, SHA, and commit count');
     // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
     // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
     assert.ok(/function startSessionDrag[\s\S]*?options\.dragImage \|\| source[\s\S]*?setDragImage\(dragImageSource/.test(source), '#47: tab drags default to the native tab drag image while allowing shared callers to override it');

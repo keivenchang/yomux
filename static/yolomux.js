@@ -18018,6 +18018,8 @@ function topbarVersionTitle() {
   const sha = aboutCommitShaText();
   const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
+  if (bootstrap.versionStatus) lines.push(String(bootstrap.versionStatus));
+  if (Array.isArray(bootstrap.postReleaseCommits)) lines.push(...bootstrap.postReleaseCommits.map(String));
   if (sha) lines.push(t('menu.help.about.sha', {sha}));
   if (bootstrap.versionCommitTime) lines.push(t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}));
   if (Number.isFinite(commitCount) && commitCount > 0) lines.push(t('menu.help.about.commits', {count: commitCount}));
