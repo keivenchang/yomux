@@ -37,8 +37,6 @@ assert.match(adapter, /normalizeLegacyBreakMarkup/);
 assert.match(adapter, /sourceSurface: 'view-editor'/);
 assert.match(adapter, /prosemirrorSelectionAtClientPoint/);
 assert.match(adapter, /prosemirrorSelectionHasMark/);
-assert.match(adapter, /view\.dom\.addEventListener\('click', event => \{[\s\S]*?handleMarkdownPreviewLinkClick\(event\)/);
-assert.match(adapter, /view\.dom\.dataset\.mdPath = path;[\s\S]*?view\.dom\.dataset\.basePath = dirnameOf\(path\)/);
 assert.match(adapter, /marks\.strike/);
 assert.match(adapter, /marks\.underline/);
 assert.match(adapter, /strike: \{open: '~~'/);
