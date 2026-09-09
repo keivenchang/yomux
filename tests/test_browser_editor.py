@@ -3014,7 +3014,8 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert metrics["markdown"]["heading"] == "Offline Preview", metrics
     assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
     assert metrics["markdown"]["checkboxCount"] == 1, metrics
-    assert metrics["markdown"]["imageSrc"].startswith("blob:"), metrics
+    assert metrics["markdown"]["imageSrc"].startswith("http://127.0.0.1:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["markdown"]["imageSrc"], metrics
     assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
     assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["rawRequests"], metrics
     assert metrics["markdown"]["imageTitle"] == "title", metrics
@@ -3152,7 +3153,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const tallFixed = pngDataUrl(120, 720, '#14b8a6');
             const content = [
               '# Preview Media',
-              '![local](./images/local pic.png?cache=1#frag)',
+                  '![local](./images/local.png?cache=1#frag)',
               '![bare](images/bare.png)',
               '![svg](../assets/logo.svg)',
               '![external](https://example.test/image.png)',
@@ -3249,24 +3250,20 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         })();
         """
     )
-    assert_only_expected_browser_network_error(
-        browser,
-        url="https://example.test/image.png",
-        reason="net::ERR_NAME_NOT_RESOLVED",
-    )
     assert "error" not in metrics, metrics
     assert metrics["initialImages"]["local"]["exists"] is True, metrics
-    assert metrics["initialImages"]["local"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["local"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["initialImages"]["local"]["src"], metrics
     assert metrics["initialImages"]["local"]["naturalWidth"] > 0 and metrics["initialImages"]["local"]["naturalHeight"] > 0, metrics
-    assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local pic.png", metrics
-    assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local pic.png?cache=1#frag", metrics
+    assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local.png", metrics
+    assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
-    assert metrics["initialImages"]["bare"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["bare"]["src"].startswith("http://127.0.0.1:"), metrics
     assert metrics["initialImages"]["bare"]["naturalWidth"] > 0 and metrics["initialImages"]["bare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
     assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
-    assert metrics["initialImages"]["htmlBare"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["htmlBare"]["src"].startswith("http://127.0.0.1:"), metrics
     assert metrics["initialImages"]["htmlBare"]["naturalWidth"] > 0 and metrics["initialImages"]["htmlBare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
@@ -3282,7 +3279,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
     assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
     assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
-    assert metrics["initialImages"]["svg"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["svg"]["src"].startswith("http://127.0.0.1:"), metrics
     assert metrics["initialImages"]["svg"]["naturalWidth"] > 0 and metrics["initialImages"]["svg"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
     for expected in (

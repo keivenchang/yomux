@@ -12013,10 +12013,7 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
             buffer: {active: {viewportY: 0, getLine: index => index === 0 ? {isWrapped: false, translateToString: () => text} : null}},
             _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
           };
-          const controller = installTerminalFileReferenceUnderlines('1', term, container, {
-            isActive: () => true,
-            targetResolver: async (_session, reference) => ({path: `/repo/${reference.path}`}),
-          });
+          const controller = installTerminalFileReferenceUnderlines('1', term, container, {isActive: () => true});
           const initial = await controller.refresh();
           const before = container.querySelectorAll('.terminal-file-link-underline').length;
           text = 'No file references here';

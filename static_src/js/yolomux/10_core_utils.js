@@ -5558,8 +5558,6 @@ async function terminalReferenceProviderLinks(session, term, y, container = null
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
-const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
-
 function terminalFileReferenceViewportSignature(term) {
   const references = terminalVisibleFileReferences(term)
     .map(terminalFileReferenceKey)
@@ -5745,26 +5743,18 @@ function terminalFileReferenceUnderlineIsActive(session, container) {
 
 function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
   if (!session || !term || !container) return null;
-  const targetResolver = options.targetResolver || terminalFileReferenceTarget;
   const isActive = typeof options.isActive === 'function' ? options.isActive : terminalFileReferenceUnderlineIsActive;
   const disposables = [];
   let disposed = false;
-  let timer = 0;
   let renderFrame = 0;
-  let sequence = 0;
   let lastRenderedViewportSignature = '';
   let existingReferenceKeys = new Set();
-  const existingReferenceTargets = new Map();
   let hoverKey = '';
-  let refreshRequest = null;
 
   const active = () => !disposed && Boolean(isActive(session, container));
 
   const clearInactive = () => {
-    sequence += 1;
-    if (timer) clearTimeout(timer);
     if (renderFrame) cancelAnimationFrame(renderFrame);
-    timer = 0;
     renderFrame = 0;
     existingReferenceKeys = new Set();
     hoverKey = '';
@@ -5789,12 +5779,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   const renderCached = () => {
     if (!active()) return clearInactive();
-    const existingRefs = [];
-    for (const ref of terminalVisibleFileReferences(term)) {
-      const key = terminalFileReferenceCacheKey(session, ref);
-      const targetPath = existingReferenceTargets.get(key);
-      if (targetPath) existingRefs.push({...ref, targetPath});
-    }
+    // Underlines are a syntactic affordance only. Resolving every visible token here turns terminal
+    // repaint/scroll into a filesystem request storm; the user gesture owns the real resolution.
+    const existingRefs = terminalVisibleFileReferences(term).map(ref => ({...ref, targetPath: ref.path}));
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
     const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
@@ -5802,54 +5789,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
-  const refreshNow = async () => {
+  const refreshNow = () => {
     if (disposed) return 0;
     if (!active()) return clearInactive();
-    if (timer) {
-      clearTimeout(timer);
-      timer = 0;
-    }
-    const currentSequence = ++sequence;
-    const refs = terminalVisibleFileReferences(term);
-    if (!refs.length) {
-      existingReferenceKeys = new Set();
-      hoverKey = '';
-      const count = renderTerminalFileReferenceUnderlines(term, container, []);
-      lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
-      return count;
-    }
-    const targets = await Promise.all(refs.map(ref => (
-      Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
-    )));
-    if (disposed || currentSequence !== sequence) return 0;
-    if (!active()) return clearInactive();
-    const existingRefs = refs
-      .map((ref, index) => {
-        const cacheKey = terminalFileReferenceCacheKey(session, ref);
-        if (!targets[index]) {
-          existingReferenceTargets.delete(cacheKey);
-          return null;
-        }
-        const targetPath = targets[index].path || ref.path || '';
-        existingReferenceTargets.set(cacheKey, targetPath);
-        return {...ref, targetPath};
-      })
-      .filter(Boolean);
-    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
-    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
-    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
-    return count;
-  };
-
-  const refresh = () => {
-    if (refreshRequest) return refreshRequest;
-    const request = refreshNow();
-    refreshRequest = request;
-    request.finally(() => {
-      if (refreshRequest === request) refreshRequest = null;
-    });
-    return request;
+    return renderCached();
   };
 
   const scheduleCachedRender = () => {
@@ -5874,13 +5817,6 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
     const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
     if (viewportChanged || contentChanged) scheduleCachedRender();
-    if ((viewportChanged || contentChanged) && !timer) {
-      timer = setTimeout(() => {
-        timer = 0;
-        if (active()) refresh();
-        else clearInactive();
-      }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
-    }
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -5902,13 +5838,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   return {
     schedule,
-    refresh,
+    refresh: refreshNow,
     dispose() {
       disposed = true;
-      sequence += 1;
-      if (timer) clearTimeout(timer);
       if (renderFrame) cancelAnimationFrame(renderFrame);
-      timer = 0;
       renderFrame = 0;
       disposables.forEach(disposable => {
         try { disposable.dispose(); } catch (_) {}

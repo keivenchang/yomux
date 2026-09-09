@@ -8088,8 +8088,6 @@ async function terminalReferenceProviderLinks(session, term, y, container = null
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
-const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
-
 function terminalFileReferenceViewportSignature(term) {
   const references = terminalVisibleFileReferences(term)
     .map(terminalFileReferenceKey)
@@ -8275,26 +8273,18 @@ function terminalFileReferenceUnderlineIsActive(session, container) {
 
 function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
   if (!session || !term || !container) return null;
-  const targetResolver = options.targetResolver || terminalFileReferenceTarget;
   const isActive = typeof options.isActive === 'function' ? options.isActive : terminalFileReferenceUnderlineIsActive;
   const disposables = [];
   let disposed = false;
-  let timer = 0;
   let renderFrame = 0;
-  let sequence = 0;
   let lastRenderedViewportSignature = '';
   let existingReferenceKeys = new Set();
-  const existingReferenceTargets = new Map();
   let hoverKey = '';
-  let refreshRequest = null;
 
   const active = () => !disposed && Boolean(isActive(session, container));
 
   const clearInactive = () => {
-    sequence += 1;
-    if (timer) clearTimeout(timer);
     if (renderFrame) cancelAnimationFrame(renderFrame);
-    timer = 0;
     renderFrame = 0;
     existingReferenceKeys = new Set();
     hoverKey = '';
@@ -8319,12 +8309,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   const renderCached = () => {
     if (!active()) return clearInactive();
-    const existingRefs = [];
-    for (const ref of terminalVisibleFileReferences(term)) {
-      const key = terminalFileReferenceCacheKey(session, ref);
-      const targetPath = existingReferenceTargets.get(key);
-      if (targetPath) existingRefs.push({...ref, targetPath});
-    }
+    // Underlines are a syntactic affordance only. Resolving every visible token here turns terminal
+    // repaint/scroll into a filesystem request storm; the user gesture owns the real resolution.
+    const existingRefs = terminalVisibleFileReferences(term).map(ref => ({...ref, targetPath: ref.path}));
     existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
     const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
@@ -8332,54 +8319,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
-  const refreshNow = async () => {
+  const refreshNow = () => {
     if (disposed) return 0;
     if (!active()) return clearInactive();
-    if (timer) {
-      clearTimeout(timer);
-      timer = 0;
-    }
-    const currentSequence = ++sequence;
-    const refs = terminalVisibleFileReferences(term);
-    if (!refs.length) {
-      existingReferenceKeys = new Set();
-      hoverKey = '';
-      const count = renderTerminalFileReferenceUnderlines(term, container, []);
-      lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
-      return count;
-    }
-    const targets = await Promise.all(refs.map(ref => (
-      Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
-    )));
-    if (disposed || currentSequence !== sequence) return 0;
-    if (!active()) return clearInactive();
-    const existingRefs = refs
-      .map((ref, index) => {
-        const cacheKey = terminalFileReferenceCacheKey(session, ref);
-        if (!targets[index]) {
-          existingReferenceTargets.delete(cacheKey);
-          return null;
-        }
-        const targetPath = targets[index].path || ref.path || '';
-        existingReferenceTargets.set(cacheKey, targetPath);
-        return {...ref, targetPath};
-      })
-      .filter(Boolean);
-    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
-    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
-    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
-    return count;
-  };
-
-  const refresh = () => {
-    if (refreshRequest) return refreshRequest;
-    const request = refreshNow();
-    refreshRequest = request;
-    request.finally(() => {
-      if (refreshRequest === request) refreshRequest = null;
-    });
-    return request;
+    return renderCached();
   };
 
   const scheduleCachedRender = () => {
@@ -8404,13 +8347,6 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
     const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
     if (viewportChanged || contentChanged) scheduleCachedRender();
-    if ((viewportChanged || contentChanged) && !timer) {
-      timer = setTimeout(() => {
-        timer = 0;
-        if (active()) refresh();
-        else clearInactive();
-      }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
-    }
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -8432,13 +8368,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   return {
     schedule,
-    refresh,
+    refresh: refreshNow,
     dispose() {
       disposed = true;
-      sequence += 1;
-      if (timer) clearTimeout(timer);
       if (renderFrame) cancelAnimationFrame(renderFrame);
-      timer = 0;
       renderFrame = 0;
       disposables.forEach(disposable => {
         try { disposable.dispose(); } catch (_) {}
@@ -70463,7 +70396,6 @@ function scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, cre
 
 function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
   if (!root || !markdownPath) return [];
-  const pending = [];
   for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
     const original = img.getAttribute('src') || '';
     const target = markdownPreviewImageTarget(original, markdownPath);
@@ -70481,25 +70413,17 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       }, {once: true});
       continue;
     }
-    img.removeAttribute('src');
-    pending.push(installRawFileMediaSource(img, target.path, {
-      isCurrent: options.isCurrent,
-      onFailure: error => {
-        if (options.isCurrent?.() === false) return;
-        const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
-        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, label)
-        ));
-      },
-      onDecodeFailure: () => {
-        if (options.isCurrent?.() === false) return;
-        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
-        ));
-      },
-    }));
+    // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
+    // request after attachment so the browser does not discard a load from a detached image.
+    img.dataset.markdownRawPath = target.path;
+    img.addEventListener('error', () => {
+      if (options.isCurrent?.() === false) return;
+      void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+        markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+      ));
+    }, {once: true});
   }
-  return pending;
+  return [];
 }
 
 function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
@@ -71163,6 +71087,12 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
+    const rawPath = String(img.dataset.markdownRawPath || '');
+    if (!rawPath) continue;
+    img.src = rawFileUrl(rawPath);
+    delete img.dataset.markdownRawPath;
+  }
   applyMarkdownSourceLines(container, text);
   if (options.readOnly !== true) bindMarkdownPreviewEditing(container, text, markdownPath);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
@@ -77616,27 +77546,13 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
     image.src = target.src;
   } else {
     image.dataset.resolvedPath = target.path;
+    image.src = rawFileUrl(target.path);
+    image.addEventListener('error', () => {
+      image.classList.add('prosemirror-image-error');
+      image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+    }, {once: true});
   }
   return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
-}
-
-function startProseMirrorImageLoads(panel, markdownPath) {
-  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image[data-resolved-path]') || [])) {
-    if (image._rawFileAbortController || image._rawFileObjectUrl || Number(image.naturalWidth || 0) > 0) continue;
-    const path = String(image.dataset.resolvedPath || '');
-    if (!path) continue;
-    void installRawFileMediaSource(image, path, {
-      isCurrent: () => panel?._pmPath === markdownPath && panel?._pmView?.dom?.contains(image) && image.isConnected,
-      onFailure: error => {
-        image.classList.add('prosemirror-image-error');
-        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path}));
-      },
-      onDecodeFailure: () => {
-        image.classList.add('prosemirror-image-error');
-        image.title = t('preview.markdown.imageUnavailable', {path});
-      },
-    });
-  }
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -77975,7 +77891,6 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
-  startProseMirrorImageLoads(panel, path);
   attachSourceLines();
   attachHeadingSourceLines();
   requestAnimationFrame(() => {

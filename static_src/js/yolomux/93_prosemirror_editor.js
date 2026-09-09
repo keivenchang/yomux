@@ -399,27 +399,13 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
     image.src = target.src;
   } else {
     image.dataset.resolvedPath = target.path;
+    image.src = rawFileUrl(target.path);
+    image.addEventListener('error', () => {
+      image.classList.add('prosemirror-image-error');
+      image.title = t('preview.markdown.imageUnavailable', {path: target.path});
+    }, {once: true});
   }
   return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
-}
-
-function startProseMirrorImageLoads(panel, markdownPath) {
-  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image[data-resolved-path]') || [])) {
-    if (image._rawFileAbortController || image._rawFileObjectUrl || Number(image.naturalWidth || 0) > 0) continue;
-    const path = String(image.dataset.resolvedPath || '');
-    if (!path) continue;
-    void installRawFileMediaSource(image, path, {
-      isCurrent: () => panel?._pmPath === markdownPath && panel?._pmView?.dom?.contains(image) && image.isConnected,
-      onFailure: error => {
-        image.classList.add('prosemirror-image-error');
-        image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path}));
-      },
-      onDecodeFailure: () => {
-        image.classList.add('prosemirror-image-error');
-        image.title = t('preview.markdown.imageUnavailable', {path});
-      },
-    });
-  }
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -758,7 +744,6 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
-  startProseMirrorImageLoads(panel, path);
   attachSourceLines();
   attachHeadingSourceLines();
   requestAnimationFrame(() => {

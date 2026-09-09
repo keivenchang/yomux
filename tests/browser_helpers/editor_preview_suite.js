@@ -1664,7 +1664,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8'),
     ].join('\n');
     assert.equal((sources.match(/function fetchRawFileBlob\(/g) || []).length, 1, 'one shared raw-byte fetch owner serves every preview surface');
-    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*installRawFileMediaSource/.test(sources), 'Markdown local images use the shared status-aware owner');
+    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*img\.src = rawFileUrl\(rawPath\)/.test(sources), 'Markdown local images use the direct raw-file URL');
     assert.ok(/function openFileImagePreview[\s\S]*installRawFileMediaSource/.test(sources), 'Finder and Differ hover images use the shared status-aware owner');
     assert.ok(/function renderFileEditorImagePane[\s\S]*installRawFileMediaSource/.test(sources), 'editor images use the shared status-aware owner');
     assert.ok(/function previewFileActionLinks[\s\S]*openRawFileInNewTab[\s\S]*triggerFileDownload/.test(sources), 'Open and Download siblings route through status-aware fetch owners');
@@ -7225,13 +7225,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/decorations: \{underline: true, pointerCursor: false\}/.test(linkProviderSource), 'terminal URL/file references are visibly underlined without showing a left-click pointer affordance');
     assert.ok(linkProviderSource.includes('function installTerminalFileReferenceUnderlines'), 'existing terminal file refs have a persistent underline overlay owner');
     assert.ok(/function terminalFileReferenceViewportSignature\(term\)/.test(linkProviderSource), 'terminal file underline scheduling keys cheap viewport state');
-    assert.ok(/const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;/.test(linkProviderSource), 'terminal file underline refresh uses the 1.7-second scan buffer');
+    assert.ok(!/terminalFileReferenceTarget\(|resolveTerminalFileReferenceCandidates\(/.test(providerSource), 'terminal underline rendering performs no filesystem resolution');
     assert.ok(/function terminalFileReferenceUnderlineIsActive\(session, container\) \{[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(session\)[\s\S]*terminalIsVisible\(session, container\)/.test(linkProviderSource), 'terminal file underlines require the active pane tab, shown xterm, and visible browser document');
     assert.ok(/const terminalFileReferenceTargetCache = new Map\(\);[\s\S]*const fileExplorerMemoryCacheLimit = 512;/.test(bootstrapSource), 'terminal file targets reuse the shared bounded frontend cache limit');
     assert.ok(/terminalFileReferenceTargetCache\.has\(cacheKey\)[\s\S]*setLimitedMapEntry\(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit\)/.test(linkProviderSource), 'terminal file target cache hits refresh LRU recency through the shared helper');
     assert.ok(/const scheduleCachedRender = \(\) => \{[\s\S]*if \(renderFrame\) return;[\s\S]*requestAnimationFrame/.test(linkProviderSource), 'terminal file underline cached repaint is coalesced through one frame');
-    assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);[\s\S]*if \(\(viewportChanged \|\| contentChanged\) && !timer\)/.test(linkProviderSource), 'terminal output clears stale cached underlines immediately and cannot postpone the bounded visual refresh with continuous renders');
-    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,500}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint cached file underlines before the 1.7-second refresh');
+    assert.ok(/const contentChanged = scheduleOptions\.contentChanged === true \|\| \['output', 'render'\]\.includes\(scheduleOptions\.reason\);[\s\S]*if \(viewportChanged \|\| contentChanged\) scheduleCachedRender\(\);/.test(linkProviderSource), 'terminal output coalesces syntactic underline repaint through the animation frame');
+    assert.equal(/const schedule = \(scheduleOptions = \{\}\) => \{[\s\S]{0,500}renderCached\(\);[\s\S]{0,200}setTimeout/.test(linkProviderSource), false, 'terminal output does not synchronously repaint underlines or start a timer');
     assert.equal(providerSource.includes('window.open'), false, 'xterm link provider must not open browser tabs from left-click activation');
     assert.ok(/function applyTerminalContainerTheme\(container[\s\S]*dataset\.terminalTheme = resolvedTerminalThemeMode\(terminalThemeMode, mode\)[\s\S]*style\.background = theme\.background/.test(runtimeSource), 'terminal containers carry the resolved terminal theme used by xterm link underline colors');
     assert.ok(/applyTerminalContainerTheme\(container, displayTheme\)/.test(terminalBootSource), 'new terminal containers get the same display theme marker as live theme updates');
@@ -7332,7 +7332,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.terminalPositionFromClientPoint(term, container, 315, 10)), {x: 32, y: 1}, 'client point maps to the terminal cell used by context-menu hit-testing');
   });
 
-  await testAsync('terminal underlines mark only existing file references', async () => {
+  await testAsync('terminal underlines mark syntactic file references without resolving them', async () => {
     const api = loadYolomux();
     const line = 'Open static_src/js/yolomux/00_bootstrap_state.js:283 and missing.js:9';
     const lines = [terminalLine(line)];
@@ -7350,22 +7350,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     rows.rect = {left: 0, top: 0, width: 1000, height: 60, right: 1000, bottom: 60};
     container.appendChild(rows);
 
-    let resolverCalls = 0;
     let scannerActive = true;
     const controller = api.installTerminalFileReferenceUnderlines('1', term, container, {
       isActive: () => scannerActive,
-      targetResolver: async (_session, ref) => {
-        resolverCalls += 1;
-        return ref.path === 'static_src/js/yolomux/00_bootstrap_state.js'
-          ? {path: `/repo/${ref.path}`}
-          : null;
-      },
     });
     const count = await controller.refresh();
     const layer = container.querySelector(':scope > .terminal-file-link-underlines');
-    assert.equal(count, 1, 'only existing terminal file references get a persistent underline');
-    assert.equal(layer.children.length, 1, 'missing file references do not get underline segments');
-    assert.equal(layer.children[0].dataset.path, '/repo/static_src/js/yolomux/00_bootstrap_state.js');
+    assert.equal(count, 2, 'all syntactic terminal file references get a persistent underline');
+    assert.equal(layer.children.length, 2, 'syntactic underline rendering does not probe file existence');
+    assert.equal(layer.children[0].dataset.path, 'static_src/js/yolomux/00_bootstrap_state.js');
     assert.equal(layer.children[0].dataset.text, 'static_src/js/yolomux/00_bootstrap_state.js:283');
     assert.ok(layer.children[0].dataset.referenceKey.includes('static_src/js/yolomux/00_bootstrap_state.js'), 'overlay segment records a stable file-reference hover key');
     assert.equal(layer.children[0].style.left, '50px', 'underline starts at the path column');
@@ -7377,28 +7370,25 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'moving away from the resolved file reference restores the subtle underline');
     container.listeners.get('mouseleave')[0]();
     assert.equal(layer.children[0].classList.contains('terminal-file-link-underline--hover'), false, 'leaving the terminal clears the file underline hover state');
-    const callsBeforeInactive = resolverCalls;
     scannerActive = false;
     controller.schedule({reason: 'output'});
     assert.equal(layer.children.length, 0, 'an inactive terminal clears its persistent file underlines');
     assert.equal(await controller.refresh(), 0, 'an inactive terminal skips explicit passive refresh work');
-    assert.equal(resolverCalls, callsBeforeInactive, 'an inactive terminal performs zero path resolutions');
+    assert.equal(layer.children.length, 0, 'an inactive terminal performs no underline work');
     scannerActive = true;
-    assert.equal(await controller.refresh(), 1, 'reactivating the shown terminal allows passive path resolution');
-    const callsAfterRefresh = resolverCalls;
+    assert.equal(await controller.refresh(), 2, 'reactivating the shown terminal redraws syntactic references');
     controller.schedule({reason: 'output'});
-    assert.equal(resolverCalls, callsAfterRefresh, 'same-viewport terminal output does not synchronously re-resolve file references');
-    assert.equal(layer.children.length, 1, 'terminal writes immediately repaint a still-visible cached file reference without re-resolving it');
+    assert.equal(layer.children.length, 2, 'terminal writes immediately repaint visible syntactic references without resolving them');
     term.buffer.active.viewportY = 10;
     controller.schedule({reason: 'scroll', viewportChanged: true});
     assert.equal(layer.children.length, 0, 'underlines clear when the resolved file reference scrolls out of the visible viewport');
     term.buffer.active.viewportY = 0;
     controller.schedule({reason: 'scroll', viewportChanged: true});
-    assert.equal(layer.children.length, 1, 'scrolling a cached resolved file reference back into view redraws from cache on the coalesced frame');
+    assert.equal(layer.children.length, 2, 'scrolling a syntactic file reference back into view redraws without resolving it');
     lines[0] = terminalLine('No file references here');
     controller.schedule({reason: 'output'});
     assert.equal(layer.children.length, 0, 'same-viewport terminal output clears stale underline segments on the coalesced cached repaint');
-    assert.equal(await controller.refresh(), 0, 'the trailing resolver confirms the removed reference stays absent');
+    assert.equal(await controller.refresh(), 0, 'a refresh with no syntactic references clears the overlay');
     controller.dispose();
     assert.equal(container.listeners.get('mousemove').length, 0, 'terminal file underline hover listener is removed on dispose');
     assert.equal(container.listeners.get('mouseleave').length, 0, 'terminal file underline leave listener is removed on dispose');

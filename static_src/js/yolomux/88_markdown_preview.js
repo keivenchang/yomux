@@ -1172,7 +1172,6 @@ function scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, cre
 
 function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
   if (!root || !markdownPath) return [];
-  const pending = [];
   for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
     const original = img.getAttribute('src') || '';
     const target = markdownPreviewImageTarget(original, markdownPath);
@@ -1190,25 +1189,17 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       }, {once: true});
       continue;
     }
-    img.removeAttribute('src');
-    pending.push(installRawFileMediaSource(img, target.path, {
-      isCurrent: options.isCurrent,
-      onFailure: error => {
-        if (options.isCurrent?.() === false) return;
-        const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
-        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, label)
-        ));
-      },
-      onDecodeFailure: () => {
-        if (options.isCurrent?.() === false) return;
-        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
-        ));
-      },
-    }));
+    // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
+    // request after attachment so the browser does not discard a load from a detached image.
+    img.dataset.markdownRawPath = target.path;
+    img.addEventListener('error', () => {
+      if (options.isCurrent?.() === false) return;
+      void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+        markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+      ));
+    }, {once: true});
   }
-  return pending;
+  return [];
 }
 
 function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
@@ -1872,6 +1863,12 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
+    const rawPath = String(img.dataset.markdownRawPath || '');
+    if (!rawPath) continue;
+    img.src = rawFileUrl(rawPath);
+    delete img.dataset.markdownRawPath;
+  }
   applyMarkdownSourceLines(container, text);
   if (options.readOnly !== true) bindMarkdownPreviewEditing(container, text, markdownPath);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
