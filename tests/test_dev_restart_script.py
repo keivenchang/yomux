@@ -709,7 +709,6 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
     assert "cpu_idle=" in result.stdout
     assert "cpu_stall_some <= 0.10 and idle_fraction >= 0.10" in startup_common
     assert "defender_d_tasks = defender_d_state_tasks()" in startup_common
-    assert 'task_dir = f"/proc/{entry.name}/task"' in startup_common
     assert "effective_load1 = max(0.0, load1 - defender_d_tasks)" in startup_common
     assert "load_pressure_ok = effective_load1 <= cpus * 0.75" in startup_common
     assert "ok = cpu_pressure_ok and load_pressure_ok" in startup_common

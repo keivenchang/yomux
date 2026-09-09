@@ -163,21 +163,15 @@ def defender_d_state_tasks() -> int:
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
             continue
-        task_dir = f"/proc/{entry.name}/task"
         try:
-            task_entries = tuple(os.scandir(task_dir))
+            status = open(f"/proc/{entry.name}/status", encoding="utf-8").read().splitlines()
         except OSError:
             continue
-        for task in task_entries:
-            try:
-                status = open(f"{task_dir}/{task.name}/status", encoding="utf-8").read().splitlines()
-            except OSError:
-                continue
-            fields = dict(line.split(":", 1) for line in status if ":" in line)
-            name = fields.get("Name", "").strip().lower()
-            state = fields.get("State", "").lstrip()[:1]
-            if name == "wdavdaemon" and state == "D":
-                count += 1
+        fields = dict(line.split(":", 1) for line in status if ":" in line)
+        name = fields.get("Name", "").strip().lower()
+        state = fields.get("State", "").lstrip()[:1]
+        if name == "wdavdaemon" and state == "D":
+            count += 1
     return count
 
 
