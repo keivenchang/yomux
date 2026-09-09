@@ -757,7 +757,13 @@ async function addMarkdownLinkUrl(view) {
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
-  const onContextMenu = event => {
+  view.dom.addEventListener('click', event => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    const link = event.target?.closest?.('a[href]');
+    if (!link || !view.dom.contains(link)) return;
+    handleMarkdownPreviewLinkClick(event);
+  });
+  view.dom.addEventListener('contextmenu', event => {
     const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
@@ -875,6 +881,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   requestAnimationFrame(attachHeadingSourceLines);
   panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
   panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
+  view.dom.dataset.mdPath = path;
+  view.dom.dataset.basePath = dirnameOf(path);
   container._prosemirrorView = view;
   panel._pmView = view;
   panel._pmPreviewPane = parts.previewPane;

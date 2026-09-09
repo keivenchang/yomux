@@ -1978,6 +1978,52 @@ def test_markdown_viewedit_global_link_guard_suppresses_native_menu(browser, tmp
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_markdown_viewedit_link_click_uses_preview_link_dispatch(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/LINK-CLICK.md';
+            const source = '[YOLOmux](https://example.com/docs)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const opened = [];
+            const originalOpen = window.open;
+            window.open = (...args) => { opened.push(args); return null; };
+            const link = panel._pmView.dom.querySelector('a[href]');
+            const event = new MouseEvent('click', {bubbles: true, cancelable: true, button: 0});
+            const prevented = !link.dispatchEvent(event);
+            window.open = originalOpen;
+            done({
+              prevented,
+              opened,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["prevented"] is True, metrics
+    assert metrics["opened"] == [["https://example.com/docs", "_blank", "noopener,noreferrer"]], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
