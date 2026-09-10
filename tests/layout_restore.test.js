@@ -2451,7 +2451,6 @@ async function runLayoutRestoreSuite() {
     const refreshBody = source.slice(refreshStart, refreshEnd);
     assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path);'), 'open-file refresh uses a structured file lookup');
     assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched)'), 'open-file polling routes structured status through the shared refresh helper');
-    assert.ok(source.includes('function fileEditorSelfWritePending(path)') && source.includes('!fileEditorSelfWritePending(path)'), 'self-write acknowledgements suppress false external-change conflicts');
     const statusRefreshStart = source.indexOf('async function refreshOpenFileFromFetchedStatus(');
     const statusRefreshEnd = source.indexOf('async function refreshOpenFilesIfChanged(', statusRefreshStart);
     assert.ok(statusRefreshStart > 0 && statusRefreshEnd > statusRefreshStart, 'could not locate refreshOpenFileFromFetchedStatus body');

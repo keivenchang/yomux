@@ -3373,7 +3373,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
+  if (state.externalChanged && !state.externalChangeEditPrompted) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);

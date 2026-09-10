@@ -145,6 +145,27 @@ def test_read_tool_inputs_returns_only_completed_tool_inputs(tmp_path: Path) -> 
     ]
 
 
+def test_incremental_usage_reads_newest_step_finish_parts_before_bound(monkeypatch, tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    session_id = "ses-large"
+    parts = []
+    messages = []
+    monkeypatch.setattr(opencode, "MAX_INCREMENTAL_PARTS", 2)
+    count = 2
+    for index in range(count):
+        message_id = f"msg-{index}"
+        part_id = f"part-{index}"
+        messages.append(_message(message_id, session_id, completed=2_000 + index))
+        parts.append(_part(part_id, message_id, session_id, {"input": index + 1, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}}))
+    _database(database, [_session(session_id, "/repo/large", updated=2_000 + count, tokens=(None, None, None, None, None))], messages, parts)
+
+    result = opencode.read_usage(database, session_id=session_id, incremental=True, max_parts=1, known_event_revisions={})
+
+    assert isinstance(result, opencode.OpenCodeReadSuccess)
+    assert result.components
+    assert {component.part_id for component in result.components} == {"part-0", "part-1"}
+
+
 def test_read_tool_inputs_keeps_newest_bounded_slice_and_write_metadata(tmp_path: Path) -> None:
     database = tmp_path / "opencode.db"
     _database(

@@ -8337,13 +8337,15 @@ class TmuxWebtermApp:
         )
         return rev
 
-    def stats_agent_window_rows(self) -> list[dict[str, Any]]:
+    def stats_agent_window_rows(self, *, prefer_discovered: bool = False) -> list[dict[str, Any]]:
+        discovered_sessions, _errors = discover_sessions(self.sessions)
+        discovered_rows = self.stats_agent_window_rows_from_discovered_sessions(discovered_sessions)
+        if prefer_discovered:
+            return discovered_rows
         payload = self.status_snapshot_payload()
         rows = self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
         if not rows:
-            return rows
-        discovered_sessions, _errors = discover_sessions(self.sessions)
-        discovered_rows = self.stats_agent_window_rows_from_discovered_sessions(discovered_sessions)
+            return discovered_rows
         discovered_by_key = {
             (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower()): row
             for row in discovered_rows
@@ -8941,17 +8943,6 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        if not self.start_status_collector_lease():
-            return stats_current_collectors.collector_unavailable(
-                family="agent_tokens",
-                source_id="statusd",
-                epoch_id=attempt.epoch_id,
-                epoch_started_at=attempt.epoch_started_at,
-                observed_at=attempt.scheduled_at,
-                cadence_seconds=attempt.cadence_seconds,
-                owner_generation=attempt.owner_generation,
-                reason="statusd-unavailable",
-            )
         rows = self.stats_agent_window_rows()
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:

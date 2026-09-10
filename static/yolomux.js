@@ -28690,15 +28690,6 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   return true;
 }
 
-function fileEditorSelfWritePending(path) {
-  const ack = fileEditorSelfWriteAcks.get(path);
-  if (!ack || ack.expiresAt < Date.now()) {
-    fileEditorSelfWriteAcks.delete(path);
-    return false;
-  }
-  return true;
-}
-
 function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
@@ -29064,7 +29055,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && (!state.externalChanged || fileEditorSelfWritePending(path))
+    && !state.externalChanged
     && !state.externalMissing
     && !state.externalError;
 }
@@ -68773,7 +68764,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
+  if (state.externalChanged && !state.externalChangeEditPrompted) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -77350,7 +77341,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
+  if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};

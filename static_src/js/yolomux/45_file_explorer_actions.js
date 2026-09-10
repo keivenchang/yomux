@@ -1321,15 +1321,6 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   return true;
 }
 
-function fileEditorSelfWritePending(path) {
-  const ack = fileEditorSelfWriteAcks.get(path);
-  if (!ack || ack.expiresAt < Date.now()) {
-    fileEditorSelfWriteAcks.delete(path);
-    return false;
-  }
-  return true;
-}
-
 function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
@@ -1695,7 +1686,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && (!state.externalChanged || fileEditorSelfWritePending(path))
+    && !state.externalChanged
     && !state.externalMissing
     && !state.externalError;
 }

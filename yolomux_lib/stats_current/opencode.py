@@ -1242,9 +1242,10 @@ def _read_session_parts(
     rows = connection.execute(
         f'SELECT {columns} FROM "part" WHERE session_id = ? '
         "AND json_valid(data) = 1 AND json_extract(data, '$.type') = ? "
-        "ORDER BY time_created ASC, id ASC LIMIT ?",
+        "ORDER BY time_created DESC, id DESC LIMIT ?",
         (session.session_id, "step-finish", (MAX_INCREMENTAL_PARTS if incremental else max_parts) + 1),
     ).fetchall()
+    rows = list(reversed(rows))
     step_finish_rows: list[sqlite3.Row] = []
     part_limit = MAX_INCREMENTAL_PARTS if incremental else max_parts
     for row in rows:

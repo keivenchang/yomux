@@ -156,6 +156,45 @@ def test_agent_status_collector_keeps_typed_unavailable_when_refresh_never_compl
     assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
+def test_agent_tokens_collector_does_not_gate_on_statusd_lease(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_agent_window_rows = lambda **_kwargs: [{
+        "session": "yo7110", "window": "0", "window_index": 0, "pane_target": "%55",
+        "kind": "opencode", "agent_session_id": "ses-current", "cwd": "/repo",
+    }]
+    webapp.stats_agent_token_rows = lambda rows: rows
+    webapp.background_owner = SimpleNamespace(owner_payload=lambda: {"port": 7110, "owner_generation": 1})
+    webapp.stats_current_transcript_usage = SimpleNamespace(scan=lambda _rows: SimpleNamespace(items=(), tombstones=(), unavailable_spans=(), coverage_epochs=(), budget_exhausted=False, receipt_id="test"), usage_atom_backfill_status_for_scan=lambda _scan, atoms_accepted, rejection_reasons: None, commit=lambda _id: None, rollback=lambda _id: None)
+    monkeypatch.setattr(webapp, "start_status_collector_lease", lambda: False)
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: app_module.stats_current_opencode.OpenCodeUnavailable("test"))
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.unavailable_spans
+    assert all(span.reason != "statusd-unavailable" for span in facts.unavailable_spans)
+
+
+def test_stats_agent_window_rows_falls_back_to_discovered_opencode_during_statusd_refresh(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["yo7110"]
+    webapp.status_snapshot_payload = lambda: None
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({
+        "yo7110": SimpleNamespace(agents=[SimpleNamespace(
+            kind="opencode", pane_target="%55", cwd="/home/keivenc/dev/yolomux/yo7110",
+            session_id="ses-current", started_at=123.0,
+        )]),
+    }, []))
+    monkeypatch.setattr(app_module.session_files, "agent_window_for_info", lambda _info, _agent: ("0", None))
+
+    rows = webapp.stats_agent_window_rows()
+
+    assert rows == [{
+        "session": "yo7110", "window": "0", "window_index": 0, "pane_target": "%55",
+        "kind": "opencode", "agent_session_id": "ses-current", "cwd": "/home/keivenc/dev/yolomux/yo7110",
+        "started_at": 123.0,
+    }]
+
+
 def test_agent_status_adapter_rolls_deduplicated_windows_into_one_session_state():
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
