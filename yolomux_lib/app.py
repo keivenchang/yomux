@@ -9077,6 +9077,21 @@ class TmuxWebtermApp:
                 )
                 continue
             result = opencode_results[token_key]
+            if isinstance(result, stats_current_opencode.OpenCodeAmbiguousSession):
+                # A live pane with a missing session ID is still a valid collector row, but
+                # directory/title selection is unsafe when OpenCode has multiple sessions.
+                # Keep that source explicitly unavailable instead of treating the whole family
+                # as absent.
+                unavailable_spans.extend(
+                    stats_current_collectors.collector_unavailable(
+                        family="agent_tokens", source_id=source_id,
+                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
+                        epoch_started_at=attempt.epoch_started_at, observed_at=attempt.scheduled_at,
+                        cadence_seconds=attempt.cadence_seconds, owner_generation=attempt.owner_generation,
+                        reason=f"opencode-{result.reason}",
+                    ).unavailable_spans
+                )
+                continue
             if not isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
                 unavailable_source = source_id
                 unavailable_spans.extend(
