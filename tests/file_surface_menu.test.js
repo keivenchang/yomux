@@ -83,7 +83,7 @@ test('Dockview keeps the group tab strip for singleton file surfaces', () => {
 test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
   assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewPaneContentDropAllowed\(paneInfo\)[\s\S]*moveSessionToSlot\(paneInfo\.item, paneInfo\.intent\.targetSlot/);
   assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
-  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewContentDropRegionForEvent\(event\)[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
+  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewContentDropRegionForEvent\(releaseEvent\)[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
@@ -108,7 +108,7 @@ test('Finder hides its Session control outside Sync mode', () => {
 
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
   assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
-  assert.ok(dockview.includes('function dockviewHeaderActionsHtml(item, slot = slotForItem(item))') && dockview.includes('if (isVirtualItem(item)) return `${paneHandle}${virtualPanelControlsHtml(item'), 'Dockview virtual panels use the shared outer header controls');
+  assert.ok(dockview.includes('function dockviewHeaderActionsHtml(item, slot = slotForItem(item))') && dockview.includes('if (isVirtualItem(item)) return virtualPanelControlsHtml(item'), 'Dockview virtual panels use the shared outer header controls');
   assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
   assert.match(shell, /function paneTabDismissControlHtml\(item\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(isLegacyFiles \|\| \(tabIsPinned\(item\) && !isEditor\)\) return ''/);
   assert.match(shell, /function paneTabInnerHtml\(item, rowOptions = \{\}\)[\s\S]*html \+= paneTabDismissControlHtml\(item\)/);

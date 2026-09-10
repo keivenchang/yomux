@@ -4939,6 +4939,45 @@ def test_dockview_drag_reorders_two_tab_pane(browser, tmp_path):
     assert dockview_layout_metrics(browser)["groups"][0]["tabs"] == ["2", "1"]
 
 
+def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path):
+    """Dockview cancels the mouse pointer stream after its final drag position."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const source = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+        const target = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+        const sourceRect = source.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const start = {clientX: sourceRect.left + sourceRect.width / 2, clientY: sourceRect.top + sourceRect.height / 2, button: 0};
+        const end = {clientX: targetRect.left + targetRect.width * .68, clientY: targetRect.top + targetRect.height / 2, button: 0};
+        dockviewBeginTabPointerDrag(start, '1');
+        dockviewTrackTabPointerDrag(end);
+        document.dispatchEvent(new PointerEvent('pointercancel', {
+          bubbles: true,
+          cancelable: true,
+          pointerType: 'mouse',
+          clientX: 0,
+          clientY: 0,
+        }));
+        setTimeout(() => done({
+          tabs: paneTabs('left'),
+          pointerDragActive: Boolean(dockviewLayoutState.tabPointerDrag),
+          insertionPreview: Boolean(document.querySelector('[data-yolomux-tab-insertion-preview]')),
+          errors: jsDebugFailureEvents('error'),
+        }), 125);
+        """
+    )
+    assert result == {
+        "tabs": ["2", "1", "3"],
+        "pointerDragActive": False,
+        "insertionPreview": False,
+        "errors": [],
+    }, result
+
+
 def test_dockview_drag_reorders_into_first_top_left_tab_without_root_split(browser, tmp_path):
     """A real drag onto the first tab of the top-left pane reorders; it never becomes an edge split."""
     load_dockview_runtime_boot_fixture(

@@ -421,6 +421,9 @@ function normalizeLegacyBreakMarkup(text) {
 function destroyProseMirrorPanel(panel) {
   const view = panel?._pmView;
   if (!view) return;
+  panel._pmContextMenuGeneration = Number(panel._pmContextMenuGeneration || 0) + 1;
+  panel._pmContextMenuDispose?.();
+  delete panel._pmContextMenuDispose;
   flushProseMirrorSource(panel, panel._pmPath);
   releaseRawFileMediaSources(view.dom);
   view.destroy();
@@ -428,6 +431,17 @@ function destroyProseMirrorPanel(panel) {
   delete panel._pmPath;
   delete panel._pmSource;
   delete panel._pmPlugins;
+  delete panel._pmPreviewPane;
+}
+
+function installProseMirrorContextMenuGuard() {
+  if (document.__yolomuxProseMirrorContextMenuGuard) return;
+  const guard = event => {
+    const anchor = event.target?.closest?.('[data-prosemirror-editor] a[href]');
+    if (anchor) event.preventDefault();
+  };
+  document.addEventListener('contextmenu', guard, true);
+  document.__yolomuxProseMirrorContextMenuGuard = guard;
 }
 
 function syncProseMirrorPanelSource(panel, path, state) {
@@ -590,6 +604,30 @@ function prosemirrorSelectionContext(view) {
 }
 
 function prosemirrorSelectionAtClientPoint(view, event) {
+  const link = event.target?.closest?.('a[href]');
+  if (link && view.dom.contains(link)) {
+    const textNode = link.firstChild;
+    const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
+    const href = link.getAttribute('href') || '';
+    if (Number.isFinite(position)) {
+      const linkMark = view.state.doc.resolve(position + 1).marks().find(
+        mark => mark.type.name === 'link' && mark.attrs.href === href,
+      );
+      if (linkMark) {
+        let from = position;
+        let to = position;
+        view.state.doc.nodesBetween(position, position + Math.max(1, link.textContent.length + 1), (node, nodePosition) => {
+          if (!node.isText || !node.marks.some(mark => mark.eq(linkMark))) return;
+          from = Math.min(from, nodePosition);
+          to = Math.max(to, nodePosition + node.nodeSize);
+        });
+        if (from < to) {
+          view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, from, to)));
+          return prosemirrorSelectionContext(view);
+        }
+      }
+    }
+  }
   const selection = view.state.selection;
   if (!selection.empty) return prosemirrorSelectionContext(view);
   const point = view.posAtCoords({left: event.clientX, top: event.clientY});
@@ -634,10 +672,92 @@ function applyProseMirrorFormat(api, view, schema, command) {
   return run ? run(view.state, view.dispatch, view) : false;
 }
 
+async function markdownLinkUrlDialog(view, currentUrl, title) {
+  const action = await showFileEditorDecisionDialog({
+    title,
+    bodyHtml: `<label class="markdown-link-url-field">${esc(title)}<input type="url" data-markdown-link-url-input value="${esc(currentUrl)}" /></label>`,
+    actions: [
+      {id: 'cancel', label: t('common.cancel')},
+      {id: 'save', label: t('common.save')},
+    ],
+    className: 'markdown-link-url-dialog',
+    focusSelector: '[data-markdown-link-url-input]',
+    onMount: backdrop => {
+      const input = backdrop.querySelector('[data-markdown-link-url-input]');
+      input?.focus?.();
+      input?.select?.();
+    },
+    onInput: value => { view._markdownLinkUrlDialogValue = value; },
+  });
+  const nextUrl = view._markdownLinkUrlDialogValue || currentUrl;
+  delete view._markdownLinkUrlDialogValue;
+  return action === 'save' ? nextUrl : null;
+}
+
+async function modifyMarkdownLinkUrl(view, link) {
+  const currentUrl = link?.getAttribute?.('href') || '';
+  const nextUrl = await markdownLinkUrlDialog(view, currentUrl, t('contextmenu.modifyUrl'));
+  if (nextUrl === null) return false;
+  if (nextUrl === currentUrl) return false;
+  const textNode = link?.firstChild;
+  const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
+  if (!Number.isFinite(position)) return false;
+  const linkMark = view.state.doc.resolve(position + 1).marks().find(
+    mark => mark.type.name === 'link' && mark.attrs.href === currentUrl,
+  );
+  if (!linkMark) return false;
+  let from = position;
+  let to = position;
+  view.state.doc.nodesBetween(position, position + Math.max(1, link.textContent.length + 1), (node, nodePosition) => {
+    if (!node.isText || !node.marks.some(mark => mark.eq(linkMark))) return;
+    from = Math.min(from, nodePosition);
+    to = Math.max(to, nodePosition + node.nodeSize);
+  });
+  if (from === to) return false;
+  view.dispatch(view.state.tr.removeMark(from, to, linkMark.type).addMark(
+    from,
+    to,
+    linkMark.type.create({...linkMark.attrs, href: nextUrl}),
+  ));
+  return true;
+}
+
+function removeMarkdownLinkUrl(view, link) {
+  const currentUrl = link?.getAttribute?.('href') || '';
+  const textNode = link?.firstChild;
+  const position = textNode ? view.posAtDOM(textNode, 0) : NaN;
+  if (!Number.isFinite(position)) return false;
+  const linkMark = view.state.doc.resolve(position + 1).marks().find(
+    mark => mark.type.name === 'link' && mark.attrs.href === currentUrl,
+  );
+  if (!linkMark) return false;
+  let from = position;
+  let to = position;
+  view.state.doc.nodesBetween(position, position + Math.max(1, link.textContent.length + 1), (node, nodePosition) => {
+    if (!node.isText || !node.marks.some(mark => mark.eq(linkMark))) return;
+    from = Math.min(from, nodePosition);
+    to = Math.max(to, nodePosition + node.nodeSize);
+  });
+  if (from === to) return false;
+  view.dispatch(view.state.tr.removeMark(from, to, linkMark.type));
+  return true;
+}
+
+async function addMarkdownLinkUrl(view) {
+  const {from, to} = view.state.selection;
+  if (from === to) return false;
+  const label = t('contextmenu.addUrl');
+  const nextUrl = await markdownLinkUrlDialog(view, '', label === 'contextmenu.addUrl' ? 'Add URL' : label);
+  if (!nextUrl) return false;
+  const link = view.state.schema.marks.link;
+  view.dispatch(view.state.tr.addMark(from, to, link.create({href: nextUrl})));
+  return true;
+}
+
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
-  view.dom.addEventListener('contextmenu', event => {
+  const onContextMenu = event => {
     const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
@@ -645,6 +765,9 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
     event.stopPropagation();
     markdownFormattingContextMenu(event, context, {
       href: link && view.dom.contains(link) ? link.href : '',
+      modifyUrl: link && view.dom.contains(link) ? () => modifyMarkdownLinkUrl(view, link) : null,
+      removeUrl: link && view.dom.contains(link) ? () => removeMarkdownLinkUrl(view, link) : null,
+      addUrl: !link && context.selectedText ? () => addMarkdownLinkUrl(view) : null,
       applyCommand: command => applyProseMirrorFormat(api, view, schema, command),
       isActive: command => {
         const mark = command === 'bold' ? schema.marks.strong
@@ -656,11 +779,24 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
         return prosemirrorSelectionHasMark(view, mark);
       },
     });
-  });
+  };
+  const previewPane = panel._pmPreviewPane;
+  const onPanelContextMenu = event => {
+    const link = event.target?.closest?.('[data-prosemirror-editor] a[href]');
+    if (!link || !previewPane?.contains(link) || event.defaultPrevented) return;
+    onContextMenu(event);
+  };
+  view.dom.addEventListener('contextmenu', onContextMenu);
+  previewPane?.addEventListener('contextmenu', onPanelContextMenu, true);
+  panel._pmContextMenuDispose = () => {
+    view.dom.removeEventListener('contextmenu', onContextMenu);
+    previewPane?.removeEventListener('contextmenu', onPanelContextMenu, true);
+  };
 }
 
 function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (!parts?.previewPane) return false;
+  installProseMirrorContextMenuGuard();
   const schema = prosemirrorMarkdownSchema(api);
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
@@ -687,7 +823,10 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) {
     return false;
   }
-  if (panel._pmView) panel._pmView.destroy();
+  if (panel._pmView) {
+    panel._pmContextMenuDispose?.();
+    panel._pmView.destroy();
+  }
   cleanupStandardPreviewStrategy(parts.previewPane);
   disposeMarkdownPreviewEditing(parts.previewPane);
   parts.previewPane._previewRendererId = null;
@@ -738,6 +877,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   container._prosemirrorView = view;
   panel._pmView = view;
+  panel._pmPreviewPane = parts.previewPane;
   panel._pmPath = path;
   panel._pmSchema = schema;
   panel._pmParser = parser;

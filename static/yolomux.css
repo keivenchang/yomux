@@ -15011,6 +15011,25 @@ body.editor-theme-light .file-editor-image-panel {
   box-shadow: var(--app-modal-dialog-shadow);
   color: var(--text);
 }
+.markdown-link-url-dialog .file-editor-dialog {
+  width: min(80vw, 1100px);
+}
+.markdown-link-url-field {
+  display: grid;
+  gap: var(--space-8);
+  font-weight: 700;
+}
+.markdown-link-url-field input {
+  width: 100%;
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  background: var(--input-bg);
+  color: var(--text);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
 .file-editor-dialog-title {
   padding: var(--space-10) var(--space-12);
   border-bottom: 1px solid var(--line);

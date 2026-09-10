@@ -325,7 +325,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
-    assert {".git", ".ssh", ".uploads", "__pycache__", "node_modules"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
+    assert {".git", ".ssh", ".uploads", ".coverage", ".hypothesis", ".nox", ".pnpm-store", ".yarn", ".vscode", ".idea", "__pycache__", "node_modules", "coverage", "htmlcov"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
     assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
@@ -806,7 +806,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
-    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 1800
+    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 300
 
     custom = sanitize_settings({
         "performance": {

@@ -13,7 +13,7 @@ When a user marks a directory as indexed, YOLOmux makes its direct children sear
 - **Frontier** is the bounded queue of discovered directories that have not yet been scanned for the active root generation.
 - **Published depth** is the deepest completely published layer for a root. Results from partially scanned deeper layers may also be published, but status must not call that layer complete.
 - **Hot path** is a file or directory with recent concrete change evidence, such as a watch event, a successful YOLOmux file mutation, an open-file save, or a visible Finder/Differ root.
-- **Safety refresh** is the low-priority full reconciliation controlled by `file_explorer.index_refresh_seconds`, 1800 seconds by default. It catches changes not covered by stronger evidence; it is not the primary freshness mechanism.
+- **Safety refresh** is the low-priority full reconciliation controlled by `file_explorer.index_refresh_seconds`, 300 seconds (5 minutes) by default. It catches changes not covered by stronger evidence; it is not the primary freshness mechanism.
 
 ## Required lifecycle
 
@@ -63,7 +63,7 @@ One owner coalesces recent change evidence by canonical indexed subtree. Native 
 - Promote a queued frontier item when the changed or user-visible path is already pending; do not enqueue a competing task for the same directory.
 - Track heat with a bounded last-change time and score, decay it after inactivity, and remove vanished/out-of-scope paths.
 - Guarantee background progress with a tested starvation bound: after a bounded number or time slice of hot items, run an eligible shallow breadth-expansion item.
-- Keep the 30-minute interval as a safety net. It may enqueue a new low-priority root generation or reconciliation frontier, but it never invalidates the readable previous snapshot before replacement coverage is published.
+- Keep the 5-minute interval as a safety net. It may enqueue a new low-priority root generation or reconciliation frontier, but it never invalidates the readable previous snapshot before replacement coverage is published.
 
 Proven cadence and open question. For a root that already holds an `indexd` scheduler lease, item 6 live-proved that a create or delete reflects in the index in about 2.5 seconds (a 2-second debounce plus one bounded repair), against the 1800-second safety interval. Seconds-level freshness is therefore proven for lease-scheduled roots, not unconditional: a mutation driven through the full `POST /api/fs/write`→`batchd` chain did NOT refresh in-window for a root with no active indexer lease. Whether a batchd-executed mutation reliably RPCs `indexd` in a multi-server or follower topology — the same producer path the pre-existing rename reindex uses — is an open question and is not claimed as a guarantee.
 

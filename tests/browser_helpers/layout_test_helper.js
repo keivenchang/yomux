@@ -2302,6 +2302,7 @@ globalThis.__layoutTestApi = {
   fileExplorerEntryIsNewForTest: fileExplorerEntryIsNew,
   invalidateFileExplorerFsCachesForTest: invalidateFileExplorerFsCaches,
   invalidateFileExplorerRootsForTest: invalidateFileExplorerRoots,
+  setFileExplorerFsResourceValueForTest(path, entries) { setFileExplorerFsResourceValue('list', path, entries); },
   fileExplorerFsResourceRecordsForTest() {
     return [...fileExplorerFsResourceRecords.entries()].map(([key, record]) => ({
       key,

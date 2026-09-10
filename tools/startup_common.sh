@@ -101,7 +101,6 @@ yolomux_acquire_start_lock() {
 yolomux_system_load_snapshot() {
   local python_bin="$1"
   "$python_bin" - <<'PY'
-import math
 import os
 import platform
 import time
@@ -134,27 +133,6 @@ def cpu_idle_fraction() -> float:
     return (idle_after - idle_before) / total_delta if total_delta > 0 else 1.0
 
 
-def defender_d_state_tasks() -> int:
-    """Count Defender tasks that inflate Linux load while they are blocked in the kernel."""
-    if platform.system() != "Linux":
-        return 0
-    defender_names = {"sensecm", "senseimdscollector", "msmpeng", "mdatp"}
-    count = 0
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        try:
-            status = open(f"/proc/{entry.name}/status", encoding="utf-8").read().splitlines()
-        except OSError:
-            continue
-        fields = dict(line.split(":", 1) for line in status if ":" in line)
-        name = fields.get("Name", "").strip().lower()
-        state = fields.get("State", "").lstrip()[:1]
-        if name in defender_names and state == "D":
-            count += 1
-    return count
-
-
 def linux_psi_some_fraction(resource: str, window: str = "avg10") -> float:
     """Read the current Linux PSI stall fraction, when available."""
     if platform.system() != "Linux":
@@ -177,39 +155,43 @@ def linux_psi_some_fraction(resource: str, window: str = "avg10") -> float:
     return 0.0
 
 
+def defender_d_state_tasks() -> int:
+    """Count Defender blocked threads so they do not inflate startup load."""
+    if platform.system() != "Linux":
+        return 0
+    count = 0
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        task_dir = f"/proc/{entry.name}/task"
+        try:
+            task_entries = tuple(os.scandir(task_dir))
+        except OSError:
+            continue
+        for task in task_entries:
+            try:
+                status = open(f"{task_dir}/{task.name}/status", encoding="utf-8").read().splitlines()
+            except OSError:
+                continue
+            fields = dict(line.split(":", 1) for line in status if ":" in line)
+            name = fields.get("Name", "").strip().lower()
+            state = fields.get("State", "").lstrip()[:1]
+            if name == "wdavdaemon" and state == "D":
+                count += 1
+    return count
+
+
 idle_fraction = cpu_idle_fraction()
-defender_d_tasks = defender_d_state_tasks()
 cpu_stall_some = linux_psi_some_fraction("cpu")
-io_stall_some = linux_psi_some_fraction("io")
-try:
-    requested_discount = float(os.environ.get("YOLOMUX_START_LOAD_DISCOUNT_CORES", "0"))
-except ValueError:
-    requested_discount = -1.0
-if not math.isfinite(requested_discount) or requested_discount < 0:
-    print("invalid YOLOMUX_START_LOAD_DISCOUNT_CORES", flush=True)
-    raise SystemExit(2)
-discount = min(float(cpus), requested_discount)
-effective_load1 = max(0.0, load1 - discount)
-effective_load5 = max(0.0, load5 - discount)
-# Linux load average includes tasks blocked in uninterruptible I/O and is not a reliable current
-# capacity signal on this NFS host. Use instantaneous CPU idle plus current CPU/I/O PSI instead;
-# the load averages remain reported for diagnosis.
-defender_load_ignored = defender_d_tasks > 0
 cpu_pressure_ok = cpu_stall_some <= 0.10 and idle_fraction >= 0.10
-io_pressure_ok = io_stall_some <= 0.10
-load_ok = (
-    defender_load_ignored
-    or (cpu_pressure_ok and io_pressure_ok)
-)
-cpu_ok = cpu_pressure_ok
-ok = load_ok and cpu_ok
+defender_d_tasks = defender_d_state_tasks()
+effective_load1 = max(0.0, load1 - defender_d_tasks)
+load_pressure_ok = effective_load1 <= cpus * 0.75
+ok = cpu_pressure_ok and load_pressure_ok
 print(
-    f"load1={load1:.2f} effective={effective_load1:.2f}/{cpus:.2f} "
-    f"load5={load5:.2f} effective={effective_load5:.2f}/{cpus * 2.0:.2f} "
-    f"discount={discount:.2f} cpu_idle={idle_fraction:.2%} cpu_stall={cpu_stall_some:.2%} "
-    f"io_stall={io_stall_some:.2%} "
-    f"defender_d_tasks={defender_d_tasks} defender_load_ignored={defender_load_ignored} "
-    f"cpu_budget={cpus}"
+    f"load1={load1:.2f} effective_load1={effective_load1:.2f} load5={load5:.2f} "
+    f"cpu_idle={idle_fraction:.2%} cpu_stall={cpu_stall_some:.2%} "
+    f"defender_d_tasks={defender_d_tasks} cpu_budget={cpus}"
 )
 raise SystemExit(0 if ok else 1)
 PY

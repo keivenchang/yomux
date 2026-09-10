@@ -1286,6 +1286,14 @@ function markdownFormattingContextMenu(event, context, options = {}) {
   menu.setAttribute('role', 'menu');
   const closeMenu = () => markdownPreviewContextMenuController.close();
   const apply = command => options.applyCommand?.(command, context) === true;
+  if (options.href) {
+    appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
+    appendContextMenuSeparator(menu);
+  } else if (context.selectedText && typeof options.addUrl === 'function') {
+    const label = t('contextmenu.addUrl');
+    appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
+    appendContextMenuSeparator(menu);
+  }
   appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);

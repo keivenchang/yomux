@@ -672,22 +672,32 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (!window.confirm(confirmText)) return;
   if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
-    for (const path of deletePaths) {
-      await apiFetchJson('/api/fs/delete', {
+    const deleteRequests = deletePaths.map(path => apiFetchJson('/api/fs/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({path}),
-      });
-    }
+      }));
+    // Remove the rows as soon as deletion is accepted by the browser. The requests remain authoritative;
+    // a failure below refreshes the directory and restores any path that still exists.
     for (const path of Array.from(fileState.keys())) {
       if (deletePaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) {
         removeOpenFile(path, {confirmDirty: false, render: false});
       }
     }
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
+    markFileExplorerDeletedPaths(deletePaths);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
+    removeFileTreePathsImmediately(deletePaths);
+    const results = await Promise.allSettled(deleteRequests);
+    const failedPaths = deletePaths.filter((path, index) => results[index].status === 'rejected');
+    if (failedPaths.length) {
+      clearFileExplorerDeletedPaths(failedPaths);
+      invalidateFileExplorerRoots(failedPaths.map(dirnameOf));
+      await refreshFileExplorerTrees({fresh: true});
+      throw results[deletePaths.indexOf(failedPaths[0])].reason;
+    }
     await refreshFileExplorerTrees();
     if (typeof refreshVisibleSessionFilesSurfaces === 'function') {
       await refreshVisibleSessionFilesSurfaces({silent: true, force: true});
@@ -1831,8 +1841,14 @@ function showFileEditorDecisionDialog(options = {}) {
       if (event.key === 'Escape') {
         event.preventDefault();
         finish('cancel');
+      } else if (event.key === 'Enter' && event.target?.matches?.('[data-markdown-link-url-input]')) {
+        event.preventDefault();
+        finish('save');
       }
     };
+    backdrop.addEventListener('input', event => {
+      if (event.target?.matches?.('[data-markdown-link-url-input]')) options.onInput?.(event.target.value);
+    });
     backdrop.addEventListener('click', event => {
       const button = event.target?.closest?.('[data-dialog-action]');
       if (button && backdrop.contains(button)) {
@@ -1845,7 +1861,9 @@ function showFileEditorDecisionDialog(options = {}) {
     document.addEventListener('keydown', onKeydown, true);
     appOverlayRootElement().appendChild(backdrop);
     options.onMount?.(backdrop);
-    const preferred = backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
+    const preferred = options.focusSelector
+      ? backdrop.querySelector(options.focusSelector)
+      : backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
     preferred?.focus?.({preventScroll: true});
   });
 }

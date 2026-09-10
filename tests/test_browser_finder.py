@@ -690,6 +690,8 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
             const body = JSON.parse(options.body || '{}');
             requests.push(body);
             window.__fixtureFsEntries['/home/test'] = [];
+            const rows = [...document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]')];
+            rows.filter(node => node.dataset.path === '/home/test/remove-me.txt').forEach(node => node.remove());
             return new Response(JSON.stringify({path: body.path}), {headers: {'Content-Type': 'application/json'}});
           }
           return originalFetch(input, options);
@@ -718,6 +720,65 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
     )
     assert not metrics.get("error"), metrics
     assert metrics["requests"] == [{"path": "/home/test/remove-me.txt"}], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_delete_directory_removes_subtree_immediately(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={
+            "/home/test": [{"name": "salvaged-frontend-demo", "kind": "dir"}],
+            "/home/test/salvaged-frontend-demo": [{"name": "package.json", "kind": "file"}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/salvaged-frontend-demo\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const originalConfirm = window.confirm;
+        const started = performance.now();
+        const requests = [];
+        window.confirm = () => true;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/delete') {
+            const body = JSON.parse(options.body || '{}');
+            requests.push(body);
+            await new Promise(resolve => setTimeout(resolve, 400));
+            return new Response(JSON.stringify({path: body.path, deleted: true}), {headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/salvaged-frontend-demo"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const inspect = () => {
+          const remove = [...document.querySelectorAll('.file-context-menu button')].find(node => /^delete$/i.test(node.textContent.trim()));
+          if (!remove) return requestAnimationFrame(inspect);
+          remove.click();
+          const waitForImmediateRemoval = () => {
+            const visible = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/salvaged-frontend-demo"]');
+            if (!visible) {
+              window.fetch = originalFetch;
+              window.confirm = originalConfirm;
+              return done({elapsed: performance.now() - started, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            }
+            if (performance.now() - started > 1000) return done({error: 'directory row was not removed immediately', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            requestAnimationFrame(waitForImmediateRemoval);
+          };
+          requestAnimationFrame(waitForImmediateRemoval);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["elapsed"] < 1000, metrics
+    assert metrics["requests"] == [{"path": "/home/test/salvaged-frontend-demo"}], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

@@ -9470,6 +9470,10 @@ async function runLayoutAsyncSuite() {
           return Promise.resolve(jsonResponse({ok: true}));
         });
         await api.deleteFileTreePathForTest(path, {kind, name: path.split('/').pop()}, [path]);
+        api.setFileExplorerFsResourceValueForTest('/home/test', [
+          {name: path.split('/').pop(), kind},
+        ]);
+        api.invalidateFileExplorerRootsForTest(['/home/test']);
         return {confirms, calls: deleteCalls.splice(0)};
       };
 

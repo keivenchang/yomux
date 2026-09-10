@@ -68,7 +68,7 @@ PERSIST_DEBOUNCE_SECONDS = 2.0
 # than this (stale-while-revalidate), which also prunes deleted files.
 # A stale index remains immediately searchable while the owner refreshes it.  A
 # short TTL turns ordinary Quick Open use into a recurring whole-tree walk.
-INDEX_TTL_SECONDS = 30.0 * 60.0
+INDEX_TTL_SECONDS = 5.0 * 60.0
 # C11: bump when the on-disk storage shape changes so old/incompatible indexes rebuild for a clear reason.
 # v5 adds a per-row `generation` column plus `directory_coverage` and `frontier`
 # tables so a progressive breadth-first build can publish one directory at a time,

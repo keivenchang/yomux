@@ -119,6 +119,7 @@ const fileExplorerFsNegativeBackoffMaxMs = 5 * 60_000;
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
+const fileExplorerDeletedPathTombstones = new Set();
 const fileExplorerRepoInfoEnrichmentState = {
   pending: new Set(),
   inFlight: new Set(),
@@ -286,6 +287,41 @@ function setFileExplorerFsResourceValue(type, path, value) {
   record.storedAt = Date.now();
   clearFileExplorerFsResourceFailure(record);
   return value;
+}
+
+function markFileExplorerDeletedPaths(paths = []) {
+  for (const path of paths) {
+    const normalized = normalizeDirectoryPath(path);
+    if (normalized) fileExplorerDeletedPathTombstones.add(normalized);
+  }
+}
+
+function reconcileFileExplorerDeletedPathTombstones(directory, entries, authoritative = false) {
+  if (!authoritative || !Array.isArray(entries)) return;
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  const listed = new Set(entries.map(entry => childPath(normalizedDirectory, entry?.name)));
+  for (const path of Array.from(fileExplorerDeletedPathTombstones)) {
+    if (dirnameOf(path) === normalizedDirectory && !listed.has(path)) fileExplorerDeletedPathTombstones.delete(path);
+  }
+}
+
+function clearFileExplorerDeletedPaths(paths = []) {
+  for (const path of paths) fileExplorerDeletedPathTombstones.delete(normalizeDirectoryPath(path));
+}
+
+function filterFileExplorerDeletedPathTombstones(directory, entries) {
+  if (!Array.isArray(entries) || !fileExplorerDeletedPathTombstones.size) return entries;
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  return entries.filter(entry => !fileExplorerDeletedPathTombstones.has(childPath(normalizedDirectory, entry?.name)));
+}
+
+function removeFileTreePathsImmediately(paths = []) {
+  const deleted = paths.map(path => normalizeDirectoryPath(path)).filter(Boolean);
+  if (!deleted.length) return;
+  for (const row of document.querySelectorAll('.file-tree-row[data-path]')) {
+    const path = normalizeDirectoryPath(row.dataset.path || '');
+    if (deleted.some(root => path === root || pathIsInsideDirectory(path, root))) row.remove();
+  }
 }
 
 function fileExplorerFsResourceHasValue(type, path) {
@@ -688,7 +724,9 @@ async function fetchDirectory(path, options = {}) {
       // in the same render window. LIST is intentionally a one-level direct
       // request; only deferred detailed INFO work enters /api/fs/batch.
       const payload = await apiFetchJson(`/api/fs/fast/list?path=${encodeURIComponent(root)}`);
-      return payload.entries || [];
+      const entries = payload.entries || [];
+      reconcileFileExplorerDeletedPathTombstones(root, entries, options.fresh === true || options.user === true);
+      return filterFileExplorerDeletedPathTombstones(root, entries);
     }, {
       onReuse: entries => {
         clearFileExplorerListError(root);
@@ -777,13 +815,15 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
     const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
     const data = item?.data && typeof item.data === 'object' ? item.data : {};
     const entries = Array.isArray(data.entries) ? data.entries : null;
-    if (!path || !entries || item.ok === false || Number(item.status || 200) >= 400) continue;
-    entriesByDir.set(path, entries);
-    cacheFileExplorerRepoInfoEntries(path, entries);
-    markNewDirectoryEntries(path, entries);
-    recordDirectorySignature(path, entries);
-    setFileExplorerFsResourceValue('list', path, entries);
-    scheduleFileExplorerRepoInfoEnrichment(path, entries, {
+    reconcileFileExplorerDeletedPathTombstones(path, entries, true);
+    const visibleEntries = entries ? filterFileExplorerDeletedPathTombstones(path, entries) : null;
+    if (!path || !visibleEntries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    entriesByDir.set(path, visibleEntries);
+    cacheFileExplorerRepoInfoEntries(path, visibleEntries);
+    markNewDirectoryEntries(path, visibleEntries);
+    recordDirectorySignature(path, visibleEntries);
+    setFileExplorerFsResourceValue('list', path, visibleEntries);
+    scheduleFileExplorerRepoInfoEnrichment(path, visibleEntries, {
       includeRoot: path === currentFileExplorerRoot(),
       watchDiffOwned: options.fromWatchDiff === true,
     });
@@ -909,6 +949,12 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
     ...(Array.isArray(payload?.removed_roots) ? payload.removed_roots : []),
   ];
+  const removedPaths = Array.isArray(payload?.removed_paths) ? payload.removed_paths : [];
+  if (removedPaths.length) {
+    markFileExplorerDeletedPaths(removedPaths);
+    removeFileTreePathsImmediately(removedPaths);
+    invalidateFileExplorerRoots(removedPaths.map(dirnameOf));
+  }
   // File links are a consumer of the same filesystem truth even when Finder is hidden.
   // Invalidate only affected entries so a create/rename can become clickable immediately.
   if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(changedPaths);
@@ -3807,6 +3853,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
+  entries = filterFileExplorerDeletedPathTombstones(parentPath, entries);
   // Step the .file-tree-children::before guide line per nesting level: rows indent 14px/level
   // (updateFileTreeRow padding-left = base + depth*14), and the children wrappers are NOT physically
   // indented, so without this the fixed-left guide stacks every level at one x and only level 1 shows.

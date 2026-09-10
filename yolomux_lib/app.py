@@ -4674,9 +4674,9 @@ class WatchBridge:
                 snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
             if snapshot_generation:
                 app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
-            if snapshot_worker is not threading.current_thread():
-                snapshot_worker.join(timeout=5.0)
-                assert not snapshot_worker.is_alive(), "client-event snapshot worker did not stop"
+            # The snapshot build can be blocked in tmux or metadata work that has no cancellation
+            # boundary. Generation invalidation above fences its result; do not hold the SSE request
+            # open waiting for uncancellable work to return.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
@@ -15766,6 +15766,19 @@ class TmuxWebtermApp:
                 )
             if reload_yolo_rules:
                 data["yolo_rules"] = yolo_rules.reload_rules()
+            if route == "POST /api/fs/delete" and data.get("deleted") is True:
+                deleted_path = str(data.get("path") or "")
+                if deleted_path:
+                    self.publish_client_event(
+                        "fs_changed",
+                        {
+                            "removed_paths": [deleted_path],
+                            "refresh": True,
+                            "change_summary": {"roots_changed": 1, "coarse": False},
+                        },
+                        trigger="fs-delete",
+                        cache="ready",
+                    )
             self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
         except BatchedOperationUnavailable as error:
             typed_failure = self.typed_filesystem_operation_failure(error.failure)

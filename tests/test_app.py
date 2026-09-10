@@ -6623,6 +6623,36 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
     assert webapp.client_watch_service.event_watcher_record.snapshot_worker is None
 
 
+def test_stop_client_event_watcher_does_not_wait_for_uncancellable_snapshot(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    release = threading.Event()
+
+    def blocked_build():
+        assert release.wait(timeout=5)
+        return {"sessions": {}, "session_order": []}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", blocked_build)
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
+    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    try:
+        assert webapp.start_client_watch_snapshot_publish() is True
+        worker = webapp.client_watch_service.event_watcher_record.snapshot_worker
+        assert worker is not None
+        started = time.monotonic()
+        webapp.stop_client_event_watcher()
+        assert time.monotonic() - started < 1.0
+        assert worker.is_alive()
+    finally:
+        release.set()
+        webapp.stop_client_event_watcher()
+        webapp.control_server.stop()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     signature = {"main": "", "pr": "123", "status": "open", "ci": "pending"}

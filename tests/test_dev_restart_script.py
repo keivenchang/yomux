@@ -706,56 +706,13 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
 
     assert result.returncode in {0, 1}
     assert f"cpu_budget={expected}" in result.stdout
-    assert f"/{expected:.2f}" in result.stdout
+    assert "cpu_idle=" in result.stdout
     assert "cpu_stall_some <= 0.10 and idle_fraction >= 0.10" in startup_common
-    assert "cpu_pressure_ok and io_pressure_ok" in startup_common
-    assert "effective_load1 <= cpus * 0.75" not in startup_common
-
-
-def test_startup_capacity_accepts_bounded_operator_load_discount():
-    expected = startup_cpu_budget()
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES="$3" yolomux_system_load_snapshot "$2"',
-            "startup-capacity-discount",
-            str(STARTUP_COMMON),
-            sys.executable,
-            str(expected + 100),
-        ],
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode in {0, 1}, result.stdout + result.stderr
-    assert f"discount={expected:.2f}" in result.stdout
-    fields = [part.split("=", 1) for part in result.stdout.split() if "=" in part]
-    raw_loads = [float(value) for key, value in fields if key in {"load1", "load5"}]
-    effective_loads = [float(value.split("/", 1)[0]) for key, value in fields if key == "effective"]
-    assert len(raw_loads) == len(effective_loads) == 2
-    assert all(
-        abs(effective - max(0.0, raw - expected)) <= 0.02
-        for raw, effective in zip(raw_loads, effective_loads)
-    )
-
-
-def test_startup_capacity_rejects_invalid_operator_load_discount():
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES=invalid yolomux_system_load_snapshot "$2"',
-            "startup-capacity-invalid-discount",
-            str(STARTUP_COMMON),
-            sys.executable,
-        ],
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode == 2
-    assert "invalid YOLOMUX_START_LOAD_DISCOUNT_CORES" in result.stdout
+    assert "defender_d_tasks = defender_d_state_tasks()" in startup_common
+    assert 'task_dir = f"/proc/{entry.name}/task"' in startup_common
+    assert "effective_load1 = max(0.0, load1 - defender_d_tasks)" in startup_common
+    assert "load_pressure_ok = effective_load1 <= cpus * 0.75" in startup_common
+    assert "ok = cpu_pressure_ok and load_pressure_ok" in startup_common
 
 
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
