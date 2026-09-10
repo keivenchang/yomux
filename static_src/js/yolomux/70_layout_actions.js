@@ -3701,6 +3701,7 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
+  clearTerminalRemovalLatency('session', session);
   if (terminals.get(session) === item) terminals.delete(session);
   if (item.reconnectTimer) {
     clearTimeout(item.reconnectTimer);
@@ -3787,11 +3788,6 @@ function sessionConfirmedGone(session, order) {
   return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
-function terminalSocketCloseLooksFinal(event = null) {
-  const code = Number(event?.code || 0);
-  return event?.wasClean === true || code === 1000 || code === 1001;
-}
-
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
 // cleanup without the confirm/POST, for sessions that ended outside this client.
 function pruneDeadSession(session) {
@@ -3807,20 +3803,15 @@ function pruneDeadSession(session) {
   statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
 }
 
-// On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
-// prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
+// A WebSocket close describes the transport, not the tmux session. Confirm the session through the
+// live tmux roster before pruning; a clean close can still be a transient transport disconnect.
 async function confirmSessionGoneOrReconnect(session, item, event = null, lifecycleToken = item?.sessionLifecycleToken || tmuxSessionLifecycleToken(session)) {
-  if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
+  if (item.manualClose || item.closeHandled || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
   const closeDetails = {
     origin: 'ws-close',
     closeCode: Number(event?.code || 0),
     wasClean: event?.wasClean === true,
   };
-  if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
-    noteTerminalRemovalLatencyStart('session', session, closeDetails);
-    pruneDeadSession(session);
-    return;
-  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
@@ -3829,7 +3820,11 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
   item.confirmingGone = true;
   try {
     const exists = await tmuxSessionExistsForReconnect(session);
-    if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
+    if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
+      if (terminals.get(session) === item) clearTerminalRemovalLatency('session', session);
+      return;
+    }
+    item.closeHandled = true;
     if (exists === false) {
       pruneDeadSession(session);
       return;

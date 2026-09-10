@@ -5022,6 +5022,7 @@ function connectTerminalSocket(session, item) {
   item.socket = socket;
   item.sessionLifecycleToken = lifecycleToken;
   item.manualClose = false;
+  item.closeHandled = false;
   socket.onopen = () => {
     if (!socketIsCurrent()) return;
     clearTerminalRemovalLatency('session', session);
@@ -5057,7 +5058,7 @@ function connectTerminalSocket(session, item) {
     }
   };
   socket.onclose = event => {
-    if (item.manualClose || !socketIsCurrent()) return;
+    if (item.manualClose || item.closeHandled || !socketIsCurrent()) return;
     tmuxSessionLifecycleReleaseSource(lifecycleToken, socket);
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
