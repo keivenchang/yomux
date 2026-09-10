@@ -4563,8 +4563,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(css.includes('.cm-content .md-heading'), 'Markdown fallback color classes apply inside CodeMirror edit content');
     assert.ok(/gutterButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the line-number button because no CodeMirror gutter is shown');
     assert.ok(/wrapButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the wrap button because no CodeMirror editor is shown');
-    assert.ok(source.includes("if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);"), 'Preview routes the shared Search control to rendered-preview search');
-    assert.ok(source.includes("if (mode !== 'preview') closePreviewFind(panel);"), 'leaving Preview clears rendered-preview search highlights');
+    assert.ok(source.includes("if (fileEditorSearchSurfaceForHost(host) === 'preview')"), 'Search routes to the active preview surface');
+    assert.ok(source.includes("if (mode !== 'preview' && mode !== 'split') closePreviewFind(panel);"), 'leaving Preview clears rendered-preview search highlights');
     assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
     assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
     assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\), captureViewState: false\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active or overwriting saved scroll');

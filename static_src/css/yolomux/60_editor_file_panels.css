@@ -2419,6 +2419,13 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-preview-find-panel[hidden] {
   display: none;
 }
+.file-editor-content.split-preview.split-search-preview .file-editor-preview-find-panel {
+  inset-inline-start: calc(50% + 10px);
+  inset-inline-end: auto;
+}
+.file-editor-content.split-preview.split-search-editor .file-editor-preview-find-panel {
+  inset-inline-end: calc(50% + 10px);
+}
 .file-editor-find-overview {
   position: absolute;
   z-index: var(--z-file-editor-find-overlay);
@@ -2485,6 +2492,14 @@ body.app-topbar-coarse-pointer .file-editor-toolbar-center {
   background: color-mix(in srgb, var(--editor-cursor) 50%, transparent);
 }
 .file-editor-preview-find-match.active {
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
+}
+.file-editor-preview-pane-panel::highlight(yolomux-find-match) {
+  color: inherit;
+  background: color-mix(in srgb, var(--editor-cursor) 50%, transparent);
+}
+.file-editor-preview-pane-panel::highlight(yolomux-find-active) {
   color: var(--editor-scheme-bg);
   background: var(--editor-cursor);
 }

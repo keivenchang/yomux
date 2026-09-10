@@ -3805,6 +3805,14 @@ function createFileEditorPanel(item) {
   });
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const previewFindPanel = panel.querySelector('.file-editor-preview-find-panel');
+  panel.addEventListener('pointerdown', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
+  panel.addEventListener('focusin', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
   previewFindPanel?.addEventListener('submit', event => event.preventDefault());
   previewFindPanel?.addEventListener('input', event => {
     if (event.target.matches('input')) previewFindApplyQuery(panel, event.target.value);

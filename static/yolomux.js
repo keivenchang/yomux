@@ -32649,6 +32649,27 @@ function previewFindPanelForHost(host = null) {
   return host?.querySelector?.('.file-editor-preview-find-panel') || null;
 }
 
+function fileEditorSearchSurfaceForHost(host = null) {
+  if (!host) return 'editor';
+  const mode = fileEditorPanelMode(host);
+  if (mode === 'preview') return 'preview';
+  if (mode !== 'split') return 'editor';
+  if (host._fileEditorSearchSurface === 'preview' || host._fileEditorSearchSurface === 'editor') {
+    return host._fileEditorSearchSurface;
+  }
+  const active = document.activeElement;
+  if (active && host.querySelector('.file-editor-preview-pane-panel')?.contains(active)) return 'preview';
+  if (active && host.querySelector('.file-editor-codemirror-panel')?.contains(active)) return 'editor';
+  return host._fileEditorSearchSurface === 'preview' ? 'preview' : 'editor';
+}
+
+function rememberFileEditorSearchSurface(host = null, surface = 'editor') {
+  if (!host || !['editor', 'preview'].includes(surface)) return;
+  host._fileEditorSearchSurface = surface;
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-preview', surface === 'preview');
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-editor', surface === 'editor');
+}
+
 function fileEditorFindOverviewForHost(host = null) {
   return host?.querySelector?.('.file-editor-find-overview') || null;
 }
@@ -32680,19 +32701,42 @@ function updateFileEditorFindOverview(host = null, positions = [], activeIndex =
 
 function previewFindStateForHost(host = null, create = false) {
   if (!host) return null;
-  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1};
+  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1, open: false};
   return host._previewFindState || null;
 }
 
 function previewFindClearMatches(host = null) {
   const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
   if (!preview) return;
+  if (host?._pmView?.dom && CSS.highlights) {
+    CSS.highlights.delete('yolomux-find-match');
+    CSS.highlights.delete('yolomux-find-active');
+  }
   for (const match of preview.querySelectorAll('.file-editor-preview-find-match')) {
     const parent = match.parentNode;
     match.replaceWith(document.createTextNode(match.textContent || ''));
     parent?.normalize?.();
   }
   clearFileEditorFindOverview(host);
+}
+
+function previewFindUsesTextHighlights(host = null) {
+  return Boolean(host?._pmView?.dom && CSS.highlights && typeof Highlight === 'function');
+}
+
+function previewFindSetReadOnly(host = null, readOnly = false) {
+  const view = host?._pmView;
+  if (!view) return;
+  host._pmSearchReadOnly = readOnly === true;
+  view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
+  view.dom.setAttribute('contenteditable', String(host._pmSearchReadOnly !== true));
+}
+
+function previewFindSetDomObserver(host = null, running = true) {
+  const observer = host?._pmView?.domObserver;
+  if (!observer) return;
+  if (running) observer.start?.();
+  else observer.stop?.();
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -32743,8 +32787,17 @@ function previewFindSelectMatch(host = null, index = 0) {
   const state = previewFindStateForHost(host);
   if (!state?.matches.length) return false;
   state.index = (index + state.matches.length) % state.matches.length;
-  state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
-  state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  if (previewFindUsesTextHighlights(host)) {
+    CSS.highlights.set('yolomux-find-match', new Highlight(...state.matches));
+    CSS.highlights.set('yolomux-find-active', new Highlight(state.matches[state.index]));
+    state.matches[state.index].getBoundingClientRect?.();
+    const range = state.matches[state.index];
+    const element = range.startContainer.parentElement;
+    element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else {
+    state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
+    state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  }
   previewFindUpdateOverview(host);
   previewFindUpdatePanel(host);
   return true;
@@ -32765,7 +32818,8 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
   state.index = -1;
   const needle = state.query.toLocaleLowerCase();
   if (needle) {
-    const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    const root = previewFindUsesTextHighlights(host) ? host._pmView.dom : preview;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
@@ -32779,6 +32833,15 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       let from = 0;
       let index = folded.indexOf(needle, from);
       if (index < 0) continue;
+      if (previewFindUsesTextHighlights(host)) {
+        for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
+          const range = document.createRange();
+          range.setStart(node, matchIndex);
+          range.setEnd(node, matchIndex + needle.length);
+          state.matches.push(range);
+        }
+        continue;
+      }
       const fragment = document.createDocumentFragment();
       while (index >= 0) {
         fragment.append(document.createTextNode(text.slice(from, index)));
@@ -32807,6 +32870,10 @@ function openPreviewFind(host = null) {
   const panel = previewFindPanelForHost(host);
   if (!panel) return false;
   panel.hidden = false;
+  const state = previewFindStateForHost(host, true);
+  state.open = true;
+  previewFindSetReadOnly(host, true);
+  previewFindSetDomObserver(host, false);
   const input = panel.querySelector('input');
   previewFindApplyQuery(host, input?.value || '');
   input?.focus();
@@ -32818,7 +32885,10 @@ function closePreviewFind(host = null) {
   const panel = previewFindPanelForHost(host);
   if (!panel) return false;
   previewFindClearMatches(host);
+  previewFindSetReadOnly(host, false);
+  previewFindSetDomObserver(host, true);
   const state = previewFindStateForHost(host, true);
+  state.open = false;
   state.matches = [];
   state.index = -1;
   panel.hidden = true;
@@ -32829,6 +32899,16 @@ function closePreviewFind(host = null) {
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
   previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function restorePreviewFindAfterRender(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state || state.open !== true) return;
+  panel.hidden = false;
+  previewFindSetReadOnly(host, true);
+  previewFindSetDomObserver(host, false);
+  previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
 }
 
 function fileEditorPreviewSelectionOffsets(pane = null) {
@@ -32906,7 +32986,9 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   if (!pane) return false;
   if (host?._pmRequired && previewKindForPath(path) === 'markdown') return false;
   if (host?._pmView && host._pmPath === path && host._pmView.dom?.isConnected) {
-    return syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+    const result = syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+    restorePreviewFindAfterRender(host);
+    return result;
   }
   if (options.force !== true && previewScrollUserOwnsElementNow(pane)) {
     void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
@@ -32919,7 +33001,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
   const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
-  refreshPreviewFind(host);
+  restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
   return rendered;
 }
@@ -32932,9 +33014,9 @@ function updateEditorFindButton(button, state, host = null) {
   const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
   button.title = label;
   button.setAttribute('aria-label', label);
-  const previewMode = fileEditorPanelMode(host) === 'preview';
-  button.setAttribute('aria-pressed', previewMode ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
-  if (!previewMode) refreshCodeMirrorFindOverview(host);
+  const previewSurface = fileEditorSearchSurfaceForHost(host) === 'preview';
+  button.setAttribute('aria-pressed', previewSurface ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
+  if (!previewSurface) refreshCodeMirrorFindOverview(host);
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -33027,12 +33109,18 @@ async function closeEditorFind(host = null) {
 }
 
 async function toggleEditorFind(host = null) {
-  if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
+  }
   return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
 }
 
 async function openEditorFindShortcut(host = null) {
-  if (fileEditorPanelMode(host) === 'preview') return openPreviewFind(host);
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return openPreviewFind(host);
+  }
   return openEditorFind(host);
 }
 
@@ -69193,6 +69281,14 @@ function createFileEditorPanel(item) {
   });
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const previewFindPanel = panel.querySelector('.file-editor-preview-find-panel');
+  panel.addEventListener('pointerdown', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
+  panel.addEventListener('focusin', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
   previewFindPanel?.addEventListener('submit', event => event.preventDefault());
   previewFindPanel?.addEventListener('input', event => {
     if (event.target.matches('input')) previewFindApplyQuery(panel, event.target.value);
@@ -76148,7 +76244,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
     updateEditorWrapButton(parts.wrapButton);
   }
   updateEditorFindButton(parts.findButton, state, panel);
-  if (mode !== 'preview') closePreviewFind(panel);
+  if (mode !== 'preview' && mode !== 'split') closePreviewFind(panel);
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
