@@ -72,14 +72,14 @@ def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_
     # The directory is now the host partition rather than the state root, because a
     # shared NFS home gives two machines the same absolute path and WAL cannot span
     # hosts; the legacy database is left in place beside it, never moved.
-    assert client.database_path.name == storage.DATABASE_FILENAME == "stats-v8.sqlite3"
+    assert client.database_path.name == storage.DATABASE_FILENAME == "stats-v9.sqlite3"
     assert client.database_path == storage.default_database_path(tmp_path)
     assert client.database_path.parent != tmp_path
     # The socket name identifies both the protocol/schema and the database it
     # owns; its directory stays host-local because a Unix socket cannot live on
     # an NFS state root.
     assert client_module.default_socket_path().name.startswith(
-        "statsd.p24s8."
+        "statsd.p25s9."
     )
     assert client_module.default_socket_path().name.endswith(".sock")
     assert client_module.default_socket_path() == storage.default_socket_path()
@@ -87,8 +87,8 @@ def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_
         client_module.default_socket_path(), prefix="yolomux-statsd",
     )
     assert client._transport.registry.spec.socket_name == client._transport.socket_path.name
-    assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
-    assert storage.SCHEMA_VERSION == 8
+    assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL
+    assert storage.SCHEMA_VERSION == 9
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
     assert client._transport.registry.spec.extra_args == ("--database", str(client.database_path))
     # The registry must track wherever the socket actually lives, rather than a
@@ -228,9 +228,9 @@ def test_all_lifecycle_and_data_rpcs_carry_the_current_service_and_schema_fence(
     assert append_payload["coverage_epochs"][0]["epoch_id"] == "cpu:1"
     assert append_payload["unavailable_spans"][0]["reason"] == "legacy_aggregate_not_reconstructable"
     snapshot_payload = calls[-2][1]
-    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": 24, "schema_generation": storage.SCHEMA_VERSION}
+    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": storage.MIN_WRITER_PROTOCOL, "schema_generation": storage.SCHEMA_VERSION}
     delta_payload = calls[-1][1]
-    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": 24, "schema_generation": storage.SCHEMA_VERSION}
+    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": storage.MIN_WRITER_PROTOCOL, "schema_generation": storage.SCHEMA_VERSION}
 
 
 def test_snapshot_revalidates_typed_or_query_requests_before_rpc(tmp_path, monkeypatch):
@@ -388,7 +388,7 @@ def test_upgrade_required_is_terminal_and_never_retried(tmp_path, monkeypatch, s
 
 def test_registry_preserves_schema_upgrade_as_terminal(tmp_path, monkeypatch):
     calls = []
-    upgrade = {"ok": False, "status": "upgrade_required", "required_protocol_version": 25, "required_schema_generation": 6}
+    upgrade = {"ok": False, "status": "upgrade_required", "required_protocol_version": storage.MIN_WRITER_PROTOCOL + 1, "required_schema_generation": storage.SCHEMA_VERSION + 1}
 
     def rpc(_socket_path, envelope, *, timeout_seconds):
         calls.append(envelope.payload)
@@ -397,7 +397,7 @@ def test_registry_preserves_schema_upgrade_as_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(client_module, "local_service_request", rpc)
     client = client_module.StatsCurrentClient(tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME)
     assert client.ensure_started() is False
-    assert client.status()["required_schema_generation"] == 6
+    assert client.status()["required_schema_generation"] == storage.SCHEMA_VERSION + 1
     assert len(calls) == 1
 
 

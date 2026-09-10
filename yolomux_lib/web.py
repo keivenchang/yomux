@@ -13,7 +13,6 @@ from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import MANAGED_CHAT_AGENT_KINDS
-from .common import path_mtime_or_zero
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
@@ -25,6 +24,7 @@ from .common import yolomux_commit_count
 from .common import yolomux_commit_sha
 from .common import yolomux_commit_time_pt
 from .common import yolomux_dev_bundle_revision
+from .common import yolomux_version_metadata
 from .locales import LANGUAGE_PREFERENCES
 from .locales import LOCALE_ENDONYMS
 from .locales import FALLBACK_LOCALE
@@ -59,6 +59,7 @@ STATIC_CONTENT_TYPES = {
     "setup-auth.js": "application/javascript; charset=utf-8",
     "preauth-locale.js": "application/javascript; charset=utf-8",
     "codemirror.js": "application/javascript; charset=utf-8",
+    "prosemirror.js": "application/javascript; charset=utf-8",
     "emoji-data.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
@@ -186,22 +187,32 @@ def server_plural(locale: str, key: str, count: object, **params: object) -> str
     return value
 
 
-def static_asset_version(asset: str) -> int:
+def static_asset_version(asset: str) -> str:
     path = static_asset_path(asset)
-    return int(path_mtime_or_zero(path)) if path is not None else 0
+    if path is None:
+        return "0-0"
+    try:
+        stat = path.stat()
+    except OSError:
+        return "0-0"
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
 def static_asset_url(asset: str) -> str:
     return f"/static/{asset}?v={static_asset_version(asset)}"
 
 
-def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
+def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None, version_metadata: tuple[str, list[str]] | None = None) -> str:
     active_locale = normalize_locale(locale)
     commit_count = yolomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
+    version_status, post_release_commits = version_metadata or yolomux_version_metadata()
     version_title = html.escape(
-        f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
-        f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
+        f"{version_status}\n"
+        + "\n".join(post_release_commits)
+        + ("\n" if post_release_commits else "")
+        + f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
+        + f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
         quote=True,
     )
     # follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
@@ -221,7 +232,7 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
         '<span class="brand-blue">m</span>'
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
-        f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
+        f'<span class="brand-version" title="{version_title}">{html.escape(version_status)}</span>'
         '<button type="button" class="brand-update-badge" data-update-badge hidden '
         f'title="{update_title}" aria-label="{update_aria}">{update_label}</button>'
         f"</{tag}>"
@@ -292,6 +303,7 @@ def html_page(
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
+    version_metadata = yolomux_version_metadata()
     bootstrap = {
         "sessions": sessions,
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
@@ -333,6 +345,8 @@ def html_page(
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
         "version": YOLOMUX_VERSION,
+        "versionStatus": version_metadata[0],
+        "postReleaseCommits": version_metadata[1],
         "clientRevision": yolomux_client_revision(),
         "devBundleRevision": yolomux_dev_bundle_revision(),
         "versionCommit": yolomux_commit_sha(),
@@ -355,6 +369,7 @@ def html_page(
         "strings": bootstrap_locale_catalogs(locale),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
+        "proseMirrorAssetUrl": static_asset_url("prosemirror.js"),
     }
     # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
     # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the
@@ -387,7 +402,7 @@ def html_page(
 <div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
-    {brand_html("brand brand-title title", "div", locale=locale)}
+    {brand_html("brand brand-title title", "div", locale=locale, version_metadata=version_metadata)}
     <span id="httpsWarning" class="transport-warning" hidden aria-label="{html.escape(server_string(locale, "app.noHttps"), quote=True)}"></span>
   </div>
   <div id="sessionButtons" class="app-menu-area" aria-label="{html.escape(server_string(locale, "app.menusAria"), quote=True)}"></div>
@@ -447,7 +462,7 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
     # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
     # (or none are installed — a terminal-only host needs no agent login).
     status = agent_auth_status()
-    installed = [agent for agent in MANAGED_CHAT_AGENT_KINDS if status.get(agent, {}).get("installed")]
+    installed = [agent for agent in AGENT_LOGIN_COMMANDS if agent in MANAGED_CHAT_AGENT_KINDS and status.get(agent, {}).get("installed")]
     logged_out = [agent for agent in installed if not agent_auth_entry_available(status[agent])]
     if not installed or not logged_out:
         return ""
@@ -457,7 +472,7 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
         lead = server_string(locale, "login.agent.loginTo", names=names)
     else:
         lead = server_string(locale, "login.agent.login", names=", ".join(logged_out))
-    notice = server_string(locale, "login.agent.run", lead=html.escape(lead), commands=commands)
+    notice = server_string(locale, "login.agent.run", lead=lead, commands=commands)
     return f'<div class="{html.escape(css_class)}">{notice}</div>'
 
 

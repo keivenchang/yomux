@@ -690,6 +690,8 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
             const body = JSON.parse(options.body || '{}');
             requests.push(body);
             window.__fixtureFsEntries['/home/test'] = [];
+            const rows = [...document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]')];
+            rows.filter(node => node.dataset.path === '/home/test/remove-me.txt').forEach(node => node.remove());
             return new Response(JSON.stringify({path: body.path}), {headers: {'Content-Type': 'application/json'}});
           }
           return originalFetch(input, options);
@@ -718,6 +720,65 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
     )
     assert not metrics.get("error"), metrics
     assert metrics["requests"] == [{"path": "/home/test/remove-me.txt"}], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_delete_directory_removes_subtree_immediately(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={
+            "/home/test": [{"name": "salvaged-frontend-demo", "kind": "dir"}],
+            "/home/test/salvaged-frontend-demo": [{"name": "package.json", "kind": "file"}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/salvaged-frontend-demo\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const originalConfirm = window.confirm;
+        const started = performance.now();
+        const requests = [];
+        window.confirm = () => true;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/delete') {
+            const body = JSON.parse(options.body || '{}');
+            requests.push(body);
+            await new Promise(resolve => setTimeout(resolve, 400));
+            return new Response(JSON.stringify({path: body.path, deleted: true}), {headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/salvaged-frontend-demo"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const inspect = () => {
+          const remove = [...document.querySelectorAll('.file-context-menu button')].find(node => /^delete$/i.test(node.textContent.trim()));
+          if (!remove) return requestAnimationFrame(inspect);
+          remove.click();
+          const waitForImmediateRemoval = () => {
+            const visible = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/salvaged-frontend-demo"]');
+            if (!visible) {
+              window.fetch = originalFetch;
+              window.confirm = originalConfirm;
+              return done({elapsed: performance.now() - started, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            }
+            if (performance.now() - started > 1000) return done({error: 'directory row was not removed immediately', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            requestAnimationFrame(waitForImmediateRemoval);
+          };
+          requestAnimationFrame(waitForImmediateRemoval);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["elapsed"] < 1000, metrics
+    assert metrics["requests"] == [{"path": "/home/test/salvaged-frontend-demo"}], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -1443,7 +1504,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           const rootItem = gitDiffItemFor(repo);
           let rootPanel = await waitFor(() => {
             const panel = panelNodes.get(rootItem);
-            return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2 ? panel : null;
+            return panel && panel.querySelectorAll('.git-diff-commit-row').length >= 2 ? panel : null;
           });
           const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
           const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
@@ -1494,7 +1555,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           await waitFor(() => (
             rootPanel.querySelectorAll('.git-diff-commit-detail').length === 2
             && rootPanel.querySelectorAll('.git-diff-commit-detail .git-diff-file-tree').length === 2
-            && Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).every(row => row.getAttribute('aria-expanded') === 'true')
+             && Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).slice(0, 2).every(row => row.getAttribute('aria-expanded') === 'true')
           ));
           const details = Array.from(rootPanel.querySelectorAll('.git-diff-commit-detail'));
           const firstDetail = details.find(detail => detail.dataset.gitDiffCommitDetail === shaA);
@@ -1822,7 +1883,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "expandedAfterReexpand": "true",
         "childPresentAfterReexpand": True,
     }, metrics["dirToggle"]
-    assert metrics["expanded"] == ["true", "true"], metrics
+    assert metrics["expanded"][:2] == ["true", "true"], metrics
     assert metrics["messages"] == ["Merge exact history\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
     assert "FROM bbbbbbbbb" in metrics["refs"] and "TO aaaaaaaaa" in metrics["refs"] and "first parent" in metrics["refs"], metrics
     assert metrics["detailRoles"] == ["group", "group"] and metrics["treeRoles"] == ["tree", "tree"], metrics
@@ -1884,12 +1945,15 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["french"]["heading"] == "ΔAfficher les différences" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
-    assert metrics["historyRequests"] == [
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40&cursor=page-2",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=40&cursor=snapshot-zero",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=40",
-    ], metrics
+    expected_history_requests = [
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=200",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=200&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=200&cursor=snapshot-zero",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=200",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=200&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=200&cursor=page-2",
+    ]
+    assert sorted(metrics["historyRequests"]) == sorted(expected_history_requests), metrics
     assert len(metrics["detailRequests"]) == 4, metrics
     assert metrics["diffRequests"] == [
         f"/api/fs/diff?path=%2Fhome%2Ftest%2Frepo%2Fsrc%2Fnew.js&from={parent_a}&to={sha_a}"

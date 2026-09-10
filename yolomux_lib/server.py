@@ -602,7 +602,7 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     def handle_fs_git_history(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        limit, error = parse_query_int(qs, "limit", 40, max_value=40, clamp_min=True)
+        limit, error = parse_query_int(qs, "limit", 200, max_value=200, clamp_min=True)
         if error:
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return

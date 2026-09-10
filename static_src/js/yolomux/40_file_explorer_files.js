@@ -119,6 +119,7 @@ const fileExplorerFsNegativeBackoffMaxMs = 5 * 60_000;
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
+const fileExplorerDeletedPathTombstones = new Set();
 const fileExplorerRepoInfoEnrichmentState = {
   pending: new Set(),
   inFlight: new Set(),
@@ -220,7 +221,7 @@ function setFileExplorerListError(path, error, status = 0) {
 
 function currentFileExplorerListError(path) {
   const root = normalizeDirectoryPath(path || '');
-  return root && normalizeDirectoryPath(fileExplorerLastListError?.path || '') === root
+  return root && fileExplorerLastListError && normalizeDirectoryPath(fileExplorerLastListError.path || '') === root
     ? userMessageText(fileExplorerLastListError.source, fileExplorerLastListError.fallback)
     : '';
 }
@@ -286,6 +287,41 @@ function setFileExplorerFsResourceValue(type, path, value) {
   record.storedAt = Date.now();
   clearFileExplorerFsResourceFailure(record);
   return value;
+}
+
+function markFileExplorerDeletedPaths(paths = []) {
+  for (const path of paths) {
+    const normalized = normalizeDirectoryPath(path);
+    if (normalized) fileExplorerDeletedPathTombstones.add(normalized);
+  }
+}
+
+function reconcileFileExplorerDeletedPathTombstones(directory, entries, authoritative = false) {
+  if (!authoritative || !Array.isArray(entries)) return;
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  const listed = new Set(entries.map(entry => childPath(normalizedDirectory, entry?.name)));
+  for (const path of Array.from(fileExplorerDeletedPathTombstones)) {
+    if (dirnameOf(path) === normalizedDirectory && !listed.has(path)) fileExplorerDeletedPathTombstones.delete(path);
+  }
+}
+
+function clearFileExplorerDeletedPaths(paths = []) {
+  for (const path of paths) fileExplorerDeletedPathTombstones.delete(normalizeDirectoryPath(path));
+}
+
+function filterFileExplorerDeletedPathTombstones(directory, entries) {
+  if (!Array.isArray(entries) || !fileExplorerDeletedPathTombstones.size) return entries;
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  return entries.filter(entry => !fileExplorerDeletedPathTombstones.has(childPath(normalizedDirectory, entry?.name)));
+}
+
+function removeFileTreePathsImmediately(paths = []) {
+  const deleted = paths.map(path => normalizeDirectoryPath(path)).filter(Boolean);
+  if (!deleted.length) return;
+  for (const row of document.querySelectorAll('.file-tree-row[data-path]')) {
+    const path = normalizeDirectoryPath(row.dataset.path || '');
+    if (deleted.some(root => path === root || pathIsInsideDirectory(path, root))) row.remove();
+  }
 }
 
 function fileExplorerFsResourceHasValue(type, path) {
@@ -688,7 +724,9 @@ async function fetchDirectory(path, options = {}) {
       // in the same render window. LIST is intentionally a one-level direct
       // request; only deferred detailed INFO work enters /api/fs/batch.
       const payload = await apiFetchJson(`/api/fs/fast/list?path=${encodeURIComponent(root)}`);
-      return payload.entries || [];
+      const entries = payload.entries || [];
+      reconcileFileExplorerDeletedPathTombstones(root, entries, options.fresh === true || options.user === true);
+      return filterFileExplorerDeletedPathTombstones(root, entries);
     }, {
       onReuse: entries => {
         clearFileExplorerListError(root);
@@ -777,13 +815,15 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
     const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
     const data = item?.data && typeof item.data === 'object' ? item.data : {};
     const entries = Array.isArray(data.entries) ? data.entries : null;
-    if (!path || !entries || item.ok === false || Number(item.status || 200) >= 400) continue;
-    entriesByDir.set(path, entries);
-    cacheFileExplorerRepoInfoEntries(path, entries);
-    markNewDirectoryEntries(path, entries);
-    recordDirectorySignature(path, entries);
-    setFileExplorerFsResourceValue('list', path, entries);
-    scheduleFileExplorerRepoInfoEnrichment(path, entries, {
+    reconcileFileExplorerDeletedPathTombstones(path, entries, true);
+    const visibleEntries = entries ? filterFileExplorerDeletedPathTombstones(path, entries) : null;
+    if (!path || !visibleEntries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    entriesByDir.set(path, visibleEntries);
+    cacheFileExplorerRepoInfoEntries(path, visibleEntries);
+    markNewDirectoryEntries(path, visibleEntries);
+    recordDirectorySignature(path, visibleEntries);
+    setFileExplorerFsResourceValue('list', path, visibleEntries);
+    scheduleFileExplorerRepoInfoEnrichment(path, visibleEntries, {
       includeRoot: path === currentFileExplorerRoot(),
       watchDiffOwned: options.fromWatchDiff === true,
     });
@@ -909,6 +949,12 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
     ...(Array.isArray(payload?.removed_roots) ? payload.removed_roots : []),
   ];
+  const removedPaths = Array.isArray(payload?.removed_paths) ? payload.removed_paths : [];
+  if (removedPaths.length) {
+    markFileExplorerDeletedPaths(removedPaths);
+    removeFileTreePathsImmediately(removedPaths);
+    invalidateFileExplorerRoots(removedPaths.map(dirnameOf));
+  }
   // File links are a consumer of the same filesystem truth even when Finder is hidden.
   // Invalidate only affected entries so a create/rename can become clickable immediately.
   if (typeof invalidateTerminalFileReferenceTargets === 'function') invalidateTerminalFileReferenceTargets(changedPaths);
@@ -1300,6 +1346,14 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
+  const finderIsSynced = fileExplorerRootMode === 'sync';
+  for (const panel of document.querySelectorAll('.file-explorer-panel[data-file-explorer-view="finder"]')) {
+    panel.classList.toggle('file-explorer-root-mode-sync', finderIsSynced);
+    panel.classList.toggle('file-explorer-root-mode-fixed', !finderIsSynced);
+  }
+  if (typeof syncFileExplorerSessionControlVisibility === 'function') {
+    syncFileExplorerSessionControlVisibility();
+  }
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -1382,13 +1436,15 @@ function fileExplorerSyncCommandSessionTarget() {
 function rememberFileExplorerExplicitSyncSession(session) {
   const normalizedSession = String(session || '');
   if (!isTmuxSession(normalizedSession) || !activeSessions.includes(normalizedSession)) return false;
+  const finderSelectionChanged = fileExplorerFinderSelectedSession !== normalizedSession;
+  fileExplorerFinderSelectedSession = normalizedSession;
   const previous = fileExplorerExplicitSyncSessionTarget();
   const changed = setExplicitPaneFocusItem(normalizedSession);
   if (changed) {
     if (previous) restoreCommittedFileExplorerRootDisplay();
     cancelPendingFileExplorerActiveSync();
   }
-  return changed;
+  return changed || finderSelectionChanged;
 }
 
 function fileExplorerRootForOpen(preferredItem = null) {
@@ -2351,10 +2407,12 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
   const staleInFlightSync = Boolean(fileExplorerSyncState.inFlightSignature && fileExplorerSyncState.inFlightSignature !== syncSignature);
+  const syncTargetChanged = explicit && Boolean(fileExplorerVisibleSyncSession)
+    && String(syncPlan.session || '') !== String(fileExplorerVisibleSyncSession || '');
   if (explicit && staleInFlightSync) cancelPendingFileExplorerActiveSync();
   if (
     syncPlan.root
-    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || (explicit && staleInFlightSync))
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length || syncTargetChanged || (explicit && staleInFlightSync))
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
@@ -2811,7 +2869,11 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
-      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true, user: options.user === true});
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {
+        auto: options.auto === true,
+        generation,
+        user: options.user === true,
+      });
       if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
@@ -2833,11 +2895,11 @@ async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoo
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
   setFileExplorerPathDisplay(root);
-  for (const container of fileExplorerTreeContainers()) {
-    if (generation !== fileExplorerSyncState.generation) return false;
-    expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
-  }
-  return expanded;
+  if (generation !== fileExplorerSyncState.generation) return false;
+  const results = await Promise.all(fileExplorerTreeContainers().map(container => (
+    expandFileTreeContainerToPath(container, root, path, generation, options)
+  )));
+  return results.some(Boolean);
 }
 
 async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplorerRoot()) {
@@ -2846,9 +2908,20 @@ async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplore
     .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path))
     .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
   const generation = ++fileExplorerSyncState.generation;
-  for (const path of expandedPaths) {
+  let depth = 1;
+  while (depth <= expandedPaths.reduce((maximum, path) => Math.max(maximum, childPathParts(root, path).length), 0)) {
     if (generation !== fileExplorerSyncState.generation) return false;
-    await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
+    const pathsAtDepth = expandedPaths.filter(path => childPathParts(root, path).length === depth);
+    let nextIndex = 0;
+    const workers = Array.from({length: Math.min(8, pathsAtDepth.length)}, async () => {
+      while (nextIndex < pathsAtDepth.length) {
+        const path = pathsAtDepth[nextIndex++];
+        if (generation !== fileExplorerSyncState.generation) return;
+        await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
+      }
+    });
+    await Promise.all(workers);
+    depth += 1;
   }
   return true;
 }
@@ -3780,6 +3853,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
+  entries = filterFileExplorerDeletedPathTombstones(parentPath, entries);
   // Step the .file-tree-children::before guide line per nesting level: rows indent 14px/level
   // (updateFileTreeRow padding-left = base + depth*14), and the children wrappers are NOT physically
   // indented, so without this the fixed-left guide stacks every level at one x and only level 1 shows.

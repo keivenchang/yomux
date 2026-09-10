@@ -34,20 +34,17 @@ from . import resolution as stats_resolution
 # combination makes the legacy writer's read-only header fence stop before it
 # can reinterpret or mutate this intentionally incompatible schema.
 APPLICATION_ID = 0x594F5354
-# Schema 8 adds the ring's durability kernel: a per-resolution replay cursor, an invalidation
-# ledger, and a versioned slot payload. It is a SIDE-BY-SIDE format, not an in-place upgrade --
-# DATABASE_FILENAME embeds the version, so a v8 build creates `stats-v8.sqlite3` and never opens,
-# writes, or WAL-touches an existing `stats-v7.sqlite3`. Migration is an explicit, bounded copy
-# (`migrate_v7_to_v8`), so the rollback boundary is simply "keep running the v7 build against the
-# v7 file". SOCKET_FILENAME also embeds the version, so a v8 build and a v7 build address different
-# statsd sockets and cannot half-share a store.
+# The ring schema added a per-resolution replay cursor, an invalidation
+# ledger, and a versioned slot payload. It is a SIDE-BY-SIDE format, not an in-place upgrade.
+# DATABASE_FILENAME embeds the version, so each schema build addresses its own file and cannot
+# half-share a store with an older build. Migration is an explicit, bounded copy.
 SCHEMA_VERSION = common.STATS_SCHEMA_VERSION
-MIN_WRITER_PROTOCOL = 24
+MIN_WRITER_PROTOCOL = 25
 # Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
 # strict process-memory payload. Build 6 makes the same census the sole owner of
 # grouped CPU and RSS. Build 7 stores large persisted-ring JSON as bounded zlib
 # blobs, so an older reader must yield before it can reinterpret those slots.
-MIN_WRITER_BUILD = 7
+MIN_WRITER_BUILD = 8
 # How long original facts stay on disk. Retention and the GUI's longest display
 # window (stats_resolution.MAX_RANGE_SECONDS) are two independent knobs that used
 # to be spelled with the same literal, which invited the assumption that moving
@@ -81,11 +78,10 @@ DATABASE_FILENAME = common.STATS_DATABASE_FILENAME
 # cannot grow a column without a SCHEMA_VERSION bump that would strand the
 # operator's existing history.
 # VERSIONED, like DATABASE_FILENAME and SOCKET_FILENAME. Prune state is mutable companion state
-# belonging to one database, and schema 8 is a SIDE-BY-SIDE format: an unversioned name would have
-# a v8 build rewriting the still-running v7 build's prune schedule.
+# belonging to one database, so an unversioned name would let one schema rewrite another's schedule.
 PRUNE_STATE_FILENAME = f"stats-prune-v{SCHEMA_VERSION}.json"
 # The compaction-benefit baseline, in a sidecar for exactly the reason stated above: schema_meta
-# cannot grow a column without a SCHEMA_VERSION bump, and schema 8 is a SIDE-BY-SIDE format, so a
+# cannot grow a column without a SCHEMA_VERSION bump, and the format is side-by-side, so a
 # bump would strand the operator's entire existing history to persist one float.
 #
 # The sidecar cannot share the marker's transaction, so it carries the marker VALUE instead and is
@@ -148,12 +144,9 @@ def socket_filename(protocol_version: int, schema_generation: int) -> str:
 # all compatible protocol builds of this schema.
 SOCKET_FILENAME = socket_filename(MIN_WRITER_PROTOCOL, SCHEMA_VERSION)
 # VERSIONED for the same reason, and this one is load-bearing for rollback. The fence is a
-# deliberate cross-BUILD guard: a writer whose schema is older than the fence refuses to open. That
-# is correct within one format lineage and actively wrong across a side-by-side pair -- a v8 build
-# publishing `schema_version: 8` into a shared fence made the still-running v7 build raise
-# SchemaTooNewError against its OWN v7 database, destroying the rollback boundary the side-by-side
-# design exists to provide. Measured before this change: a v7 fence read `7`, and after one v8
-# `Store.open` in the same state directory it read `8` with `database_filename: stats-v8.sqlite3`.
+# deliberate cross-BUILD guard: a writer whose schema is older than the fence refuses to open. The
+# fence is versioned with the database so side-by-side schema builds do not rewrite each other's
+# compatibility state.
 WRITER_FENCE_FILENAME = f"stats-writer-compat-v{SCHEMA_VERSION}.json"
 MAX_DIRTY_INTERVALS = 32
 MAX_BROWSER_FAILURE_FINGERPRINTS = 128
@@ -222,10 +215,10 @@ _RING_TABLES = frozenset(
 _RING_FIXED_ROW_TABLES = frozenset(
     {"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"}
 )
-# The payload schema `bucket_json` is written with. Schema 8 stops accepting shape-only ring data:
+# The payload schema `bucket_json` is written with. The current format stops accepting shape-only ring data:
 # serving decodes named fields out of this blob, so a blob written by a build with a different
 # payload contract must be refused as data rather than mis-decoded into a plausible chart.
-RING_PAYLOAD_VERSION = 1
+RING_PAYLOAD_VERSION = 2
 _RING_COLUMNS = {
     "aggregate_publication": (
         "singleton", "ring_generation", "source_generation", "published_at",
@@ -1930,7 +1923,7 @@ def _record_invalidations(
 def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
     """Every table of the ring extension, matched by NAME SET rather than by prefix.
 
-    Schema 8 added `ring_replay_cursor` and `ring_invalidations`, which do not share the
+    The ring extension added `ring_replay_cursor` and `ring_invalidations`, which do not share the
     `aggregate_` prefix the original three were discovered by. Intersecting against `_RING_TABLES`
     keeps one list authoritative instead of coupling the extension's membership to a naming
     convention that a later table can silently fall outside of -- which is exactly how a partial
@@ -2299,7 +2292,7 @@ class Store:
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
             connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
-            # Schema 8 makes the ring extension part of the FORMAT rather than an opt-in a caller
+            # The current format makes the ring extension part of the FORMAT rather than an opt-in a caller
             # remembers to request. The durability kernel -- replay cursor and invalidation ledger
             # -- has to exist before the first append can be recorded as un-folded, and an optional
             # kernel is one that is absent exactly when a crash needs it. Creation is idempotent:

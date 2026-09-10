@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from tools.mockers import opencode
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = ROOT / "tools" / "mockers"
@@ -225,6 +227,9 @@ def test_text_clients_accept_mock_mode(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["claude.py", "--mock"])
     assert claude.parse_args().mock is True
+
+    monkeypatch.setattr(sys, "argv", ["opencode.py", "--mock"])
+    assert opencode.parse_args().mock is True
 
 
 def test_text_clients_accept_dump_fixtures(monkeypatch):

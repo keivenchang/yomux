@@ -87,7 +87,9 @@ def reap_dead_client_leases(
 
     identity = host_identity or current_host_identity()
     dead: list[str] = []
-    for lease_id, value in leases.items():
+    # A broker request may release a lease while identity probing is in progress. Snapshot the
+    # mapping before the potentially slow probes, then keep all removals in the existing second pass.
+    for lease_id, value in tuple(leases.items()):
         if not isinstance(value, dict):
             continue
         diagnostic = is_current_local_process(

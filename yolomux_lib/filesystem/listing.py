@@ -347,9 +347,12 @@ def _visible_directory_names(
                             )
                             paths.authority_pinned(operation, entry_path)
                             entry_stat = os.fstat(link_fd)
-                            target_text = os.readlink("", dir_fd=link_fd)
-                        except OSError as error:
-                            raise error
+                            target_text = paths.symlink_target_from_descriptor(
+                                link_fd,
+                                entry_path,
+                                parent_descriptor=directory_descriptor,
+                                name=name,
+                            )
                         finally:
                             if link_fd is not None:
                                 os.close(link_fd)

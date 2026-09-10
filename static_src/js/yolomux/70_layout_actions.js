@@ -1433,8 +1433,20 @@ function terminalContextMenuPreservesNativeBehavior(session, container) {
 }
 
 function terminalUsesAppWheel(session, container) {
+  const containerTarget = terminalContextMenuPaneTargetForContainer(container);
+  if (containerTarget) {
+    return terminalContextMenuCapabilityForSession(session, {
+      paneTarget: () => containerTarget,
+    }).clientKind === 'opencode';
+  }
+  // A live terminal may receive the signal snapshot before its cheap DOM target handoff runs. Only
+  // real terminal elements may use this narrow fallback; plain test/data objects with no identity
+  // must remain fail-closed.
+  if (container?.nodeType !== 1) return false;
+  const signalWindow = activeTmuxSignalWindowForSession(session);
+  const signalTarget = terminalContextMenuPaneTargetForWindow(signalWindow);
   return terminalContextMenuCapabilityForSession(session, {
-    paneTarget: () => terminalContextMenuPaneTargetForContainer(container),
+    paneTarget: () => signalTarget,
   }).clientKind === 'opencode';
 }
 
@@ -1872,6 +1884,13 @@ function compactHomePath(path) {
   return text;
 }
 
+function projectMetaPathHtml(path) {
+  const fullPath = String(path || '');
+  return fullPath
+    ? `<button type="button" class="meta-path meta-path-action" data-info-open-path="${esc(fullPath)}" title="${esc(fullPath)}">${esc(compactHomePath(fullPath))}</button>`
+    : '';
+}
+
 function projectMetaParts(session, info, options = {}) {
   const summary = sessionWorkSummary(session, info);
   const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
@@ -1888,7 +1907,7 @@ function projectMetaParts(session, info, options = {}) {
     </span>`;
   })() : '';
   if (!git) {
-    if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+    if (fullPath) metadataParts.push(projectMetaPathHtml(fullPath));
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
@@ -1902,7 +1921,7 @@ function projectMetaParts(session, info, options = {}) {
     }
   }
   if (git.branch) metadataParts.push(`<span class="meta-branch">${esc(fullText ? git.branch : shortBranch(git.branch))}</span>`);
-  if (fullPath) metadataParts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
+  if (fullPath) metadataParts.push(projectMetaPathHtml(fullPath));
   if (Number.isFinite(git.behind) && git.behind > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) metadataParts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count)) metadataParts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);

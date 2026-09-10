@@ -2206,7 +2206,7 @@ def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
         assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 1, "cursor": None})
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=999"))
-    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 40, "cursor": None})
+    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 200, "cursor": None})
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=many"))
     assert writes[-1][0] == HTTPStatus.BAD_REQUEST

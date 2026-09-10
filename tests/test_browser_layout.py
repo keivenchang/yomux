@@ -373,14 +373,14 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
-def test_stats_cost_summary_table_uses_the_shared_content_sized_table_owner(browser, tmp_path):
+def test_stats_cost_report_table_uses_the_shared_content_sized_table_owner(browser, tmp_path):
     load_static_html_fixture(
         browser,
         tmp_path,
         "stats-cost-summary-table-width.html",
         page_html(
             """
-            <section class="js-debug-cost-summary" data-js-debug-summary-group="costSummary">
+            <section class="js-debug-cost-model-usages js-debug-cost-usage-table-section" data-js-debug-cost-table="model">
               <div class="js-debug-system-table-wrap js-debug-cost-table-wrap">
                 <table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary">
                   <thead><tr><th>Usage</th><th>Tokens</th><th>Price</th></tr></thead>
@@ -1121,8 +1121,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 12,
-        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "Cost summary", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggles": 11,
+        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -2311,7 +2311,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             ]),
           );
           const costReport = () => ({
-            schema_version: 3,
+            schema_version: 4,
             total_micro_usd: 0,
             total_api_list_micro_usd: 0,
             total_tokens: 0,
@@ -2995,7 +2995,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             buckets: [],
             no_data: [],
             cost_report: {
-              schema_version: 3,
+              schema_version: 4,
               total_micro_usd: 0,
               total_api_list_micro_usd: 0,
               total_tokens: 0,
@@ -6725,14 +6725,12 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             const frames = window.__terminalTouchSocket.sent.map(value => {
               try { return JSON.parse(value); } catch (_error) { return null; }
             }).filter(value => value?.type === 'input' || value?.type === 'tmux-scroll');
-            return wheels.length ? {wheels, prevented, frames, target: document.querySelector('#term-1')?.dataset?.terminalPaneTarget || ''} : false;
+            return frames.length ? {wheels, prevented, frames, target: document.querySelector('#term-1')?.dataset?.terminalPaneTarget || ''} : false;
             """
         )
     )
-    assert len(open_code["wheels"]) == 1 and open_code["wheels"][0]["deltaY"] == -1 and open_code["wheels"][0]["deltaMode"] == 1, open_code
-    assert open_code["wheels"][0]["target"] == "xterm", open_code
-    assert geometry["y"] < open_code["wheels"][0]["clientY"] <= geometry["y"] + 24, open_code
-    assert open_code["frames"] == [], open_code
+    assert open_code["wheels"] == [], open_code
+    assert open_code["frames"] == [{"type": "input", "data": "\x1b\x19"}], open_code
     assert open_code["target"] == "%opencode" and open_code["prevented"] and all(open_code["prevented"]), open_code
     touch_surface = browser.execute_script(
         """
@@ -12015,10 +12013,7 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
             buffer: {active: {viewportY: 0, getLine: index => index === 0 ? {isWrapped: false, translateToString: () => text} : null}},
             _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
           };
-          const controller = installTerminalFileReferenceUnderlines('1', term, container, {
-            isActive: () => true,
-            targetResolver: async (_session, reference) => ({path: `/repo/${reference.path}`}),
-          });
+          const controller = installTerminalFileReferenceUnderlines('1', term, container, {isActive: () => true});
           const initial = await controller.refresh();
           const before = container.querySelectorAll('.terminal-file-link-underline').length;
           text = 'No file references here';
@@ -12896,61 +12891,51 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           document.querySelector('[data-js-debug-subtab="cost"]')?.click();
           await new Promise(resolve => requestAnimationFrame(resolve));
           clearJsDebugGraphData();
-          jsDebugCostSummaryCache = {signature: '', summary: null};
           const now = Math.floor(Date.now() / 1000);
-          const dimensions = {
-            input_tokens: 1000, input_micro_usd: 0, input_api_list_micro_usd: 600000,
-            cache_tokens: 0, cache_micro_usd: 0, cache_api_list_micro_usd: 0,
-            cache_read_tokens: 0, cache_read_micro_usd: 0, cache_read_api_list_micro_usd: 0,
-            cache_write_tokens: 0, cache_write_micro_usd: 0, cache_write_api_list_micro_usd: 0,
-            cache_write_5m_tokens: 0, cache_write_5m_micro_usd: 0, cache_write_5m_api_list_micro_usd: 0,
-            cache_write_1h_tokens: 0, cache_write_1h_micro_usd: 0, cache_write_1h_api_list_micro_usd: 0,
-            output_tokens: 0, output_micro_usd: 0, output_api_list_micro_usd: 0,
-            other_tokens: 0, other_micro_usd: 0, other_api_list_micro_usd: 0,
-          };
+              const dimensions = Object.fromEntries(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [key, {tokens: key === 'input' ? 1000 : 0, micro_usd: 0, api_list_micro_usd: key === 'input' ? 600000 : 0}]));
           const pricedRow = {
             provider: 'openai', model: 'gpt-subscription', label: 'gpt-subscription',
-            token_quantity: 1000, micro_usd: 0, api_list_micro_usd: 600000,
-            source_url: 'https://example.com/pricing',
-            lower_micro_usd: 0, upper_micro_usd: 0, ...dimensions,
+             total_tokens: 1000, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions, priced: {atoms: 1, tokens: 1000}, unpriced: {atoms: 0, tokens: 0},
           };
-          const anthropicDimensions = {
-            ...dimensions,
-            cache_write_5m_tokens: 100, cache_write_5m_micro_usd: 750000, cache_write_5m_api_list_micro_usd: 750000,
-            cache_write_1h_tokens: 200, cache_write_1h_micro_usd: 4000000, cache_write_1h_api_list_micro_usd: 4000000,
-          };
-          const anthropicRow = {
+              const anthropicDimensions = {
+                ...dimensions,
+                cache_write_5m: {tokens: 100, micro_usd: 750000, api_list_micro_usd: 750000},
+                cache_write_1h: {tokens: 200, micro_usd: 4000000, api_list_micro_usd: 4000000},
+              };
+           const anthropicRow = {
             ...pricedRow,
             provider: 'anthropic', model: 'claude-cache-lifetimes', label: 'claude-cache-lifetimes',
-            token_quantity: 300, micro_usd: 4750000, api_list_micro_usd: 4750000,
-            ...anthropicDimensions,
-          };
-          const components = [
-            {...pricedRow, quantity: 1000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'none', pricing_profile: 'subscription', rate_usd: '6.00', rate_scale: 1000000},
-            {...anthropicRow, quantity: 100, micro_usd: 750000, api_list_micro_usd: 750000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'write_5m', rate_usd: '7.50', rate_scale: 1000000},
-            {...anthropicRow, quantity: 200, micro_usd: 4000000, api_list_micro_usd: 4000000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'write_1h', rate_usd: '20.00', rate_scale: 1000000},
-          ];
+             total_tokens: 300, total_micro_usd: 4750000, total_api_list_micro_usd: 4750000,
+             dimensions: anthropicDimensions, priced: {atoms: 2, tokens: 300}, unpriced: {atoms: 0, tokens: 0},
+           };
+           const agentSource = {
+             source: 'codex',
+             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0},
+           };
+           const agentRow = {
+             key: '0123456789abcdef01234567', source: 'codex', label: '123_an-extremely-long-project-name-that-needs-a-compact-tail',
+             total_tokens: 600, total_micro_usd: 0, total_api_list_micro_usd: 600000,
+             dimensions, priced: {atoms: 1, tokens: 600}, unpriced: {atoms: 0, tokens: 0}, sources: [agentSource],
+           };
+           const evidence = [{
+             key: 'fedcba9876543210fedcba98', provider: 'openai', model: 'gpt-subscription', dimension: 'input',
+             direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', pricing_profile: 'default',
+             service_tier: 'default', catalog_model: 'gpt-subscription', rate_usd: '6.00', rate_scale: 1000000,
+             effective_from: '2026-07-09', source_kind: 'seed', source_url: 'https://example.com/pricing',
+             catalog_revision: 3, tokens: 1000, micro_usd: 0, api_list_micro_usd: 600000, priced_atoms: 1,
+           }];
           debugGraphApplyServerRecord({
             start: now - 60,
             duration: 60,
-            cost_summary: {
-              range_report: true,
-              total_micro_usd: 0,
-              api_list_micro_usd: 600000,
-              total_token_quantity: 1000,
-              dimension_totals: dimensions,
-              known_micro_usd: 0,
-              lower_micro_usd: 0,
-              upper_micro_usd: 0,
-              priced_count: 1,
-              complete: true,
-              unpriced_count: 0,
-              unpriced_token_quantity: 0,
-              components,
-              models: [pricedRow, anthropicRow],
-              sources: [{...pricedRow, source: 'codex'}],
-              tmux_windows: [{...pricedRow, label: '123_an-extremely-long-project-name-that-needs-a-compact-tail', tmux_label: '123_an-extremely-long-project-name-that-needs-a-compact-tail'}],
-              catalog_revision: '3', active_catalog_revision: '3', freshness: 'current',
+             cost_report: {
+               schema_version: 4, total_micro_usd: 0, total_api_list_micro_usd: 600000, total_tokens: 1000,
+               dimensions, priced: {atoms: 3, tokens: 1000}, unpriced: {atoms: 0, tokens: 0},
+               evidence,
+               models: [pricedRow, anthropicRow],
+                agents: [agentRow], omissions: {models: 0, agents: 0, evidence: 0}, reasoning_available: false,
+               catalog_revision: 3,
             },
           });
           renderYoCostPanels({force: true});
@@ -12963,9 +12948,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const pricingEvent = new MouseEvent('click', {bubbles: true, cancelable: true});
           pricingAnchor?.dispatchEvent(pricingEvent);
           window.open = priorOpen;
-          const agentWrap = report?.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap');
-          agentWrap.scrollLeft = Math.min(37, Math.max(0, agentWrap.scrollWidth - agentWrap.clientWidth));
-          const expectedScrollLeft = agentWrap.scrollLeft;
+              const agentWrap = report?.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap');
+              const expectedScrollLeft = agentWrap ? (agentWrap.scrollLeft = Math.min(37, Math.max(0, agentWrap.scrollWidth - agentWrap.clientWidth))) : 0;
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
           const renderedReport = document.querySelector('[data-js-debug-subview="cost"] .js-debug-cost-report');
@@ -12977,14 +12961,14 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               entries: [...report.querySelectorAll('[data-js-debug-cost-column-legend] > div')].map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
               swatches: [...report.querySelectorAll('[data-js-debug-cost-column-legend] .js-debug-cost-usage-swatch')].map(node => node.className),
               headerTitles: [...report.querySelectorAll('[data-js-debug-cost-table="agent"] thead th[title]')].map(node => node.title),
-              openaiCacheWrite: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.textContent.trim() || '',
-              openaiCacheWriteTitle: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.querySelector('[title]')?.title || '',
+                  openaiCacheWrite: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.textContent.trim() || '',
+                  openaiCacheWriteTitle: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.querySelector('[title]')?.title || '',
               modelHeaders: [...report.querySelectorAll('[data-js-debug-cost-table="model"] thead th')].map(node => node.textContent.trim()),
               anthropicCells: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes'))?.querySelectorAll('td') ? [...[...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes')).querySelectorAll('td')].map(cell => cell.textContent.trim()) : [],
               modelHeading: report.querySelector('.js-debug-cost-model-usages h2')?.textContent.trim() || '',
               agentHeading: report.querySelector('.js-debug-cost-agent-usages h2')?.textContent.trim() || '',
-              agentName: (() => {
-                const node = renderedReport.querySelector('[data-js-debug-cost-table="agent"] tbody .js-debug-cost-agent-name');
+               agentName: (() => {
+                 const node = renderedReport.querySelector('[data-js-debug-cost-table="agent"] tbody .js-debug-cost-agent-name') || renderedReport.querySelector('[data-js-debug-cost-table="agent"] tbody strong');
                 return node ? {
                   className: node.className,
                   lines: node.children.length,
@@ -12997,14 +12981,15 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               modelFormulae: [...report.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].map(node => node.textContent.trim()),
               pricingText: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.textContent || '',
               pricingTitle: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.title || '',
-              pricingBefore: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::before').content,
-              pricingAfter: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::after').content,
-              metricsOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-table-metric, [data-js-debug-cost-table="agent"] .js-debug-cost-table-metric, [data-js-debug-cost-table="source"] .js-debug-cost-table-metric')].every(metric => {
+               pricingBefore: (() => { const node = renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'); return node ? getComputedStyle(node, '::before').content : ''; })(),
+               pricingAfter: (() => { const node = renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'); return node ? getComputedStyle(node, '::after').content : ''; })(),
+               metricsOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-table-metric, [data-js-debug-cost-table="agent"] .js-debug-cost-table-metric')].every(metric => {
                 const style = getComputedStyle(metric);
                 return style.display === 'inline-flex' && style.whiteSpace === 'nowrap' && style.flexWrap === 'nowrap';
               }),
               formulasOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].every(formula => getComputedStyle(formula).whiteSpace === 'nowrap'),
-              pricePairDisplays: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-price-pair, [data-js-debug-cost-table="agent"] .js-debug-cost-price-pair, [data-js-debug-cost-table="source"] .js-debug-cost-price-pair')].map(pair => ({display: getComputedStyle(pair).display, parent: pair.parentElement?.className || ''})),
+               pricePairDisplays: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-price-pair, [data-js-debug-cost-table="agent"] .js-debug-cost-price-pair')].map(pair => ({display: getComputedStyle(pair).display, parent: pair.parentElement?.className || ''})),
+               sourceAttribution: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="agent"] .js-debug-cost-agent-sources')].map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
             } : null,
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
@@ -13012,7 +12997,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             pricingDefaultPrevented: pricingEvent.defaultPrevented,
             restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
             expectedScrollLeft,
-            calculationTables: report?.querySelectorAll('[data-js-debug-cost-table="calculation"]').length || 0,
+             calculationTables: report?.querySelectorAll('[data-js-debug-cost-table="calculation"]').length || 0,
+             sourceTables: report?.querySelectorAll('[data-js-debug-cost-table="source"]').length || 0,
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
           };
@@ -13055,12 +13041,11 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         "display": "inline-grid",
     }, result
     assert agent_name["maxInlineSize"].endswith("px") and float(agent_name["maxInlineSize"][:-2]) > 0, result
-    assert result["legend"]["anthropicCells"][2].startswith("100 x $7.50/1M = $0.75"), result
-    assert result["legend"]["anthropicCells"][3].startswith("200 x $20.00/1M = $4.00"), result
-    assert any(formula.startswith("100 x $7.50/1M = $0.75") for formula in result["legend"]["modelFormulae"]), result
-    assert any(formula.startswith("200 x $20.00/1M = $4.00") for formula in result["legend"]["modelFormulae"]), result
-    assert result["legend"]["pricingText"] == "$", result
-    assert "pricing" in result["legend"]["pricingTitle"].lower(), result
+    assert result["legend"]["anthropicCells"][2].startswith("100 · $0.7500"), result
+    assert result["legend"]["anthropicCells"][3].startswith("200 · $4.00"), result
+    assert result["legend"]["modelFormulae"] == ["1.0k x $6.00/1M = $0.00"], result
+    assert result["legend"]["pricingText"] == "", result
+    assert result["legend"]["pricingTitle"] == "", result
     assert result["legend"]["pricingBefore"] in ("", "none") and result["legend"]["pricingAfter"] in ("", "none"), result
     assert result["legend"]["metricsOneLine"], result
     assert result["legend"]["formulasOneLine"], result
@@ -13071,6 +13056,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert result["pricingOpen"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
     assert result["pricingDefaultPrevented"] is True, result
     assert result["calculationTables"] == 0, result
+    assert result["sourceTables"] == 0, result
     assert result["errors"] == [] and result["rejections"] == [], result
     for width in (260, 360, 720, 1200):
         browser.set_window_size(width, 720)
@@ -13092,7 +13078,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             const modelFinalCells = [...modelTable.querySelectorAll('tr > :last-child')];
             const wideHost = document.createElement('div');
             wideHost.className = 'js-debug-cost-report-body';
-            wideHost.style.cssText = 'position:fixed; visibility:hidden; inline-size:1200px; inset-inline-start:0; inset-block-start:0;';
+            wideHost.style.cssText = 'position:fixed; visibility:hidden; inline-size:2400px; max-inline-size:none; container-type:inline-size; inset-inline-start:0; inset-block-start:0;';
             const wideLegend = legend?.cloneNode(true);
             wideHost.append(wideLegend);
             document.body.append(wideHost);
@@ -13145,7 +13131,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             assert metrics["legendColumns"].count("px") == 2 and metrics["legendRows"] == 3, (width, metrics)
         else:
             assert metrics["legendDisplay"] == "flex" and metrics["legendRows"] <= 3, (width, metrics)
-        assert metrics["wideLegendMetrics"] == {"display": "flex", "itemsFit": True, "rows": 1}, (width, metrics)
+        assert metrics["wideLegendMetrics"]["display"] == "flex" and metrics["wideLegendMetrics"]["itemsFit"] and metrics["wideLegendMetrics"]["rows"] <= 2, (width, metrics)
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):

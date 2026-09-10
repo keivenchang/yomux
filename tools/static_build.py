@@ -208,6 +208,9 @@ NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
     # migration-error type. Collapsing further would couple two unrelated schemas.
     "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
     "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
+    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
 }
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
@@ -766,6 +769,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/90_pane_popout.js",
         "static_src/js/yolomux/91_preview_popout.js",
         "static_src/js/yolomux/92_codemirror_editor.js",
+        "static_src/js/yolomux/93_prosemirror_editor.js",
         "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
         "static_src/js/yolomux/99_client_event_transport.js",

@@ -1293,19 +1293,19 @@ def drag_yocost_pane(driver: webdriver.Chrome) -> dict[str, object]:
         const sourceTab = [...document.querySelectorAll('.dockview-pane-tab')]
           .find(node => node.dataset.paneTab === yocostItemId && node.closest('.dv-tab')?.classList.contains('dv-active-tab'));
         const sourceGroup = sourceTab?.closest('.dv-groupview');
-        const source = sourceGroup?.querySelector('.pane-drag-handle');
+        const source = sourceTab;
         const sourceSlotName = sourceGroup ? dockviewSlotForGroupElement(sourceGroup) : '';
         const target = [...document.querySelectorAll('.dv-groupview')]
           .filter(group => group !== sourceGroup && group.getBoundingClientRect().width > 0 && group.getBoundingClientRect().height > 0)
-          .find(group => paneSwapAllowed(sourceSlotName, dockviewSlotForGroupElement(group)));
+          .find(group => paneRoleAllowsItemTransfer(yocostItemId, sourceSlotName, dockviewSlotForGroupElement(group)));
         const point = node => { const rect = node?.getBoundingClientRect(); return rect && rect.width > 0 && rect.height > 0 ? {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)} : null; };
         const result = {
           signature,
           source: point(source),
-          target: point(target),
-          sourceSlot: source?.dataset.paneDrag || '',
+          target: point(target?.querySelector('[data-dockview-region="content"]')),
+          sourceSlot: sourceSlotName,
           targetSlot: target ? dockviewSlotForGroupElement(target) : '',
-          canSwap: Boolean(sourceGroup && target && paneSwapAllowed(dockviewSlotForGroupElement(sourceGroup), dockviewSlotForGroupElement(target))),
+          canMove: Boolean(sourceGroup && target && paneRoleAllowsItemTransfer(yocostItemId, sourceSlotName, dockviewSlotForGroupElement(target))),
         };
         return result.source && result.target ? result : null;
         """
@@ -1319,9 +1319,9 @@ def drag_yocost_pane(driver: webdriver.Chrome) -> dict[str, object]:
         changed = WebDriverWait(driver, 10).until(lambda current: current.execute_script("return layoutSlotsSignature(layoutSlots) !== arguments[0]", drag["signature"]))
     except TimeoutException as error:
         final_signature = driver.execute_script("return layoutSlotsSignature(layoutSlots)")
-        raise RuntimeError(f"YO!cost pane drag did not change layout: source={drag['sourceSlot']} target={drag['targetSlot']} allowed={drag['canSwap']} changed={final_signature != drag['signature']}") from error
+        raise RuntimeError(f"YO!cost tab drag did not change layout: source={drag['sourceSlot']} target={drag['targetSlot']} allowed={drag['canMove']} changed={final_signature != drag['signature']}") from error
     if not changed or driver.execute_script('return Boolean(document.querySelector(\'.drag-image, [data-pane-dragging="true"]\'))'):
-        raise RuntimeError("YO!cost pane drag did not settle cleanly")
+        raise RuntimeError("YO!cost tab drag did not settle cleanly")
     return driver.execute_script("return {longTasks: clientPerfLongTaskSummary(), perf: clientPerfSummary()}")
 
 

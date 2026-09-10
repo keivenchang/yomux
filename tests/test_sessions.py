@@ -72,6 +72,21 @@ def test_list_processes_records_native_opencode_executable(monkeypatch):
     assert processes[10].executable == executable
 
 
+def test_process_executable_strips_linux_deleted_binary_marker(monkeypatch):
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sessions.os, "readlink", lambda path: "/home/me/.opencode/bin/opencode (deleted)")
+
+    assert sessions.process_executable(123) == "/home/me/.opencode/bin/opencode"
+
+
+def test_classify_agent_accepts_replaced_opencode_binary_at_installed_path(monkeypatch, tmp_path):
+    executable = tmp_path / "opencode"
+    executable.touch()
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: str(executable))
+
+    assert sessions.classify_agent("opencode --model openai/gpt-5", f"{executable} (deleted)") == "opencode"
+
+
 def test_select_pane_agent_preserves_breadth_first_native_opencode_owner(monkeypatch, tmp_path):
     executable = tmp_path / "opencode"
     executable.touch()

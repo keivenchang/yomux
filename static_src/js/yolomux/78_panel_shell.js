@@ -417,6 +417,7 @@ function renderEmptyPane(slot) {
   }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
+  fill.dataset.dockviewRegion = 'content';
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -687,7 +688,7 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
     ${headAfterTabsHtml}
   </div>
   ${afterHeadHtml}
-  <div class="${classes}"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
+  <div class="${classes}" data-dockview-region="content"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
   ${afterBodyHtml}`;
 }
 
@@ -1364,97 +1365,6 @@ function bindPanelShell(panel, session) {
       schedulePaneViewStateCapture(session, panel);
     }
   }, true);
-  const head = panel.querySelector('.panel-head');
-  if (head) {
-    head.draggable = true;
-    head.dataset.dragSession = session;
-    head.addEventListener('dragstart', event => startPaneDrag(event, head.dataset.dragSlot || slotForSession(session)));
-    head.addEventListener('dragend', endSessionDrag);
-    head.addEventListener('dragover', event => {
-      const panePayload = paneDragPayload(event);
-      if (panePayload?.slot) {
-        event.preventDefault();
-        event.stopPropagation();
-        clearDropPreview();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
-        if (!paneSwapIntentAllowed(intent)) {
-          event.dataTransfer.dropEffect = 'none';
-          head.classList.remove(CLS.tabDragOver);
-          return;
-        }
-        event.dataTransfer.dropEffect = 'move';
-        head.classList.add(CLS.tabDragOver);
-        return;
-      }
-      const filePayload = fileDragPayload(event);
-      if (filePayload?.path) {
-        event.preventDefault();
-        event.stopPropagation();
-        clearDropPreview();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot)) {
-          event.dataTransfer.dropEffect = 'none';
-          return;
-        }
-        event.dataTransfer.dropEffect = 'copy';
-        head.classList.add(CLS.tabDragOver);
-        return;
-      }
-      const payload = dragPayload(event);
-      if (!payload?.session) return;
-      event.preventDefault();
-      event.stopPropagation();
-      clearDropPreview();
-      if (event.target.closest('.pane-tabs')) return;
-      const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot)) {
-        event.dataTransfer.dropEffect = 'none';
-        return;
-      }
-      event.dataTransfer.dropEffect = 'move';
-      head.classList.add(CLS.tabDragOver);
-    });
-    head.addEventListener('dragleave', event => {
-      if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
-    });
-    head.addEventListener('drop', event => {
-      const panePayload = paneDragPayload(event);
-      if (panePayload?.slot && !event.target.closest('.pane-tabs')) {
-        head.classList.remove(CLS.tabDragOver);
-        event.preventDefault();
-        event.stopPropagation();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        const intent = paneSwapIntentForEvent(event, panePayload.slot) || {sourceSlot: panePayload.slot, targetSlot, swap: true};
-        clearDropPreview();
-        if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
-        return;
-      }
-      const filePayload = fileDragPayload(event);
-      if (filePayload?.path && !event.target.closest('.pane-tabs')) {
-        head.classList.remove(CLS.tabDragOver);
-        event.preventDefault();
-        event.stopPropagation();
-        const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot)) return;
-        if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
-        return;
-      }
-      const payload = dragPayload(event);
-      head.classList.remove(CLS.tabDragOver);
-      if (!payload?.session || event.target.closest('.pane-tabs')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot)) return;
-      if (isFileExplorerItem(payload.session) && !fileExplorerUsesNormalTabMovement()) {
-        dockFileExplorerPane();
-        return;
-      }
-      moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), paneTabs(targetSlot).length);
-    });
-  }
   panel.querySelector('[data-detail-toggle]')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();

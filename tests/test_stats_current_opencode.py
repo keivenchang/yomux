@@ -89,6 +89,17 @@ def _part(part_id: str, message_id: str, session_id: str, tokens: dict[str, obje
     return (part_id, message_id, session_id, 1_600, 1_600, json.dumps(data))
 
 
+def _tool_part(part_id: str, message_id: str, session_id: str, tool: str, input_data: object, *, status: str = "completed") -> tuple[object, ...]:
+    return (
+        part_id,
+        message_id,
+        session_id,
+        1_600,
+        1_600,
+        json.dumps({"type": "tool", "tool": tool, "state": {"status": status, "input": input_data}}),
+    )
+
+
 def _state_database(path: Path, *, parts=(), messages=(), inputs=(), tokens=(0, 0, 0, 0, 0)) -> None:
     _database(path, [_session("ses-a", "/repo/a", tokens=tokens)], list(messages), list(parts))
     with sqlite3.connect(path) as connection:
@@ -96,6 +107,117 @@ def _state_database(path: Path, *, parts=(), messages=(), inputs=(), tokens=(0, 
             "INSERT INTO session_input VALUES (?, ?, ?, ?, ?, ?, ?)",
             inputs,
         )
+
+
+def test_read_tool_inputs_returns_only_completed_tool_inputs(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            (
+                "patch",
+                "msg-a",
+                "ses-a",
+                1_600,
+                1_600,
+                json.dumps({
+                    "type": "tool",
+                    "tool": "apply_patch",
+                    "state": {
+                        "status": "completed",
+                        "input": {"patchText": "*** Begin Patch\n*** Update File: app.py\n"},
+                        "metadata": {"files": [{"filePath": "/repo/a/app.py", "type": "update", "patch": "large output omitted"}]},
+                    },
+                }),
+            ),
+            _tool_part("read", "msg-a", "ses-a", "read", {"filePath": "/repo/a/app.py"}),
+            _tool_part("running", "msg-a", "ses-a", "bash", {"command": "git add app.py"}, status="running"),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a")
+
+    assert isinstance(result, tuple)
+    assert [(item.part_id, item.tool, item.patch_text, item.changed_files) for item in result] == [
+        ("patch", "apply_patch", "*** Begin Patch\n*** Update File: app.py\n", (("/repo/a/app.py", "update"),)),
+    ]
+
+
+def test_incremental_usage_reads_newest_step_finish_parts_before_bound(monkeypatch, tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    session_id = "ses-large"
+    parts = []
+    messages = []
+    monkeypatch.setattr(opencode, "MAX_INCREMENTAL_PARTS", 2)
+    count = 2
+    for index in range(count):
+        message_id = f"msg-{index}"
+        part_id = f"part-{index}"
+        messages.append(_message(message_id, session_id, completed=2_000 + index))
+        parts.append(_part(part_id, message_id, session_id, {"input": index + 1, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}}))
+    _database(database, [_session(session_id, "/repo/large", updated=2_000 + count, tokens=(None, None, None, None, None))], messages, parts)
+
+    result = opencode.read_usage(database, session_id=session_id, incremental=True, max_parts=1, known_event_revisions={})
+
+    assert isinstance(result, opencode.OpenCodeReadSuccess)
+    assert result.components
+    assert {component.part_id for component in result.components} == {"part-0", "part-1"}
+
+
+def test_read_tool_inputs_keeps_newest_bounded_slice_and_write_metadata(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("old", "msg-a", "ses-a", 1_000, 1_000, json.dumps({"type": "tool", "tool": "bash", "state": {"status": "completed", "input": {"command": "git add old.py"}}})),
+            ("new", "msg-a", "ses-a", 2_000, 2_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/new.py"}, "metadata": {"exists": False}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", max_parts=1)
+
+    assert isinstance(result, tuple)
+    assert [(item.tool, item.file_path, item.file_exists) for item in result] == [("write", "/repo/a/new.py", False)]
+
+
+def test_read_tool_inputs_applies_start_time_and_reports_move_paths(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("old", "msg-a", "ses-a", 1_000, 1_000, json.dumps({"type": "tool", "tool": "apply_patch", "state": {"status": "completed", "metadata": {"files": [{"filePath": "/repo/a/old.py", "type": "update"}]}}})),
+            ("move", "msg-a", "ses-a", 2_000, 2_000, json.dumps({"type": "tool", "tool": "apply_patch", "state": {"status": "completed", "metadata": {"files": [{"filePath": "/repo/a/old.py", "movePath": "/repo/a/new.py", "type": "move"}]}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", after=1.5)
+
+    assert isinstance(result, tuple)
+    assert result[0].changed_files == (("/repo/a/old.py", "delete"), ("/repo/a/new.py", "add"))
+
+
+def test_read_tool_inputs_bounds_by_updated_time(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a")],
+        [_message("msg-a", "ses-a")],
+        [
+            ("older-created", "msg-a", "ses-a", 1_000, 5_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/recent.py"}}})),
+            ("newer-created", "msg-a", "ses-a", 4_000, 4_000, json.dumps({"type": "tool", "tool": "write", "state": {"status": "completed", "input": {"filePath": "/repo/a/old.py"}}})),
+        ],
+    )
+
+    result = opencode.read_tool_inputs(database, session_id="ses-a", max_parts=1)
+
+    assert isinstance(result, tuple)
+    assert [item.file_path for item in result] == ["/repo/a/recent.py"]
 
 
 def test_read_usage_emits_exact_step_finish_dimensions_without_message_double_count(tmp_path: Path) -> None:
@@ -694,6 +816,109 @@ def test_part_bound_counts_only_step_finish_rows(tmp_path: Path) -> None:
     ]
 
 
+def test_incremental_read_handles_a_session_beyond_the_initial_part_bound(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    count = opencode.DEFAULT_MAX_PARTS + 1
+    messages = [_message(f"msg-{index}", "ses-a") for index in range(count)]
+    parts = [
+        _part(
+            f"step-{index}", f"msg-{index}", "ses-a",
+            {"input": 0, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        )
+        for index in range(count)
+    ]
+    _database(database, [_session("ses-a", "/repo/a", tokens=(0, count, 0, 0, 0))], messages, parts)
+
+    initial = opencode.read_usage(database, session_id="ses-a", max_parts=count)
+    assert isinstance(initial, opencode.OpenCodeReadSuccess)
+    revisions = {item.event_id: item.source_revision for item in initial.components if item.source_revision}
+
+    incremental = opencode.read_usage(database, session_id="ses-a", known_event_revisions=revisions, incremental=True)
+
+    assert isinstance(incremental, opencode.OpenCodeReadSuccess)
+    assert incremental.components == ()
+
+
+def test_incremental_read_emits_only_a_new_part_from_a_long_session(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    count = opencode.DEFAULT_MAX_PARTS + 1
+    messages = [_message(f"msg-{index}", "ses-a") for index in range(count)]
+    parts = [
+        _part(
+            f"step-{index}", f"msg-{index}", "ses-a",
+            {"input": 0, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        )
+        for index in range(count)
+    ]
+    _database(database, [_session("ses-a", "/repo/a", tokens=(0, count, 0, 0, 0))], messages, parts)
+    initial = opencode.read_usage(database, session_id="ses-a", max_parts=count)
+    assert isinstance(initial, opencode.OpenCodeReadSuccess)
+    revisions = {item.event_id: item.source_revision for item in initial.components if item.source_revision}
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE part SET data = ?, time_updated = ? WHERE id = ?",
+            (json.dumps({"type": "step-finish", "tokens": {"input": 0, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}}}), 1_700, "step-0"),
+        )
+        connection.execute("UPDATE session SET tokens_output = ? WHERE id = ?", (count + 1, "ses-a"))
+    incremental = opencode.read_usage(database, session_id="ses-a", known_event_revisions=revisions, incremental=True)
+
+    assert isinstance(incremental, opencode.OpenCodeReadSuccess)
+    assert [(item.part_id, item.dimension, item.tokens) for item in incremental.components if item.tokens] == [("step-0", "output", 2)]
+
+
+def test_incremental_read_skips_unchanged_long_identifier_revisions(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    session_id = "s" * 100
+    part_id = "p" * 300
+    message_id = "m" * 100
+    _database(
+        database,
+        [_session(session_id, "/repo/a", tokens=(0, 1, 0, 0, 0))],
+        [_message(message_id, session_id)],
+        [_part(part_id, message_id, session_id, {"input": 0, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}})],
+    )
+    initial = opencode.read_usage(database, session_id=session_id)
+    assert isinstance(initial, opencode.OpenCodeReadSuccess)
+    revisions = {item.event_id: item.source_revision for item in initial.components if item.source_revision}
+
+    incremental = opencode.read_usage(database, session_id=session_id, known_event_revisions=revisions, incremental=True)
+
+    assert isinstance(incremental, opencode.OpenCodeReadSuccess)
+    assert incremental.components == ()
+
+
+def test_cursor_accepts_the_hashed_event_id_for_long_part_identifiers(tmp_path: Path) -> None:
+    path = tmp_path / "cursors.json"
+    store = opencode.OpenCodeCursorStore(path)
+    event_id = opencode._event_id("s" * 100, "p" * 300, "output")
+
+    store.prepare({}, event_revisions={event_id: "revision"})
+    store.commit()
+
+    state = store.state()
+    assert isinstance(state, opencode.OpenCodeCursorState)
+    assert state.event_revisions == {event_id: "revision"}
+
+
+def test_first_read_with_another_session_cursor_still_validates_the_cumulative_anchor(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    _database(
+        database,
+        [_session("ses-a", "/repo/a", tokens=(0, 2, 0, 0, 0))],
+        [_message("msg-a", "ses-a")],
+        [_part("step-a", "msg-a", "ses-a", {"input": 0, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}})],
+    )
+
+    result = opencode.read_usage(
+        database,
+        session_id="ses-a",
+        known_event_revisions={"opencode:other-session:step-a:output": "revision"},
+    )
+
+    assert isinstance(result, opencode.OpenCodeUnavailable)
+    assert result.reason == "cumulative-anchor-mismatch"
+
+
 def test_revised_step_finish_snapshot_keeps_stable_source_identity(tmp_path: Path) -> None:
     database = tmp_path / "opencode.db"
     _database(
@@ -834,14 +1059,14 @@ def test_cursor_presence_prevents_stale_delta_when_a_dimension_reappears(tmp_pat
 
 def test_cursor_state_is_reset_when_the_stats_database_is_replaced(tmp_path: Path) -> None:
     cursor_path = tmp_path / "cursors.json"
-    database = tmp_path / "stats-v8.sqlite3"
+    database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"first")
     store = opencode.OpenCodeCursorStore(cursor_path)
     assert store.reset_for_database(database) is None
     store.prepare({"part:output": 10}, event_revisions={"part:output": "rev-1"})
     store.commit()
 
-    replacement = tmp_path / "stats-v8.sqlite3.new"
+    replacement = tmp_path / "stats-v9.sqlite3.new"
     replacement.write_bytes(b"second")
     replacement.replace(database)
 
@@ -855,7 +1080,7 @@ def test_cursor_state_is_reset_when_the_stats_database_is_replaced(tmp_path: Pat
 
 def test_cursor_state_is_preserved_for_normal_stats_database_writes(tmp_path: Path) -> None:
     cursor_path = tmp_path / "cursors.json"
-    database = tmp_path / "stats-v8.sqlite3"
+    database = tmp_path / "stats-v9.sqlite3"
     database.write_bytes(b"stable")
     store = opencode.OpenCodeCursorStore(cursor_path)
     store.reset_for_database(database)
@@ -892,7 +1117,7 @@ def test_cursor_event_revisions_are_compacted_on_restart(tmp_path: Path) -> None
     assert isinstance(state, opencode.OpenCodeCursorState)
     assert len(state.event_revisions) == opencode.MAX_CURSOR_ENTRIES
     assert "event-00000" not in state.event_revisions
-    assert "event-08208" in state.event_revisions
+    assert f"event-{opencode.MAX_CURSOR_ENTRIES - 1:05d}" in state.event_revisions
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert len(persisted["event_revisions"]) == opencode.MAX_CURSOR_ENTRIES
 
@@ -912,4 +1137,4 @@ def test_cursor_event_revisions_are_bounded_when_prepared_and_survive_restart(tm
     assert isinstance(restarted, opencode.OpenCodeCursorState)
     assert len(restarted.event_revisions) == opencode.MAX_CURSOR_ENTRIES
     assert "event-00000" not in restarted.event_revisions
-    assert "event-08192" in restarted.event_revisions
+    assert f"event-{opencode.MAX_CURSOR_ENTRIES:05d}" in restarted.event_revisions

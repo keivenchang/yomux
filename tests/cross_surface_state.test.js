@@ -956,6 +956,15 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Differ interaction leaves Finder selected session intact');
     assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
   });
+  test('Differ session selector remains authoritative after switching away and back', () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '1', loaded: true, files: [], repos: [], errors: []});
+    api.setFileExplorerChangesSelectedSessionForTest('2');
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'Differ selector owns the target immediately');
+    api.setFileExplorerSessionFilesPayloadForTest({session: '2', loaded: true, files: [], repos: [], errors: []});
+    assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'later payload reads do not restore the previous session');
+  });
   test('Finder sync prefers live tmux path over transcript metadata', () => {
     const signalPathApi = loadYolomux('', ['5']);
     signalPathApi.setTranscriptInfoForTest('5', {
@@ -1896,7 +1905,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/term\.onData\(data => \{[\s\S]*recordTerminalMobileInputTrace\(session, 'on-data'[\s\S]*handleTerminalData\(session, data\);[\s\S]*\}\);/.test(terminalInputBody), 'startTerminal traces metadata then routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
     assert.ok(/function applyTerminalUnicode11Addon\(term\)[\s\S]*new Unicode11AddonCtor\(\)[\s\S]*term\.loadAddon\(addon\)[\s\S]*term\.unicode\.activeVersion = '11'/.test(appSource), 'xterm terminals register Unicode 11 widths for emoji cell accounting');
-    assert.ok(/const term = new TerminalCtor\([\s\S]*?\}\);\s*applyTerminalUnicode11Addon\(term\);\s*term\.open\(container\);/.test(terminalInputBody), 'xterm Unicode widths are selected before the first terminal paint');
+    assert.ok(/const term = new TerminalCtor\([\s\S]*?\}\);[\s\S]*?applyTerminalUnicode11Addon\(term\);[\s\S]*?term\.open\(container\);/.test(terminalInputBody), 'xterm Unicode widths are selected before the first terminal paint');
     assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
     assert.equal(/term\.onData\(data => \{[^]*?noteTerminalExplicitInput\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder indirectly through explicit-input helpers because hover mouse reports can emit terminal bytes');
     assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling still avoids the explicit-input helper that commits Finder targets');
@@ -2389,6 +2398,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
+    assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
     assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
@@ -3198,7 +3208,8 @@ async function runCrossSurfaceStateSuite() {
       left: {active: 'old', tabs: ['old', 'recent']},
       right: {active: 'newest', tabs: ['newest']},
     }, 'the responsive owner leaves the same restored URL split intact on a desktop viewport');
-    assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
+    assert.ok(/function dispatchTouchContextMenu[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
+    assert.ok(coreSource.includes('event.yolomuxTouchLongPress = true'), 'a bridged long press is marked for editor selection ownership');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
     const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
@@ -4842,11 +4853,11 @@ async function runCrossSurfaceStateSuite() {
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
     assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
     assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
-    assert.ok(pinTabRow?.innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
-    assert.equal((pinTabRow?.innerHTML.match(/app-menu-ui-icon-pin/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
+    assert.ok(pinTabRow?.innerHTML.includes('context-menu-check'), 'Pin Tab context menu row has the shared pin icon');
+    assert.equal((pinTabRow?.innerHTML.match(/context-menu-check/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
@@ -5083,6 +5094,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
     readonlyApi.setAutoApproveStateForTest('1', {enabled: true});
     assert.equal(readonlyApi.menuTabCommand('1', {toggleYolo: true}).html.includes('data-auto-session'), false);
+    const macFinderApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'admin', {homePath: '/Users/test'});
+    macFinderApi.applyLayoutUrlStateSeedForTest({finder: {root: '/home', rootMode: 'fixed'}});
+    assert.equal(macFinderApi.fileExplorerRootForTest(), '/Users/test', 'saved macOS /home Finder root migrates to the bootstrap home');
     api.setTranscriptInfoForTest('1', {
       project: {git: {cwd: '/home/test/yolomux.dev', root: '/home/test/yolomux.dev'}},
       panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],

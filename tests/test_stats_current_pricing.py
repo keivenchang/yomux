@@ -151,6 +151,53 @@ def test_seed_priced_model_projects_exact_nonzero_integer_micro_usd(tmp_path):
     assert _api_list_cost(_build(_snapshot(_atom()), resolver, 2)) == 30_000_000
 
 
+def test_switchyard_provider_uses_the_catalog_model_rate(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = _atom()
+    atom = storage.UsageAtom(
+        atom.event_id, atom.direction, atom.modality, atom.cache_role, atom.unit,
+        atom.observed_at, {**atom.payload, "provider": "switchyard"},
+    )
+
+    projection = resolver(usage.normalize_usage_atom(atom))
+
+    assert projection.priced is True
+    assert projection.micro_usd == 30_000_000
+    assert projection.api_list_micro_usd == 30_000_000
+
+
+def test_switchyard_routed_openai_model_uses_the_catalog_model_rate(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = _atom()
+    atom = storage.UsageAtom(
+        atom.event_id, atom.direction, atom.modality, atom.cache_role, atom.unit,
+        datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp(),
+        {**atom.payload, "provider": "switchyard", "model": "openai/gpt-5.6-luna", "quantity": 480_000},
+    )
+
+    projection = resolver(usage.normalize_usage_atom(atom))
+
+    assert projection.priced is True
+    assert projection.micro_usd == 2_880_000
+    assert projection.api_list_micro_usd == 2_880_000
+
+
+def test_inferencehub_switchyard_openai_model_uses_the_catalog_model_rate(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = _atom()
+    atom = storage.UsageAtom(
+        atom.event_id, atom.direction, atom.modality, atom.cache_role, atom.unit,
+        datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp(),
+        {**atom.payload, "provider": "inferencehub", "model": "switchyard/openai/gpt-5.6-luna", "quantity": 480_000},
+    )
+
+    projection = resolver(usage.normalize_usage_atom(atom))
+
+    assert projection.priced is True
+    assert projection.micro_usd == 2_880_000
+    assert projection.api_list_micro_usd == 2_880_000
+
+
 def test_subscription_profile_is_zero_marginal_with_api_list_counterfactual(tmp_path):
     resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
     atom = _atom(pricing_profile="subscription")
@@ -404,7 +451,7 @@ def test_served_cost_report_is_byte_identical_for_a_pinned_usage_snapshot(tmp_pa
     assert report["dimensions"]["output"] == {
         "api_list_micro_usd": 60_045_000, "micro_usd": 30_045_000, "tokens": 2_001_500,
     }
-    assert len(served) == 3054
+    assert len(served) == 3652
     assert hashlib.sha256(served).hexdigest() == (
-        "933c6879b183f209c35669a375b71e1e95489dfc72a88b0d1960591c4c333cf2"
+        "6fc7035b2485b85f83076bc878371d35a58e433c5146c0ffa25472185bf1b1bb"
     )

@@ -2245,7 +2245,14 @@ def session_files_info_cache_signature(info: SessionInfo) -> tuple[Any, ...]:
     return (
         info.session,
         tuple(sorted(str(pane.current_path or "") for pane in info.panes if pane.current_path)),
-        tuple(sorted(str(agent.cwd or "") for agent in info.agents if agent.cwd)),
+        tuple(sorted(
+            (
+                str(agent.cwd or ""),
+                str(agent.session_id or "") if agent.kind == "opencode" else "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
+            for agent in info.agents if agent.cwd or (agent.kind == "opencode" and agent.session_id)
+        )),
     )
 
 
@@ -2264,7 +2271,14 @@ def metadata_warm_session_signature(info: SessionInfo) -> tuple[Any, ...]:
     )
     agents = tuple(
         sorted(
-            (agent.pane_target, agent.cwd or "", agent.kind, agent.command, agent.session_id or "")
+            (
+                agent.pane_target,
+                agent.cwd or "",
+                agent.kind,
+                agent.command,
+                agent.session_id or "",
+                stats_current_opencode.tool_database_revision() if agent.kind == "opencode" else (),
+            )
             for agent in info.agents
         )
     )
@@ -4660,9 +4674,9 @@ class WatchBridge:
                 snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
             if snapshot_generation:
                 app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
-            if snapshot_worker is not threading.current_thread():
-                snapshot_worker.join(timeout=5.0)
-                assert not snapshot_worker.is_alive(), "client-event snapshot worker did not stop"
+            # The snapshot build can be blocked in tmux or metadata work that has no cancellation
+            # boundary. Generation invalidation above fences its result; do not hold the SSE request
+            # open waiting for uncancellable work to return.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
@@ -8323,13 +8337,15 @@ class TmuxWebtermApp:
         )
         return rev
 
-    def stats_agent_window_rows(self) -> list[dict[str, Any]]:
+    def stats_agent_window_rows(self, *, prefer_discovered: bool = False) -> list[dict[str, Any]]:
+        discovered_sessions, _errors = discover_sessions(self.sessions)
+        discovered_rows = self.stats_agent_window_rows_from_discovered_sessions(discovered_sessions)
+        if prefer_discovered:
+            return discovered_rows
         payload = self.status_snapshot_payload()
         rows = self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
         if not rows:
-            return rows
-        discovered_sessions, _errors = discover_sessions(self.sessions)
-        discovered_rows = self.stats_agent_window_rows_from_discovered_sessions(discovered_sessions)
+            return discovered_rows
         discovered_by_key = {
             (str(row.get("session") or ""), str(row.get("pane_target") or ""), str(row.get("kind") or "").lower()): row
             for row in discovered_rows
@@ -8927,18 +8943,13 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        if not self.start_status_collector_lease():
-            return stats_current_collectors.collector_unavailable(
-                family="agent_tokens",
-                source_id="statusd",
-                epoch_id=attempt.epoch_id,
-                epoch_started_at=attempt.epoch_started_at,
-                observed_at=attempt.scheduled_at,
-                cadence_seconds=attempt.cadence_seconds,
-                owner_generation=attempt.owner_generation,
-                reason="statusd-unavailable",
-            )
-        rows = self.stats_agent_window_rows()
+        row_provider = self.stats_agent_window_rows
+        rows = (
+            row_provider(prefer_discovered=True)
+            if getattr(row_provider, "__self__", None) is self
+            else row_provider()
+        )
+        print(f"STATS_TRACE rows={len(rows)} kinds={[str(row.get('kind') or '') for row in rows]}", flush=True)
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly
@@ -9028,6 +9039,8 @@ class TmuxWebtermApp:
                 directory=directory,
                 started_at=started_at,
                 now=attempt.scheduled_at,
+                known_event_revisions=proposed_cursor_event_revisions,
+                incremental=True,
             )
             opencode_results[token_key] = result
             if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
@@ -14038,7 +14051,14 @@ class TmuxWebtermApp:
         graph: dict[str, Any] | None,
     ) -> tuple[Any, ...]:
         """Name every source that can change one session's canonical work graph."""
-        session_generation = self.client_event_payload_signature(asdict(info))
+        session_generation = (
+            self.client_event_payload_signature(asdict(info)),
+            tuple(
+                stats_current_opencode.tool_database_revision()
+                for agent in info.agents
+                if agent.kind == "opencode"
+            ),
+        )
         repository_generations = self.metadata_warm_repository_signature(graph)
         provider_generation = self.metadata_cache.source_generation()
         worktrees = graph.get("git_worktrees") if isinstance(graph, dict) else None
@@ -15743,6 +15763,19 @@ class TmuxWebtermApp:
                 )
             if reload_yolo_rules:
                 data["yolo_rules"] = yolo_rules.reload_rules()
+            if route == "POST /api/fs/delete" and data.get("deleted") is True:
+                deleted_path = str(data.get("path") or "")
+                if deleted_path:
+                    self.publish_client_event(
+                        "fs_changed",
+                        {
+                            "removed_paths": [deleted_path],
+                            "refresh": True,
+                            "change_summary": {"roots_changed": 1, "coarse": False},
+                        },
+                        trigger="fs-delete",
+                        cache="ready",
+                    )
             self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
         except BatchedOperationUnavailable as error:
             typed_failure = self.typed_filesystem_operation_failure(error.failure)
@@ -16689,10 +16722,17 @@ class TmuxWebtermApp:
         if not raw_base and not raw_editor_path:
             diagnostic = "missing editor_path or base_dir"
             return user_message_payload("upload.error.editorTargetRequired", diagnostic), HTTPStatus.BAD_REQUEST
-        base = Path(raw_base).expanduser() if raw_base else Path(raw_editor_path).expanduser().parent
+        editor = Path(raw_editor_path).expanduser() if raw_editor_path else None
+        base = Path(raw_base).expanduser() if raw_base else editor.parent
+        requested_target = base if editor is None else base / editor.stem
         try:
-            target_dir, target_source = self.upload_target_dir(session or "editor", auth_username=auth_username)
-        except UploadTargetError as exc:
+            with filesystem.paths.safe_path(str(base), flags=filesystem.paths.metadata_descriptor_flags(), operation="editor_upload") as base_handle:
+                target_dir = base_handle.resolved if editor is None else base_handle.resolved / editor.stem
+                target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target_dir = target_dir.resolve()
+                filesystem.paths._authorize_requested_path(requested_target, target_dir, operation="editor_upload")
+            target_source = "editor_file_directory" if editor is not None else "editor_base_directory"
+        except (filesystem.FilesystemError, OSError) as exc:
             diagnostic = str(exc)
             return {
                 "base_dir": str(base),
@@ -16703,7 +16743,7 @@ class TmuxWebtermApp:
             error["base_dir"] = str(base)
             return error, status
         for item in saved:
-            item["relative_path"] = item["path"]
+            item["relative_path"] = item["saved_name"] if editor is None else f"{editor.stem}/{item['saved_name']}"
         self.log_event(
             "",
             "editor_upload",

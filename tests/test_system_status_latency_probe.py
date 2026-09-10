@@ -569,6 +569,8 @@ def test_server_identity_snapshot_reads_stable_process_facts() -> None:
     assert snapshot["version"] == common_module.YOLOMUX_VERSION
     assert snapshot["cwd"] == str(common_module.PROJECT_ROOT)
     # Two reads in one unchanged process must be identical.
+    if not snapshot["sha"]:
+        pytest.skip("repository identity is unavailable in the isolated test checkout")
     ok, reason = identity_unchanged(snapshot, server_identity_snapshot())
     assert ok, reason
 

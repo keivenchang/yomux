@@ -265,7 +265,7 @@ const sourceFunction = (name, nextName) => {
   return source.slice(start, end);
 };
 const report = JSON.parse(fs.readFileSync(0, 'utf8'));
-const context = {
+  const context = {
   result: '',
   report,
   esc: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
@@ -278,25 +278,50 @@ const context = {
   normalizedExternalHttpUrl: value => String(value || ''),
   debugGraphTokenNumberText: value => String(value),
   debugGraphTokensText: value => `${value} tokens`,
-  debugGraphCostAggregateRows: () => [],
-};
-const helpers = [
-  sourceFunction('jsDebugCurrentCostDimensionRows', 'jsDebugCurrentCostSummary'),
-  sourceFunction('jsDebugCurrentCostSummary', 'jsDebugCurrentModelComponent'),
+    debugGraphCostAggregateRows: () => [],
+    debugGraphCostPricePairText: (marginal, list) => {
+      const format = value => '$' + (Number(value) / 1000000).toFixed(6);
+      return Number(list) === Number(marginal) ? format(Number(marginal)) : format(Number(marginal)) + ' marginal / ' + format(Number(list)) + ' list';
+    },
+  debugGraphCostPricePairHtml: (marginal, list) => `${marginal}:${list}`,
+  debugGraphCostModelIdentityHtml: row => String(row?.model || 'unknown'),
+  debugGraphCostAgentLabelHtml: value => String(value),
+  };
+  const constants = `const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'];`;
+  const functions = [
+  sourceFunction('debugGraphCostReportRow', 'debugGraphCostDimensionRows'),
+  sourceFunction('debugGraphCostDimensionRows', 'debugGraphCostUsageTableCellHtml'),
   sourceFunction('debugGraphCostMicroUsd', 'debugGraphCostApiListMicroUsd'),
   sourceFunction('debugGraphCostApiListMicroUsd', 'debugGraphCostUsdText'),
-  sourceFunction('debugGraphCostUsdText', 'debugGraphCostRangeUsdText'),
-  sourceFunction('debugGraphCostModelAgentKind', 'debugGraphCostComponentRateText'),
-  sourceFunction('debugGraphCostComponentRateText', 'debugGraphCostSourceLabel'),
+  sourceFunction('debugGraphCostComponentRateText', 'debugGraphCostModelEvidenceLinksHtml'),
+  sourceFunction('debugGraphCostModelEvidenceLinksHtml', 'debugGraphCostModelFormulaCellHtml'),
+  sourceFunction('debugGraphCostModelFormulaCellHtml', 'debugGraphCostTmuxLabel'),
+  sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'),
+  sourceFunction('debugGraphCostExactTotalRow', 'debugGraphCostUsageTableHtml'),
+  sourceFunction('debugGraphCostUsageColumns', 'debugGraphCostUsesLifetimeCacheWrites'),
+  sourceFunction('debugGraphCostUsesLifetimeCacheWrites', 'debugGraphCostBreakdownItems'),
+  sourceFunction('debugGraphCostBreakdownItems', 'debugGraphCostReportRow'),
+  sourceFunction('debugGraphCostModelUsageChartHtml', 'debugGraphCostComponentRateText'),
 ].join('\n');
 vm.runInNewContext(`
   const debugGraphCostInteger = value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0;
   const debugGraphCostOptionalInteger = value => value === null || value === undefined ? null : debugGraphCostInteger(value);
   const debugGraphCostText = (_key, fallback) => fallback;
+  const debugGraphCostUsageTokensText = value => String(value);
+  const debugGraphCostUsagePriceText = (marginal, list, tokens, row) => {
+    if (Number(row?.unpriced_token_quantity) > 0 && Number(row?.priced_token_quantity) <= 0) return 'Unpriced';
+    return debugGraphCostPricePairText(marginal, list);
+  };
+  const debugGraphCostUsdText = value => {
+    const microUsd = Number(value);
+    return Number.isFinite(microUsd) ? '$' + (microUsd / 1000000).toFixed(6) : '$0.000000';
+  };
+  const debugGraphCostUsageTableCellHtml = (tokens, micro) => String(tokens) + ':' + String(micro);
   const debugGraphCostRowRangeUsdText = row => debugGraphCostUsdText(row?.micro_usd);
-  ${helpers}
-  const summary = jsDebugCurrentCostSummary(report);
-  result = debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary});
+  ${constants}
+  ${functions}
+  const summary = {...report, models: report.models.map(debugGraphCostReportRow)};
+  result = debugGraphCostModelUsageChartHtml(summary.models, summary.evidence, {report: true, summary});
 `, context);
 process.stdout.write(context.result);
 """

@@ -97,7 +97,8 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert "--port 8123" in command
     assert "--port 8124" in command
     assert "--port 8125" in command
-    assert command.count("--dang --self-signed --dev") == 3
+    assert command.count("--dang --self-signed --dev") == 2
+    assert command.count("--dang --self-signed") >= 3
 
 
 def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
@@ -220,7 +221,7 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'source "$repo_root/tools/startup_common.sh"' in source
     assert "yolomux_acquire_start_lock" in source
     assert "trap yolomux_release_start_lock EXIT" in source
-    assert 'trap yolomux_release_start_lock EXIT\nyolomux_wait_for_system_capacity "$python_bin"\nensure_xterm_assets' in source
+    assert "skipping only the startup CPU/load capacity wait" in source
     assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
     assert 'yolomux_bootout_macos_server "$port"\n  fi\n  stop_port_listener "$port"' in source
     assert "yolomux_submit_macos_server" in source
@@ -229,6 +230,15 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'tmux -L "$socket_name" new-session' in startup_common
     assert "launchctl submit" not in startup_common
     assert 'cd "$repo"' in startup_common
+
+
+def test_boot_ignore_load_is_explicit_and_preserves_other_startup_guards():
+    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+
+    assert "--ignore-load" in source
+    assert 'yolomux_acquire_start_lock || die "startup lock unavailable"' in source
+    assert 'restart_port "$port"' in source
+    assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
 
 
 def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path):
@@ -243,7 +253,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    assert not 7770 <= port <= 7773, port
+    assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
             ["/bin/bash", "-c", f'source "$1"; yolomux_port_listener_pids {port}',
@@ -267,7 +277,7 @@ def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    assert not 7770 <= port <= 7773, port
+    assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
             ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {port}',
@@ -290,7 +300,7 @@ def test_startup_listener_boundary_propagates_an_absent_listener_exactly(tmp_pat
     probe.bind(("127.0.0.1", 0))
     free_port = probe.getsockname()[1]
     probe.close()
-    assert not 7770 <= free_port <= 7773, free_port
+    assert not 7110 <= free_port <= 7113, free_port
 
     result = subprocess.run(
         ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {free_port}',
@@ -696,55 +706,13 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
 
     assert result.returncode in {0, 1}
     assert f"cpu_budget={expected}" in result.stdout
-    assert f"/{expected:.2f}" in result.stdout
-    assert "effective_load1 <= cpus and effective_load5 <= cpus * 2.0" in startup_common
-    assert "effective_load1 <= cpus * 0.75" not in startup_common
-
-
-def test_startup_capacity_accepts_bounded_operator_load_discount():
-    expected = startup_cpu_budget()
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES="$3" yolomux_system_load_snapshot "$2"',
-            "startup-capacity-discount",
-            str(STARTUP_COMMON),
-            sys.executable,
-            str(expected + 100),
-        ],
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode in {0, 1}, result.stdout + result.stderr
-    assert f"discount={expected:.2f}" in result.stdout
-    fields = [part.split("=", 1) for part in result.stdout.split() if "=" in part]
-    raw_loads = [float(value) for key, value in fields if key in {"load1", "load5"}]
-    effective_loads = [float(value.split("/", 1)[0]) for key, value in fields if key == "effective"]
-    assert len(raw_loads) == len(effective_loads) == 2
-    assert all(
-        abs(effective - max(0.0, raw - expected)) <= 0.02
-        for raw, effective in zip(raw_loads, effective_loads)
-    )
-
-
-def test_startup_capacity_rejects_invalid_operator_load_discount():
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES=invalid yolomux_system_load_snapshot "$2"',
-            "startup-capacity-invalid-discount",
-            str(STARTUP_COMMON),
-            sys.executable,
-        ],
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode == 2
-    assert "invalid YOLOMUX_START_LOAD_DISCOUNT_CORES" in result.stdout
+    assert "cpu_idle=" in result.stdout
+    assert "cpu_stall_some <= 0.10 and idle_fraction >= 0.10" in startup_common
+    assert "defender_d_tasks = defender_d_state_tasks()" in startup_common
+    assert 'task_dir = f"/proc/{entry.name}/task"' in startup_common
+    assert "effective_load1 = max(0.0, load1 - defender_d_tasks)" in startup_common
+    assert "load_pressure_ok = effective_load1 <= cpus * 0.75" in startup_common
+    assert "ok = cpu_pressure_ok and load_pressure_ok" in startup_common
 
 
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):

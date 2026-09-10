@@ -140,7 +140,7 @@ The change requires schema v8 because it adds fixed tables, fixed seed rows, tri
 
 An existing v7 database is migration input, never an in-place target. The migrator takes a consistent SQLite backup of v7 into a shadow `stats-v8.sqlite3`, copies the retained raw fact tables, seeds all 1,248 slots, performs the one-time initial ring fold in the shadow, validates exact row counts and staleness metadata, and atomically activates v8 only after validation. This one-time upgrade materialization is distinct from restart behavior: every later v8 restart reads persisted rings without rebuilding them.
 
-The old versioned database, WAL sidecars, writer fence, and socket are not moved, deleted, or rewritten. The process on port 7770 continues using its old schema and socket throughout shadow construction and after v8 activation. A v8 migration failure leaves the old database untouched and does not publish a partial v8 file.
+The old versioned database, WAL sidecars, writer fence, and socket are not moved, deleted, or rewritten. The process on port 7110 continues using its old schema and socket throughout shadow construction and after v8 activation. A v8 migration failure leaves the old database untouched and does not publish a partial v8 file.
 
 A change to ring capacity, resolution membership, slot payload format, or timestamp semantics requires schema v9 and the same shadow-build process. Rows are never inserted, deleted, or resized in an active v8 aggregate store.
 

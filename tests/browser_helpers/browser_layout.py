@@ -659,6 +659,10 @@ class BrowserFakeTlsContext:
 
 
 def isolate_browser_runtime_paths(monkeypatch, tmp_path):
+    # This helper supplies explicit per-app roots below tmp_path. Keeping the suite-wide rooted-run
+    # override active makes common.runtime_root() rebuild a longer <test-root>/runtime path and can
+    # push the local-service socket beyond Linux's sockaddr_un limit.
+    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
     config_dir = tmp_path / "yolomux-config"
     state_dir = tmp_path / "yolomux-state"
     runtime_base_dir = tmp_path / "yolomux-runtime"
@@ -2303,6 +2307,8 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "serverHostname": "localhost",
         "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
         "version": "test",
+        "versionStatus": "test",
+        "postReleaseCommits": [],
         "versionCommitTime": "test",
         "settingsPayload": {"settings": settings, "defaults": settings_module.default_settings(), "mtime_ns": 0},
         "statsWriterFence": {
@@ -2316,6 +2322,7 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
             "errors": [],
         },
         "codeMirrorAssetUrl": fixture_asset_url("static", "codemirror.js"),
+        "proseMirrorAssetUrl": fixture_asset_url("static", "prosemirror.js"),
         "locale": "en",
         "localeRegistry": locale_registry_payload(),
         "strings": {"en": dict(app_english_strings())},
@@ -2571,7 +2578,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       }
       function fixtureStatsCostReport() {
         return {
-          schema_version: 3,
+          schema_version: 4,
           total_micro_usd: 0,
           total_api_list_micro_usd: 0,
           total_tokens: 0,
@@ -2676,7 +2683,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           return fixtureSettingAnswer('appearance.tab_width', '172', '220', 'Preferences -> UI sizes');
         }
         if (lower.includes('font size')) {
-          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});
+          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18, sync_font_sizes: false}});
           return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> UI sizes');
         }
         if (lower.includes('notification level') || lower.includes('notify level')) {

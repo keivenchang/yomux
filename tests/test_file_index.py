@@ -198,8 +198,8 @@ def test_configured_glob_and_regex_exclusions_match_root_relative_paths(tmp_path
     assert policy["exclude_signature"].startswith("fs-secret-v2:")
 
 
-def test_index_safety_refresh_uses_a_thirty_minute_interval():
-    assert file_index.INDEX_TTL_SECONDS == 30.0 * 60.0
+def test_index_safety_refresh_uses_a_five_minute_interval():
+    assert file_index.INDEX_TTL_SECONDS == 5.0 * 60.0
 
 
 def test_walk_root_skips_symlinked_files_and_dirs(tmp_path, monkeypatch):
@@ -1146,7 +1146,7 @@ def test_reindex_ordinary_symlink_is_admitted_and_marks_its_root_dirty(tmp_path,
 def test_indexer_restart_resumes_a_durable_partial_frontier_without_waiting_for_ttl(tmp_path, monkeypatch):
     # P0-4 (integration through process_due): searchable state and crawl completion are SEPARATE facts.
     # A compatible partial loads ready=True with a durable pending frontier; a restart's startup enqueue
-    # + process_due must RESUME that generation's crawl, not wait out the 30-minute TTL ("Indexing...").
+    # + process_due must RESUME that generation's crawl, not wait out the safety TTL ("Indexing...").
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)

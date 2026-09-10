@@ -57,7 +57,7 @@ ROOTED_SOCKET_RELATIVE_PATHS = (
     Path("services/batchd.sock"),
     Path("services/watchd.sock"),
     Path("services/approvald.sock"),
-    Path("services/statsd.p24s7.ffffffffffffffff.sock"),
+    Path("services/statsd.p25s9.ffffffffffffffff.sock"),
     Path("services/indexer.sock"),
 )
 # W1: one authoritative identity carrier. Replaces the three same-valued vars
@@ -236,7 +236,7 @@ class InstanceResolution:
 
 
 def default_port(platform: str) -> int:
-    return 8880 if platform.casefold() == "darwin" else 7770
+    return 8880 if platform.casefold() == "darwin" else 7110
 
 
 def scan_port(argv: list[str]) -> int | None:

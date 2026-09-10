@@ -1620,7 +1620,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
     assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
     const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
+    assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); font-weight: 700; }'), 'Markdown table headers get a readable preview background');
     assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-12) 0; }'), 'Markdown thematic breaks render as preview rules');
     assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
@@ -2360,7 +2360,7 @@ async function runLayoutRestoreSuite() {
     // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
     assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.marker'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
     assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarServerUptimeTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows server uptime and version hover shows the commit SHA');
-    assert.ok(/function topbarVersionTitle\(\)[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title localizes the SHA and commit count');
+    assert.ok(/function topbarVersionTitle\(\)[\s\S]*bootstrap\.versionStatus[\s\S]*bootstrap\.postReleaseCommits[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title shows release status, post-release commits, SHA, and commit count');
     // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
     // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
     assert.ok(/function startSessionDrag[\s\S]*?options\.dragImage \|\| source[\s\S]*?setDragImage\(dragImageSource/.test(source), '#47: tab drags default to the native tab drag image while allowing shared callers to override it');
@@ -2436,7 +2436,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(focusedPanelBody.includes('focusPreferencesSearch'), false, 'shared pane focus does not steal focus into Preferences search');
     assert.ok(focusedPanelBody.includes('updateFocusOnlyChrome()'), 'shared pane focus refreshes every pane focus ring through the shared focus-chrome parent');
     const panelShellStart = source.indexOf('function bindPanelShell(');
-    const panelShellEnd = source.indexOf('const head = panel.querySelector', panelShellStart);
+    const panelShellEnd = source.indexOf('function eventTargetIsTerminalFocusSurface(', panelShellStart);
     assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
     const panelShellBody = source.slice(panelShellStart, panelShellEnd);
     assert.equal(panelShellBody.includes('focusPreferencesSearch'), false, 'panel pointer/focus events do not steal focus into Preferences search');
@@ -2752,8 +2752,8 @@ async function runLayoutRestoreSuite() {
     );
     const threeToneHtml = threeToneApi.globalActivityStatusLineHtml();
     assert.equal((threeToneHtml.match(/topbar-activity-count[^\"]* active/g) || []).length, 3, 'topbar renders one ball per established status tone');
-    assert.match(threeToneHtml, /topbar-activity-ask active[\s\S]*topbar-activity-count-number">2</, 'unavailable rows join the red attention count');
-    assert.equal(threeToneHtml.includes('topbar-activity-unavailable'), false, 'topbar does not render a fourth unavailable ball');
+    assert.match(threeToneHtml, /topbar-activity-ask active[\s\S]*topbar-activity-count-number">1</, 'unavailable rows do not join the red attention count');
+    assert.equal(threeToneHtml.includes('topbar-activity-unavailable'), false, 'topbar does not render an unavailable ball');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10)') && source.includes('ctx.fillStyle = faviconAccent.bg') && source.includes("getPropertyValue('--active-accent')") && source.includes("'#99d441'"), 'favicon fills the icon with the active-accent tile (theme/active-color driven, legacy lime as fallback) instead of a dark border');
     assert.ok(source.includes('ctx.fillStyle = faviconAccent.text') && source.includes("getPropertyValue('--active-accent-text')"), 'favicon Y uses the theme-aware contrast color (dark on light accents, light on dark accents like blue)');
@@ -3608,6 +3608,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/recordJsDebugEvent\('terminal_mobile_input_trace',[\s\S]*\{graph: false, refresh: false\}\)/.test(coreSource), 'terminal metadata capture stays out of chart observations and cannot rerender Debug while native input is arriving');
     assert.ok(/function syncFilePreviewPopoutFromPanel[\s\S]*syncScrollPositionByRatio\([^)]*preview-popout-panel-reflection/.test(popoutSource), 'popout reflection names its Preview writes');
     assert.ok(/function writeFileEditorSplitScrollIfOwned[\s\S]*writeDeferredElementScrollIfOwned[\s\S]*preview-split-reflection/.test(splitSource), 'queued split reflections yield through the shared Preview scroll owner');
+    assert.ok(/function sourceSpanIsIgnoredComment[\s\S]*_pmIgnoredCommentRanges[\s\S]*function previewScrollTopForSourcePosition[\s\S]*sourceSpanIsIgnoredComment[\s\S]*fraction/.test(splitSource), 'split scroll holds across hidden comments but interpolates smoothly across rendered content');
     assert.ok(/function applyPendingLayoutUrlState[\s\S]*createPassiveDeferredElementScrollOwner[\s\S]*applyLayoutUrlScrollSnapshot\(state\.scroll, scrollOwner\)/.test(layoutSource), 'repeated layout URL restores share the same passive scroll owner');
     for (const phase of ['touch-start', 'touch-decision', 'touch-focus-attempt', 'touch-focus-result', 'focusin', 'keydown', 'beforeinput', 'compositionstart', 'compositionend', 'on-data']) {
       assert.ok(terminalTouchSource.includes(`'${phase}'`) || terminalSource.includes(`'${phase}'`) || coreSource.includes(`'${phase}'`), `terminal mobile capture includes ${phase}`);
@@ -4420,7 +4421,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/async function renderMermaidSourceInto[\s\S]*previewZoomOptionsForKind\(fullPreview \? 'mermaidFull' : 'mermaidInline'/.test(source), 'Mermaid previews use shared renderer zoom policy');
     assert.ok(/function disconnectPreviewZoomSurface\(shell, options = \{\}\)[\s\S]*resetPreviewZoomSurfaceClasses/.test(source), 'visual preview zoom cleanup uses one reset helper');
     assert.ok(/function hydratePreviewZoomSurface[\s\S]*data-preview-zoom-action[\s\S]*setPreviewZoomSurfaceState/.test(source), 'visual preview zoom controls can hydrate existing markup');
-    assert.ok(source.includes("renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'})"), 'Split Preview keeps its own preview zoom context through the shared selection/find-preserving renderer');
+    assert.ok(source.includes("renderProseMirrorPreviewMode(panel, item, path, state, parts)"), 'Split Preview keeps its own preview zoom context through the ProseMirror renderer');
     assert.ok(source.includes("hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc)"), 'preview pop-out rehydrates zoom controls after snapshot writes');
     assert.ok(source.includes('.file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell'), 'preview pop-out preserves zoom-shell layout');
     assert.equal(source.includes('fileEditorImageModeForPath'), false, 'visual previews do not keep the obsolete imageMode state path');

@@ -63,11 +63,11 @@ PROBE_EPOCH = 1_787_000_100.0
 
 FAMILY_MIX: tuple[tuple[str, str, int], ...] = (
     ("service_load", "statsd", 8069),
-    ("cpu", "port:7771", 1329),
+    ("cpu", "port:7111", 1329),
     ("browser", "stats-costprobe", 422),
     ("gpu", "gpu:0", 90),
     ("system_memory", "host", 60),
-    ("agent_status", "port:7771", 30),
+    ("agent_status", "port:7111", 30),
 )
 MIX_TOTAL = sum(weight for _family, _source, weight in FAMILY_MIX)
 

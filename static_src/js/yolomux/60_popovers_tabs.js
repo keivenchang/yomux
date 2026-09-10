@@ -103,6 +103,10 @@ function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
 }
 
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  const expansionGeneration = options.generation;
+  const generationIsCurrent = () => expansionGeneration === undefined
+    || expansionGeneration === fileExplorerSyncState.generation;
+  if (!generationIsCurrent()) return;
   const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
   if (Array.isArray(cachedEntries)) {
     if (options.manual === true) {
@@ -115,6 +119,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
     }
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, cachedEntries);
     void fetchDirectory(fullPath, {user: options.user === true, fresh: true}).then(entries => {
+      if (!generationIsCurrent()) return;
       if (!Array.isArray(entries) || !fileExplorerExpanded.has(fullPath)) return;
       if (directoryRowExpansionIsSuppressed(fullPath, options)) return;
       settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
@@ -137,6 +142,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // arrive, but it no longer owns this row and must not restore children the user just hid.
   const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
   if (!ownsExpansion) return;
+  if (!generationIsCurrent()) return;
   if (!entries) {
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;

@@ -104,6 +104,13 @@ DEFAULT_INDEX_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
     ".ruff_cache",
     ".tox",
     ".venv",
+    ".coverage",
+    ".hypothesis",
+    ".nox",
+    ".pnpm-store",
+    ".yarn",
+    ".vscode",
+    ".idea",
     ".uploads",
     "venv",
     "node_modules",
@@ -111,6 +118,8 @@ DEFAULT_INDEX_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
     "dist",
     "build",
     "target",
+    "coverage",
+    "htmlcov",
 )
 DEFAULT_INDEX_EXCLUDE_PATHS: tuple[str, ...] = (
     "~/.config/gh",
@@ -192,7 +201,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_light_color_scheme": "yolomux-light",
         "editor_cursor_style": "block",
         "editor_cursor_color": DEFAULT_CURSOR_COLOR,
-        "file_explorer_font_size": 14,
+        "file_explorer_font_size": 12,
         "tab_width": 172,
         "pane_spacing": 3,
         "pane_ring_opacity": 75,
@@ -245,12 +254,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "terminal_editor": {
         "scrollback": 5000,
-        "word_wrap": False,
+        "word_wrap": True,
         "line_numbers": False,
     },
     "editor": {
         "autosave": True,
-        "autosave_delay_seconds": 2.5,
+        "autosave_delay_seconds": 6,
         "blame_all_lines": False,
         "trim_trailing_whitespace_on_save": False,
         "ensure_final_newline_on_save": False,
@@ -260,7 +269,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "image_open_mode": "same-tab",
         "image_preview_max_px": 320,
         "indexed_dirs": [],
-        "index_refresh_seconds": 1800,
+        "index_refresh_seconds": 300,
         "index_max_files": 100000,
         "index_persist": True,
         "index_persist_max_files": 100000,
@@ -377,11 +386,11 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "global_font_size"): (6, 25),
-    ("appearance", "ui_font_size"): (6, 20),
+    ("appearance", "ui_font_size"): (6, 30),
     ("appearance", "terminal_font_size"): (6, 28),
     ("appearance", "editor_font_size"): (6, 28),
     ("appearance", "preview_font_size"): (6, 32),
-    ("appearance", "file_explorer_font_size"): (6, 24),
+    ("appearance", "file_explorer_font_size"): (1, 24),
     ("appearance", "tab_width"): (120, 420),
     ("appearance", "pane_spacing"): (0, 20),
     ("appearance", "pane_ring_opacity"): (5, 100),
@@ -539,7 +548,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "tmux_status_bar"): "off | top | bottom. Native tmux status bar position for new sessions. The YOLOmux Info Bar remains at the top of each pane.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
     ("stats", "prune_at_local_time"): "Local wall-clock time, on the half hour, for the once-a-night YO!stats cleanup. Default 02:30. YO!stats keeps 2 days of history and charts the last 24 hours; this is when the older facts are deleted. If the machine is asleep or the server is down at this time, the cleanup runs at the next opportunity instead of skipping the night.",
-    ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text when appearance.sync_font_sizes is false.",
+    ("appearance", "ui_font_size"): "Pixels, 6-30. Drives tab and compact UI text when appearance.sync_font_sizes is false.",
     ("appearance", "global_font_size"): "Pixels, 6-25. Shared font size for UI, terminal, editor, preview, and File Explorer surfaces when appearance.sync_font_sizes is true. Default 14.",
     ("appearance", "sync_font_sizes"): "true/false. When true, all UI, terminal, editor, preview, and File Explorer font sizes follow appearance.global_font_size. Default true.",
     ("appearance", "terminal_font_size"): "Pixels, 6-28. Applied live to xterm.js terminals.",
@@ -1113,7 +1122,18 @@ def merge_settings(base: dict[str, Any], patch: Any, coerced: list[str] | None =
                 continue
             if key in merged[section]:
                 merged[section][key] = value
-    return sanitize_settings(merged, coerced)
+    merged = sanitize_settings(merged, coerced)
+    appearance = merged["appearance"]
+    appearance_patch = patch.get("appearance")
+    if appearance["sync_font_sizes"] and isinstance(appearance_patch, dict) and (
+        "sync_font_sizes" in appearance_patch or "global_font_size" in appearance_patch
+    ):
+        global_size = int(appearance["global_font_size"])
+        finder_size = max(1, global_size - max(1, round(global_size * 0.12)))
+        for key in ("ui_font_size", "terminal_font_size", "editor_font_size", "preview_font_size"):
+            appearance[key] = global_size
+        appearance["file_explorer_font_size"] = finder_size
+    return merged
 
 
 def settings_template(settings: dict[str, Any]) -> str:
@@ -1436,6 +1456,6 @@ def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
         _settings_payload_cache_store_unlocked(path, payload)
         payload = copy.deepcopy(payload)
         # report which patched keys were clamped/reverted so the API/UI can surface it
-        # instead of silently changing the value (e.g. ui_font_size:999 -> 20).
+        # instead of silently changing the value (e.g. ui_font_size:999 -> 30).
         payload["coerced"] = coerced
         return payload

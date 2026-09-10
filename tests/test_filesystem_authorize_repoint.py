@@ -1648,6 +1648,57 @@ def test_symlink_listing_fails_closed_without_link_descriptor_support(repoint_tr
     assert swapped is False
 
 
+def test_descriptor_symlink_target_fails_closed_without_empty_path_support(repoint_tree, monkeypatch):
+    root, blocked = repoint_tree
+    safe = root / "safe.txt"
+    safe.write_text("safe", encoding="utf-8")
+    link = root / "link"
+    link.symlink_to(safe.name)
+    parent_descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    link_descriptor = os.open(
+        link.name,
+        paths.descriptor_open_flags(paths.metadata_descriptor_flags()),
+        dir_fd=parent_descriptor,
+    )
+    def macos_readlink(path, *args, **kwargs):
+        if path == "" and kwargs.get("dir_fd") == link_descriptor:
+            raise OSError(errno.ENOTSUP, "simulated macOS empty-path readlink rejection")
+        raise AssertionError("fallback must not reopen the symlink by name")
+
+    monkeypatch.setattr(paths.os, "readlink", macos_readlink)
+    try:
+        with pytest.raises(paths.FilesystemError) as changed:
+            paths.symlink_target_from_descriptor(link_descriptor, link)
+    finally:
+        os.close(link_descriptor)
+        os.close(parent_descriptor)
+
+    assert (changed.value.status, changed.value.message_key) == (500, "fs.error.operationFailed")
+
+
+def test_symlink_listing_falls_back_to_the_pinned_parent_on_macos(repoint_tree, monkeypatch):
+    root, _blocked = repoint_tree
+    target = root / "target"
+    target.mkdir()
+    (target / "inside.txt").write_text("safe", encoding="utf-8")
+    link = root / "link"
+    link.symlink_to(target.name, target_is_directory=True)
+    real_readlink = paths.os.readlink
+
+    def macos_readlink(path, *args, **kwargs):
+        if path == "":
+            raise OSError(errno.ENOTSUP, "simulated macOS empty-path readlink rejection")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(paths.os, "readlink", macos_readlink)
+    payload = filesystem.list_directory(str(root), include_repo_info=False)
+
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+    assert entries["link"]["kind"] == "dir"
+    assert entries["link"]["symlink_target"] == "target"
+    assert entries["target"]["kind"] == "dir"
+
+
 def test_rename_refuses_source_replacement_after_descriptor_pin(repoint_tree):
     root, blocked = repoint_tree
     source = root / "source.txt"

@@ -289,6 +289,11 @@ function handleGlobalShortcutKeydown(event) {
     return;
   }
   if (mod && platformActionAllowed) {
+    if (key === 's' && isFileEditorItem(currentActiveMenuItem())) {
+      event.preventDefault();
+      void saveFileEditor(fileItemPath(currentActiveMenuItem()), panelNodes.get(currentActiveMenuItem()));
+      return;
+    }
     if (key === 'k' && event.shiftKey) {
       event.preventDefault();
       event.stopPropagation();

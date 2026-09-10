@@ -45,7 +45,7 @@
   const STATS_MIGRATION_FIELDS = ['state', 'result', 'issue_kinds'];
   const CURRENT_RESOLUTIONS = Object.freeze([1, 10, 60, 300]);
   const CURRENT_STATS_WIRE_PROTOCOL_VERSION = 2;
-  const CURRENT_COST_REPORT_SCHEMA_VERSION = 3;
+  const CURRENT_COST_REPORT_SCHEMA_VERSION = 4;
   const CURRENT_COST_DIMENSIONS = Object.freeze(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
   const CURRENT_COST_REPORT_FIELDS = Object.freeze([
     'schema_version', 'total_micro_usd', 'total_api_list_micro_usd', 'total_tokens',
@@ -60,7 +60,10 @@
   ]);
   const CURRENT_COST_AGENT_FIELDS = Object.freeze([
     'key', 'source', 'label', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd',
-    'dimensions', 'priced', 'unpriced',
+    'dimensions', 'priced', 'unpriced', 'sources',
+  ]);
+  const CURRENT_COST_SOURCE_FIELDS = Object.freeze([
+    'source', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd', 'dimensions', 'priced', 'unpriced',
   ]);
   const CURRENT_COST_EVIDENCE_FIELDS = Object.freeze([
     'key', 'provider', 'model', 'dimension', 'direction', 'modality', 'cache_role', 'unit',
@@ -2041,8 +2044,8 @@
       '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
       dimensions,
       '</tbody></table></div></section>',
-      currentCostAttributionTable('Cost by Model', report.models, 'model'),
-      currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
+       currentCostAttributionTable('Cost by Model', report.models, 'model'),
+       currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
       '<section><h3>Pricing attribution</h3>',
       evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
       '</section>',
@@ -2052,7 +2055,7 @@
   }
 
   function currentCostAttributionTable(title, rows, kind) {
-    const displayedRows = kind === 'agent' ? currentCostConsolidatedAgentRows(rows) : rows;
+    const displayedRows = rows;
     const body = displayedRows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
@@ -2060,7 +2063,14 @@
       const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
         `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
       )).join('');
-      return `<tr><th scope="row">${identity}</th><td>${currentStatsEscape(currentStatsMetric(row.total_tokens, 'usage'))}<small>${currentCostPriceHtml(row.total_micro_usd, row.total_api_list_micro_usd)}</small></td>${dimensions}<td>${currentStatsEscape(currentStatsMetric(row.priced.tokens, 'usage'))}<small>${row.priced.atoms} atoms</small></td><td>${currentStatsEscape(currentStatsMetric(row.unpriced.tokens, 'usage'))}<small>${row.unpriced.atoms} atoms</small></td></tr>`;
+       const sourceRows = kind === 'agent' && Array.isArray(row.sources) ? row.sources : [];
+        const sourceDetails = sourceRows.length
+          ? `<details class="yo-cost-current-agent-sources"><summary>Source attribution (${sourceRows.length})</summary><ul>${sourceRows.map(source => `<li><strong>${currentStatsEscape(source.source)}</strong><span>${currentStatsEscape(currentStatsMetric(source.total_tokens, 'usage'))} tokens · ${currentCostPriceHtml(source.total_micro_usd, source.total_api_list_micro_usd)}</span></li>`).join('')}</ul></details>`
+          : '';
+        const agentIdentity = kind === 'agent' && sourceDetails
+          ? `<details class="yo-cost-current-agent-row" data-stats-current-cost-agent-key="${currentStatsEscape(row.key || row.label || row.source)}"><summary>${identity}</summary>${sourceDetails}</details>`
+          : identity;
+        return `<tr><th scope="row">${agentIdentity}</th><td>${currentStatsEscape(currentStatsMetric(row.total_tokens, 'usage'))}<small>${currentCostPriceHtml(row.total_micro_usd, row.total_api_list_micro_usd)}</small></td>${dimensions}<td>${currentStatsEscape(currentStatsMetric(row.priced.tokens, 'usage'))}<small>${row.priced.atoms} atoms</small></td><td>${currentStatsEscape(currentStatsMetric(row.unpriced.tokens, 'usage'))}<small>${row.unpriced.atoms} atoms</small></td></tr>`;
     }).join('');
     return [
       `<section><h3>${currentStatsEscape(title)}</h3>`,
@@ -2069,35 +2079,6 @@
         : '<p>No attributed usage in this range.</p>',
       '</section>',
     ].join('');
-  }
-
-  function currentCostConsolidatedAgentRows(rows) {
-    const consolidated = new Map();
-    for (const row of rows) {
-      const label = currentStatsCanonicalAgentLabel(row.label || row.source);
-      const existing = consolidated.get(label);
-      if (!existing) {
-        consolidated.set(label, {
-          ...row,
-          label,
-          dimensions: Object.fromEntries(CURRENT_COST_DIMENSIONS.map(dimension => [dimension, {...row.dimensions[dimension]}])),
-          priced: {...row.priced},
-          unpriced: {...row.unpriced},
-        });
-        continue;
-      }
-      for (const field of ['total_tokens', 'total_micro_usd', 'total_api_list_micro_usd']) existing[field] += row[field];
-      for (const dimension of CURRENT_COST_DIMENSIONS) {
-        for (const field of ['tokens', 'micro_usd', 'api_list_micro_usd']) {
-          existing.dimensions[dimension][field] += row.dimensions[dimension][field];
-        }
-      }
-      for (const coverage of ['priced', 'unpriced']) {
-        existing[coverage].atoms += row[coverage].atoms;
-        existing[coverage].tokens += row[coverage].tokens;
-      }
-    }
-    return [...consolidated.values()];
   }
 
   function currentCostDimensionCell(value) {
@@ -2879,6 +2860,7 @@
       } else {
         identityText(row.source, `${rowName}.source`);
         identityText(row.label, `${rowName}.label`);
+        validateCostSources(row.sources, `${rowName}.sources`, row);
       }
       const totalTokens = costInteger(row.total_tokens, `${rowName}.total_tokens`);
       const totalMicroUsd = costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`);
@@ -2900,6 +2882,40 @@
       previous = rank;
     }
     return value;
+  }
+
+  function validateCostSources(value, name, parent) {
+    const kinds = ['claude', 'codex', 'opencode', 'yoagent', 'summary', 'images', 'responses', 'legacy', 'unknown'];
+    if (!Array.isArray(value) || value.length > kinds.length) throw new Error(`${name} is not bounded`);
+    const seen = new Set();
+    let previous = null;
+    const totals = [0, 0, 0];
+    for (const [index, row] of value.entries()) {
+      const rowName = `${name}[${index}]`;
+      exactFields(row, CURRENT_COST_SOURCE_FIELDS, rowName);
+      identityText(row.source, `${rowName}.source`);
+      if (!kinds.includes(row.source) || seen.has(row.source)) throw new Error(`${rowName}.source is unsupported or duplicated`);
+      seen.add(row.source);
+      const rowTotals = [
+        costInteger(row.total_tokens, `${rowName}.total_tokens`),
+        costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`),
+        costInteger(row.total_api_list_micro_usd, `${rowName}.total_api_list_micro_usd`),
+      ];
+      const dimensions = validateCostDimensions(row.dimensions, `${rowName}.dimensions`);
+      const dimensionTotals = CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => {
+        const value = dimensions[dimension];
+        return sum.map((total, field) => total + [value.tokens, value.micro_usd, value.api_list_micro_usd][field]);
+      }, [0, 0, 0]);
+      if (rowTotals.some((total, field) => total !== dimensionTotals[field])) throw new Error(`${rowName} totals disagree with dimensions`);
+      const priced = validateCostCoverage(row.priced, `${rowName}.priced`);
+      const unpriced = validateCostCoverage(row.unpriced, `${rowName}.unpriced`);
+      if (priced.tokens + unpriced.tokens !== rowTotals[0]) throw new Error(`${rowName} coverage disagrees with total`);
+      const rank = [-rowTotals[0], -rowTotals[2], -rowTotals[1], row.source];
+      if (previous && compareCostRank(rank, previous) <= 0) throw new Error(`${name} rank order is invalid`);
+      previous = rank;
+      rowTotals.forEach((total, field) => { totals[field] += total; });
+    }
+    if (totals.some((total, field) => total !== [parent.total_tokens, parent.total_micro_usd, parent.total_api_list_micro_usd][field])) throw new Error(`${name} totals disagree with parent attribution`);
   }
 
   function validateCostEvidence(value) {

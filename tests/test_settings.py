@@ -235,7 +235,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
     assert settings["appearance"]["separator_color"] == "theme"
     assert sanitize_settings({"appearance": {"separator_color": "purple"}})["appearance"]["separator_color"] == "purple"
-    assert settings["appearance"]["file_explorer_font_size"] == 6
+    assert settings["appearance"]["file_explorer_font_size"] == 1
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
     assert settings["appearance"]["pane_ring_opacity"] == 5
@@ -280,6 +280,10 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["yolo"]["prompt_source"] == "hybrid"
 
 
+def test_editor_autosave_delay_defaults_to_six_seconds():
+    assert sanitize_settings({})["editor"]["autosave_delay_seconds"] == 6
+
+
 def test_legacy_yoagent_auto_refresh_and_interval_are_dropped():
     disabled = sanitize_settings({"yoagent": {"auto_refresh": False, "refresh_interval_seconds": 120}})
     enabled = sanitize_settings({"yoagent": {"auto_refresh": True, "refresh_interval_seconds": 45}})
@@ -321,7 +325,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
-    assert {".git", ".ssh", ".uploads", "__pycache__", "node_modules"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
+    assert {".git", ".ssh", ".uploads", ".coverage", ".hypothesis", ".nox", ".pnpm-store", ".yarn", ".vscode", ".idea", "__pycache__", "node_modules", "coverage", "htmlcov"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
     assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
@@ -638,7 +642,7 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     save_settings(default_settings(), path)
     result = save_settings({"appearance": {"ui_font_size": 999}}, path)
     assert "appearance.ui_font_size" in result["coerced"]
-    assert result["settings"]["appearance"]["ui_font_size"] == 20  # clamped to the max
+    assert result["settings"]["appearance"]["ui_font_size"] == 30  # clamped to the max
     ok = save_settings({"appearance": {"ui_font_size": 14}}, path)
     assert ok["coerced"] == []
     ring = save_settings({"appearance": {"pane_ring_opacity": 20}}, path)
@@ -656,6 +660,26 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     clamped_opacity = save_settings({"appearance": {"inactive_pane_opacity": 500}}, path)
     assert "appearance.inactive_pane_opacity" in clamped_opacity["coerced"]
     assert clamped_opacity["settings"]["appearance"]["inactive_pane_opacity"] == 100
+
+
+def test_save_settings_derives_smaller_finder_size_when_font_sizes_are_synced(tmp_path):
+    path = tmp_path / "settings.yaml"
+    save_settings(default_settings(), path)
+
+    saved = save_settings({"appearance": {"sync_font_sizes": True, "global_font_size": 14}}, path)
+
+    appearance = saved["settings"]["appearance"]
+    assert appearance["ui_font_size"] == 14
+    assert appearance["terminal_font_size"] == 14
+    assert appearance["editor_font_size"] == 14
+    assert appearance["preview_font_size"] == 14
+    assert appearance["file_explorer_font_size"] == 12
+
+    minimum = save_settings({"appearance": {"global_font_size": 6}}, path)["settings"]["appearance"]
+    assert minimum["file_explorer_font_size"] == 5
+
+    independent = save_settings({"appearance": {"sync_font_sizes": False, "file_explorer_font_size": 3}}, path)["settings"]["appearance"]
+    assert independent["file_explorer_font_size"] == 3
 
 
 def test_login_locale_picker_writes_general_language():
@@ -782,7 +806,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
-    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 1800
+    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 300
 
     custom = sanitize_settings({
         "performance": {

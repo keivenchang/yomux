@@ -56,7 +56,8 @@ TOKEN_DETAIL_DIMENSIONS = (
 MAX_PRIVATE_BROWSER_CLIENTS = 4
 MAX_CACHED_OBSERVATION_PROJECTIONS = 32_768
 PUBLIC_EXECUTION_SOURCES = frozenset({
-    "claude", "codex", "opencode", "images", "messages", "responses", "unknown",
+    "claude", "codex", "opencode", "yoagent", "summary", "images", "responses",
+    "legacy", "unknown",
 })
 
 
@@ -96,6 +97,17 @@ class CostCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class CostSourceValue:
+    source: str
+    total_tokens: int = 0
+    total_micro_usd: int = 0
+    total_api_list_micro_usd: int = 0
+    dimensions: tuple[CostDimensionValue, ...] = ()
+    priced: CostCoverage = CostCoverage()
+    unpriced: CostCoverage = CostCoverage()
+
+
+@dataclass(frozen=True, slots=True)
 class CostAttribution:
     key: str
     provider: str = ""
@@ -105,6 +117,7 @@ class CostAttribution:
     dimensions: tuple[CostDimensionValue, ...] = ()
     priced: CostCoverage = CostCoverage()
     unpriced: CostCoverage = CostCoverage()
+    sources: tuple[CostSourceValue, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1226,9 +1239,8 @@ def _usage_projection(
     dimension = _cost_detail_dimension(atom)
     is_tokens = atom.unit == "tokens"
     execution_source = atom.payload.get("execution_source")
-    agent_source = (
-        _privacy_safe_execution_source(execution_source)
-        if isinstance(execution_source, str) and execution_source else "unknown"
+    agent_source = _privacy_safe_execution_source(
+        execution_source if isinstance(execution_source, str) and execution_source else "unknown",
     )
     evidence = None
     if projection.evidence is not None:
@@ -1395,6 +1407,7 @@ def _freeze_attribution(
     model: str = "",
     source: str = "",
     label: str = "",
+    sources: tuple[CostSourceValue, ...] = (),
 ) -> CostAttribution:
     dimensions = row["dimensions"]
     priced = row["priced"]
@@ -1407,6 +1420,28 @@ def _freeze_attribution(
         raise MaterializationError("cost attribution accumulator is malformed")
     return CostAttribution(
         key=str(row["key"]), provider=provider, model=model, source=source, label=label,
+        dimensions=_freeze_cost_dimensions(dimensions),
+        priced=CostCoverage(int(priced["atoms"]), int(priced["tokens"])),
+        unpriced=CostCoverage(int(unpriced["atoms"]), int(unpriced["tokens"])),
+        sources=sources,
+    )
+
+
+def _freeze_source(row: Mapping[str, object]) -> CostSourceValue:
+    dimensions = row["dimensions"]
+    priced = row["priced"]
+    unpriced = row["unpriced"]
+    if (
+        not isinstance(dimensions, Mapping)
+        or not isinstance(priced, Mapping)
+        or not isinstance(unpriced, Mapping)
+    ):
+        raise MaterializationError("cost source accumulator is malformed")
+    return CostSourceValue(
+        source=str(row["source"]),
+        total_tokens=int(row["total_tokens"]),
+        total_micro_usd=int(row["total_micro_usd"]),
+        total_api_list_micro_usd=int(row["total_api_list_micro_usd"]),
         dimensions=_freeze_cost_dimensions(dimensions),
         priced=CostCoverage(int(priced["atoms"]), int(priced["tokens"])),
         unpriced=CostCoverage(int(unpriced["atoms"]), int(unpriced["tokens"])),
@@ -1446,7 +1481,7 @@ class _CostDetailFold:
     __slots__ = (
         "_dimensions", "_priced", "_unpriced", "_model_scores", "_agent_scores",
         "_evidence_scores", "_models", "_agents", "_evidence", "_model_metadata",
-        "_model_conflicts", "_agent_sources", "_agent_labels", "_saw_any",
+        "_model_conflicts", "_agent_sources", "_agent_labels", "_sources", "_saw_any",
     )
 
     def __init__(self) -> None:
@@ -1463,6 +1498,7 @@ class _CostDetailFold:
         self._model_conflicts: set[str] = set()
         self._agent_sources: dict[str, set[str]] = {}
         self._agent_labels: dict[str, set[str]] = {}
+        self._sources: dict[tuple[str, str], dict[str, object]] = {}
         self._saw_any = False
 
     def _require_key_budget(self) -> None:
@@ -1519,6 +1555,20 @@ class _CostDetailFold:
         self._agent_sources.setdefault(atom.agent_key, set()).add(atom.agent_source)
         self._agent_labels.setdefault(atom.agent_key, set()).add(atom.agent_label)
         _add_cost_atom_to_attribution(row, atom, "cost agent attribution")
+        source_identity = (atom.agent_key, atom.agent_source)
+        source_row = self._sources.setdefault(
+            source_identity,
+            {
+                "source": atom.agent_source,
+                "total_tokens": 0,
+                "total_micro_usd": 0,
+                "total_api_list_micro_usd": 0,
+                "dimensions": _empty_cost_dimensions(),
+                "priced": {"atoms": 0, "tokens": 0},
+                "unpriced": {"atoms": 0, "tokens": 0},
+            },
+        )
+        _add_cost_atom_to_attribution(source_row, atom, "cost source attribution")
         if atom.evidence is not None:
             self._evidence[atom.evidence.key] = _merge_cost_evidence(
                 self._evidence.get(atom.evidence.key), atom.evidence,
@@ -1550,6 +1600,10 @@ class _CostDetailFold:
                 label=(
                     next(iter(self._agent_labels[key]))
                     if len(self._agent_labels[key]) == 1 else "mixed"
+                ),
+                sources=tuple(
+                    _freeze_source(self._sources[(key, source)])
+                    for source in sorted(self._agent_sources[key])
                 ),
             )
             for key in sorted(selected_agents)
@@ -1592,9 +1646,19 @@ def _stable_detail_key(*values: str) -> str:
 
 def _privacy_safe_execution_source(value: str) -> str:
     normalized = value.strip().lower()
+    aliases = {
+        "messages": "claude",
+        "response": "responses",
+        "ai summary": "summary",
+        "codex-exec": "summary",
+        "image tool": "images",
+        "image stream": "images",
+        "yo!agent": "yoagent",
+    }
+    normalized = aliases.get(normalized, normalized)
     if normalized in PUBLIC_EXECUTION_SOURCES:
         return normalized
-    return "sha256-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+    return "unknown"
 
 
 def _privacy_safe_agent_label(agent_id: str, source: str) -> str:
@@ -1657,6 +1721,18 @@ def _empty_cost_dimensions() -> dict[str, dict[str, int]]:
 def _empty_attribution(key: str) -> dict[str, object]:
     return {
         "key": key,
+        "total_tokens": 0,
+        "total_micro_usd": 0,
+        "total_api_list_micro_usd": 0,
+        "dimensions": _empty_cost_dimensions(),
+        "priced": {"atoms": 0, "tokens": 0},
+        "unpriced": {"atoms": 0, "tokens": 0},
+    }
+
+
+def _empty_source(source: str) -> dict[str, object]:
+    return {
+        "source": source,
         "total_tokens": 0,
         "total_micro_usd": 0,
         "total_api_list_micro_usd": 0,
@@ -1735,6 +1811,7 @@ def build_cost_report(layer: Layer) -> dict[str, object]:
     model_metadata: dict[str, set[tuple[str, str]]] = {}
     agent_sources: dict[str, set[str]] = {}
     agent_labels: dict[str, set[str]] = {}
+    agent_source_rows: dict[tuple[str, str], dict[str, object]] = {}
     evidence: dict[str, CostEvidenceValue] = {}
     omissions = {"models": 0, "agents": 0, "evidence": 0}
     total_tokens = 0
@@ -1820,6 +1897,34 @@ def build_cost_report(layer: Layer) -> dict[str, object]:
                 else:
                     agent_sources.setdefault(value.key, set()).add(value.source)
                     agent_labels.setdefault(value.key, set()).add(value.label)
+                    for source_value in value.sources:
+                        source_row = agent_source_rows.setdefault(
+                            (value.key, source_value.source),
+                            _empty_source(source_value.source),
+                        )
+                        for dimension in source_value.dimensions:
+                            _accumulate_attribution_metric(
+                                source_row, dimension.dimension, "tokens", dimension.tokens,
+                                "typed agent source tokens",
+                            )
+                            _accumulate_attribution_metric(
+                                source_row, dimension.dimension, "micro_usd", dimension.micro_usd,
+                                "typed agent source micro_usd",
+                            )
+                            _accumulate_attribution_metric(
+                                source_row, dimension.dimension, "api_list_micro_usd",
+                                dimension.api_list_micro_usd,
+                                "typed agent source API-list micro_usd",
+                            )
+                        for coverage_name, coverage in (
+                            ("priced", source_value.priced),
+                            ("unpriced", source_value.unpriced),
+                        ):
+                            target = source_row[coverage_name]
+                            if not isinstance(target, dict):
+                                raise MaterializationError("cost source coverage is malformed")
+                            _add_exact(target, "atoms", coverage.atoms, "typed agent source coverage")
+                            _add_exact(target, "tokens", coverage.tokens, "typed agent source coverage")
         for value in detail.evidence:
             evidence[value.key] = _merge_cost_evidence(evidence.get(value.key), value)
 
@@ -1845,6 +1950,38 @@ def build_cost_report(layer: Layer) -> dict[str, object]:
         row["source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
         labels = agent_labels.get(key, {"unknown"})
         row["label"] = next(iter(labels)) if len(labels) == 1 else "mixed"
+        source_rows = [
+            _freeze_source(source_row)
+            for (agent_key, _source), source_row in agent_source_rows.items()
+            if agent_key == key
+        ]
+        row["sources"] = [
+            {
+                "source": source.source,
+                "total_tokens": source.total_tokens,
+                "total_micro_usd": source.total_micro_usd,
+                "total_api_list_micro_usd": source.total_api_list_micro_usd,
+                "dimensions": {
+                    item.dimension: {
+                        "tokens": item.tokens,
+                        "micro_usd": item.micro_usd,
+                        "api_list_micro_usd": item.api_list_micro_usd,
+                    }
+                    for item in source.dimensions
+                },
+                "priced": {"atoms": source.priced.atoms, "tokens": source.priced.tokens},
+                "unpriced": {"atoms": source.unpriced.atoms, "tokens": source.unpriced.tokens},
+            }
+            for source in sorted(
+                source_rows,
+                key=lambda item: (
+                    -item.total_tokens,
+                    -item.total_api_list_micro_usd,
+                    -item.total_micro_usd,
+                    item.source,
+                ),
+            )
+        ]
     model_rows, omitted_models = _rank_cost_rows(models, MAX_COST_DETAIL_MODELS)
     agent_rows, omitted_agents = _rank_cost_rows(agents, MAX_COST_DETAIL_AGENTS)
     _add_exact(omissions, "models", omitted_models, "cost report model rows")

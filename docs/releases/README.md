@@ -4,6 +4,15 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.8.3 | `v0.8.3` | `v0.8.3^{commit}` | [v0.8.3-evidence.md](v0.8.3-evidence.md) | ProseMirror link editing, Finder/Dockview interaction fixes, reduced indexed filesystem churn, and Defender-aware startup admission |
+| 0.8.2 | `v0.8.2` | `v0.8.2^{commit}` | [v0.8.2-evidence.md](v0.8.2-evidence.md) | direct raw Markdown image loading and reduced terminal filesystem resolution traffic |
+| 0.8.1 | `v0.8.1` | `v0.8.1^{commit}` | [v0.8.1-evidence.md](v0.8.1-evidence.md) | ProseMirror ViewEditor comments, literal HTML, images, semantic scroll sync, and editor/layout hardening |
+| 0.8.0 | `v0.8.0` | `v0.8.0^{commit}` | [v0.8.0-evidence.md](v0.8.0-evidence.md) | source-backed Markdown ViewEditor, layout hardening, Git-history recovery, and startup-capacity fixes |
+| 0.7.35 | `v0.7.35` | `v0.7.35^{commit}` | [v0.7.35-evidence.md](v0.7.35-evidence.md) | source-backed Markdown ViewEditor, image editing flows, and corrected Linux startup capacity admission |
+| 0.7.33 | `v0.7.33` | `v0.7.33^{commit}` | [v0.7.33-evidence.md](v0.7.33-evidence.md) | bounded incremental OpenCode usage collection for long-lived sessions |
+| 0.7.32 | `v0.7.32` | `v0.7.32^{commit}` | [v0.7.32-evidence.md](v0.7.32-evidence.md) | OpenCode URL reflow, ring-buffer cost reconstruction, linked-worktree gate isolation, and launch/editor gate fixes |
+| 0.7.31 | `v0.7.31` | `v0.7.31^{commit}` | [v0.7.31-evidence.md](v0.7.31-evidence.md) | server-owned YO!cost reporting, expandable agent/source attribution, routed-provider pricing, and stats schema 9 |
+| 0.7.30 | `v0.7.30` | `v0.7.30^{commit}` | [v0.7.30-evidence.md](v0.7.30-evidence.md) | serialized editor saves, journal recovery hardening, OpenCode live token attribution, and terminal touch routing |
 | 0.7.29 | `v0.7.29` | `v0.7.29^{commit}` | [v0.7.29-evidence.md](v0.7.29-evidence.md) | first-class OpenCode support, shared client capabilities, usage attribution, native terminal behavior, and Directory Diff paging |
 | 0.7.28 | `v0.7.28` | `v0.7.28^{commit}` | [v0.7.28-evidence.md](v0.7.28-evidence.md) | OpenCode attribution, smooth touch scrolling, startup capacity checks, Preferences reorganization, and test isolation fixes |
 | 0.7.26 | `v0.7.26` | `v0.7.26^{commit}` | [v0.7.26-evidence.md](v0.7.26-evidence.md) | OpenCode visible status, native terminal navigation, URL handling, and read-only usage statistics |

@@ -1428,6 +1428,13 @@ def test_c4_dirty_editor_survives_differ_open_and_external_refresh(gate_browser_
     _configure_differ_payload(gate_browser_runtime, repo, target)
     _open_editor(gate_browser_runtime, target, target.read_text(encoding="utf-8"))
     _wait_for_file_event_stream(gate_browser_runtime, target)
+    gate_browser_runtime.browser.execute_script(
+        """
+        const settings = structuredClone(clientSettingsPayload);
+        settings.settings = {...settings.settings, editor: {...settings.settings.editor, autosave: false}};
+        applySettingsPayload(settings, {force: true});
+        """
+    )
     dirty_text = _type_dirty_text(gate_browser_runtime, target, "dirty text survives Differ")
     _open_differ(gate_browser_runtime, target)
     opened = gate_browser_runtime.browser.execute_script(

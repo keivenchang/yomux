@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -35,6 +36,7 @@ BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS = 4.0
 SUPERVISOR_JOIN_SECONDS = 5.0
 EXPECTED_SUPERVISOR_ERRORS = (OSError, RuntimeError, ValueError)
 WEB_COLLECTED_FAMILIES = scheduler.COLLECTED_FAMILIES - frozenset({"cpu", "gpu"})
+logger = logging.getLogger(__name__)
 
 
 def _positive_seconds(value: float, name: str) -> float:
@@ -130,6 +132,7 @@ class StatsCurrentRuntime:
         family: str,
     ) -> Callable[[scheduler.CollectorAttempt], None]:
         def collect(attempt: scheduler.CollectorAttempt) -> None:
+            logger.warning("stats collector attempt family=%s epoch=%s", family, attempt.epoch_id)
             attempt.assert_current()
             facts = self._collectors[family](attempt)
             if not isinstance(facts, collectors.CollectorFacts):

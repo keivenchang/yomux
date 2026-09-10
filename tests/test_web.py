@@ -7,6 +7,7 @@ session names) embedded in the page must not be able to break out of the bootstr
 """
 
 import json
+import os
 from pathlib import Path
 import re
 
@@ -140,6 +141,23 @@ def test_xterm_assets_have_one_vendor_owner_even_with_root_contamination(monkeyp
         assert web.static_asset_path(name) == vendor_dir / name
         assert web.static_asset_path(f"vendor/{name}") == vendor_dir / name
         assert web.static_asset_version(name) == web.static_asset_version(f"vendor/{name}")
+
+
+def test_static_asset_version_uses_high_resolution_generation(monkeypatch, tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    asset = static_dir / "yolomux.js"
+    asset.write_text("one", encoding="utf-8")
+    monkeypatch.setattr(web, "STATIC_DIR", static_dir)
+
+    first = web.static_asset_version("yolomux.js")
+    first_stat = asset.stat()
+    asset.write_text("two-two", encoding="utf-8")
+    os.utime(asset, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1))
+
+    second = web.static_asset_version("yolomux.js")
+    assert first != second
+    assert second == f"{asset.stat().st_mtime_ns}-{asset.stat().st_size}"
 
 
 def test_emoji_catalog_is_a_served_lazy_javascript_asset():

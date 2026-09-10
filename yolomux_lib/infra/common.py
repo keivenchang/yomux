@@ -63,7 +63,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.29"
+YOLOMUX_VERSION = "0.8.4"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -109,7 +109,7 @@ def resolve_yolomux_roots(
 # `runtime_socket_candidates`, which is a divergent copy of the same fact: bumping the schema left
 # the socket digest computed from a filename the product no longer uses, so the socket-length
 # preflight validated a path that would never exist.
-STATS_SCHEMA_VERSION = 8
+STATS_SCHEMA_VERSION = 9
 STATS_DATABASE_FILENAME = f"stats-v{STATS_SCHEMA_VERSION}.sqlite3"
 
 
@@ -855,6 +855,40 @@ def yolomux_commit_count() -> int:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         _YOLOMUX_COMMIT_COUNT = 0
     return _YOLOMUX_COMMIT_COUNT
+
+
+def yolomux_version_metadata() -> tuple[str, list[str]]:
+    """Return one consistent release status and post-release commit list for a page render."""
+    version = YOLOMUX_VERSION
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "log", f"v{version}^{{}}..HEAD", "--format=%cI%x09%s"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        commits: list[str] = []
+        for line in result.stdout.splitlines():
+            timestamp, separator, subject = line.partition("\t")
+            if not separator or not subject:
+                raise ValueError("malformed commit metadata")
+            commit_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            commits.append(f"{commit_time.astimezone(PACIFIC_TIME).strftime('%Y-%m-%d %H:%M:%S PT')} {subject}")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        return f"{version}*", []
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return f"{version}{f'({len(commits)})' if commits else ''}*", commits
+    suffix = f"({len(commits)})" if commits else ""
+    return f"{version}{suffix}{'*' if status.stdout else ''}", commits
 
 
 def positive_env_int(name: str, default: int) -> int:

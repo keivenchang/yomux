@@ -14,3 +14,7 @@ DOIT*.md
 
 # Transient browser test fixture pages served from repo root (Chrome 150 HTTP fixtures)
 .browser-fixture-*
+
+# Local diagnostic logs from production and test launches.
+*.log
+*.log.old

@@ -72,6 +72,7 @@ def populated_cost_report() -> dict[str, object]:
         "priced": {"atoms": 1, "tokens": 10},
         "unpriced": {"atoms": 0, "tokens": 0},
     }
+    source = {"source": "codex", **copy.deepcopy(attribution)}
     return cost_report(
         total_micro_usd=20,
         total_api_list_micro_usd=30,
@@ -83,6 +84,7 @@ def populated_cost_report() -> dict[str, object]:
         }],
         agents=[{
             "key": "b" * 24, "source": "codex", "label": "yo8881|0|codex",
+            "sources": [source],
             **copy.deepcopy(attribution),
         }],
         evidence=[{

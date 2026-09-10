@@ -55,7 +55,11 @@ function testAsync(name, body) {
 
 function sourceFunction(name, nextName) {
   const start = source.indexOf(`function ${name}(`);
-  const end = source.indexOf(`\nfunction ${nextName}(`, start);
+  const end = Math.min(
+    ...[`\nfunction ${nextName}(`, `\nasync function ${nextName}(`]
+      .map(marker => source.indexOf(marker, start))
+      .filter(index => index >= 0),
+  );
   assert.notEqual(start, -1, `${name} exists`);
   assert.notEqual(end, -1, `${nextName} follows ${name}`);
   return source.slice(start, end);
@@ -1256,11 +1260,10 @@ test('every range selection defaults to AUTO', () => {
   assert.match(sourceFunction('setDebugGraphRange', 'setDebugGraphResolutionOverride'), /graphResolutionOverrideSeconds = debugGraphDefaultResolutionForRange/);
 });
 
-test('cost backfill labels distinguish unknown, pending, and complete cursor state', () => {
+test('current cost reports do not expose the retired backfill display state', () => {
   assert.match(source, /const jsDebugUsageAtomBackfill = \{state: 'unknown'/);
   assert.match(source, /debugGraphApplyUsageAtomBackfill\(snapshot\.usage_atom_backfill\)/);
-  assert.match(source, /backfillUnknown/);
-  assert.match(source, /backfillPending/);
+  assert.doesNotMatch(source, /backfillUnknown|backfillPending/);
 });
 
 test('browser observations share the topbar ping and keep a calm bounded cadence', () => {
@@ -2359,7 +2362,7 @@ test('a complete snapshot replaces graph data once and resolves readiness', () =
   assert.equal(context.result.phase, 'ready');
   assert.equal(context.result.overlayVisible, false);
   assert.deepEqual([...context.result.intervals].map(interval => [interval.startSeconds, interval.endSeconds]), [[0, 7200]]);
-  assert.deepEqual([...context.result.rangeCostFlags], [false, true]);
+  assert.deepEqual([...context.result.rangeCostFlags], [undefined, undefined]);
   assert.equal(context.result.resolved, 1);
 });
 
@@ -2388,7 +2391,6 @@ test('eleven live deltas mutate only named graph buckets without clearing retain
     function armJsDebugStatsPolling() {}
     function scheduleJsDebugPanelRefresh() {}
     function debugGraphApplyServerCostSummary() {}
-    function jsDebugCurrentCostSummary() { return {components: []}; }
     ${deleteSource}
     ${applySource}
 
@@ -2428,170 +2430,11 @@ test('eleven live deltas mutate only named graph buckets without clearing retain
   assert.equal(context.result.keys.includes('31000:1000'), true);
 });
 
-test('the range-cost owner never leaves two flagged buckets or a lost total when a delta skips the latest bucket', () => {
-  // Root cause (found via a real forced-red browser run, ring-landing e2e suite): a delta only
-  // carries the buckets it actually changed. If the bucket that is CURRENTLY latest is not among
-  // them (an older bucket was corrected instead, or the latest position just advanced), the old
-  // per-bucket loop in applyJsDebugCurrentDelta never re-flags it -- so a stale rangeReport=true
-  // can survive on a bucket that is no longer latest. debugGraphCostSummaryForBuckets SUMS every
-  // bucket with rangeReport===true: two flagged buckets double the rendered total; zero flagged
-  // buckets (the observed symptom) render 0 instead of the real total.
-  const bucketSource = sourceFunction('debugGraphBucketForServerRecord', 'debugGraphApplyServerRecord');
-  const costHelpersSource = sourceFunction('debugGraphDeleteServerRecord', 'debugGraphApplyHostMetricProcesses');
-  const apiListSource = sourceFunction('debugGraphCostApiListMicroUsd', 'debugGraphCostUsdText');
-  const dimensionSource = sourceFunction('jsDebugCurrentCostDimensionRows', 'debugGraphReconcileRangeCostOwner');
-  const reconcileAndDeltaSource = sourceFunction('debugGraphReconcileRangeCostOwner', 'scheduleJsDebugStatsHistoryFlush');
-  const context = {result: null};
-  vm.runInNewContext(`
-    const jsDebugGraphRawBucketMs = 1000;
-    const jsDebugGraphBuckets = new Map();
-    function debugGraphBucket(map, startMs, durationMs) {
-      const key = startMs + ':' + durationMs;
-      let bucket = map.get(key);
-      if (!bucket) { bucket = {startMs, durationMs}; map.set(key, bucket); }
-      bucket.durationMs = Math.max(bucket.durationMs || durationMs, durationMs);
-      return bucket;
-    }
-    function debugGraphAgentDisplayLabel(value) { return String(value || ''); }
-    ${apiListSource}
-    ${costHelpersSource}
-    ${bucketSource}
-    function debugGraphApplyServerRecord(record) {
-      const bucket = debugGraphBucketForServerRecord(record);
-      debugGraphApplyServerCostSummary(bucket, record.cost_summary);
-    }
-    ${dimensionSource}
-    function updateJsDebugCurrentSnapshotState() {}
-    ${reconcileAndDeltaSource}
-
-    function bucketRecord(bucket, includeRangeCost, rangeCost) {
-      return {
-        start: bucket.start, duration: bucket.duration,
-        cost_summary: includeRangeCost
-          ? jsDebugCurrentCostSummary(rangeCost || {})
-          : {range_report: false, total_token_quantity: 0, total_micro_usd: 0, components: []},
-      };
-    }
-
-    // Round 1: bucket at start=0 is the only, correctly latest, bucket -- flagged.
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 0, duration: 60}], cost_report: {priced: {}, unpriced: {}, models: [], agents: [], total_tokens: 12, total_micro_usd: 0}},
-      {buckets: [bucketRecord({start: 0, duration: 60}, true, {priced: {}, unpriced: {}, models: [], agents: [], total_tokens: 12, total_micro_usd: 0})]},
-    );
-    const afterRound1 = jsDebugGraphBuckets.get('0:60000').costSummary.rangeReport;
-
-    // Round 2: a NEW bucket (start=60) is now latest, but this delta only touches a DIFFERENT,
-    // unrelated bucket (start=30) -- neither the old (0) nor the new (60) latest position. Without
-    // the reconcile fix, bucket 0's stale flag from round 1 would never be cleared.
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}], cost_report: {priced: {}, unpriced: {}, models: [], agents: [], total_tokens: 19, total_micro_usd: 0}},
-      {buckets: [bucketRecord({start: 30, duration: 60}, false, null)]},
-    );
-    const flaggedBucketCount = [...jsDebugGraphBuckets.values()].filter(bucket => bucket.costSummary?.rangeReport === true).length;
-    const newBucketFabricated = jsDebugGraphBuckets.has('60000:60000');
-
-    // Round 3 (the case an independent audit found the first fix still got wrong): the delta's
-    // OWN touched bucket (start=60) IS the current latest position -- the ordinary, majority-case
-    // tick. jsDebugCurrentBucketRecord's own includeRangeCost branch already merges this bucket's
-    // (empty, here) modelComponents with rangeCost.components once; debugGraphReconcileRangeCostOwner
-    // must NOT re-patch on top of that and duplicate every range-level component/model/source row.
-    const richRangeCost = {
-      priced: {}, unpriced: {}, total_tokens: 7, total_micro_usd: 500,
-      models: [{provider: 'openai', model: 'gpt-5', total_tokens: 7, total_micro_usd: 500, total_api_list_micro_usd: 500, dimensions: {}}],
-      agents: [],
-    };
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}], cost_report: richRangeCost},
-      {buckets: [{start: 60, duration: 60}]},
-    );
-    const latestBucketAfterRound3 = jsDebugGraphBuckets.get('60000:60000');
-    const round3Flagged = latestBucketAfterRound3.costSummary.rangeReport;
-    const round3ModelCount = latestBucketAfterRound3.costSummary.models.length;
-    const round3TotalTokens = latestBucketAfterRound3.costSummary.totalTokenQuantity;
-
-    // Round 4 (found by a SECOND independent audit of the round-3 fix): a bucket can become
-    // latest WITHOUT being touched at all this round -- not just "not yet created" (round 2)
-    // and not "touched and merged by jsDebugCurrentBucketRecord" (round 3), but "already exists,
-    // already has its OWN per-bucket cost components from an earlier round, and this round's
-    // delta skips it entirely". The reconcile patch branch must merge those pre-existing
-    // components with the new range-level ones, not silently replace the bucket's own
-    // components with only the range ones.
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 90, duration: 60}], cost_report: null},
-      {buckets: [{start: 90, duration: 60}]},
-    );
-    // jsDebugCurrentBucketRecord derives components from real per-bucket series/model-rate
-    // data, which this unit test has no need to fabricate -- set the bucket's own already-
-    // applied ownCostComponents directly (the stable field a real per-bucket cost tick would
-    // have left), so the reconcile patch branch under test has real prior components to merge.
-    const bucket90 = jsDebugGraphBuckets.get('90000:60000');
-    bucket90.ownCostComponents = [{provider: 'anthropic', model: 'claude-5', micro_usd: 40}];
-    const richRangeCost2 = {
-      priced: {}, unpriced: {}, total_tokens: 11, total_micro_usd: 900,
-      evidence: [{provider: 'google', model: 'gemini-3', tokens: 11, micro_usd: 900}],
-      models: [], agents: [],
-    };
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}, {start: 90, duration: 60}], cost_report: richRangeCost2},
-      {buckets: []},
-    );
-    const latestBucketAfterRound4 = jsDebugGraphBuckets.get('90000:60000');
-    const round4Flagged = latestBucketAfterRound4.costSummary.rangeReport;
-    const round4ComponentCount = latestBucketAfterRound4.costSummary.components.length;
-    const round4ComponentModels = latestBucketAfterRound4.costSummary.components.map(row => row.model).sort().join(',');
-    const round4TotalTokens = latestBucketAfterRound4.costSummary.totalTokenQuantity;
-
-    // Round 5 (found by a THIRD independent audit of the round-4 fix): the SAME bucket (90)
-    // stays latest for a SECOND consecutive untouched round. The old guard read
-    // costSummary.rangeReport to mean "already handled this round" -- but round 4's patch also
-    // sets that flag, so round 5's guard would have seen it as already-true and returned early,
-    // freezing the bucket's totals/components at round 4's stale values forever instead of
-    // refreshing to round 5's real range data. This must NOT duplicate (own component still
-    // appears once) and must NOT freeze (range total/component must update to round 5's data).
-    const richRangeCost3 = {
-      priced: {}, unpriced: {}, total_tokens: 99, total_micro_usd: 5000,
-      evidence: [{provider: 'meta', model: 'llama-6', tokens: 99, micro_usd: 5000}],
-      models: [], agents: [],
-    };
-    applyJsDebugCurrentDelta(
-      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}, {start: 90, duration: 60}], cost_report: richRangeCost3},
-      {buckets: []},
-    );
-    const latestBucketAfterRound5 = jsDebugGraphBuckets.get('90000:60000');
-
-    result = {
-      afterRound1,
-      oldBucketStillFlagged: jsDebugGraphBuckets.get('0:60000').costSummary.rangeReport,
-      newBucketFabricated,
-      flaggedBucketCount,
-      round3Flagged,
-      round3ModelCount,
-      round3TotalTokens,
-      round4Flagged,
-      round4ComponentCount,
-      round4ComponentModels,
-      round4TotalTokens,
-      round5Flagged: latestBucketAfterRound5.costSummary.rangeReport,
-      round5ComponentCount: latestBucketAfterRound5.costSummary.components.length,
-      round5ComponentModels: latestBucketAfterRound5.costSummary.components.map(row => row.model).sort().join(','),
-      round5TotalTokens: latestBucketAfterRound5.costSummary.totalTokenQuantity,
-    };
-  `, context);
-  assert.equal(context.result.afterRound1, true, 'the only bucket must carry the range-cost flag after round 1');
-  assert.equal(context.result.oldBucketStillFlagged, false, 'a bucket that is no longer latest must lose the stale flag, or the next real total would double-count it');
-  assert.equal(context.result.newBucketFabricated, false, 'a bucket this delta never actually touched must never be fabricated from cost data alone');
-  assert.equal(context.result.flaggedBucketCount, 0, 'never two flagged buckets (double-count) -- zero is the honest answer when the latest bucket record does not exist yet');
-  assert.equal(context.result.round3Flagged, true, 'the bucket the delta itself touches, when it is the latest, must still end up flagged');
-  assert.equal(context.result.round3ModelCount, 1, 'exactly one model row -- reconciling on top of the per-bucket loop\'s own merge must never duplicate range components');
-  assert.equal(context.result.round3TotalTokens, 7, 'the top-line total must reflect the real range total, not a doubled one');
-  assert.equal(context.result.round4Flagged, true, 'a pre-existing bucket that only just became latest without being touched must still end up flagged');
-  assert.equal(context.result.round4ComponentCount, 2, 'the bucket\'s own prior component and the new range component must both survive -- neither dropped nor duplicated');
-  assert.equal(context.result.round4ComponentModels, 'claude-5,gemini-3', 'the bucket\'s own component must be merged with the range component, not replaced by it');
-  assert.equal(context.result.round4TotalTokens, 11, 'the top-line total must reflect the new range total');
-  assert.equal(context.result.round5Flagged, true, 'a bucket staying latest across a SECOND consecutive untouched round must still end up flagged');
-  assert.equal(context.result.round5ComponentCount, 2, 'still exactly the own component plus the current round\'s range component -- never duplicated across rounds');
-  assert.equal(context.result.round5ComponentModels, 'claude-5,llama-6', 'round 5\'s range component must replace round 4\'s, not accumulate alongside it, while the bucket\'s own component survives');
-  assert.equal(context.result.round5TotalTokens, 99, 'the total must refresh to round 5\'s real range data, not freeze at round 4\'s stale total');
+test('current deltas replace the authoritative report without per-bucket cost state', () => {
+  const deltaSource = source.slice(source.indexOf('function applyJsDebugCurrentDelta('), source.indexOf('\nasync function pollJsDebugStatsSample('));
+  assert.match(deltaSource, /if \(delta\.cost_report\) jsDebugCurrentCostReport = delta\.cost_report/);
+  assert.doesNotMatch(deltaSource, /cost_summary|rangeReport|rangeCost/);
+  assert.doesNotMatch(source, /debugGraphCostSummaryForBuckets|debugGraphCostSummaryHtml|includeCostSummary/);
 });
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {
@@ -2798,104 +2641,12 @@ test('an exact range-resolution switch retains the rendered buckets behind one r
   assert.equal(context.result.calls[1].options.select, true);
 });
 
-test('the retained YO!cost adapter and totals preserve marginal and API-list prices', () => {
-  const adapterSource = [
-    sourceFunction('jsDebugCurrentCostDimensionRows', 'jsDebugCurrentCostSummary'),
-    sourceFunction('debugGraphAgentDisplayLabel', 'debugGraphCostModelAgentKind'),
-    sourceFunction('jsDebugCurrentCostSummary', 'jsDebugCurrentModelComponent'),
-    sourceFunction('debugGraphCostAggregateRowInto', 'debugGraphCostAggregateValues'),
-    sourceFunction('debugGraphCostAggregateValues', 'debugGraphCostAggregateRows'),
-    sourceFunction('debugGraphCostAggregateRows', 'debugGraphCostSummarySignature'),
-  ].join('\n');
-  const adapterContext = {result: null};
-  vm.runInNewContext(`
-    ${adapterSource}
-    const dimensions = {
-      input: {tokens: 600, micro_usd: 0, api_list_micro_usd: 300000},
-      cache_read: {tokens: 300, micro_usd: 0, api_list_micro_usd: 60000},
-      cache_write_5m: {tokens: 100, micro_usd: 0, api_list_micro_usd: 40000},
-      cache_write_1h: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
-      output: {tokens: 200, micro_usd: 0, api_list_micro_usd: 200000},
-      other: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
-    };
-    const summary = jsDebugCurrentCostSummary({
-      total_micro_usd: 0,
-      total_api_list_micro_usd: 600000,
-      priced: {atoms: 1, tokens: 1200},
-      unpriced: {atoms: 0, tokens: 0},
-      dimensions,
-      models: [{provider: 'openai', model: 'gpt', total_tokens: 1200, total_micro_usd: 0, total_api_list_micro_usd: 600000, dimensions}],
-      agents: [
-        {key: 'agent-one', source: 'codex', label: 'yo8881|0|codex', total_tokens: 1200, total_micro_usd: 0, total_api_list_micro_usd: 600000, dimensions},
-        {key: 'agent-two', source: 'codex', label: 'yo8881|1|codex', total_tokens: 300, total_micro_usd: 0, total_api_list_micro_usd: 150000, dimensions},
-      ],
-      evidence: [{tokens: 200, micro_usd: 0, api_list_micro_usd: 200000}],
-      catalog_revision: 3,
-    });
-    const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd']);
-    const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['token_quantity']);
-    const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'agent_kind', 'source']);
-    const debugGraphCostInteger = value => Math.max(0, Number(value) || 0);
-    const debugGraphCostMicroUsd = row => debugGraphCostInteger(row?.micro_usd);
-    const grouped = debugGraphCostAggregateRows(summary.sources, DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS);
-    result = {summary, grouped};
-  `, adapterContext);
-  const adapted = adapterContext.result.summary;
-  assert.equal(adapted.total_micro_usd, 0);
-  assert.equal(adapted.api_list_micro_usd, 600000);
-  assert.equal(adapted.models[0].api_list_micro_usd, 600000);
-  assert.equal(adapted.sources[0].api_list_micro_usd, 600000);
-  assert.equal(adapted.components[0].api_list_micro_usd, 200000);
-  assert.equal(adapted.components[0].micro_usd, 0);
-  assert.equal(adapted.models[0].cache_api_list_micro_usd, 100000);
-  assert.deepEqual([...adapted.sources.map(row => row.tmux_key)], ['agent-one', 'agent-two']);
-  assert.deepEqual([...adapted.sources.map(row => row.label)], ['yo8881|0|codex', 'yo8881|1|codex']);
-  assert.equal(adapterContext.result.grouped.length, 2, 'distinct agent keys survive cost aggregation');
-  assert.equal(adapterContext.result.grouped.reduce((sum, row) => sum + row.token_quantity, 0), 1500);
-
-  const labelContext = {result: null};
-  vm.runInNewContext(`
-    ${sourceFunction('debugGraphAgentDisplayLabel', 'debugGraphCostModelAgentKind')}
-    result = {
-      first: debugGraphAgentDisplayLabel('claude-bg:-Users-keivenc-projects-yolomux.dev8881:123456789abc:deadbeef'),
-      second: debugGraphAgentDisplayLabel('claude-bg:-Users-keivenc-projects-yolomux.dev8881:abcdef012345:feedface'),
-    };
-  `, labelContext);
-  assert.match(labelContext.result.first, /^claude-bg:/);
-  assert.notEqual(labelContext.result.first, labelContext.result.second);
-  assert.ok(labelContext.result.first.length <= 64);
-  assert.doesNotMatch(labelContext.result.first, /123456789abc/);
-  assert.match(sourceFunction('debugGraphLegendHtml', 'debugGraphLegendSwatchHtml'), /debugGraphExplainAttrs\(series\.fullLabel \|\| series\.label/);
-
-  const priceContext = {
-    result: null,
-    debugGraphCostInteger: value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0,
-    debugGraphCostText: (_key, fallback) => fallback,
-    debugGraphCostUsdText: value => `$${(Number(value) / 1000000).toFixed(2)}`,
-    esc: value => String(value),
-  };
-  vm.runInNewContext(`
-    ${sourceFunction('debugGraphCostPricePairText', 'debugGraphCostPricePairHtml')}
-    ${sourceFunction('debugGraphCostPricePairHtml', 'debugGraphCostBreakdownItems')}
-    result = {
-      subscription: debugGraphCostPricePairText(0, 600000),
-      defaultProfile: debugGraphCostPricePairText(600000, 600000),
-      html: debugGraphCostPricePairHtml(0, 600000),
-    };
-  `, priceContext);
-  assert.equal(priceContext.result.subscription, '$0.00 marginal · $0.60 list');
-  assert.equal(priceContext.result.defaultProfile, '$0.60');
-  assert.match(priceContext.result.html, /\$0\.00 marginal[\s\S]*\$0\.60 list/);
-  assert.match(sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'), /grandTotalDual[\s\S]*grandTotalApiList/);
-  assert.match(sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml'), /debugGraphCostPricePairText\(summary\.totalMicroUsd, summary\.apiListMicroUsd\)/);
+test('the server cost report is rendered directly without browser aggregation', () => {
+  assert.match(sourceFunction('debugGraphCostReportHtml', 'refreshDebugCostPricing'), /report\.total_micro_usd/);
+  assert.doesNotMatch(source, /jsDebugCurrentCostSummary|debugGraphCostSummaryForBuckets|components/);
 });
 
 test('current cost rows retain typed unpriced coverage instead of rendering it as zero', () => {
-  const adapterSource = [
-    sourceFunction('jsDebugCurrentCostDimensionRows', 'jsDebugCurrentCostSummary'),
-    sourceFunction('debugGraphAgentDisplayLabel', 'debugGraphCostModelAgentKind'),
-    sourceFunction('jsDebugCurrentCostSummary', 'jsDebugCurrentModelComponent'),
-  ].join('\n');
   const context = {
     result: null,
     debugGraphCostInteger: value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0,
@@ -2909,37 +2660,20 @@ test('current cost rows retain typed unpriced coverage instead of rendering it a
     esc: value => String(value),
   };
   vm.runInNewContext(`
-    ${adapterSource}
+    function debugGraphCostDimensionRows(dimensions) { return Object.fromEntries(Object.entries(dimensions).flatMap(([key, value]) => [[key + '_tokens', value.tokens], [key + '_micro_usd', value.micro_usd], [key + '_api_list_micro_usd', value.api_list_micro_usd]])); }
+    function debugGraphCostReportRow(row) { return {...row, token_quantity: row.total_tokens, micro_usd: row.total_micro_usd, api_list_micro_usd: row.total_api_list_micro_usd, priced_token_quantity: row.priced.tokens, unpriced_token_quantity: row.unpriced.tokens, ...debugGraphCostDimensionRows(row.dimensions)}; }
     ${sourceFunction('debugGraphCostUsageUsdText', 'debugGraphCostPricePairText')}
     ${sourceFunction('debugGraphCostUsageTableCellHtml', 'debugGraphCostExactTotalRow')}
-    const report = {
-      total_tokens: 10,
-      total_micro_usd: 0,
-      total_api_list_micro_usd: 0,
-      priced: {atoms: 0, tokens: 0},
-      unpriced: {atoms: 1, tokens: 10},
-      dimensions: {output: {tokens: 10, micro_usd: 0, api_list_micro_usd: 0}},
-      models: [{
+    const row = debugGraphCostReportRow({
         provider: 'unknown', model: 'future-model', total_tokens: 10,
         total_micro_usd: 0, total_api_list_micro_usd: 0,
         dimensions: {output: {tokens: 10, micro_usd: 0, api_list_micro_usd: 0}},
         priced: {atoms: 0, tokens: 0}, unpriced: {atoms: 1, tokens: 10},
-      }],
-      agents: [], evidence: [], catalog_revision: 5,
-    };
-    const summary = jsDebugCurrentCostSummary(report);
-    const row = summary.models[0];
-    const pricedSummary = jsDebugCurrentCostSummary({
-      ...report,
-      priced: {atoms: 1, tokens: 10},
-      unpriced: {atoms: 0, tokens: 0},
-      models: [{...report.models[0], priced: {atoms: 1, tokens: 10}, unpriced: {atoms: 0, tokens: 0}}],
     });
-    const pricedRow = pricedSummary.models[0];
     result = {
       row,
       html: debugGraphCostUsageTableCellHtml(row.token_quantity, row.micro_usd, {total: true, row}),
-      pricedZeroHtml: debugGraphCostUsageTableCellHtml(pricedRow.token_quantity, pricedRow.micro_usd, {total: true, row: pricedRow}),
+      pricedZeroHtml: debugGraphCostUsageTableCellHtml(10, 0, {total: true, row: {...row, priced_token_quantity: 10, unpriced_token_quantity: 0}}),
     };
   `, context);
   assert.equal(context.result.row.unpriced_token_quantity, 10);
@@ -2987,8 +2721,9 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
   ].join('\n');
   const context = {result: null};
   vm.runInNewContext(`
-    let jsDebugGraphSelectionState = null;
-    let jsDebugGraphTouchCandidateState = null;
+    var jsDebugGraphSelectionState = null;
+    var jsDebugGraphTouchCandidateState = null;
+    var jsDebugGraphPendingResolutionChange = null;
     let jsDebugGraphZoomDomain = null;
     let jsDebugGraphLastPointerType = 'mouse';
     const jsDebugGraphTouchArmDistancePx = 24;
@@ -3127,7 +2862,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     sourceFunction('clearDebugGraphZoom', 'debugEventCounts'),
     sourceFunction('debugGraphDomain', 'debugGraphBucketRate'),
     sourceFunction('refreshDebugGraphSurfaces', 'createDebugPanel'),
-    sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons'),
+     sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection'),
     sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
   ].join('\n');
   const context = {result: null};
@@ -3136,8 +2871,9 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     const Date = {now: () => nowMs};
     const debugRuntimeState = {graphRangeSeconds: 900, graphResolutionOverrideSeconds: 60};
     const jsDebugGraphRetentionMs = 86400000;
+    const jsDebugGraphExactResolutionEnabled = false;
     let jsDebugGraphZoomDomain = {startMs: 390000, endMs: 3417000};
-    let jsDebugGraphSelectionState = {pointerType: 'touch'};
+     var jsDebugGraphSelectionState = {pointerType: 'touch'};
     let jsDebugGraphRangeSliderDragging = false;
     let resetVisible = true;
     let paintedDomain = {startMs: 390000, endMs: 3417000, rangeSeconds: 3017, zoomed: true};
@@ -3164,7 +2900,8 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
         if (selector === '.js-debug-graph-view') return scrollOwner;
         return null;
       },
-      querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+       querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+       querySelectorAll() { return []; },
       setAttribute() {},
     };
     const document = {
@@ -3176,6 +2913,10 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     function syncDebugGraphResolutionOverride() {}
     function syncJsDebugStatsDeliveryMode() {}
     function requestJsDebugHistoryForCurrentDomain() { return false; }
+    function jsDebugStatsPanelVisible() { return true; }
+    function jsDebugRequestedHistoryResolutionSeconds() { return 60; }
+    function jsDebugHistoryCoverageResolutionSeconds() { return 60; }
+    function jsDebugHistoryCoverageNeedsRefresh() { return false; }
     function renderYoCostPanels() { return false; }
     function debugGraphInteractionBelongsToPanel() { return false; }
     function debugGraphClassName() { return 'js-debug-graph'; }
@@ -3198,6 +2939,10 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     function jsDebugHistoryReadinessBusy() { return false; }
     const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
     const jsDebugHistoryReadiness = {phase: 'ready'};
+    var jsDebugGraphSelectionState = null;
+    var jsDebugGraphTouchCandidateState = null;
+    var jsDebugGraphPendingResolutionChange = null;
+    function debugGraphInteractionBelongsToPanel() { return false; }
     function commitJsDebugCurrentStatsPaint() {}
     function resolveDebugGraphResolutionChange() {}
     function syncDebugGraphLiveTicker() {}
@@ -3420,6 +3165,7 @@ test('accepted current stats generations are not declared painted before a rende
       paintedGenerationKey: '300:10:10:11:12',
       pendingGenerationKey: '',
     };
+    let jsDebugGraphSelectionState = null;
     function jsDebugStatsPanelVisible() { return true; }
     function jsDebugCurrentStatsGenerationKey(value) {
       return [value.range_seconds, value.requested_resolution, value.resolution_seconds, value.source_generation, value.cache_generation].join(':');
@@ -3442,10 +3188,10 @@ test('a focused stable graph control preserves focus while a newer generation co
     sourceFunction('commitJsDebugCurrentStatsPaint', 'paintJsDebugCurrentStatsGeneration'),
     sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient'),
   ].join('\n');
-  const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons');
+  const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection');
   const context = {result: null};
   vm.runInNewContext(`
-    const toggle = {dataset: {jsDebugChartToggle: 'costSummary'}};
+    const toggle = {dataset: {jsDebugChartToggle: 'modelTokens'}};
     const panel = {};
     const scrollOwner = {scrollTop: 0, scrollLeft: 0};
     let bodyPaints = 0;
@@ -3460,7 +3206,8 @@ test('a focused stable graph control preserves focus while a newer generation co
         if (selector === '.js-debug-graph-view') return scrollOwner;
         return null;
       },
-      querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+       querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+       querySelectorAll() { return []; },
       setAttribute() {},
     };
     const document = {
@@ -3472,6 +3219,9 @@ test('a focused stable graph control preserves focus while a newer generation co
       pendingGenerationKey: '',
     };
     const jsDebugHistoryReadiness = {phase: 'ready'};
+    let jsDebugGraphSelectionState = null;
+    let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphPendingResolutionChange = null;
     let jsDebugGraphRangeSliderDragging = false;
     function jsDebugStatsPanelVisible() { return true; }
     function jsDebugCurrentStatsGenerationKey(value) {
@@ -4140,7 +3890,6 @@ test('the current snapshot adapter merges both GPU dimensions into one device', 
     result: null,
     jsDebugCurrentSeriesValue: (series, name) => Number(series[name]?.value),
     jsDebugCurrentModelComponent: () => ({}),
-    jsDebugCurrentCostSummary: () => ({components: []}),
   };
   vm.runInNewContext(`${functionText}\nresult = jsDebugCurrentBucketRecord({
     start: 100,
@@ -4165,7 +3914,6 @@ test('the current snapshot adapter maps binary RSS series into memory processes'
     result: null,
     jsDebugCurrentSeriesValue: (series, name) => Number(series[name]?.value),
     jsDebugCurrentModelComponent: () => ({}),
-    jsDebugCurrentCostSummary: () => ({components: []}),
   };
   vm.runInNewContext(`${projectionText}\n${functionText}\nresult = jsDebugCurrentBucketRecord({
     start: 100,
@@ -4213,7 +3961,6 @@ test('the current snapshot adapter retains marginal cost, API-list cost, and usa
     result: null,
     jsDebugCurrentSeriesValue: (series, name) => Number(series[name]?.value),
     jsDebugCurrentModelComponent: () => ({}),
-    jsDebugCurrentCostSummary: () => ({components: []}),
   };
   vm.runInNewContext(`${functionText}\nresult = jsDebugCurrentBucketRecord({
     start: 100,
@@ -4224,19 +3971,13 @@ test('the current snapshot adapter retains marginal cost, API-list cost, and usa
       usage_tokens: {value: 1200},
     },
   });`, context);
-  assert.equal(context.result.cost_summary.range_report, false);
-  assert.equal(context.result.cost_summary.total_micro_usd, 0);
-  assert.equal(context.result.cost_summary.api_list_micro_usd, 600000);
-  assert.equal(context.result.cost_summary.total_token_quantity, 1200);
+  assert.equal(context.result.cost_report, undefined);
   vm.runInNewContext(`result = jsDebugCurrentBucketRecord({
     start: 110,
     duration: 10,
     series: {usage_tokens: {value: 300}},
   });`, context);
-  assert.equal(context.result.cost_summary.complete, false);
-  assert.equal(context.result.cost_summary.priced_count, 0);
-  assert.equal(context.result.cost_summary.unpriced_count, 1);
-  assert.equal(context.result.cost_summary.unpriced_token_quantity, 300);
+  assert.equal(context.result.cost_report, undefined);
 });
 
 test('health observations retain measured latency and bytes as original browser facts', () => {
@@ -4266,42 +4007,15 @@ test('health observations retain measured latency and bytes as original browser 
   assert.equal(context.result.payload.bytes, 456);
 });
 
-test('the Cost summary card renders as a content-sized ruled table with the report cost-table style, basis stated once', () => {
-  const summaryFn = sourceFunction('debugGraphCostSummaryHtml', 'scheduleDebugCostPricingStatusRefresh');
-  // Shared report table style + scroll-wrap owner reused (no bespoke summary table style).
-  assert.match(summaryFn, /<div class="js-debug-system-table-wrap js-debug-cost-table-wrap">/);
-  assert.match(summaryFn, /<table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary"/);
-  // Tables stay content-sized; their shared wrapper owns narrow horizontal scrolling.
-  assert.match(css, /\.js-debug-cost-usage-table-section \.js-debug-cost-table,\s*\.js-debug-cost-summary \.js-debug-cost-table\s*\{\s*inline-size: max-content;\s*max-inline-size: none;\s*min-inline-size: auto;/);
-  // Header row: Usage / Tokens / Price.
-  assert.match(summaryFn, /<thead><tr><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.usage', 'Usage'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.modelTokens\.label', 'Tokens'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.priceColumn', 'Price'\)\)\}<\/th><\/tr><\/thead>/);
-  // Input/Cache/Output in tbody, Total in tfoot, via the shared row shape.
-  assert.match(summaryFn, /<tbody>\$\{compactRows\.slice\(0, 3\)\.map\(summaryRowHtml\)\.join\(''\)\}<\/tbody>/);
-  assert.match(summaryFn, /<tfoot>\$\{summaryRowHtml\(compactRows\[3\]\)\}<\/tfoot>/);
-  // Row shape: <th scope="row"> keeps the per-usage explain-attrs owner; prices stay concise
-  // (default-omit debugGraphCostPricePairHtml => amount only, basis is NOT repeated per row).
-  assert.match(summaryFn, /const summaryRowHtml = \(\[label, value, apiListValue, tokenCount\]\) => \{/);
-  assert.match(summaryFn, /<th scope="row"\$\{debugGraphCostUsageColumnHeaderAttrs\(key, rowLabel\)\}>/);
-  assert.match(summaryFn, /<td>\$\{value === null \? '—' : debugGraphCostPricePairHtml\(value, apiListValue\)\}<\/td>/);
-  // Basis "At API list prices" is stated once in the section heading, not in the table.
-  assert.match(summaryFn, /js-debug-cost-estimate">\(\$\{esc\(heading\)\}\)/);
-  assert.match(summaryFn, /debug\.cost\.atApiListPrices/);
-  // Surrounding chrome preserved: head, Refresh, close, range/backfill status, More Info.
-  assert.match(summaryFn, /class="js-debug-chart-head"/);
-  assert.match(summaryFn, /data-js-debug-cost-details/);
-  // Old compact definition-list structure is gone.
-  assert.doesNotMatch(summaryFn, /js-debug-cost-compact/);
-  assert.doesNotMatch(summaryFn, /<dl /);
-  assert.doesNotMatch(summaryFn, /js-debug-cost-token-count/);
-  // Dead compact-card CSS was removed with the DOM.
-  assert.doesNotMatch(css, /\.js-debug-cost-compact/);
-  assert.doesNotMatch(css, /\.js-debug-cost-token-count/);
+test('the graph has no separate cost summary card', () => {
+  assert.doesNotMatch(source, /debugGraphCostSummaryHtml|data-js-debug-summary-group="costSummary"|includeCostSummary/);
+  assert.doesNotMatch(source, /jsDebugCurrentCostSummary|components/);
 });
 
 test('the YO!cost report renders one shared always-visible column legend with translated terse glosses', () => {
   const copyStart = source.indexOf('const debugGraphCostUsageColumnCopy = Object.freeze(');
   const copyEnd = source.indexOf('\nfunction debugGraphCostUsageColumnHeaderAttrs(', copyStart);
-  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const report = sourceFunction('debugGraphCostReportHtml', 'refreshDebugCostPricing');
   const legend = sourceFunction('debugGraphCostUsageColumnLegendHtml', 'debugGraphCostUsageColumnHeaderAttrs');
   assert.notEqual(copyStart, -1, 'one shared copy owner exists');
   assert.notEqual(copyEnd, -1, 'shared copy owner precedes header attrs');
@@ -4390,7 +4104,7 @@ test('Graphs and Cost give the same retained token range separate SVG pattern id
   assert.match(context.result.cost.definition, new RegExp(`id="${context.result.cost.id}"`));
 
   const costPanel = sourceFunction('yoCostPanelHtml', 'openYoCostTranscriptPreview');
-  assert.match(costPanel, /debugGraphSvgHtml\(buckets, debugGraphSeriesData\(buckets\), tokenGroups, nowMs, \{includeCostSummary: false, patternScope: 'cost'\}\)/);
+  assert.match(costPanel, /debugGraphSvgHtml\(buckets, debugGraphSeriesData\(buckets\), tokenGroups, nowMs, \{patternScope: 'cost'\}\)/);
   const graphRenderer = sourceFunction('debugGraphSvgHtml', 'debugGraphClassName');
   assert.match(graphRenderer, /patternScope = 'graphs'/);
   assert.match(graphRenderer, /patternScope: `\$\{patternScope\}-\$\{group\.key\}`/);
@@ -4433,7 +4147,7 @@ test('debug subviews share one complete lifecycle descriptor registry', () => {
 
 test('the YO!cost report shows one always-visible column legend sharing the description owner', () => {
   // Legend rendered once in the report body, above the usage tables.
-  const reportFn = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const reportFn = sourceFunction('debugGraphCostReportHtml', 'refreshDebugCostPricing');
   const legendCalls = reportFn.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || [];
   assert.equal(legendCalls.length, 1, 'legend rendered exactly once per report');
   // The legend renders a swatch (except Total) + label + terse gloss for each column, and reuses
@@ -4455,11 +4169,11 @@ test('the YO!cost report shows one always-visible column legend sharing the desc
 });
 
 test('YO!cost keeps exact formulas inside Cost by Model and removes the duplicate calculation table', () => {
-  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const report = sourceFunction('debugGraphCostReportHtml', 'refreshDebugCostPricing');
   const usageTable = sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml');
-  const formula = sourceFunction('debugGraphCostModelFormulaCellHtml', 'debugGraphCostSourceLabel');
+  const formula = sourceFunction('debugGraphCostModelFormulaCellHtml', 'debugGraphCostTmuxLabel');
   assert.doesNotMatch(report, /debugGraphCostComponentDetailsHtml|data-js-debug-cost-table="calculation"/);
-  assert.match(usageTable, /debugGraphCostModelFormulaCellHtml\(components, row, item\)/);
+  assert.match(usageTable, /debugGraphCostModelFormulaCellHtml\(evidence, row, item\)/);
   assert.match(formula, /cache_write_5m.*cache_write_1h/);
   assert.match(formula, /x \$\{esc\(debugGraphCostComponentRateText\(row\)\)\} =/);
   assert.match(formula, /js-debug-cost-model-formula/);
@@ -4467,7 +4181,7 @@ test('YO!cost keeps exact formulas inside Cost by Model and removes the duplicat
 
 test('YO!cost keeps Cost by Model and Cost by Agent on one cache-write grid', () => {
   const gridStart = source.indexOf('const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = Object.freeze(');
-  const gridEnd = source.indexOf('\nfunction debugGraphCostPricingSourceEntries(', gridStart);
+  const gridEnd = source.indexOf('\nfunction debugGraphCostUsageTableCellHtml(', gridStart);
   assert.notEqual(gridStart, -1, 'shared cache-write grid exists');
   assert.notEqual(gridEnd, -1, 'shared cache-write grid ends before the next owner');
   const sharedGrid = source.slice(gridStart, gridEnd);
@@ -4511,7 +4225,7 @@ test('YO!cost keeps Cost by Model and Cost by Agent on one cache-write grid', ()
 });
 
 test('Cost by Agent sorts by the canonical displayed agent name', () => {
-  const sorter = sourceFunction('debugGraphCostAgentRowsAlphabetically', 'debugGraphCostTmuxBreakdownRows');
+  const sorter = sourceFunction('debugGraphCostAgentRowsAlphabetically', 'debugGraphCostTmuxBreakdownHtml');
   const context = {result: null};
   vm.runInNewContext(`
     const debugGraphCostTmuxLabel = row => row.label;
@@ -4530,7 +4244,7 @@ test('Cost by Agent sorts by the canonical displayed agent name', () => {
 });
 
 test('Cost by Agent keeps names compact and labels the footer succinctly', () => {
-  const helper = sourceFunction('debugGraphCostAgentLabelHtml', 'debugGraphCostSourceLabelHtml');
+  const helper = sourceFunction('debugGraphCostAgentLabelHtml', 'debugGraphCostCatalogDetailsHtml');
   const context = {result: null};
   vm.runInNewContext(`
     const esc = value => String(value);
@@ -4549,17 +4263,29 @@ test('Cost by Agent keeps names compact and labels the footer succinctly', () =>
   assert.match(css, /\.js-debug-cost-agent-name--long\s*\{[\s\S]*display: inline-grid;[\s\S]*line-height: 1\.1;/);
 });
 
+test('Cost by Agent owns expandable source attribution instead of a separate source section', () => {
+  const table = sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostTranscriptPath');
+  assert.match(sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'), /js-debug-cost-agent-row/);
+  assert.match(table, /js-debug-cost-agent-sources/);
+  assert.doesNotMatch(table, /data-js-debug-cost-table="source"/);
+  assert.doesNotMatch(source, /Agent and source attribution/);
+});
+
+test('Cost refresh preserves expanded agent rows by stable key', () => {
+  const renderSource = sourceFunction('renderYoCostPanel', 'renderYoCostPanels');
+  const anchorSource = coreSource.slice(coreSource.indexOf('function keyedDetailsOpenAnchor('), coreSource.indexOf('\nfunction wsUrl('));
+  assert.match(renderSource, /keyedDetailsOpenAnchor\('\.js-debug-cost-agent-row\[data-js-debug-cost-agent-key\]'\)/);
+  assert.match(anchorSource, /filter\(element => element\.open\)/);
+  assert.match(anchorSource, /element\.open = keys\.has/);
+});
+
 test('YO!cost usage metrics and compact pricing links stay on one line', () => {
   const cell = sourceFunction('debugGraphCostUsageTableCellHtml', 'debugGraphCostExactTotalRow');
-  const pricing = sourceFunction('debugGraphCostPricingLinksHtml', 'debugGraphCostAllPricingSourcesHtml');
   assert.match(cell, /js-debug-cost-table-metric js-debug-cost-table-metric--inline/);
-  assert.match(pricing, /js-debug-cost-pricing-links--compact/);
-  assert.match(pricing, /compact \? '\$' : label/);
-  assert.match(pricing, /title="\$\{esc\(`\$\{label\} pricing`\)\}"/);
+  assert.doesNotMatch(source, /debugGraphCostPricingLinksHtml|debugGraphCostAllPricingSourcesHtml/);
   assert.match(css, /\.js-debug-cost-table-metric--inline\s*\{[\s\S]*?display: inline-flex;[\s\S]*?white-space: nowrap;/);
   assert.match(css, /\.js-debug-cost-table-metric--inline \.js-debug-cost-price-pair\s*\{[\s\S]*?display: inline-flex;/);
   assert.match(css, /\.js-debug-cost-model-copy\s*\{[\s\S]*?display: flex;[\s\S]*?white-space: nowrap;/);
-  assert.match(css, /\.js-debug-cost-pricing-links--compact::before,[\s\S]*?\.js-debug-cost-pricing-links--compact::after\s*\{[\s\S]*?content: none;/);
 });
 
 test('Daemons chart mirrors the server continuous one-second service-load cadence', () => {

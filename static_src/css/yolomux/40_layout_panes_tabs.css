@@ -1158,6 +1158,20 @@ body.layout-resizing {
 .meta-path {
   color: var(--pane-meta-path);
 }
+.meta-path-action {
+  padding: 0;
+  border: 0;
+  color: var(--pane-meta-path);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.meta-path-action:hover,
+.meta-path-action:focus-visible {
+  color: var(--text);
+  text-decoration: underline;
+  outline: none;
+}
 .meta-desc {
   color: var(--pane-meta-desc);
 }

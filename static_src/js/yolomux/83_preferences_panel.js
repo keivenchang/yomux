@@ -307,9 +307,9 @@ function preferenceSections() {
     {id: PREFERENCE_SECTION_IDS.sizes, title: t('pref.section.sizes'), items: [
       preferenceSettingItem('appearance.sync_font_sizes', {type: 'boolean'}),
       preferenceSettingItem('appearance.global_font_size', {type: 'number', min: 6, max: 25, step: 1, suffix: 'px', whenSyncFontSizes: true}),
-      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px', whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 30, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
-      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 1, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}, whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px', whenSyncFontSizes: false}),
       preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),

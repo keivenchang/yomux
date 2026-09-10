@@ -2918,6 +2918,19 @@ def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
     assert "+print('two')" in result["diff"]
 
 
+def test_git_history_reuses_result_for_ten_seconds_and_expires(monkeypatch, tmp_path):
+    git_ops._clear_git_history_cache()
+    now = [100.0]
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: now[0])
+    key = (str(tmp_path / "repo"), "", 1, "", f"test:{git_ops.GIT_HISTORY_MAX_PAYLOAD_BYTES}")
+    payload = {"head": "abc", "commits": [{"sha": "abc"}]}
+
+    git_ops._git_history_cache_put(key, payload)
+    assert git_ops._git_history_cache_get(key) == payload
+    now[0] += git_ops.GIT_HISTORY_CACHE_TTL_SECONDS + 0.1
+    assert git_ops._git_history_cache_get(key) is None
+
+
 def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
     git(tmp_path, "init")
     target = tmp_path / "new.txt"
@@ -3029,21 +3042,18 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert first["snapshot_cursor"]
     assert first["next_cursor"]
     assert first["truncated"] is False
-    assert all(
-        {"sha", "short", "parents", "subject", "author", "authored_at", "files", "added", "removed", "binary_files"}
-        <= item.keys()
-        for item in first["commits"]
-    )
+    assert all({"sha", "short", "parents", "subject", "author", "authored_at"} <= item.keys() for item in first["commits"])
     assert repo.outside_sha not in {item["sha"] for item in scoped["commits"]}
     assert scoped["relative_path"] == "scope"
     scoped_root = next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)
-    assert scoped_root["files"] > 0
-    assert scoped_root["added"] >= 0
-    assert scoped_root["removed"] >= 0
+    assert "files" not in scoped_root
+    assert "added" not in scoped_root
+    assert "removed" not in scoped_root
     assert root_call_count == scoped_call_count
     assert root_call_count <= 4
-    assert "--numstat" in history_log_args
-    assert "--shortstat" in history_log_args
+    assert "--no-patch" in history_log_args
+    assert "--numstat" not in history_log_args
+    assert "--shortstat" not in history_log_args
     assert "--find-renames" not in history_log_args
     assert "--find-copies-harder" not in history_log_args
 
@@ -3206,7 +3216,7 @@ def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_
 
     limited = filesystem.git_history(str(repo.root), limit=999)
     clamped = filesystem.git_history(str(repo.root), limit=0)
-    assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 40
+    assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 100
     assert len(clamped["commits"]) == 1
 
     monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1400)
@@ -3403,7 +3413,7 @@ def test_git_history_drops_in_progress_commit_when_output_is_truncated(tmp_path,
         assert isinstance(result, git_ops.PinnedGitResult)
         raw = result.stdout
         assert isinstance(raw, bytes)
-        second = raw.find(b"\ncommit\0")
+        second = raw.find(b"commit\0", 1)
         assert second > 0
         return git_ops.PinnedGitResult(
             args=result.args,
@@ -3943,16 +3953,14 @@ def test_git_history_initial_rows_include_one_process_file_and_line_totals(tmp_p
     monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
     history = filesystem.git_history(str(repo.root), limit=4)
 
-    assert all({"files", "added", "removed", "binary_files"} <= commit.keys() for commit in history["commits"])
+    assert all({"sha", "subject", "authored_at"} <= commit.keys() for commit in history["commits"])
     merge = history["commits"][0]
-    assert merge["files"] > 0
-    assert merge["added"] >= 0
-    assert merge["removed"] >= 0
-    assert merge["binary_files"] == 0
+    assert "files" not in merge
+    assert "binary_files" not in merge
     history_calls = [args for args in calls if "log" in args]
     assert len(history_calls) == 1
-    assert "--shortstat" in history_calls[0]
-    assert "--numstat" in history_calls[0]
+    assert "--no-patch" in history_calls[0]
+    assert "--numstat" not in history_calls[0]
     assert "--no-renames" in history_calls[0]
 
 

@@ -155,7 +155,7 @@ def test_invalid_columns_and_payloads_fail_at_one_boundary(updates, message):
 
 @pytest.mark.parametrize(
     "field",
-    ["micro_usd", "cost_summary", "agent_token_total", "model_token_total"],
+    ["micro_usd", "agent_token_total", "model_token_total"],
 )
 def test_derived_values_cannot_enter_the_source_atom(field):
     payload = dict(_atom().payload)
@@ -219,7 +219,7 @@ def test_owner_is_small_and_has_no_old_or_derived_pipeline_dependency():
     assert imported == {"__future__", "collections.abc", "types", "storage"}
     assert len(source.splitlines()) < 220
     for forbidden in (
-        "micro_usd", "cost_summary", "agent_token_rates", "tokens_per_agent_total",
+        "micro_usd", "agent_token_rates", "tokens_per_agent_total",
         "token_stream", "legacy_history",
     ):
         assert forbidden not in source

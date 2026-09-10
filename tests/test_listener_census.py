@@ -438,7 +438,7 @@ def test_proc_fallback_rejects_partial_or_absent_listener_tables(tmp_path, reada
 
 def test_darwin_lsof_snapshot_preserves_raw_parent_and_child_owners():
     calls = []
-    snapshot = "p101\nR1\ncpython3.12\np202\nR101\ncpython3.12\n"
+    snapshot = "p101\nR1\ncpython3.12\nf9\np202\nR101\ncpython3.12\nf10\n"
 
     def run(command, **kwargs):
         calls.append((command, kwargs["timeout"]))

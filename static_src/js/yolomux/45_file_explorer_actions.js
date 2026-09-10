@@ -672,22 +672,32 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (!window.confirm(confirmText)) return;
   if (!await confirmLargeDirectoryDeletes(deletePaths, fullPath, entry)) return;
   try {
-    for (const path of deletePaths) {
-      await apiFetchJson('/api/fs/delete', {
+    const deleteRequests = deletePaths.map(path => apiFetchJson('/api/fs/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({path}),
-      });
-    }
+      }));
+    // Remove the rows as soon as deletion is accepted by the browser. The requests remain authoritative;
+    // a failure below refreshes the directory and restores any path that still exists.
     for (const path of Array.from(fileState.keys())) {
       if (deletePaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) {
         removeOpenFile(path, {confirmDirty: false, render: false});
       }
     }
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
+    markFileExplorerDeletedPaths(deletePaths);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
+    removeFileTreePathsImmediately(deletePaths);
+    const results = await Promise.allSettled(deleteRequests);
+    const failedPaths = deletePaths.filter((path, index) => results[index].status === 'rejected');
+    if (failedPaths.length) {
+      clearFileExplorerDeletedPaths(failedPaths);
+      invalidateFileExplorerRoots(failedPaths.map(dirnameOf));
+      await refreshFileExplorerTrees({fresh: true});
+      throw results[deletePaths.indexOf(failedPaths[0])].reason;
+    }
     await refreshFileExplorerTrees();
     if (typeof refreshVisibleSessionFilesSurfaces === 'function') {
       await refreshVisibleSessionFilesSurfaces({silent: true, force: true});
@@ -1169,6 +1179,11 @@ function defaultFileEditorViewModeForPath(path, kind) {
   return previewRendererForPath(path)?.defaultMode || 'edit';
 }
 
+function defaultFileEditorWrapForPath(path, kind) {
+  if (kind !== 'text') return false;
+  return previewRendererForPath(path)?.defaultWrap === true;
+}
+
 function openFileKindForPreviewPath(path) {
   const renderer = previewRendererForPath(path);
   const mediaKind = renderer?.mediaKind || '';
@@ -1291,6 +1306,21 @@ function fileEntryChanged(state, entry) {
   return Number(state.size) !== Number(entry.size);
 }
 
+function fileEditorSelfWriteAcknowledged(path, entry) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
+  const mtime = fileEntryMtime(entry);
+  const size = entry?.size;
+  const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
+  const transientMatch = ack.pending === true && Number(size) === 0;
+  if (!finalMatch && !transientMatch) return false;
+  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
+}
+
 function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
@@ -1343,8 +1373,11 @@ function openFilePathHasOwner(path) {
 }
 
 function removeFilePanelOwner(path, item) {
+  const state = fileStateFor(path);
+  const panel = panelNodes.get(item);
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (state && state.contentOwnerPanel === panel) reassignFileContentOwnerPanel(path, panel);
   if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
@@ -1352,7 +1385,7 @@ function removeFilePanelOwner(path, item) {
   fileEditorViewState.delete(item);
   fileEditorDiffExpandOverrides.delete(item);
   tabLastActivatedAt.delete(item);
-  if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
+  if (!openFilePathHasOwner(path)) state?.ownerSessions.clear();
 }
 
 function normalizedOpenFileOwnerSession(value) {
@@ -1375,9 +1408,24 @@ function openFileOwnerSessionsForPath(path) {
 function removePanelForItem(item) {
   const panel = panelNodes.get(item);
   if (!panel) return;
+  reassignFileContentOwnerPanel(fileEditorPanelPath(panel), panel);
   tabTypeForItem(item)?.cleanup?.(item, panel);
   panel.remove();
   panelNodes.delete(item);
+}
+
+function reassignFileContentOwnerPanel(path, panel) {
+  const state = path ? fileState.get(path) : null;
+  if (!state || state.contentOwnerPanel !== panel) return;
+  const replacement = Array.from(state.editorTabItems || [])
+    .map(item => panelNodes.get(item))
+    .find(candidate => (
+      candidate !== panel
+      && candidate?.isConnected !== false
+      && fileEditorPanelState(candidate)?.historical !== true
+    ));
+  if (replacement) state.contentOwnerPanel = replacement;
+  else delete state.contentOwnerPanel;
 }
 
 // A language switch must repaint the Finder's toolbar chrome (root/dates/sort/new-file… labels), which
@@ -1589,8 +1637,8 @@ function openFileStatus(state) {
 }
 
 function fileEditorAutosaveDelayMs() {
-  const seconds = Number(fileEditorAutosaveDelaySeconds || 2.5);
-  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 2.5));
+  const seconds = Number(fileEditorAutosaveDelaySeconds || 6);
+  const clamped = Math.max(0.5, Math.min(60, Number.isFinite(seconds) ? seconds : 6));
   return Math.round(clamped * 1000);
 }
 
@@ -1611,6 +1659,7 @@ function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
+  flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
   state.content = cmContent;
@@ -1619,6 +1668,10 @@ function syncOpenFileContentFromPanel(path, panel) {
 }
 
 function syncOpenFileContentFromPanels(path, preferredPanel = null) {
+  if (preferredPanel?._pmView) flushProseMirrorSource(preferredPanel, path);
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel !== preferredPanel && panel?._pmView) flushProseMirrorSource(panel, path);
+  }
   if (syncOpenFileContentFromPanel(path, preferredPanel)) return true;
   for (const panel of fileEditorPanelsForPath(path)) {
     if (panel === preferredPanel) continue;
@@ -1660,7 +1713,10 @@ function rescheduleAllFileAutosaves() {
 async function autoSaveFileEditor(path) {
   const state = fileState.get(path);
   if (!openFileAutosaveReady(path, state)) return false;
-  const panel = fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
+  const contentOwner = state.contentOwnerPanel;
+  const panel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+    ? contentOwner
+    : fileEditorPanelsForPath(path).find(candidate => candidate?._cmView) || fileEditorPanelsForPath(path)[0] || null;
   syncOpenFileContentFromPanels(path, panel);
   if (!openFileAutosaveReady(path, state)) return false;
   return saveFileEditor(path, panel, {autosave: true});
@@ -1785,8 +1841,14 @@ function showFileEditorDecisionDialog(options = {}) {
       if (event.key === 'Escape') {
         event.preventDefault();
         finish('cancel');
+      } else if (event.key === 'Enter' && event.target?.matches?.('[data-markdown-link-url-input]')) {
+        event.preventDefault();
+        finish('save');
       }
     };
+    backdrop.addEventListener('input', event => {
+      if (event.target?.matches?.('[data-markdown-link-url-input]')) options.onInput?.(event.target.value);
+    });
     backdrop.addEventListener('click', event => {
       const button = event.target?.closest?.('[data-dialog-action]');
       if (button && backdrop.contains(button)) {
@@ -1799,12 +1861,14 @@ function showFileEditorDecisionDialog(options = {}) {
     document.addEventListener('keydown', onKeydown, true);
     appOverlayRootElement().appendChild(backdrop);
     options.onMount?.(backdrop);
-    const preferred = backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
+    const preferred = options.focusSelector
+      ? backdrop.querySelector(options.focusSelector)
+      : backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
     preferred?.focus?.({preventScroll: true});
   });
 }
 
-async function showFileConflictCompareDialog(path, panel = null) {
+async function showFileConflictCompareDialog(path, panel = null, options = {}) {
   const state = fileState.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
@@ -1820,9 +1884,12 @@ async function showFileConflictCompareDialog(path, panel = null) {
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
   });
-  if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-  if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-  return false;
+  const result = action === 'overwrite'
+    ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+    : action === 'reload'
+      ? await reloadOpenFileFromDisk(path, {force: true})
+      : false;
+  return options.returnAction === true ? {action, result} : result;
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
@@ -1848,10 +1915,16 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
       ],
       className: 'file-editor-conflict-dialog',
     });
-    if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
-    if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
-    if (action === 'compare') return showFileConflictCompareDialog(path, panel);
-    return false;
+    const result = action === 'overwrite'
+      ? options.deferSave === true ? true : await saveFileEditor(path, panel, {force: true})
+      : action === 'reload'
+        ? await reloadOpenFileFromDisk(path, {force: true})
+        : action === 'compare'
+          ? await showFileConflictCompareDialog(path, panel, {returnAction: true, deferSave: options.deferSave === true})
+          : false;
+    return options.returnAction === true
+      ? {action, nestedAction: action === 'compare' ? result?.action || '' : '', result: action === 'compare' ? result?.result : result}
+      : result;
   } finally {
     setFileConflictDialogOpen(path, false);
   }
@@ -2756,6 +2829,7 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
     }
     return;
   }
+  if (fileEditorSelfWriteAcknowledged(path, entry)) return;
   if (!fileEntryChanged(state, entry)) {
     if (state.externalChanged || state.externalMissing || state.externalError) {
       clearOpenFileMissingState(state);
@@ -4132,6 +4206,7 @@ function updateFileEditorCountStatus(panel) {
 }
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
+  const state = options.state || fileState.get(path);
   const save = options.save || (() => saveFileEditor(path, panel));
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
@@ -4190,7 +4265,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.bracketMatching(),
     api.foldGutter(),
     api.highlightActiveLine(),
-    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, {...options, path, state}),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     codeMirrorSearchScrollFix(api),
@@ -4202,6 +4277,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
+    codeMirrorSplitSyncExtension(api, panel, path),
     ...(options.plain ? [codeMirrorThemeOnlyExtensions(api, panel)] : [codeMirrorLanguageExtension(api, path), codeMirrorThemedExtensions(api, panel, path)]),
   ];
 }
@@ -4215,6 +4291,8 @@ async function removeOpenFile(path, options = {}) {
   const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
   const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
+  if (closePanel?._pmView) flushProseMirrorSource(closePanel, path);
+  if (closePanel?._cmView) flushCodeMirrorSource(closePanel, path);
   if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
@@ -4288,6 +4366,14 @@ function layoutWithReplacedItems(replacements) {
 
 function renameOpenFilePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !fileState.has(oldPath)) return;
+  const saveOwner = fileEditorSaveOwners.get(oldPath);
+  if (saveOwner) {
+    fileEditorSaveOwners.delete(oldPath);
+    fileEditorSaveOwners.set(newPath, saveOwner);
+    saveOwner.path = newPath;
+    if (saveOwner.active) saveOwner.active.options.statePath = newPath;
+    if (saveOwner.pending) saveOwner.pending.path = newPath;
+  }
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
   const state = fileStateFor(oldPath);

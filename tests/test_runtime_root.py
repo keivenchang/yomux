@@ -129,6 +129,6 @@ def test_runtime_root_removes_an_owned_loose_previous_boot_sibling(tmp_path):
 def test_runtime_stats_socket_path_stays_within_sockaddr_un_budget(tmp_path):
     identity = HostIdentity("a" * 32, "host.example", "b" * 36, 42, "proc:1", 1, "nonce-a", "fixture")
     root = common.runtime_root(environ={}, identity=identity, temporary_dir=Path("/tmp"), uid=1000)
-    socket_path = root / "services" / "statsd.p24s6.sock"
+    socket_path = root / "services" / "statsd.p25s9.sock"
 
     assert len(str(socket_path).encode()) <= UNIX_SOCKET_PATH_LIMIT_BYTES

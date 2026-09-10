@@ -14,6 +14,11 @@ function editorViewModeFor(path, item = null) {
   return 'edit';
 }
 
+function fileEditorWrapForPath(path, state = null) {
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
+}
+
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   const state = fileEditorStateForItem(path, item);
@@ -53,9 +58,9 @@ function updateEditorModeControl(control, path, state, item = null) {
 
 function editorModeLabel(mode) {
   if (mode === 'diff') return t('common.diff');
-  if (mode === 'preview') return t('common.preview');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
   if (mode === 'split') return t('editor.mode.split');
-  return t('common.edit');
+  return t('editor.mode.textEdit');
 }
 
 function editorModeIconClass(mode) {
@@ -223,7 +228,8 @@ function refreshOpenEditorThemePanels() {
     const state = fileEditorStateForItem(path, item);
     if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -545,14 +551,18 @@ function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) 
 // selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
 function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
   if (!pane) return false;
-  if (previewScrollUserOwnsElementNow(pane)) {
+  if (host?._pmRequired && previewKindForPath(path) === 'markdown') return false;
+  if (host?._pmView && host._pmPath === path && host._pmView.dom?.isConnected) {
+    return syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+  }
+  if (options.force !== true && previewScrollUserOwnsElementNow(pane)) {
     void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
       renderFileEditorPreviewSurface(host, pane, path, text, options)
     ));
     return false;
   }
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
-  const selection = fileEditorPreviewSelectionOffsets(pane);
+  const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
   const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
@@ -691,7 +701,8 @@ function applyEditorWrapPreference() {
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
-      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+      else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
@@ -1025,6 +1036,11 @@ function applyStatusPulseModeClass() {
   document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
 }
 
+function syncedFinderFontSize(globalSize) {
+  const size = Math.round(Number(globalSize));
+  return Math.max(1, size - Math.max(1, Math.round(size * 0.12)));
+}
+
 function applyCssSettings() {
   applyStatusPulseModeClass();
   const root = document.documentElement?.style;
@@ -1036,7 +1052,7 @@ function applyCssSettings() {
     terminalFontSize = globalFontSize;
     editorFontSize = globalFontSize;
     editorPreviewFontSize = globalFontSize;
-    fileExplorerFontSize = globalFontSize;
+    fileExplorerFontSize = syncedFinderFontSize(globalFontSize);
   }
   root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
   root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
@@ -1242,7 +1258,7 @@ function applySettingsPayload(payload, options = {}) {
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
   refreshMetaButtonChrome();
-  renderPreferencesPanels();
+   renderPreferencesPanels({force: options.forcePreferences === true});
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
@@ -1452,7 +1468,7 @@ function installRuntimeIntervals() {
 }
 
 function yolomuxFontSpecsForCurrentSettings() {
-  const uiSize = Math.max(6, Math.round(numberSetting('appearance.ui_font_size', 13)));
+  const uiSize = Math.max(6, Math.min(30, Math.round(numberSetting('appearance.ui_font_size', 13))));
   const monoSizes = [
     uiSize,
     terminalFontSize,

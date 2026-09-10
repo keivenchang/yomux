@@ -144,6 +144,38 @@ def descriptor_open_flags(flags: int) -> int:
     return flags | nofollow | getattr(os, "O_CLOEXEC", 0)
 
 
+def symlink_target_from_descriptor(
+    descriptor: int,
+    requested: Path,
+    *,
+    parent_descriptor: int | None = None,
+    name: str | None = None,
+) -> str:
+    """Read a symlink target from the already-authorized descriptor or fail closed.
+
+    macOS does not implement the empty-path ``readlinkat`` form.  Directory scans can
+    provide the already-pinned parent descriptor and entry name, which keeps the lookup
+    inside that authorized directory without reopening the parent path by name.
+    """
+
+    try:
+        return os.readlink("", dir_fd=descriptor)
+    except OSError as error:
+        if parent_descriptor is not None and name:
+            try:
+                return os.readlink(name, dir_fd=parent_descriptor)
+            except OSError as parent_error:
+                error = parent_error
+        # macOS lacks readlinkat's empty-path form. Reopening a parent/name pair can race with an
+        # unlink/recreate/restore sequence when the parent descriptor is unavailable, so no
+        # name-bound fallback is allowed for those callers.
+        raise FilesystemError(
+            "descriptor-bound symlink target reads are unsupported on this platform",
+            status=500,
+            message_key="fs.error.operationFailed",
+        ) from error
+
+
 def _renameat_with_flags(parent_descriptor: int, source: str, target: str, flags: int) -> None:
     """Apply a platform-native atomic rename flag within one pinned directory."""
 
@@ -959,10 +991,10 @@ def safe_descendant(
         if handle is None:
             raise FilesystemError.changed_on_disk(requested_root)
         if stat.S_ISLNK(handle.stat_result.st_mode):
-            try:
-                target_text = os.readlink("", dir_fd=handle.descriptor)
-            except OSError as error:
-                raise FilesystemError.changed_on_disk(requested, diagnostic=error) from error
+            target_text = symlink_target_from_descriptor(
+                handle.descriptor,
+                requested,
+            )
             target = Path(target_text)
             if not target.is_absolute():
                 target = requested.parent / target

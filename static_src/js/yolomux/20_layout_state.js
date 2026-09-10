@@ -1447,7 +1447,13 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('root' in finder) {
     const root = String(finder.root || '').trim();
     if (root) {
-      fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+      const expandedRoot = normalizeDirectoryPath(expandUserPath(root));
+      // macOS keeps an empty `/home` compatibility symlink. Older saved layouts can retain it
+      // even though the server bootstrap identifies the real user home under `/Users`; migrate
+      // that stale root before the first Finder request so reload cannot restore an empty tree.
+      fileExplorerRoot = expandedRoot === '/home' && homePath && homePath !== '/home'
+        ? normalizeDirectoryPath(homePath)
+        : expandedRoot;
       layoutUrlState.finderRootKindUnverified = true;
     }
   }
@@ -3528,10 +3534,9 @@ function globalActivityCountsFromAgentWindows() {
 function globalActivityStatusLineHtml() {
   const counts = globalActivityCounts();
   if (!counts.total) return '';
-  // Keep the compact control to its established three status tones. Unavailable status is still
-  // counted separately in the data model, but belongs in the red attention slot rather than
-  // creating a fourth red ball.
-  const attentionCount = (Number(counts.ask) || 0) + (Number(counts.unavailable) || 0);
+  // Keep the compact control to its established three status tones. An unavailable row is not
+  // user attention: it has no actionable status ball and must not turn a healthy working row red.
+  const attentionCount = Number(counts.ask) || 0;
   const parts = [];
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(attentionCount, 'attention', 'topbar-activity-ask'));
@@ -4414,10 +4419,10 @@ function commandPaletteKeybinding(label, detail = '') {
 
 // a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
-  if (mode === 'preview') return t('common.preview');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
   if (mode === 'split') return t('editor.mode.split');
   if (mode === 'diff') return t('common.diff');
-  return t('common.edit');
+  return t('editor.mode.textEdit');
 }
 
 function commandPaletteNumericTime(value) {

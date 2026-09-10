@@ -41,6 +41,7 @@ from ..integrations.linear_client import linear_issue_metadata
 from .locales import message_fields
 from .repository_snapshot_schema import repository_snapshot_admits_path
 from .session_files import scan_agent_changes
+from ..stats_current import opencode as opencode_stats
 from .session_files import session_info_from_json
 from .session_files import session_touched_dirs
 from .settings import settings_payload
@@ -2006,12 +2007,14 @@ def agent_signature(agent: AgentInfo) -> tuple[Any, ...]:
             transcript_signature = (str(agent.transcript), stat.st_mtime_ns, stat.st_size)
         except OSError:
             transcript_signature = (str(agent.transcript), 0, 0)
+    opencode_revision = opencode_stats.tool_database_revision() if agent.kind == "opencode" else ()
     return (
         agent.kind or "",
         agent.cwd or "",
         agent.pane_target or "",
         agent.session_id or "",
         transcript_signature,
+        opencode_revision,
     )
 
 

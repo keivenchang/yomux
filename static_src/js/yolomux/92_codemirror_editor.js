@@ -38,6 +38,35 @@ function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
 }
 
+function commitCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path || panel._cmSyncing) return false;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.historical === true) return false;
+  const next = panel._cmView.state.doc.toString();
+  if (next === state.content) return true;
+  handleFileEditorContentChanged(panel, path, next, {syntax: false, sourceSurface: 'text-editor'});
+  return true;
+}
+
+function scheduleCodeMirrorSource(panel, path) {
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  const generation = Number(panel._cmSerializeGeneration || 0) + 1;
+  panel._cmSerializeGeneration = generation;
+  panel._cmSerializeTimer = setTimeout(() => {
+    if (generation !== panel._cmSerializeGeneration || panel._cmPath !== path || !panel._cmView?.dom?.isConnected) return;
+    panel._cmSerializeTimer = null;
+    commitCodeMirrorSource(panel, path);
+  }, PROSEMIRROR_SERIALIZE_DELAY_MS);
+}
+
+function flushCodeMirrorSource(panel, path) {
+  if (!panel?._cmView || panel._cmPath !== path) return false;
+  if (panel._cmSerializeTimer) clearTimeout(panel._cmSerializeTimer);
+  panel._cmSerializeTimer = null;
+  panel._cmSerializeGeneration = Number(panel._cmSerializeGeneration || 0) + 1;
+  return commitCodeMirrorSource(panel, path);
+}
+
 function textFingerprint(text) {
   const source = String(text || '');
   let hash = 0;
@@ -99,8 +128,18 @@ function codeMirrorWorkingUpdateExtension(api, panel, path) {
       captureCodeMirrorPanelViewState(panel, path);
     }
     if (update.docChanged) {
-      handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
+      if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
     }
+  });
+}
+
+function codeMirrorSplitSyncExtension(api, panel, path) {
+  if (typeof api.EditorView?.domEventHandlers !== 'function') return [];
+  return api.EditorView.domEventHandlers({
+    blur(_event, view) {
+      flushCodeMirrorSource(panel, path);
+      return false;
+    },
   });
 }
 
@@ -117,6 +156,22 @@ function codeMirrorContextMenuSelectionExtension(api) {
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
         const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
         if (!clickedSelection) return false;
+        const panel = view.dom.closest('.file-editor-panel');
+        const path = panel?.dataset?.filePath || '';
+        if (previewKindForPath(path) === 'markdown') {
+          const range = selection.main;
+          const line = view.state.doc.lineAt(range.from);
+          const selectedText = view.state.sliceDoc(range.from, range.to);
+          if (selectedText.trim()) {
+            event.preventDefault();
+            event.stopPropagation();
+            markdownEditorContextMenu(view, panel, path, event, {
+              selectedText,
+              sourceLine: line.number,
+            });
+            return true;
+          }
+        }
         const captured = {selection};
         pending = captured;
         clearTimeout(clearTimer);
@@ -163,13 +218,19 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
-  updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
-    view.dispatch({
-      changes: {from: 0, to: view.state.doc.length, insert: next},
-      ...(preservedSelection ? {selection: preservedSelection} : {}),
-      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
-    });
-  }, {preserveSelection: selectionFits});
+  const panel = view.dom?.closest?.('.file-editor-panel');
+  if (panel) panel._cmSyncing = true;
+  try {
+    updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
+      view.dispatch({
+        changes: {from: 0, to: view.state.doc.length, insert: next},
+        ...(preservedSelection ? {selection: preservedSelection} : {}),
+        ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
+      });
+    }, {preserveSelection: selectionFits});
+  } finally {
+    if (panel) panel._cmSyncing = false;
+  }
 }
 
 function codeMirrorThemeExtensions(api, path) {
@@ -235,6 +296,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
     codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
+    codeMirrorSplitSyncExtension(api, panel, path),
   ];
 }
 
@@ -245,7 +307,7 @@ function codeMirrorEditorOptionExtensions(api, options = {}) {
     const activeLineGutter = safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.());
     extensions.push(...[lineNumbers, activeLineGutter].flat().filter(Boolean));
   }
-  if (options.wrap !== false && fileEditorWrapEnabled) {
+  if (options.wrap !== false && fileEditorWrapForPath(options.path || '', options.state || null)) {
     extensions.push(...[codeMirrorLineWrappingExtension(api), codeMirrorWrapMarkerExtension(api)].flat().filter(Boolean));
   }
   return extensions;
@@ -267,11 +329,14 @@ function codeMirrorLineWrappingExtension(api) {
 }
 
 function codeMirrorEditorOptionCompartmentExtensions(api, panel, options = {}) {
-  const extensions = codeMirrorEditorOptionExtensions(api, options);
+  const path = options.path || panel?.dataset?.filePath || '';
+  const state = options.state || (path ? fileState.get(path) : null);
+  const extensions = codeMirrorEditorOptionExtensions(api, {...options, path, state});
   if (!panel || !api.Compartment) return extensions;
   panel._cmEditorOptionCompartment = panel._cmEditorOptionCompartment || new api.Compartment();
   panel._cmEditorOptionConfig = {
     wrap: options.wrap !== false,
+    path,
     lineNumbers: options.lineNumbers !== false,
   };
   return panel._cmEditorOptionCompartment.of(extensions);
@@ -282,7 +347,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorExtensions(api, panel, path),
+        extensions: codeMirrorExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: false,
     };
@@ -292,7 +357,7 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
     return {
       state: api.EditorState.create({
         doc,
-        extensions: codeMirrorPlainEditableExtensions(api, panel, path),
+        extensions: codeMirrorPlainEditableExtensions(api, panel, path, {path, state: fileState.get(path)}),
       }),
       plain: true,
       error,
@@ -976,9 +1041,15 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           if (transaction.docChanged || transaction.selectionSet) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
+            if (transaction.selectionSet && !transaction.docChanged && typeof selectMarkdownPreviewSourceRange === 'function') {
+              const selection = transaction.newSelection.main;
+              const line = transaction.newDoc.lineAt(selection.from);
+              const text = transaction.newDoc.sliceString(selection.from, selection.to);
+              selectMarkdownPreviewSourceRange(path, line.number, text);
+            }
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -1039,7 +1110,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
             captureCodeMirrorPanelViewState(panel, path);
           }
           if (transaction.docChanged) {
-            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+            if (!panel._cmSyncing) scheduleCodeMirrorSource(panel, path);
           }
         },
       });
@@ -1056,7 +1127,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       if (createdState.plain) {
         setFileEditorPanelStatus(panel, t('editor.codemirrorPlainText'), 'warn');
       }
-    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
+    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty && !panel._cmSerializeTimer) {
       panel._cmView.dispatch({
         changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
       });
@@ -1085,10 +1156,10 @@ function renderFileEditorRawPane(rawPane, path, content) {
   const language = syntaxLanguageForPath(path);
   rawPane.hidden = false;
   rawPane.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  rawPane.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  rawPane.classList.toggle('editor-wrap', fileEditorWrapForPath(path));
   code.className = `language-${language || 'text'}`;
   code.innerHTML = editorVisualHighlightHtml(language, content, {
-    wrap: fileEditorWrapEnabled,
+    wrap: fileEditorWrapForPath(path),
     lineNumbers: fileEditorLineNumbersEnabled,
   });
 }
@@ -1168,6 +1239,13 @@ function editorPanelParts(panel) {
     parts.uploadButton,
   ];
   return parts;
+}
+
+function labelSplitEditorSurfaces(panel) {
+  const textPane = panel?.querySelector?.('[data-editor-surface="text-editor"]');
+  const viewPane = panel?.querySelector?.('[data-editor-surface="view-editor"]');
+  if (textPane) textPane.setAttribute('aria-label', t('editor.surface.textEditor'));
+  if (viewPane) viewPane.setAttribute('aria-label', t('editor.surface.viewEditor'));
 }
 
 function hideTextEditorPanes(parts) {
@@ -1326,17 +1404,21 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
+    renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
 }
 
 function renderTextCodeMode(panel, item, path, state, parts, mode) {
+  if (mode !== 'split') {
+    destroyProseMirrorPanel(panel);
+    delete panel._pmRequired;
+  }
   const rawPane = parts.rawPane;
   const previewPane = parts.previewPane;
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderProseMirrorPreviewMode(panel, item, path, state, parts);
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -1352,9 +1434,10 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
 }
 
 function renderTextEditorMode(panel, item, path, state, parts, mode) {
+  labelSplitEditorSurfaces(panel);
   resetImagePreviewPane(parts);
   setEditorContentMode(parts.content, mode);
-  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-wrap', fileEditorWrapForPath(path, state));
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
   if (mode === 'preview') renderTextPreviewMode(panel, item, path, state, parts);
   else renderTextCodeMode(panel, item, path, state, parts, mode);
@@ -1811,8 +1894,14 @@ function syntaxLanguageForPath(path) {
 }
 
 function previewSourceLineAnchors(previewPane) {
-  return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
+  const explicit = Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
     .map(element => ({element, line: Number(element.dataset.sourceLine)}))
+    .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
+  if (explicit.length) return explicit;
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const sourceLines = panel?._pmSourceLines || [];
+  return Array.from(panel?._pmView?.dom?.children || [])
+    .map((element, index) => ({element, line: Number(sourceLines[index])}))
     .filter(item => Number.isFinite(item.line) && item.line > 0 && previewSourceAnchorIsRendered(item.element));
 }
 
@@ -1903,7 +1992,7 @@ function clampScrollTop(element, value) {
   return Math.min(max, Math.max(0, Number(value || 0)));
 }
 
-const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollFocusRatio = 1 / 4;
 const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
@@ -1922,6 +2011,20 @@ function previewScrollAnchors(previewPane) {
     .sort((a, b) => a.line - b.line || a.top - b.top);
 }
 
+function sourceSpanIsIgnoredComment(previewPane, fromLine, toLine) {
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  return (panel?._pmIgnoredCommentRanges || []).some(range => (
+    Number(range?.from) <= Number(fromLine) + 1 && Number(range?.to) >= Number(toLine) - 1
+  ));
+}
+
+function semanticSourceLineAnchors(previewPane) {
+  const anchors = previewScrollAnchors(previewPane);
+  const panel = previewPane?.closest?.('.file-editor-panel');
+  const comments = panel?._pmIgnoredCommentRanges || [];
+  return anchors.filter(anchor => !comments.some(range => Number(anchor.line) >= Number(range.from) && Number(anchor.line) < Number(range.to)));
+}
+
 function sourcePositionForEditorScroll(cmView) {
   if (!cmView?.scrollDOM || !cmView.state?.doc) return null;
   try {
@@ -1937,14 +2040,14 @@ function sourcePositionForEditorScroll(cmView) {
 }
 
 function sourcePositionForPreviewScroll(previewPane) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length) return null;
   const y = Math.max(0, Number(previewPane?.scrollTop || 0)) + (Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio);
   let previous = anchors[0];
-  for (let index = 1; index < anchors.length; index += 1) {
-    const next = anchors[index];
+  for (const next of anchors.slice(1)) {
     if (next.top > y) {
       if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) return {line: previous.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -1955,7 +2058,7 @@ function sourcePositionForPreviewScroll(previewPane) {
 }
 
 function previewScrollTopForSourcePosition(previewPane, position) {
-  const anchors = previewScrollAnchors(previewPane);
+  const anchors = semanticSourceLineAnchors(previewPane);
   if (!anchors.length || !position) return null;
   const targetOffset = Math.max(1, Number(previewPane?.clientHeight || 0)) * fileEditorSplitScrollFocusRatio;
   const line = Math.max(1, Number(position.line || 1));
@@ -1964,6 +2067,12 @@ function previewScrollTopForSourcePosition(previewPane, position) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (line <= next.line) {
+      // Source-only spans such as HTML comments have no rendered height. Keep the rendered pane
+      // pinned to the preceding semantic block until the editor reaches the next rendered block.
+      if (sourceSpanIsIgnoredComment(previewPane, previous.line, next.line)) {
+        const anchor = line < next.line ? previous : next;
+        return clampScrollTop(previewPane, anchor.top - targetOffset);
+      }
       const span = Math.max(1, next.line - previous.line);
       const fraction = Math.min(1, Math.max(0, (line - previous.line) / span));
       return clampScrollTop(previewPane, previous.top + ((next.top - previous.top) * fraction) - targetOffset);
@@ -1997,7 +2106,7 @@ function editorScrollTopForSourcePosition(cmView, position) {
 }
 
 function previewPaneNeedsSourceAnchorScroll(previewPane) {
-  return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
+  return previewSourceLineAnchors(previewPane).length > 0;
 }
 
 function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) {
@@ -2236,7 +2345,8 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (mode !== 'preview' && mode !== 'split') continue;
     const state = fileEditorPanelState(panel);
     const panelContent = state?.kind === 'text' ? state.content : content;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -2355,7 +2465,8 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      if (openPanel?._pmView) syncProseMirrorPanelSource(openPanel, path, panelState);
+      else renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
@@ -2375,57 +2486,190 @@ function applyFileEditorSaveHygiene(path) {
   return true;
 }
 
-async function saveFileEditor(path, panel, options = {}) {
+function fileEditorSaveRequest(path, panel, options, resolve = null) {
+  return {
+    path,
+    panel,
+    options: {
+      ...options,
+      autosave: options.autosave === true,
+      closing: options.closing === true,
+      force: options.force === true,
+    },
+    resolvers: resolve ? [resolve] : [],
+  };
+}
+
+function mergeFileEditorSaveRequest(request, panel, options, resolve) {
+  if (panel) request.panel = panel;
+  if (options.item) request.options.item = options.item;
+  request.options.force = request.options.force || options.force === true;
+  request.options.closing = request.options.closing || options.closing === true;
+  request.options.autosave = request.options.autosave && options.autosave === true;
+  request.resolvers.push(resolve);
+}
+
+function resolveFileEditorSaveRequest(request, result) {
+  for (const resolve of request?.resolvers || []) resolve(result);
+}
+
+function queueFileEditorSave(path, owner, panel, options) {
+  return new Promise(resolve => {
+    if (owner.active || owner.conflict) {
+      if (owner.pending) mergeFileEditorSaveRequest(owner.pending, panel, options, resolve);
+      else owner.pending = fileEditorSaveRequest(path, panel, options, resolve);
+      return;
+    }
+    owner.active = fileEditorSaveRequest(path, panel, options, resolve);
+    runFileEditorSaveOwner(path, owner);
+  });
+}
+
+async function performFileEditorSave(path, panel, options = {}) {
   if (readOnlyMode) return false;
+  const statePath = options.statePath || path;
   const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
-  const state = fileEditorStateForItem(path, item);
+  const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
-  syncOpenFileContentFromPanels(path, panel);
+  const contentPanel = panel || state.contentOwnerPanel || null;
+  flushProseMirrorSource(contentPanel, statePath);
+  syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
-    return showFileSaveConflictDialog(path, panel);
+    return {conflict: true, message: ''};
   }
   applyFileEditorSaveHygiene(path);
   if (!state.dirty && options.force !== true) return true;
-  setFileEditorPanelStatus(panel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
+  const savedContent = state.content;
+  setFileEditorPanelStatus(contentPanel, t(options.autosave ? 'editor.autoSaving' : 'editor.saving'), '');
   try {
     const body = {
       path,
-      content: state.content,
+      content: savedContent,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
+    // write_file truncates in place before writing the replacement bytes. Register the expected
+    // self-write before admission so watchd's zero-byte observation cannot be mistaken for an
+    // external edit while the filesystem operation is still queued/in flight.
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: savedContent.length,
+      pending: true,
+      expiresAt: Date.now() + 10000,
+    });
     const payload = await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
+    const currentStatePath = options.statePath || statePath;
     applyFileIdentityMetadata(state, payload);
-    registerFileIdentityForPath(path, state);
     state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
-    state.original = state.content;
-    state.dirty = false;
-    state.lastCleanAt = Date.now();
-    clearFileAutosaveTimer(path);
+    fileEditorSelfWriteAcks.set(path, {
+      mtime: state.mtime,
+      size: state.size,
+      expiresAt: Date.now() + 5000,
+    });
+    state.original = savedContent;
+    state.dirty = state.content !== savedContent;
+    if (state.dirty) delete state.lastCleanAt;
+    else state.lastCleanAt = Date.now();
+    clearFileAutosaveTimer(currentStatePath);
     clearOpenFileExternalState(state);
     if (payload.yolo_rules) {
       yoloRulesPayload = payload.yolo_rules;
       renderPreferencesPanels();
     }
     for (const openPanel of fileEditorPanelsForPath(path)) {
-      updateFileEditorPanelChrome(openPanel, path);
-      setFileEditorPanelStatus(openPanel, t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), 'ok');
+      updateFileEditorPanelChrome(openPanel, currentStatePath);
+      const status = state.dirty
+        ? openFileStatus(state)
+        : {message: t(options.autosave ? 'editor.autoSaved' : 'editor.saved', {size: formatFileSize(payload.size)}), level: 'ok'};
+      setFileEditorPanelStatus(openPanel, status.message, status.level);
     }
     renderSessionButtons();
     renderPaneTabStrips();
     return true;
   } catch (err) {
+    fileEditorSelfWriteAcks.delete(path);
     if (err?.status === 409) {
       setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
-      return showFileSaveConflictDialog(path, panel, {message: userMessageText(err, err.message)});
+      return {conflict: true, message: userMessageText(err, err.message)};
     }
     setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }
+}
+
+async function runFileEditorSaveOwner(path, owner) {
+  while (owner.active) {
+    const request = owner.active;
+    const requestPath = request.path || owner.path || path;
+    const result = await performFileEditorSave(requestPath, request.panel, request.options);
+    if (result?.conflict === true) {
+      owner.active = null;
+      owner.conflict = true;
+      const conflictPath = owner.path || requestPath;
+      const conflict = await showFileSaveConflictDialog(conflictPath, request.panel, {
+        message: result.message,
+        returnAction: true,
+        deferSave: true,
+      });
+      owner.conflict = false;
+      const pending = owner.pending;
+      owner.pending = null;
+      const overwriteSelected = (
+        conflict?.action === 'overwrite' || conflict?.nestedAction === 'overwrite'
+      ) && conflict?.result === true;
+      if (overwriteSelected) {
+        request.options.force = true;
+        request.path = owner.path || requestPath;
+        if (pending) {
+          request.panel = pending.panel || request.panel;
+          if (pending.options.item) request.options.item = pending.options.item;
+          request.options.closing = request.options.closing || pending.options.closing;
+          request.resolvers.push(...pending.resolvers);
+        }
+        const contentOwner = fileState.get(conflictPath)?.contentOwnerPanel;
+        if (contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === fileState.get(conflictPath)) {
+          request.panel = contentOwner;
+        }
+        owner.active = request;
+        continue;
+      }
+      resolveFileEditorSaveRequest(request, conflict?.result === true);
+      resolveFileEditorSaveRequest(pending, false);
+      if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+      return;
+    }
+    resolveFileEditorSaveRequest(request, result);
+    owner.active = owner.pending;
+    owner.pending = null;
+    const currentPath = owner.path || requestPath;
+    const state = fileState.get(currentPath);
+    if (!owner.active && result === true && openFileAutosaveReady(currentPath, state)) {
+      clearFileAutosaveTimer(currentPath);
+      const contentOwner = state.contentOwnerPanel;
+      const trailingPanel = contentOwner?.isConnected !== false && fileEditorPanelState(contentOwner) === state
+        ? contentOwner
+        : request.panel;
+      owner.active = fileEditorSaveRequest(currentPath, trailingPanel, {autosave: true});
+    }
+  }
+  if (fileEditorSaveOwners.get(owner.path || path) === owner) fileEditorSaveOwners.delete(owner.path || path);
+}
+
+function saveFileEditor(path, panel, options = {}) {
+  if (readOnlyMode) return Promise.resolve(false);
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return Promise.resolve(false);
+  let owner = fileEditorSaveOwners.get(path);
+  if (!owner) {
+    owner = {active: null, pending: null, path};
+    fileEditorSaveOwners.set(path, owner);
+  }
+  return queueFileEditorSave(path, owner, panel, options);
 }

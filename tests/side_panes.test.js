@@ -466,6 +466,15 @@ async function runSidePaneSuite() {
     assert.equal(api.paneSwapAllowed('main1', 'main2'), true);
   });
 
+  test('Dockview tabs use the pointer drag owner without a competing HTML5 source', () => {
+    const source = fs.readFileSync(`${__dirname}/../static_src/js/yolomux/75_dockview_layout.js`, 'utf8');
+    const renderer = source.slice(source.indexOf('function createDockviewTabRenderer()'), source.indexOf('function syncDockviewTabShell('));
+    assert.match(renderer, /dockviewBeginTabPointerDrag\(event, item\)/,
+      'Dockview tab renderer starts every tab gesture through the shared pointer owner');
+    assert.doesNotMatch(renderer, /bindPaneTabNativeDragSource/,
+      'Dockview does not install a second HTML5 drag source beside the pointer owner');
+  });
+
   test('tab transfers allow only side-allowed items to cross pane roles', () => {
     const api = loadYolomux('', ['1']);
     const slots = {

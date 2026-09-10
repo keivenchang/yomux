@@ -50,7 +50,7 @@ The browser owns a separate self-update reload flow instead of relying on the ge
 - The generic `New YOLOmux version available` / `Reload` banner is suppressed for the self-update target owned by that client. A later unrelated server version can still use the normal banner path.
 - Auto-reload uses the same safety gate as the generic reload path. Dirty editor buffers or active typing defer the reload and show a self-update-specific `Software Update` notification; YOLOmux keeps polling and reloads once it is safe.
 
-Manual restart, when the toast asks for it (or any time you change source under a running server), uses `./boot.sh <port>` from the checkout that should serve the port. `boot.sh` owns the per-port startup lock, exact-listener retirement, load gate, detached launch, and readiness checks described in [`../DEVELOPMENT.md#restart-workflow`](../DEVELOPMENT.md#restart-workflow); do not recreate that lifecycle with a broad process pattern. A running server does NOT pick up edited `.py`/bundle files until restarted.
+Manual restart, when the toast asks for it or after a standard launch's source change, uses `./boot.sh <port>` from the checkout that should serve the port. `boot.sh` owns the per-port startup lock, exact-listener retirement, load gate, detached launch, and readiness checks described in [`../DEVELOPMENT.md#restart-workflow`](../DEVELOPMENT.md#restart-workflow); do not recreate that lifecycle with a broad process pattern. A standard server does not pick up edited `.py` or bundle files until restarted. Under `--dev`, backend changes under the watched source paths re-exec the server; static-source changes still require rebuilding the generated bundle.
 
 ## Contributor requirements learned (mistakes to not repeat)
 

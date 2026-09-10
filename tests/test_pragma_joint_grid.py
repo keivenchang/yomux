@@ -30,7 +30,7 @@ def _point(cache, mmap_size, syscr, *, anonymous=0, mapped=0, write_bytes=0, not
 
 
 def _store(tmp_path, rows=200):
-    path = tmp_path / "stats-v8.sqlite3"
+    path = tmp_path / "stats-v9.sqlite3"
     connection = sqlite3.connect(str(path), isolation_level=None)
     connection.execute(
         "CREATE TABLE observations(event_id TEXT PRIMARY KEY, family TEXT, source_id TEXT, "

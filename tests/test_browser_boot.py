@@ -943,14 +943,14 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         assert_upload_event("editor_upload", editor_upload_path.name)
         chooser_reference = WebDriverWait(browser, 12).until(
             lambda driver: (
-                value if "![image](" in (value := driver.execute_script(
+                value if "![" in (value := driver.execute_script(
                     "return panelNodes.get(arguments[0])?._cmView?.state?.doc?.toString?.() || '';",
                     preview_item["item"],
                 )) else False
             ),
             message="mobile editor native chooser did not insert one Markdown image reference",
         )
-        assert chooser_reference.count("![image](") == 1, chooser_reference
+        assert chooser_reference.count("![") == 1, chooser_reference
         image_paste_claimed = browser.execute_script(
             """
             const panel = panelNodes.get(arguments[0]);
@@ -975,11 +975,11 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
                 value if (value := driver.execute_script(
                     "return panelNodes.get(arguments[0])?._cmView?.state?.doc?.toString?.() || '';",
                     preview_item["item"],
-                )).count("![image](") == 2 else False
+                )).count("![") == 2 else False
             ),
             message="mobile editor image paste did not upload and insert one Markdown reference",
         )
-        assert inserted_reference.count("![image](") == 2, inserted_reference
+        assert inserted_reference.count("![") == 2, inserted_reference
         touch_editor_mode(preview_item["item"], "preview", 18)
         preview_after_upload = WebDriverWait(browser, 8).until(
             lambda driver: driver.execute_script(

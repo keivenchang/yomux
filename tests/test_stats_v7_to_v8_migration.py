@@ -271,7 +271,7 @@ def test_every_migration_boundary_leaves_an_actionable_state(tmp_path, v7_source
     else:
         assert not target.exists(), f"{boundary} left a partial target reachable under the real name"
     # No shadow directory survives to be mistaken for a resumable target.
-    assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".stats-v8-migration-")] == []
+    assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".stats-v9-migration-")] == []
 
 
 def test_a_restarted_migration_after_an_interruption_completes_exactly_once(tmp_path, v7_source):
@@ -423,7 +423,7 @@ print(json.dumps({{"base": base, "peak": peak, "observations": report.observatio
 
 # --- v7/v8 coexistence: every companion artifact, not just the main database -------------------
 # The first version of this file checked only the `.sqlite3` bytes and its -wal/-shm. That passed
-# while a v8 open was rewriting the v7 build's writer fence to `schema_version: 8`, which made the
+# while a newer open was rewriting the v7 build's writer fence, which made the
 # still-running v7 build raise SchemaTooNewError against its OWN database. The rollback boundary
 # was destroyed and the coverage said everything was fine.
 
@@ -465,9 +465,9 @@ def _seed_v7_companions(directory: Path) -> None:
 
 def test_the_v8_companion_filenames_are_versioned_and_cannot_collide_with_v7():
     """Every mutable companion carries the schema version, like the database and the socket."""
-    assert storage.DATABASE_FILENAME == "stats-v8.sqlite3"
-    assert storage.WRITER_FENCE_FILENAME == "stats-writer-compat-v8.json"
-    assert storage.PRUNE_STATE_FILENAME == "stats-prune-v8.json"
+    assert storage.DATABASE_FILENAME == "stats-v9.sqlite3"
+    assert storage.WRITER_FENCE_FILENAME == "stats-writer-compat-v9.json"
+    assert storage.PRUNE_STATE_FILENAME == "stats-prune-v9.json"
     for name in (storage.WRITER_FENCE_FILENAME, storage.PRUNE_STATE_FILENAME):
         assert name not in V7_COMPANIONS, f"{name} still collides with a v7 companion"
 

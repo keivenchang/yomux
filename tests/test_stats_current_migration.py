@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from yolomux_lib.stats_current.storage import DATABASE_FILENAME
 from yolomux_lib.stats_current.storage import RETENTION_SECONDS
 from yolomux_lib.stats_current.storage import SCHEMA_VERSION
 from yolomux_lib.stats_current.storage import WRITER_FENCE_FILENAME
+from yolomux_lib.stats_current.storage import MigrationReconciliation
 from yolomux_lib.stats_current.storage import Observation
 from yolomux_lib.stats_current.storage import Store
 from yolomux_lib.stats_current.storage import SchemaTooNewError
@@ -126,7 +128,6 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
         "agent_token_rates": {"agent-a": {"tokens": 5}},
         "host_metrics": host,
         "clients": {"browser-a": {"api_count": 2, "latency_count": 1}},
-        "cost_summary": {"components": [_component("bucket", 7)]},
     }
     connection.execute(
         "INSERT INTO stats_buckets VALUES(?,?,?,?,?)",
@@ -254,6 +255,60 @@ def test_schema5_current_database_migrates_original_facts_to_schema7_without_mut
     assert json.loads((state / WRITER_FENCE_FILENAME).read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
 
 
+def test_schema8_current_database_migrates_facts_to_schema9_without_losing_ring_lineage(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    v9_path = state / DATABASE_FILENAME
+    with Store.open(v9_path) as store:
+        store.initialize_ring_storage()
+        store.append_batch(
+            observations=(Observation("v8-observation", "cpu", "host", 100.0, "epoch", 1, {"process_percent": 2, "system_percent": 3}),),
+            usage_atoms=(UsageAtom("v8-usage", "input", "text", "none", "tokens", 100.0, {"quantity": 7, "provider": "openai", "model": "gpt", "agent_id": "agent", "telemetry_complete": True}),),
+        )
+        store.record_migration_reconciliation(MigrationReconciliation(
+            migration.MIGRATION_ID,
+            100.0,
+            "a" * 64,
+            {
+                "format": 1,
+                "sources": [],
+                "counts": {"observations": 1, "coverage_epochs": 0, "usage_atoms": 1, "unavailable_spans": 0},
+                "issue_counts": {},
+                "issues": [],
+                "issues_truncated": 0,
+            },
+        ))
+    connection = sqlite3.connect(v9_path)
+    connection.execute("PRAGMA user_version = 8")
+    connection.execute("UPDATE schema_meta SET minimum_writer_protocol = 24, minimum_writer_build = 7")
+    connection.execute(
+        "UPDATE aggregate_ring_slots SET bucket_start = 60, bucket_json = '{\"series\":{},\"source\":{}}', "
+        "complete = 1, source_generation = 1, ring_generation = 1, published_at = 100, payload_version = 1 "
+        "WHERE resolution_seconds = 60 AND slot_index = 0"
+    )
+    connection.commit()
+    connection.close()
+    v8_path = state / migration.V8_DATABASE_FILENAME
+    os.replace(v9_path, v8_path)
+    (state / migration.V7_DATABASE_FILENAME).write_bytes(b"stale schema-7 source")
+
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    assert report.active_database == state / DATABASE_FILENAME
+    assert report.observations == 1
+    assert report.usage_atoms == 1
+    with Store.open(report.active_database) as store:
+        snapshot = store.read_snapshot()
+    assert [item.event_id for item in snapshot.observations] == ["v8-observation"]
+    assert [item.event_id for item in snapshot.usage_atoms] == ["v8-usage"]
+    assert v8_path.exists()
+    assert (state / migration.V7_DATABASE_FILENAME).exists()
+    connection = sqlite3.connect(report.active_database)
+    assert connection.execute("SELECT count(*) FROM ring_invalidations WHERE reason = 'v8_payload_unversioned'").fetchone()[0] == 1
+    assert connection.execute("SELECT ring_generation FROM aggregate_publication WHERE singleton = 1").fetchone()[0] == 0
+    connection.close()
+
+
 def test_schema5_current_database_accepts_only_the_released_writer_fence(tmp_path):
     state = tmp_path / "state"
     source = _create_schema5_database(
@@ -306,7 +361,7 @@ def test_schema4_database_migrates_exact_facts_and_marks_lost_aggregates(tmp_pat
     assert {item.family for item in snapshot.observations} == {
         "cpu", "gpu", "service_load", "system_memory",
     }
-    assert {item.event_id for item in snapshot.usage_atoms} == {"table", "bucket", "spool", "image"}
+    assert {item.event_id for item in snapshot.usage_atoms} == {"table", "spool", "image"}
     assert all("micro_usd" not in item.payload for item in snapshot.usage_atoms)
     unavailable = {item.family for item in snapshot.unavailable_spans}
     assert {"cpu", "agent_status", "browser", "agent_tokens"} <= unavailable
@@ -318,6 +373,24 @@ def test_schema4_database_migrates_exact_facts_and_marks_lost_aggregates(tmp_pat
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA freelist_count").fetchone()[0] == 0
     connection.close()
+
+
+def test_schema4_bucket_cost_components_are_recovered_or_marked_unavailable(tmp_path):
+    state = tmp_path / "state"
+    legacy = _create_legacy_database(state / migration.RETIRED_DATABASE_FILENAME)
+    connection = sqlite3.connect(legacy)
+    bucket = json.loads(connection.execute("SELECT bucket_json FROM stats_buckets").fetchone()[0])
+    bucket["cost_summary"] = {"components": [_component("bucket-cost", 7)]}
+    connection.execute("UPDATE stats_buckets SET bucket_json = ?", (json.dumps(bucket),))
+    connection.commit()
+    connection.close()
+
+    migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    with Store.open(state / DATABASE_FILENAME) as store:
+        snapshot = store.read_snapshot()
+    assert "bucket-cost" in {item.event_id for item in snapshot.usage_atoms}
+    assert "agent_tokens" in {item.family for item in snapshot.unavailable_spans}
 
 
 def test_live_schema2_database_with_zero_sqlite_headers_migrates(tmp_path):
@@ -468,7 +541,7 @@ def test_every_valid_compact_token_spool_is_recovered_once_then_retired(tmp_path
     with Store.open_reader(report.active_database) as reader:
         snapshot = reader.read_snapshot()
     assert {item.event_id for item in snapshot.usage_atoms} == {
-        "table", "bucket", "spool", "orphan",
+        "table", "spool", "orphan",
     }
     assert not any((state / "services").glob("statsd-agent-token-scan-*"))
 

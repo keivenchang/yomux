@@ -102,7 +102,7 @@ def _construct_statsd_under_contention(threads: int) -> int:
         try:
             service = StatsCurrentService(
                 root / f"statsd-{index}.sock",
-                root / "stats-v8.sqlite3",
+                root / "stats-v9.sqlite3",
                 idle_seconds=60.0,
             )
         except Exception as error:  # reported to the parent; the barriers still release

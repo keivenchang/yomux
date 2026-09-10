@@ -469,8 +469,10 @@ let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
 let fileEditorCursorColor = 'yellow';  // 'yellow' default; 'theme' uses the editor/terminal scheme cursor
 let fileEditorAutosaveEnabled = false;
-let fileEditorAutosaveDelaySeconds = 2.5;
+let fileEditorAutosaveDelaySeconds = 6;
 const fileEditorAutosaveTimers = new Map();
+const fileEditorSaveOwners = new Map();
+const fileEditorSelfWriteAcks = new Map();
 const openFileBackgroundReloadDeferMs = 2000;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
@@ -673,7 +675,7 @@ const SETTING_FALLBACKS = Object.freeze({
   'appearance.terminal_font_size': 14,
   'appearance.ui_font_size': 14,
   'appearance.global_font_size': 14,
-  'editor.autosave_delay_seconds': 2.5,
+  'editor.autosave_delay_seconds': 6,
   'file_explorer.image_open_mode': 'same-tab',
   'file_explorer.image_preview_max_px': 320,
   'general.auto_focus': false,
@@ -918,11 +920,12 @@ const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const historicalFileEditorItemPrefix = 'filehistory:';
 const gitDiffItemPrefix = 'gitdiff:';
-// The history panel paints the rows that fit its viewport, with two additional viewport-sized pages
+// The history panel fetches five viewport-sized pages per request, then fetches the next batch when
+// the user reaches the second visible page.
 // reserved so the first downward scrolls do not wait on another Git walk. Keep all consumers on these
 // one-source limits: Git history includes numstat work and must never expand with the repository's
 // complete history just because a directory has many commits.
-const gitDiffHistoryPagesPrefetched = 2;
+const gitDiffHistoryPagesPrefetched = 4;
 const gitDiffHistoryMinimumPageSize = 1;
 const gitDiffHistoryStateLimit = 32;
 const imageViewerItemPrefix = 'image:';
@@ -2051,6 +2054,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
+const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;

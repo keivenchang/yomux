@@ -412,10 +412,35 @@ async function runLayoutAsyncSuite() {
     Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=6'], 'one request carries the viewport page plus two prefetched pages');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=200'], 'one request carries five viewport pages');
     assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
-    assert.equal(requests.length, 1, 'the retained reserve does not submit another Git history request');
+    assert.equal(requests.length, 2, 'reaching the second visible page starts the next five-page fetch');
+  });
+
+  await testAsync('Git history auto-loads when the initial rows do not create a scrollbar', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 8}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: requests.length === 1 ? 'next-page' : '', truncated: false}));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    const body = panel.querySelector('.git-diff-panel-body');
+    Object.defineProperties(body, {
+      clientHeight: {configurable: true, value: 480},
+      scrollHeight: {configurable: true, get: () => Math.max(1, body.querySelectorAll('.git-diff-commit-row').length * 24)},
+    });
+    await api.refreshGitDiffHistoryForTest(item, {refresh: true});
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(requests.length, 2, 'a short initial list requests its next page without waiting for an impossible scroll event');
+    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 8, 'auto-loaded history renders the complete available result');
   });
 
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
@@ -440,7 +465,7 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=3$/);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=200$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
     assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
@@ -477,10 +502,45 @@ async function runLayoutAsyncSuite() {
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
     assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
     assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=3&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=3',
+      '/api/fs/git-history?path=%2Frepo&limit=200&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=200',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
+  });
+
+  await testAsync('Git commit detail refreshes history once when its frozen head is stale', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const sha = 'a'.repeat(40);
+    const head = 'b'.repeat(40);
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        const error = new Error('Git history snapshot is stale');
+        error.status = 409;
+        error.payload = {user_message: {key: 'fs.error.gitHistoryStale', params: {}, fallback: error.message}};
+        return Promise.reject(error);
+      }
+      if (requests.length === 2) {
+        return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], next_cursor: '', truncated: false}));
+      }
+      return Promise.resolve(jsonResponse({sha, repo: '/repo', parents: [], from_ref: '0'.repeat(40), to_ref: sha, message: 'fresh detail', files: [], message_truncated: false, files_truncated: false, truncated: false}));
+    });
+    api.setGitDiffTabStateForTest(item, {path: '/repo', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], visibleCommitCount: 1, loaded: true, loadAttempted: true});
+    assert.equal(await api.loadGitDiffCommitDetailForTest(item, sha), true);
+    assert.deepStrictEqual(requests, [
+      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
+      '/api/fs/git-history?path=%2Frepo&limit=200',
+      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
+    ]);
+    assert.equal(api.gitDiffTabStateForTest(item).detailErrors.has(sha), false);
+  });
+
+  test('Git commit messages render escaped newline markers as actual returns', () => {
+    const api = loadYolomux('', ['1']);
+    const message = api.gitDiffCommitMessageForTest({message: 'subject\\n\\nbody'});
+    assert.equal(message.textContent, 'subject\n\nbody');
   });
 
   await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
@@ -2620,6 +2680,308 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0);
+  });
+
+  await testAsync('editor serializes a newer save behind the active filesystem write', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/serialized-save.md';
+    const receipts = [];
+    const writes = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      writes.push(JSON.parse(options.body || '{}'));
+      const sequence = receipts.length + 1;
+      const receipt = {id: `op-serialized-save-${sequence}`, epoch: `serialized-save-${sequence}`};
+      receipts.push(receipt);
+      return Promise.resolve(jsonResponse({
+        state: 'queued',
+        request: {id: `r-serialized-save-${sequence}`},
+        operation: {
+          id: receipt.id,
+          kind: 'filesystem_operation',
+          context: {operation: 'write', path},
+          cursor: {epoch: receipt.epoch, seq: 0},
+        },
+      }, 202));
+    });
+    const settle = (receipt, mtime, size) => api.applyApiOperationTerminalForTest({
+      operation: {id: receipt.id, cursor: {epoch: receipt.epoch, seq: 1}},
+      result: {
+        state: 'ready',
+        request: {id: `r-${receipt.id}`},
+        data: {path, size, mtime, mtime_ns: mtime, realpath: path, file_id: 'dev:1:ino:2'},
+      },
+      status: 200,
+    });
+
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'first\n', dirty: true});
+    const first = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    assert.equal(receipts.length, 1);
+    assert.deepStrictEqual(writes[0], {path, content: 'first\n', expected_mtime: 10});
+
+    api.patchOpenFileStateForTest(path, {content: 'second\n', dirty: true});
+    const second = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    assert.equal(receipts.length, 1, `a second save waits for the active filesystem write; got ${receipts.length} requests`);
+
+    settle(receipts[0], 11, 6);
+    assert.equal(await first, true);
+    await flushAsyncWork();
+    assert.equal(receipts.length, 2, `the newest dirty buffer starts one trailing save; got ${receipts.length} requests`);
+    assert.deepStrictEqual(writes[1], {path, content: 'second\n', expected_mtime: 11});
+    assert.equal(api.currentFileStateForTest(path).original, 'first\n', 'the first completion records only the content it sent');
+    assert.equal(api.currentFileStateForTest(path).dirty, true, 'newer content stays dirty until its own write completes');
+
+    settle(receipts[1], 12, 7);
+    assert.equal(await second, true);
+    assert.equal(api.currentFileStateForTest(path).original, 'second\n');
+    assert.equal(api.currentFileStateForTest(path).content, 'second\n');
+    assert.equal(api.currentFileStateForTest(path).dirty, false);
+    assert.equal(api.apiOperationStateForTest().pending, 0);
+    assert.equal(api.apiOperationStateForTest().waiters, 0);
+  });
+
+  await testAsync('editor acknowledges an in-flight zero-byte self-write before its response', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/in-flight-zero-byte.md';
+    let release;
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      assert.deepStrictEqual(JSON.parse(options.body || '{}'), {path, content: 'edited\n', expected_mtime: 10});
+      return new Promise(resolve => {
+        release = () => resolve(jsonResponse({path, size: 7, mtime: 11, mtime_ns: 11, realpath: path, file_id: 'dev:1:ino:2'}));
+      });
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'edited\n', dirty: true});
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.refreshOpenFileFromFetchedStatusForTest(path, api.currentFileStateForTest(path), {
+      path,
+      entry: {kind: 'file', name: 'in-flight-zero-byte.md', size: 0, mtime_ns: 11},
+      missing: false,
+      error: null,
+      network: false,
+    });
+    assert.equal(api.currentFileStateForTest(path).externalChanged, undefined);
+    release();
+    assert.equal(await save, true);
+    assert.equal(api.currentFileStateForTest(path).dirty, false);
+  });
+
+  await testAsync('editor moves pending saves to a renamed path without changing the active request', async () => {
+    const api = loadYolomux('', ['1']);
+    const oldPath = '/repo/renamed-save.md';
+    const newPath = '/repo/moved-save.md';
+    const receipts = [];
+    const writes = [];
+    let releaseFirst;
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      writes.push(JSON.parse(options.body || '{}'));
+      const sequence = writes.length;
+      if (sequence === 1) {
+        return new Promise(resolve => { releaseFirst = () => resolve(jsonResponse({path: oldPath, size: 6, mtime: 11, mtime_ns: 11, realpath: oldPath, file_id: 'dev:1:ino:2'})); });
+      }
+      receipts.push(sequence);
+      return Promise.resolve(jsonResponse({path: newPath, size: 7, mtime: 12, mtime_ns: 12, realpath: newPath, file_id: 'dev:1:ino:2'}));
+    });
+    api.setOpenFileStateForTest(oldPath, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'first\n', dirty: true});
+    const first = api.saveFileEditorForTest(oldPath, null);
+    await flushAsyncWork();
+    api.renameOpenFilePathForTest(oldPath, newPath);
+    api.patchOpenFileStateForTest(newPath, {content: 'second\n', dirty: true});
+    const second = api.saveFileEditorForTest(newPath, null);
+    await flushAsyncWork();
+    assert.deepStrictEqual(writes, [{path: oldPath, content: 'first\n', expected_mtime: 10}], 'the in-flight write keeps its original path');
+    releaseFirst();
+    assert.equal(await first, true);
+    await flushAsyncWork();
+    assert.deepStrictEqual(writes, [
+      {path: oldPath, content: 'first\n', expected_mtime: 10},
+      {path: newPath, content: 'second\n', expected_mtime: 11},
+    ], 'the pending write follows the renamed path');
+    assert.equal(await second, true);
+    assert.equal(api.currentFileStateForTest(newPath).dirty, false);
+    assert.equal(api.openFileStateForTest(oldPath), null);
+  });
+
+  await testAsync('editor keeps a genuine write conflict actionable and overwrite cannot deadlock', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/external-conflict.md';
+    const writes = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      const body = JSON.parse(options.body || '{}');
+      writes.push(body);
+      if (writes.length === 1) {
+        return Promise.resolve(jsonResponse({
+          error: 'Changed on disk',
+          message_key: 'fs.error.changedOnDisk',
+        }, 409));
+      }
+      return Promise.resolve(jsonResponse({
+        path,
+        size: body.content.length,
+        mtime: 12,
+        mtime_ns: 12,
+        realpath: path,
+        file_id: 'dev:1:ino:2',
+      }));
+    });
+
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'edited\n', dirty: true});
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    const overlayRoot = api.testElementForId('appOverlayRoot');
+    const dialog = overlayRoot.querySelector('.file-editor-conflict-dialog');
+    assert.ok(dialog, 'a real 409 opens the conflict dialog');
+    const overwrite = dialog.querySelector('[data-dialog-action="overwrite"]');
+    assert.ok(overwrite, 'the conflict dialog keeps overwrite actionable');
+    dialog.listeners.get('click')[0]({
+      target: overwrite,
+      preventDefault() {},
+    });
+    assert.equal(await save, true, 'overwrite resolves through a new forced save instead of waiting on the released owner');
+    assert.deepStrictEqual(writes, [
+      {path, content: 'edited\n', expected_mtime: 10},
+      {path, content: 'edited\n'},
+    ]);
+    assert.equal(api.currentFileStateForTest(path).dirty, false);
+    assert.equal(overlayRoot.querySelector('.file-editor-conflict-dialog'), null);
+  });
+
+  test('closing the last-editing tab releases its detached panel while another file tab remains', () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/multi-panel-owner.md';
+    const ownerItem = api.fileEditorItemFor(path);
+    const remainingItem = api.fileEditorCopyItemFor(path);
+    const ownerPanel = api.testElementForId('multi-panel-owner');
+    const remainingPanel = api.testElementForId('multi-panel-remaining');
+    api.setOpenFileStateForTest(path, {kind: 'text', original: 'base\n', content: 'edited\n', dirty: true});
+    api.setOpenFileOwner(path, ownerItem);
+    api.setOpenFileOwner(path, remainingItem);
+    api.setPanelNodeForTest(ownerItem, ownerPanel);
+    api.setPanelNodeForTest(remainingItem, remainingPanel);
+    api.patchOpenFileStateForTest(path, {contentOwnerPanel: ownerPanel});
+
+    api.removeFilePanelOwnerForTest(path, ownerItem);
+
+    assert.equal(api.currentFileStateForTest(path).contentOwnerPanel, remainingPanel);
+    assert.deepStrictEqual([...api.filePanelItemsForPath(path)], [remainingItem]);
+  });
+
+  await testAsync('a conflict does not report a queued newer save as successful', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/pending-conflict.md';
+    const writes = [];
+    let chooseCancel;
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/write');
+      const body = JSON.parse(options.body || '{}');
+      writes.push(body);
+      return Promise.resolve(jsonResponse({error: 'Changed on disk'}, 409));
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'first\n', dirty: true});
+    const first = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.patchOpenFileStateForTest(path, {content: 'second\n', dirty: true});
+    const second = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-conflict-dialog');
+    assert.ok(dialog);
+    const cancel = dialog.querySelector('[data-dialog-action="cancel"]');
+    chooseCancel = () => dialog.listeners.get('click')[0]({target: cancel, preventDefault() {}});
+    chooseCancel();
+    assert.equal(await first, false);
+    assert.equal(await second, false);
+    assert.deepStrictEqual(writes, [{path, content: 'first\n', expected_mtime: 10}]);
+    assert.equal(api.currentFileStateForTest(path).content, 'second\n');
+    assert.equal(api.currentFileStateForTest(path).dirty, true);
+  });
+
+  await testAsync('compare then overwrite resolves the queued newer save after its write', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/compare-pending-conflict.md';
+    const writes = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      if (String(url) === '/api/fs/write') {
+        writes.push(body);
+        if (writes.length === 1) return Promise.resolve(jsonResponse({error: 'Changed on disk'}, 409));
+        return Promise.resolve(jsonResponse({path, size: body.content.length, mtime: 12, mtime_ns: 12, realpath: path, file_id: 'dev:1:ino:2'}));
+      }
+      if (String(url).startsWith('/api/fs/read')) return Promise.resolve(jsonResponse({path, content: 'disk\n', size: 5, mtime: 11, mtime_ns: 11}));
+      throw new Error(`unexpected request ${String(url)}`);
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'first\n', dirty: true});
+    const first = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.patchOpenFileStateForTest(path, {content: 'second\n', dirty: true});
+    const second = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    const root = api.testElementForId('appOverlayRoot');
+    const conflict = root.querySelector('.file-editor-conflict-dialog');
+    conflict.listeners.get('click')[0]({target: conflict.querySelector('[data-dialog-action="compare"]'), preventDefault() {}});
+    await flushAsyncWork();
+    const compare = root.querySelector('.file-editor-compare-dialog');
+    compare.listeners.get('click')[0]({target: compare.querySelector('[data-dialog-action="overwrite"]'), preventDefault() {}});
+    await flushAsyncWork();
+    assert.equal(await first, true, 'the initial save reports the user-selected overwrite');
+    assert.equal(await second, true, 'the queued save resolves after the forced overwrite completes');
+    assert.deepStrictEqual(writes.map(write => write.content), ['first\n', 'second\n']);
+    assert.equal(api.currentFileStateForTest(path).dirty, false);
+  });
+
+  await testAsync('conflict overwrite uses the newer panel content', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/panel-conflict.md';
+    const writes = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      if (String(url) !== '/api/fs/write') throw new Error(`unexpected request ${String(url)}`);
+      writes.push(body);
+      return Promise.resolve(writes.length === 1
+        ? jsonResponse({error: 'Changed on disk'}, 409)
+        : jsonResponse({path, size: body.content.length, mtime: 12, mtime_ns: 12, realpath: path, file_id: 'dev:1:ino:2'}));
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'old panel\n', dirty: true});
+    const first = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    const secondItem = api.fileEditorCopyItemFor(path);
+    api.setOpenFileOwner(path, secondItem);
+    const secondPanel = api.testElementForId('newer-panel');
+    api.setPanelNodeForTest(secondItem, secondPanel);
+    api.patchOpenFileStateForTest(path, {content: 'new panel\n', dirty: true, contentOwnerPanel: secondPanel});
+    const second = api.saveFileEditorForTest(path, secondPanel, {item: secondItem});
+    await flushAsyncWork();
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-conflict-dialog');
+    dialog.listeners.get('click')[0]({target: dialog.querySelector('[data-dialog-action="overwrite"]'), preventDefault() {}});
+    assert.equal(await first, true);
+    assert.equal(await second, true);
+    assert.deepStrictEqual(writes.map(write => write.content), ['old panel\n', 'new panel\n']);
+  });
+
+  await testAsync('conflict overwrite uses edits made while the dialog is open', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/dialog-edit-conflict.md';
+    const writes = [];
+    api.setFetchForTest((url, options = {}) => {
+      const body = JSON.parse(options.body || '{}');
+      if (String(url) !== '/api/fs/write') throw new Error(`unexpected request ${String(url)}`);
+      writes.push(body);
+      return Promise.resolve(writes.length === 1
+        ? jsonResponse({error: 'Changed on disk'}, 409)
+        : jsonResponse({path, size: body.content.length, mtime: 12, mtime_ns: 12, realpath: path, file_id: 'dev:1:ino:2'}));
+    });
+    api.setOpenFileStateForTest(path, {mtime: 10, size: 5, kind: 'text', original: 'base\n', content: 'before dialog\n', dirty: true});
+    const save = api.saveFileEditorForTest(path, null);
+    await flushAsyncWork();
+    api.patchOpenFileStateForTest(path, {content: 'edited while dialog\n', dirty: true});
+    const dialog = api.testElementForId('appOverlayRoot').querySelector('.file-editor-conflict-dialog');
+    dialog.listeners.get('click')[0]({target: dialog.querySelector('[data-dialog-action="overwrite"]'), preventDefault() {}});
+    assert.equal(await save, true);
+    assert.deepStrictEqual(writes.map(write => write.content), ['before dialog\n', 'edited while dialog\n']);
   });
 
   test('push-owned operation kinds create no promise waiters or rejection diagnostics', () => {
@@ -8556,7 +8918,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
     }
 
-    // Markdown editor image paste inserts the server-owned absolute central-upload paths into CodeMirror.
+    // Markdown editor image paste inserts file-directory paths returned by the server into CodeMirror.
     {
       const api = loadYolomux('', ['1']);
       const sent = [];
@@ -8591,8 +8953,8 @@ async function runLayoutAsyncSuite() {
         calls.push({url: String(url), method: options.method || 'GET', body: options.body});
         if (String(url).startsWith('/api/upload')) {
           return Promise.resolve(jsonResponse({files: [
-            {path: '/tmp/yolomux.alice/uploads/editor/one.png', relative_path: '/tmp/yolomux.alice/uploads/editor/one.png'},
-            {path: '/tmp/yolomux.alice/uploads/editor/two file.png', relative_path: '/tmp/yolomux.alice/uploads/editor/two file.png'},
+            {path: '/repo/docs/note/one.png', relative_path: 'note/one.png'},
+            {path: '/repo/docs/note/two file.png', relative_path: 'note/two file.png'},
           ]}));
         }
         return Promise.resolve(jsonResponse({items: [], session: '1'}));
@@ -8615,7 +8977,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].url, `/api/upload?editor_path=${encodeURIComponent(path)}`, 'Markdown editor paste uploads with the editor path');
       assert.equal(calls[0].method, 'POST');
       assert.equal(calls[0].body.fields.length, 2, 'Markdown editor paste uploads every image');
-      assert.equal(content, 'hello\n![image](/tmp/yolomux.alice/uploads/editor/one.png)\n![image](/tmp/yolomux.alice/uploads/editor/two%20file.png)', 'Markdown editor paste inserts absolute central-upload links at the cursor');
+      assert.equal(content, 'hello\n![one](note/one.png)\n![two file](note/two%20file.png)', 'Markdown editor paste preserves original image filenames as alt text and inserts file-directory links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
     }
@@ -8708,6 +9070,8 @@ async function runLayoutAsyncSuite() {
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
       assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
+      assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
+      assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
     }
 
     {
@@ -9106,6 +9470,10 @@ async function runLayoutAsyncSuite() {
           return Promise.resolve(jsonResponse({ok: true}));
         });
         await api.deleteFileTreePathForTest(path, {kind, name: path.split('/').pop()}, [path]);
+        api.setFileExplorerFsResourceValueForTest('/home/test', [
+          {name: path.split('/').pop(), kind},
+        ]);
+        api.invalidateFileExplorerRootsForTest(['/home/test']);
         return {confirms, calls: deleteCalls.splice(0)};
       };
 
