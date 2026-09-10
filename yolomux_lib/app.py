@@ -8949,7 +8949,6 @@ class TmuxWebtermApp:
             if getattr(row_provider, "__self__", None) is self
             else row_provider()
         )
-        print(f"STATS_TRACE rows={len(rows)} kinds={[str(row.get('kind') or '') for row in rows]}", flush=True)
         sessions = getattr(self, "sessions", ())
         if sessions and not rows:
             # statusd owns this roster. During a refresh it can be briefly
