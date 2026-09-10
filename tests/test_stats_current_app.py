@@ -174,6 +174,69 @@ def test_agent_tokens_collector_does_not_gate_on_statusd_lease(monkeypatch):
     assert all(span.reason != "statusd-unavailable" for span in facts.unavailable_spans)
 
 
+def test_agent_tokens_collector_uses_machinewide_inventory_without_statusd(monkeypatch):
+    result = opencode_module.OpenCodeReadSuccess(
+        opencode_module.OpenCodeSession("ses-live", "/repo", "model", "provider", "build", 1.0, 2.0),
+        (),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "machinewide_opencode_inventory",
+        lambda: (opencode_module.OpenCodeProcessInventory((
+            opencode_module.OpenCodeProcessResolution(
+                opencode_module.OpenCodeProcessObservation(42, "opencode", "/repo"),
+                "ses-live",
+            ),
+        ), ()), []),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: result)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web", "web", 1)
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.coverage_epochs
+    assert facts.unavailable_spans == ()
+
+
+def test_agent_tokens_collector_uses_tmux_name_or_process_fallback(monkeypatch):
+    results = {
+        "ses-tmux": opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-tmux", "/repo/tmux", "model", "provider", "build", 1.0, 2.0),
+            (),
+        ),
+        "ses-process": opencode_module.OpenCodeReadSuccess(
+            opencode_module.OpenCodeSession("ses-process", "/repo/process", "model", "provider", "build", 1.0, 2.0),
+            (),
+        ),
+    }
+    monkeypatch.setattr(
+        app_module,
+        "machinewide_opencode_inventory",
+        lambda: (opencode_module.OpenCodeProcessInventory((
+            opencode_module.OpenCodeProcessResolution(
+                opencode_module.OpenCodeProcessObservation(11, "opencode", "/repo/tmux", tmux_session="yo7111"),
+                "ses-tmux",
+            ),
+            opencode_module.OpenCodeProcessResolution(
+                opencode_module.OpenCodeProcessObservation(12, "opencode", "/repo/process"),
+                "ses-process",
+            ),
+        ), ()), []),
+    )
+    monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **kwargs: results[kwargs["session_id"]])
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web", "web", 1)
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.usage_atoms == ()
+
+
 def test_stats_agent_window_rows_falls_back_to_discovered_opencode_during_statusd_refresh(monkeypatch):
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.sessions = ["yo7110"]

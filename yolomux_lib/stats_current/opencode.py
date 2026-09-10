@@ -12,11 +12,13 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import shlex
 from typing import Literal, cast
 from urllib.parse import quote
 
@@ -187,6 +189,130 @@ class OpenCodeAmbiguousSession:
 OpenCodeReadResult = OpenCodeReadSuccess | OpenCodeUnavailable | OpenCodeSchemaMismatch | OpenCodeAmbiguousSession
 OpenCodeStateReadResult = OpenCodeStateSuccess | OpenCodeStateUnavailable | OpenCodeStateSchemaMismatch
 OpenCodeToolReadResult = tuple[OpenCodeToolInput, ...] | OpenCodeUnavailable | OpenCodeSchemaMismatch
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCodeProcessObservation:
+    """One live OpenCode process and only optional terminal annotation."""
+
+    pid: int
+    command: str
+    directory: str | None = None
+    started_at: float | None = None
+    title: str = ""
+    pane_target: str = ""
+    tmux_session: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCodeProcessResolution:
+    """The exact database identity, or a typed reason why it cannot be selected."""
+
+    observation: OpenCodeProcessObservation
+    session_id: str | None
+    reason: str | None = None
+    candidates: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCodeProcessInventory:
+    resolved: tuple[OpenCodeProcessResolution, ...]
+    unavailable: tuple[OpenCodeProcessResolution, ...]
+
+    @property
+    def sessions(self) -> tuple[OpenCodeProcessResolution, ...]:
+        seen: set[str] = set()
+        result: list[OpenCodeProcessResolution] = []
+        for item in self.resolved:
+            if item.session_id is None or item.session_id in seen:
+                continue
+            seen.add(item.session_id)
+            result.append(item)
+        return tuple(result)
+
+
+def _command_session_id(command: str) -> str | None:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    for index, token in enumerate(tokens):
+        if token in ("-s", "--session") and index + 1 < len(tokens):
+            value = tokens[index + 1].strip("\"'")
+            return value if value else None
+        for prefix in ("--session=", "-s="):
+            if token.startswith(prefix):
+                value = token[len(prefix):].strip("\"'")
+                return value if value else None
+    return None
+
+
+def _title_value(title: str) -> str:
+    value = str(title or "").strip()
+    if value.startswith(_OPENCODE_TITLE_PREFIX):
+        value = value[len(_OPENCODE_TITLE_PREFIX):].strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value.rstrip('"')
+
+
+def resolve_process_session(
+    observation: OpenCodeProcessObservation,
+    *,
+    database: Path = DEFAULT_DATABASE_PATH,
+    now: float | None = None,
+) -> OpenCodeProcessResolution:
+    """Resolve process identity without guessing among equally eligible sessions."""
+
+    explicit = _command_session_id(observation.command)
+    if explicit:
+        return OpenCodeProcessResolution(observation, explicit)
+    if observation.directory and observation.title:
+        title_session = session_id_for_terminal_title(
+            database,
+            directory=observation.directory,
+            title=_title_value(observation.title),
+            now=now,
+        )
+        if title_session:
+            return OpenCodeProcessResolution(observation, title_session)
+    if observation.directory:
+        selected = _database_session_candidates(
+            database,
+            directory=observation.directory,
+            started_at=observation.started_at,
+            now=now,
+        )
+        if len(selected) == 1:
+            return OpenCodeProcessResolution(observation, selected[0])
+        if len(selected) > 1:
+            return OpenCodeProcessResolution(
+                observation, None, "ambiguous-session-identity", tuple(selected),
+            )
+    return OpenCodeProcessResolution(observation, None, "session-identity-unavailable")
+
+
+def inventory_processes(
+    observations: Iterable[OpenCodeProcessObservation],
+    *,
+    database: Path = DEFAULT_DATABASE_PATH,
+    now: float | None = None,
+) -> OpenCodeProcessInventory:
+    """Resolve every observed process; duplicate session IDs remain represented once."""
+
+    resolutions = tuple(resolve_process_session(item, database=database, now=now) for item in observations)
+    resolved: list[OpenCodeProcessResolution] = []
+    unavailable: list[OpenCodeProcessResolution] = []
+    seen_sessions: set[str] = set()
+    for item in resolutions:
+        if item.session_id is None:
+            unavailable.append(item)
+            continue
+        if item.session_id in seen_sessions:
+            continue
+        seen_sessions.add(item.session_id)
+        resolved.append(item)
+    return OpenCodeProcessInventory(tuple(resolved), tuple(unavailable))
 
 
 @dataclass(frozen=True, slots=True)
@@ -816,6 +942,53 @@ def read_tool_inputs(
     return _read_tool_inputs_uncached(
         database_path, session_id=session_id, max_parts=max_parts, after=after,
     )
+
+
+def _database_session_candidates(
+    database: Path,
+    *,
+    directory: str,
+    started_at: float | None,
+    now: float | None,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
+) -> tuple[str, ...]:
+    """Return bounded session candidates for one process cwd/start boundary."""
+
+    current = float(now if now is not None else time.time())
+    lower = current - DEFAULT_SESSION_MAX_AGE_SECONDS
+    if started_at is not None and math.isfinite(float(started_at)):
+        lower = max(lower, float(started_at) - DEFAULT_SESSION_START_SKEW_SECONDS)
+    upper = current + DEFAULT_FUTURE_SKEW_SECONDS
+    canonical_directory = _canonical_directory(directory)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{quote(str(database.expanduser().resolve(strict=False)), safe='/')}?mode=ro",
+            uri=True,
+            timeout=1.0,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        if _validate_schema(connection) is not None:
+            return ()
+        rows = connection.execute(
+            'SELECT id, directory FROM "session" '
+            "WHERE time_updated >= ? AND time_updated <= ? ORDER BY time_updated DESC, id DESC LIMIT ?",
+            (int(lower * 1000), int(upper * 1000), max_sessions + 1),
+        ).fetchall()
+        return tuple(
+            candidate
+            for row in rows
+            if _canonical_directory(_bounded_text(row["directory"])) == canonical_directory
+            for candidate in (_bounded_text(row["id"]),)
+            if candidate
+        )
+    except (OSError, sqlite3.DatabaseError, ValueError, TypeError):
+        return ()
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def session_id_for_terminal_title(
@@ -1585,6 +1758,12 @@ def source_id_for_agent(agent_key: str) -> str:
     return f"opencode-agent:{digest}"
 
 
+def agent_token_key_for_process(*, pid: int, tmux_session: str = "") -> str:
+    """Use the tmux session for chart attribution, or the process when it has no tmux owner."""
+    session = str(tmux_session or "").strip()
+    return session or f"opencode-process:{int(pid)}"
+
+
 def source_id_for_session(session_id: str) -> str:
     """Return the durable source identity independent of a pane/window key."""
     digest = hashlib.sha256(str(session_id).strip().encode("utf-8")).hexdigest()[:24]
@@ -1629,6 +1808,6 @@ __all__ = (
     "OpenCodeToolInput", "OpenCodeToolReadResult", "OpenCodeUsageComponent", "OpenCodeCursorState", "OpenCodeCursorStore",
     "OpenCodeState", "OpenCodeStateReadResult", "OpenCodeStateSchemaMismatch", "OpenCodeStateSuccess",
     "OpenCodeStateUnavailable", "OpenCodeSessionState", "TokenDimension", "read_state", "read_usage",
-    "source_id_for_agent", "source_id_for_session", "source_id_for_directory",
+    "source_id_for_agent", "agent_token_key_for_process", "source_id_for_session", "source_id_for_directory",
     "source_id_for_selector", "delta_event_id", "read_tool_inputs",
 )

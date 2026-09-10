@@ -190,6 +190,7 @@ from .metadata import watched_pr_metadata
 from .tmux.sessions import active_window_for_panes
 from .tmux.sessions import discover_sessions
 from .tmux.sessions import list_tmux_panes
+from .tmux.sessions import machinewide_opencode_inventory
 from .tmux.sessions import discover_status_sessions
 from .statusd_client import StatusClient
 from .statusd_protocol import STATUSD_ACTIVITY_MAX_WORK_BYTES
@@ -8943,34 +8944,64 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        row_provider = self.stats_agent_window_rows
-        rows = (
-            row_provider(prefer_discovered=True)
-            if getattr(row_provider, "__self__", None) is self
-            else row_provider()
-        )
-        sessions = getattr(self, "sessions", ())
-        if sessions and not rows:
-            # statusd owns this roster. During a refresh it can be briefly
-            # unavailable; emitting no facts preserves that unknown interval
-            # without treating it as measured zero token usage.
-            status_payload = self.status_snapshot_payload() if hasattr(self, "status_client") else None
-            if status_payload is None:
-                return stats_current_collectors.collector_unavailable(
+        row_provider = self.__dict__.get("stats_agent_window_rows")
+        fixture_rows = callable(row_provider) and hasattr(self, "stats_agent_token_rows")
+        if fixture_rows:
+            inventory = stats_current_opencode.OpenCodeProcessInventory((), ())
+            inventory_errors: list[str] = []
+            rows = self.stats_agent_token_rows(row_provider())
+        else:
+            inventory, inventory_errors = machinewide_opencode_inventory()
+            rows = [{
+                "key": stats_current_opencode.agent_token_key_for_process(
+                    pid=item.observation.pid,
+                    tmux_session=item.observation.tmux_session,
+                ),
+                "session": item.observation.tmux_session,
+                "pane_target": item.observation.pane_target,
+                "kind": "opencode",
+                "agent_session_id": item.session_id,
+                "cwd": item.observation.directory or "",
+                "started_at": item.observation.started_at,
+            } for item in inventory.sessions]
+        if not rows and not inventory.unavailable and not hasattr(self, "stats_current_transcript_usage"):
+            return stats_current_collectors.collector_unavailable(
+                family="agent_tokens",
+                source_id="statusd",
+                epoch_id=attempt.epoch_id,
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason=("status-roster-unavailable" if callable(row_provider) else "statusd-unavailable"),
+            )
+        unavailable_spans = []
+        for item in (*inventory.unavailable,):
+            unavailable_spans.extend(stats_current_collectors.collector_unavailable(
+                family="agent_tokens",
+                source_id=stats_current_opencode.source_id_for_agent(f"process:{item.observation.pid}"),
+                epoch_id=f"{attempt.epoch_id}:opencode:process:{item.observation.pid}",
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason=f"opencode-{item.reason or 'session-identity-unavailable'}",
+            ).unavailable_spans)
+        if not fixture_rows:
+            for error in inventory_errors:
+                unavailable_spans.extend(stats_current_collectors.collector_unavailable(
                     family="agent_tokens",
-                    source_id="statusd",
-                    epoch_id=attempt.epoch_id,
+                    source_id=stats_current_opencode.source_id_for_agent("process-inventory"),
+                    epoch_id=f"{attempt.epoch_id}:opencode:process-inventory",
                     epoch_started_at=attempt.epoch_started_at,
                     observed_at=attempt.scheduled_at,
                     cadence_seconds=attempt.cadence_seconds,
                     owner_generation=attempt.owner_generation,
-                    reason="status-roster-unavailable",
-                )
-            return stats_current_collectors.CollectorFacts()
+                    reason=f"opencode-{error[:120]}",
+                ).unavailable_spans)
         atoms = []
         tombstones = []
-        unavailable_spans = []
-        token_rows = self.stats_agent_token_rows(rows)
+        token_rows = rows
         scan = self.stats_current_transcript_usage.scan(token_rows)
         opencode_atoms: list[tuple[str, session_files.TranscriptUsageAtom]] = []
         opencode_coverage: list[stats_current_storage.CoverageEpoch] = []

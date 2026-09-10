@@ -966,6 +966,42 @@ def test_missing_session_identity_is_ambiguous_instead_of_reading_a_newest_sessi
     assert result.reason == "session-selector-requires-id-or-directory"
 
 
+def test_machinewide_inventory_resolves_explicit_ids_and_deduplicates_processes() -> None:
+    observations = [
+        opencode.OpenCodeProcessObservation(11, "opencode -s ses-a", "/repo/a"),
+        opencode.OpenCodeProcessObservation(12, "opencode --session=ses-a", "/repo/a"),
+        opencode.OpenCodeProcessObservation(13, "opencode", "/repo/b"),
+    ]
+
+    inventory = opencode.inventory_processes(observations)
+
+    assert [item.session_id for item in inventory.sessions] == ["ses-a"]
+    assert len(inventory.unavailable) == 1
+    assert inventory.unavailable[0].reason == "session-identity-unavailable"
+
+
+def test_agent_token_key_prefers_tmux_session_and_falls_back_to_process() -> None:
+    assert opencode.agent_token_key_for_process(pid=12345, tmux_session="yo7111") == "yo7111"
+    assert opencode.agent_token_key_for_process(pid=12345) == "opencode-process:12345"
+    assert opencode.agent_token_key_for_process(pid=12345, tmux_session="  ") == "opencode-process:12345"
+
+
+def test_machinewide_inventory_preserves_ambiguous_shared_cwd(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        opencode,
+        "_database_session_candidates",
+        lambda *_args, **_kwargs: ("ses-a", "ses-b"),
+    )
+
+    inventory = opencode.inventory_processes([
+        opencode.OpenCodeProcessObservation(11, "opencode", str(tmp_path)),
+    ])
+
+    assert inventory.sessions == ()
+    assert inventory.unavailable[0].reason == "ambiguous-session-identity"
+    assert inventory.unavailable[0].candidates == ("ses-a", "ses-b")
+
+
 def test_reader_queries_are_explicit_and_credential_free() -> None:
     source = Path(opencode.__file__).read_text(encoding="utf-8")
 

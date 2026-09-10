@@ -72,6 +72,27 @@ def test_list_processes_records_native_opencode_executable(monkeypatch):
     assert processes[10].executable == executable
 
 
+def test_machinewide_opencode_inventory_includes_process_outside_tmux(monkeypatch, tmp_path):
+    executable = tmp_path / "opencode"
+    executable.touch()
+    monkeypatch.setattr(sessions.shutil, "which", lambda _name: str(executable))
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([], None))
+    monkeypatch.setattr(
+        sessions,
+        "list_processes",
+        lambda: ({42: ProcessInfo(42, 1, "opencode -s ses-outside", str(executable))}, None),
+    )
+    monkeypatch.setattr(sessions, "process_cwd", lambda _pid: "/repo/outside")
+    monkeypatch.setattr(sessions, "process_started_at", lambda _pid: 12.0)
+
+    inventory, errors = sessions.machinewide_opencode_inventory(tmp_path / "missing.db")
+
+    assert errors == []
+    assert [item.session_id for item in inventory.sessions] == ["ses-outside"]
+    assert inventory.sessions[0].observation.pane_target == ""
+    assert inventory.unavailable == ()
+
+
 def test_process_executable_strips_linux_deleted_binary_marker(monkeypatch):
     monkeypatch.setattr(sessions.platform, "system", lambda: "Linux")
     monkeypatch.setattr(sessions.os, "readlink", lambda path: "/home/me/.opencode/bin/opencode (deleted)")

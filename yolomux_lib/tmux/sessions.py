@@ -232,6 +232,42 @@ def list_processes() -> tuple[dict[int, ProcessInfo], str | None]:
     return processes, None
 
 
+def machinewide_opencode_inventory(
+    database: Path = stats_current_opencode.DEFAULT_DATABASE_PATH,
+) -> tuple[stats_current_opencode.OpenCodeProcessInventory, list[str]]:
+    """Inventory every live native OpenCode process, including processes outside tmux."""
+
+    errors: list[str] = []
+    panes, tmux_error = list_tmux_panes()
+    if tmux_error:
+        errors.append(tmux_error)
+    processes, ps_error = list_processes()
+    if ps_error:
+        errors.append(ps_error)
+    children = child_index(processes)
+    pane_context: dict[int, TmuxPaneInfo] = {}
+    for pane in panes:
+        candidates = [candidate for candidate in [processes.get(pane.pid), *descendants(pane.pid, children)] if candidate is not None]
+        for process in candidates:
+            pane_context.setdefault(process.pid, pane)
+    observations: list[stats_current_opencode.OpenCodeProcessObservation] = []
+    for process in processes.values():
+        if classify_agent(process.command, process.executable) != "opencode":
+            continue
+        pane = pane_context.get(process.pid)
+        directory = process_cwd(process.pid) or (pane.current_path if pane is not None else None)
+        observations.append(stats_current_opencode.OpenCodeProcessObservation(
+            pid=process.pid,
+            command=process.command,
+            directory=directory,
+            started_at=process_started_at(process.pid),
+            title=pane.title if pane is not None else "",
+            pane_target=pane.target if pane is not None else "",
+            tmux_session=pane.session if pane is not None else "",
+        ))
+    return stats_current_opencode.inventory_processes(observations, database=database), errors
+
+
 def process_executable(pid: int) -> str | None:
     """Read executable identity from the operating system, not from argv."""
     if platform.system() == "Linux":
