@@ -1762,7 +1762,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
              popup: Boolean(urlDialog),
              dialogWidth,
              inputWidth,
-              errors: jsDebugFailureEvents('error'),
+             errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
@@ -1779,6 +1779,46 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert metrics["removed"] == "YOLOmux", metrics
     assert metrics["dialogWidth"] >= 700, metrics
     assert metrics["inputWidth"] >= 650, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highlight(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/LINK_DIRECT.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: '[Link](https://example.com)', original: '', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const view = panel._pmView;
+            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, 1, 1)));
+            const link = view.dom.querySelector('a[href]');
+            link.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            const menu = document.querySelector('.markdown-preview-context-menu');
+            done({
+              selectedText: view.state.doc.textBetween(view.state.selection.from, view.state.selection.to, '\\n'),
+              labels: [...(menu?.querySelectorAll('button') || [])].map(button => button.textContent.trim()),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["selectedText"] == "Link", metrics
+    assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -1867,6 +1907,74 @@ def test_markdown_viewedit_url_actions_do_not_show_i18n_keys(browser, tmp_path):
     assert "failure" not in metrics, metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
     assert not any(label.startswith("contextmenu.") for label in metrics["labels"]), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_link_context_menu_survives_panel_capture(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/LINK_CAPTURE.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: '[Link](https://example.com)', original: '', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const link = panel._pmView.dom.querySelector('a[href]');
+            let captured = false;
+            panel._pmPreviewPane.addEventListener('contextmenu', event => { captured = event.defaultPrevented; }, true);
+            link.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            done({captured, menu: Boolean(document.querySelector('.markdown-preview-context-menu')), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["captured"] is True, metrics
+    assert metrics["menu"] is True, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_global_link_guard_suppresses_native_menu(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/LINK_GUARD.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: '[Link](https://example.com)', original: '', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const link = panel._pmView.dom.querySelector('a[href]');
+            let prevented = false;
+            document.addEventListener('contextmenu', event => { prevented = event.defaultPrevented; }, true);
+            const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
+            link.dispatchEvent(event);
+            done({prevented: event.defaultPrevented, observed: prevented, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["prevented"] is True and metrics["observed"] is True, metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

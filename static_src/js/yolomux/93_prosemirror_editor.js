@@ -757,7 +757,7 @@ async function addMarkdownLinkUrl(view) {
 function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
-  view.dom.addEventListener('contextmenu', event => {
+  const onContextMenu = event => {
     const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
