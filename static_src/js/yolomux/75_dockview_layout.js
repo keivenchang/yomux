@@ -388,6 +388,14 @@ function dockviewTrackRootBoundaryOverlay(event) {
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
+  if (paneInfo?.intent?.zone === 'middle') {
+    // Dockview owns the center-drop preview. Clear any legacy grid/root overlay first; otherwise
+    // the native center preview is painted together with the stale full-pane split preview.
+    clearDropPreview();
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearTabInsertionPreview();
+    return;
+  }
   const pointerCapacityRefusal = customPointerInsertion
     ? dropIntentCapacityRefusalStatus(customPointerInsertion.item, {
         targetSlot: customPointerInsertion.targetSlot,

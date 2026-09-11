@@ -2534,7 +2534,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && (state.externalChanged || state.externalMissing)) {
+  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};

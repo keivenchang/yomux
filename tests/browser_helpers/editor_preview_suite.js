@@ -6727,6 +6727,29 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
+  await testAsync('terminal URL range includes the final html character without extending past it', async () => {
+    const api = loadYolomux('', ['url-html-extension']);
+    const url = 'http://keivenc-linux1/dev/frontend-crates/224-DSv4.1/conformance/CONFORMANCE_v2.html';
+    const reference = api.terminalLineLinks(url, 1).find(item => item.type === 'url');
+    assert.equal(reference?.text, url, 'the complete URL is recognized');
+    assert.equal(reference?.range?.end?.x, url.length, 'the underline range reaches the final html character');
+    assert.equal(reference?.range?.segments?.[0]?.end?.x, url.length, 'the painted segment ends at the final html character');
+    const provider = await api.terminalReferenceProviderLinks('url-html-extension', {buffer: {active: {getLine: () => terminalLine(url, false)}}, cols: url.length}, 1);
+    assert.equal(provider[0]?.range?.start?.x, 1, 'the xterm provider range starts at the first URL character');
+    assert.equal(provider[0]?.range?.end?.x, url.length, 'the xterm provider range includes the final html character');
+  });
+
+  test('OpenCode repeated-gutter URLs continue after a dot-split extension', () => {
+    const api = loadYolomux('', ['opencode-dot-wrap']);
+    const prefix = '  │ ';
+    const parts = ['http://keivenc-linux1/dev/frontend-crates/224-DSv4.1/conformance/CONFORMANCE_v2.', 'html'];
+    const lines = parts.map(part => terminalLine(prefix + part, false));
+    const term = {cols: 100, yolomuxAgentKind: 'opencode', buffer: {active: {getLine: index => lines[index] || null}}};
+    for (const row of [1, 2]) {
+      assert.equal(api.terminalWrappedLineLinks(term, row)[0]?.text, parts.join(''), `dot-split URL is complete from row ${row}`);
+    }
+  });
+
   await testAsync('OpenCode mock image URLs reflow into provider links at narrow and wide widths', async () => {
     const api = loadYolomux('', ['opencode-image-urls']);
     const url = 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/1280px-Fronalpstock_big.jpg';

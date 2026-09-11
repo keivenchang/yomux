@@ -5102,7 +5102,7 @@ function terminalTailIsUnterminatedUrl(text) {
 
 function terminalTailHasUrlSplitBoundary(text) {
   const value = String(text || '');
-  return terminalTailIsUnterminatedUrl(value) && /[-/?&=#%]$/.test(value);
+  return terminalTailIsUnterminatedUrl(value) && /[-./?&=#%]$/.test(value);
 }
 
 function terminalRowStartsNewUrlToken(text) {
@@ -5144,7 +5144,7 @@ function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
   if (!match || !match[1]) return null;
   const indent = match[1].length;
   const text = raw.slice(indent);
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
   return {indent, text};
 }
@@ -5153,7 +5153,7 @@ function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
   const line = buffer.getLine(index);
   const text = terminalBufferLineText(line);
   if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   return {text};
 }
 
@@ -5165,7 +5165,7 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   if (/\s/.test(continuation)) return false;
   if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
   const delimiter = base.at(-1);
-  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (requireSplitDelimiter && !['/', '-', '.', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
   if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
   return true;
 }
@@ -5323,12 +5323,12 @@ function terminalWrappedLineGroup(term, y) {
       const repeatedContinuation = repeatedGutterGroup
         && rowShape.indent > 0
         && continuationAllowed
-        && (index > start + 1 || /[-/?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
+        && (index > start + 1 || /[-./?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
       const zeroIndentContinuation = zeroIndentGroup
         && rowShape.indent === 0
         && continuationAllowed;
       const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      const quoteGutterSplitBoundary = /[-/?&=#%]$/.test(joined);
+      const quoteGutterSplitBoundary = /[-./?&=#%]$/.test(joined);
       const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
         && quoteShape.prefix === quoteGutterBase.prefix
         && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
@@ -5860,6 +5860,7 @@ function installTerminalLinkProvider(session, term, container) {
     },
   });
 }
+
 
 function terminalRenderCellDimensions(term) {
   const renderService = term?._core?._renderService;

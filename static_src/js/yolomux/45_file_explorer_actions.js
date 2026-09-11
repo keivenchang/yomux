@@ -1317,7 +1317,15 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
   const transientMatch = ack.pending === true && Number(size) === 0;
   if (!finalMatch && !transientMatch) return false;
-  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
+}
+
+function fileEditorSelfWritePending(path) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
   return true;
 }
 
@@ -1686,7 +1694,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && !state.externalChanged
+    && (!state.externalChanged || fileEditorSelfWritePending(path))
     && !state.externalMissing
     && !state.externalError;
 }

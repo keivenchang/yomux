@@ -50,7 +50,7 @@ PRICING_REFRESH_JITTER_SECONDS = 60 * 60
 PRICING_REFRESH_BACKOFF_INITIAL_SECONDS = 5 * 60
 PRICING_REFRESH_BACKOFF_MAX_SECONDS = 6 * 60 * 60
 SOURCE_PRIORITY = {"seed": 1, "inferred": 2, "official": 3, "override": 4}
-OFFICIAL_SOURCE_HOSTS = frozenset({"platform.openai.com", "developers.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "platform.claude.com", "ai.google.dev", "cloud.google.com"})
+OFFICIAL_SOURCE_HOSTS = frozenset({"platform.openai.com", "developers.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "platform.claude.com", "ai.google.dev", "cloud.google.com", "inference-backend.internal"})
 CORROBORATION_SOURCE_HOSTS = frozenset({"openrouter.ai", "raw.githubusercontent.com", "github.com"})
 logger = logging.getLogger(__name__)
 
@@ -244,8 +244,25 @@ def validate_catalog(payload: object) -> dict[str, Any]:
 
 def load_packaged_seed() -> dict[str, Any]:
     try:
-        raw = files("yolomux_lib").joinpath("data", SEED_FILENAME).read_text(encoding="utf-8")
-        return validate_catalog(json.loads(raw))
+        data = files("yolomux_lib").joinpath("data")
+        seed = validate_catalog(json.loads(data.joinpath(SEED_FILENAME).read_text(encoding="utf-8")))
+        internal_path = data.joinpath("internal_model_pricing.json")
+        if not internal_path.is_file():
+            return seed
+        internal = validate_catalog(json.loads(internal_path.read_text(encoding="utf-8")))
+        internal_luna = next((model for model in internal["models"] if model["provider"] == "openai" and model["model"] == "gpt-5.6-luna"), None)
+        merged = [model for model in seed["models"] if not (model["provider"] == "openai" and model["model"] == "gpt-5.6-luna")]
+        if internal_luna is not None:
+            merged.append(internal_luna)
+        seen = {(model["provider"], alias) for model in merged for alias in model["aliases"]}
+        for model in internal["models"]:
+            if model["provider"] == "openai" and model["model"] == "gpt-5.6-luna":
+                continue
+            if any((model["provider"], alias) in seen for alias in model["aliases"]):
+                continue
+            merged.append(model)
+            seen.update((model["provider"], alias) for alias in model["aliases"])
+        return validate_catalog({"schema_version": PRICING_SCHEMA_VERSION, "catalog_revision": max(seed["catalog_revision"], internal["catalog_revision"]), "generated_at": internal["generated_at"], "models": merged})
     except (OSError, json.JSONDecodeError, PricingCatalogValidationError) as exc:
         raise PricingCatalogValidationError(f"invalid packaged pricing seed: {exc}") from exc
 
@@ -359,12 +376,13 @@ class PricingCatalog:
             # a second flock for the same file descriptor family and can
             # deadlock on macOS.
             seed = load_packaged_seed()
+            seed_revision = int(seed["catalog_revision"])
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute("SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'seed'").fetchone()[0]
-                if existing is None or int(existing) < int(seed["catalog_revision"]):
-                    self._import_catalog(connection, seed, kind="seed", status="seed-only")
+                if existing is None or int(existing) < seed_revision:
+                    self._import_catalog(connection, {**seed, "catalog_revision": seed_revision}, kind="seed", status="seed-only")
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -508,6 +526,9 @@ class PricingCatalog:
                             str(first["source_url"]),
                             int(first["revision"]),
                         )
+                if row is None and provider == "openai" and model.startswith("openai/"):
+                    row = find(model.split("/", 1)[1], ("official", "seed"))
+                    source_kind = str(row["source_kind"]) if row is not None else ""
                 # Only reviewed, deterministic family forms are inferred.  The
                 # evidence is visibly labelled rather than masquerading as an
                 # exact provider match.

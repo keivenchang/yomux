@@ -142,7 +142,7 @@ def test_seed_priced_model_projects_exact_nonzero_integer_micro_usd(tmp_path):
     assert isinstance(projection.micro_usd, int)
     assert projection.evidence is not None
     assert projection.evidence.catalog_model == "gpt-5.6-sol"
-    assert projection.evidence.catalog_revision == 4
+    assert projection.evidence.catalog_revision == 5
     assert projection.evidence.rate_usd == "30.00"
     assert projection.evidence.rate_scale == 1_000_000
     assert projection.evidence.source_kind == "seed"
@@ -178,8 +178,8 @@ def test_switchyard_routed_openai_model_uses_the_catalog_model_rate(tmp_path):
     projection = resolver(usage.normalize_usage_atom(atom))
 
     assert projection.priced is True
-    assert projection.micro_usd == 2_880_000
-    assert projection.api_list_micro_usd == 2_880_000
+    assert projection.micro_usd == 422_784
+    assert projection.api_list_micro_usd == 422_784
 
 
 def test_inferencehub_switchyard_openai_model_uses_the_catalog_model_rate(tmp_path):
@@ -194,8 +194,23 @@ def test_inferencehub_switchyard_openai_model_uses_the_catalog_model_rate(tmp_pa
     projection = resolver(usage.normalize_usage_atom(atom))
 
     assert projection.priced is True
-    assert projection.micro_usd == 2_880_000
-    assert projection.api_list_micro_usd == 2_880_000
+    assert projection.micro_usd == 422_784
+    assert projection.api_list_micro_usd == 422_784
+
+
+def test_inferencehub_openai_identity_with_repeated_provider_prefix_is_priced(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = _atom()
+    atom = storage.UsageAtom(
+        atom.event_id, atom.direction, atom.modality, atom.cache_role, atom.unit,
+        atom.observed_at,
+        {**atom.payload, "provider": "inferencehub", "model": "openai/openai/gpt-5.6-luna", "quantity": 480_000},
+    )
+
+    projection = resolver(usage.normalize_usage_atom(atom))
+
+    assert projection.priced is True
+    assert projection.micro_usd == 422_784
 
 
 def test_subscription_profile_is_zero_marginal_with_api_list_counterfactual(tmp_path):
@@ -447,11 +462,11 @@ def test_served_cost_report_is_byte_identical_for_a_pinned_usage_snapshot(tmp_pa
     report = materializer.build_cost_report(_build(_snapshot(*atoms), resolver, 1).layer(1))
     served = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
 
-    assert report["catalog_revision"] == 4
+    assert report["catalog_revision"] == 5
     assert report["dimensions"]["output"] == {
         "api_list_micro_usd": 60_045_000, "micro_usd": 30_045_000, "tokens": 2_001_500,
     }
     assert len(served) == 3652
     assert hashlib.sha256(served).hexdigest() == (
-        "6fc7035b2485b85f83076bc878371d35a58e433c5146c0ffa25472185bf1b1bb"
+        "ba863dc767dee10a496074ffefa1e3dc7ad8e40897561fa2393271e0ee8b5ec4"
     )

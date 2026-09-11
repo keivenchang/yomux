@@ -7638,7 +7638,7 @@ function terminalTailIsUnterminatedUrl(text) {
 
 function terminalTailHasUrlSplitBoundary(text) {
   const value = String(text || '');
-  return terminalTailIsUnterminatedUrl(value) && /[-/?&=#%]$/.test(value);
+  return terminalTailIsUnterminatedUrl(value) && /[-./?&=#%]$/.test(value);
 }
 
 function terminalRowStartsNewUrlToken(text) {
@@ -7680,7 +7680,7 @@ function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
   if (!match || !match[1]) return null;
   const indent = match[1].length;
   const text = raw.slice(indent);
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
   return {indent, text};
 }
@@ -7689,7 +7689,7 @@ function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
   const line = buffer.getLine(index);
   const text = terminalBufferLineText(line);
   if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   return {text};
 }
 
@@ -7701,7 +7701,7 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   if (/\s/.test(continuation)) return false;
   if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
   const delimiter = base.at(-1);
-  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (requireSplitDelimiter && !['/', '-', '.', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
   if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
   return true;
 }
@@ -7859,12 +7859,12 @@ function terminalWrappedLineGroup(term, y) {
       const repeatedContinuation = repeatedGutterGroup
         && rowShape.indent > 0
         && continuationAllowed
-        && (index > start + 1 || /[-/?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
+        && (index > start + 1 || /[-./?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
       const zeroIndentContinuation = zeroIndentGroup
         && rowShape.indent === 0
         && continuationAllowed;
       const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      const quoteGutterSplitBoundary = /[-/?&=#%]$/.test(joined);
+      const quoteGutterSplitBoundary = /[-./?&=#%]$/.test(joined);
       const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
         && quoteShape.prefix === quoteGutterBase.prefix
         && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
@@ -8396,6 +8396,7 @@ function installTerminalLinkProvider(session, term, container) {
     },
   });
 }
+
 
 function terminalRenderCellDimensions(term) {
   const renderService = term?._core?._renderService;
@@ -28693,7 +28694,15 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
   const transientMatch = ack.pending === true && Number(size) === 0;
   if (!finalMatch && !transientMatch) return false;
-  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
+}
+
+function fileEditorSelfWritePending(path) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
   return true;
 }
 
@@ -29062,7 +29071,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && !state.externalChanged
+    && (!state.externalChanged || fileEditorSelfWritePending(path))
     && !state.externalMissing
     && !state.externalError;
 }
@@ -40742,6 +40751,14 @@ function dockviewTrackRootBoundaryOverlay(event) {
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
+  if (paneInfo?.intent?.zone === 'middle') {
+    // Dockview owns the center-drop preview. Clear any legacy grid/root overlay first; otherwise
+    // the native center preview is painted together with the stale full-pane split preview.
+    clearDropPreview();
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearTabInsertionPreview();
+    return;
+  }
   const pointerCapacityRefusal = customPointerInsertion
     ? dropIntentCapacityRefusalStatus(customPointerInsertion.item, {
         targetSlot: customPointerInsertion.targetSlot,
@@ -68859,7 +68876,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted) {
+  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -77444,7 +77461,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && (state.externalChanged || state.externalMissing)) {
+  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};

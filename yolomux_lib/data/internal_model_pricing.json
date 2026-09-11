@@ -1,0 +1,4072 @@
+{
+  "schema_version": 1,
+  "catalog_revision": 5,
+  "generated_at": "2026-09-10T00:00:00Z",
+  "source_count": 200,
+  "source_priced_count": 176,
+  "models": [
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.1-chat",
+      "aliases": [
+        "openai/gpt-5.1-chat",
+        "azure/openai/gpt-5.1-chat"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.1-codex",
+      "aliases": [
+        "openai/gpt-5.1-codex",
+        "azure/openai/gpt-5.1-codex"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/o1",
+      "aliases": [
+        "openai/o1",
+        "azure/openai/o1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "42.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "5.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.1",
+      "aliases": [
+        "openai/gpt-5.1",
+        "azure/openai/gpt-5.1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5-nano",
+      "aliases": [
+        "openai/gpt-5-nano",
+        "azure/openai/gpt-5-nano"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.035",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.28",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0035",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/text-embedding-3-small",
+      "aliases": [
+        "openai/text-embedding-3-small",
+        "azure/openai/text-embedding-3-small"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.014",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.1-codex-mini",
+      "aliases": [
+        "openai/gpt-5.1-codex-mini",
+        "azure/openai/gpt-5.1-codex-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.4",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-sonnet-4-5-v1",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-sonnet-4-5-v1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.207",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-haiku-4-5",
+      "aliases": [
+        "azure/anthropic/claude-haiku-4-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.69",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.069",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/claude-opus-4-5",
+      "aliases": [
+        "aws/anthropic/claude-opus-4-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/gpt-5-mini",
+      "aliases": [
+        "us/azure/openai/gpt-5-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.4",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/o1",
+      "aliases": [
+        "us/azure/openai/o1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "42.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "5.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/o3-mini",
+      "aliases": [
+        "us/azure/openai/o3-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.77",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.08",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.385",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.2",
+      "aliases": [
+        "openai/gpt-5.2",
+        "azure/openai/gpt-5.2"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.8",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-4o-mini",
+      "aliases": [
+        "openai/gpt-4o-mini",
+        "azure/openai/gpt-4o-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.75",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.1-codex-max",
+      "aliases": [
+        "openai/gpt-5.1-codex-max",
+        "azure/openai/gpt-5.1-codex-max"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/multimodalembedding",
+      "aliases": [
+        "gcp/google/multimodalembedding"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.608",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/veo-3.1-generate-001",
+      "aliases": [
+        "gcp/google/veo-3.1-generate-001"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/veo-3.0-generate-001",
+      "aliases": [
+        "gcp/google/veo-3.0-generate-001"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "aliases": [
+        "gpt-5-mini",
+        "openai/openai/gpt-5-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1835",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.468",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.01835",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5-nano",
+      "aliases": [
+        "gpt-5-nano",
+        "openai/openai/gpt-5-nano"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0367",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.2936",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.00367",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/text-embedding-3-large",
+      "aliases": [
+        "openai/text-embedding-3-large",
+        "azure/openai/text-embedding-3-large"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.091",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/o4-mini",
+      "aliases": [
+        "openai/o4-mini",
+        "azure/openai/o4-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.77",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.08",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1925",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-sonnet-4-6",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-sonnet-4-6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.207",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.2-codex",
+      "aliases": [
+        "openai/gpt-5.2-codex",
+        "azure/openai/gpt-5.2-codex"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.8",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "us/gcp/google/gemini-2.5-flash-image",
+      "aliases": [
+        "us/gcp/google/gemini-2.5-flash-image"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "us/gcp/google/gemini-2.5-flash-lite",
+      "aliases": [
+        "us/gcp/google/gemini-2.5-flash-lite"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.076",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.304",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0076",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "perplexity",
+      "model": "perplexity/sonar-deep-research",
+      "aliases": [
+        "perplexity/sonar-deep-research",
+        "perplexity/perplexity/sonar-deep-research"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "8.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "perplexity",
+      "model": "perplexity/sonar-reasoning-pro",
+      "aliases": [
+        "perplexity/sonar-reasoning-pro",
+        "perplexity/perplexity/sonar-reasoning-pro"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "8.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "perplexity",
+      "model": "perplexity/sonar-pro",
+      "aliases": [
+        "perplexity/sonar-pro",
+        "perplexity/perplexity/sonar-pro"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "15.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "perplexity",
+      "model": "perplexity/sonar",
+      "aliases": [
+        "perplexity/sonar",
+        "perplexity/perplexity/sonar"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "us/gcp/google/gemini-2.5-flash",
+      "aliases": [
+        "us/gcp/google/gemini-2.5-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-opus-4-5",
+      "aliases": [
+        "azure/anthropic/claude-opus-4-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-opus-4-6",
+      "aliases": [
+        "azure/anthropic/claude-opus-4-6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/text-embedding-ada-002",
+      "aliases": [
+        "openai/text-embedding-ada-002",
+        "azure/openai/text-embedding-ada-002"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-sonnet-4-5",
+      "aliases": [
+        "azure/anthropic/claude-sonnet-4-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.207",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4o-mini-tts",
+      "aliases": [
+        "gpt-4o-mini-tts",
+        "openai/openai/gpt-4o-mini-tts"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.835",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.34",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.1-pro-preview",
+      "aliases": [
+        "gcp/google/gemini-3.1-pro-preview"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.52",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.12",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.152",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-sonnet-4-6",
+      "aliases": [
+        "azure/anthropic/claude-sonnet-4-6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.207",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.4",
+      "aliases": [
+        "openai/gpt-5.4",
+        "azure/openai/gpt-5.4"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.75",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-opus-4-6",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-opus-4-6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "us/aws/anthropic/bedrock-claude-opus-4-6",
+      "aliases": [
+        "us/aws/anthropic/bedrock-claude-opus-4-6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.795",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "18.975",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.3795",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.2",
+      "aliases": [
+        "gpt-5.2",
+        "openai/openai/gpt-5.2"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.2845",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.276",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.12845",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.3-chat",
+      "aliases": [
+        "openai/gpt-5.3-chat",
+        "azure/openai/gpt-5.3-chat"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.8",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.3-codex",
+      "aliases": [
+        "openai/gpt-5.3-codex",
+        "azure/openai/gpt-5.3-codex"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.8",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1225",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "aliases": [
+        "gpt-5.3-codex",
+        "openai/openai/gpt-5.3-codex"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.2845",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "10.276",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.12845",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-2.5-flash-lite",
+      "aliases": [
+        "gcp/google/gemini-2.5-flash-lite"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.076",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.304",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0076",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "aliases": [
+        "gpt-5.4",
+        "openai/openai/gpt-5.4"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.835",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "11.01",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1835",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-4.1-mini",
+      "aliases": [
+        "openai/gpt-4.1-mini",
+        "azure/openai/gpt-4.1-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.28",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.12",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.07",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/gpt-4.1",
+      "aliases": [
+        "us/azure/openai/gpt-4.1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.4",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "5.6",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "us/gcp/google/gemini-2.5-pro",
+      "aliases": [
+        "us/gcp/google/gemini-2.5-pro"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.95",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.6",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.095",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-2.5-flash",
+      "aliases": [
+        "gcp/google/gemini-2.5-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-2.5-pro",
+      "aliases": [
+        "gcp/google/gemini-2.5-pro"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.95",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.6",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.095",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/gpt-5",
+      "aliases": [
+        "us/azure/openai/gpt-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "aliases": [
+        "gpt-5.1",
+        "openai/openai/gpt-5.1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.9175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.34",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.09175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.5",
+      "aliases": [
+        "openai/gpt-5.5",
+        "azure/openai/gpt-5.5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "21.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.35",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "us/azure/openai/gpt-5.1",
+      "aliases": [
+        "us/azure/openai/gpt-5.1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-image-2",
+      "aliases": [
+        "openai/gpt-image-2",
+        "azure/openai/gpt-image-2"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.875",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.5-flash",
+      "aliases": [
+        "gcp/google/gemini-3.5-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "6.84",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.114",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-opus-4-8",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-opus-4-8"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "aliases": [
+        "gpt-5.5",
+        "openai/openai/gpt-5.5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.67",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "22.02",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.367",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-opus-4-7",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-opus-4-7"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/claude-haiku-4-5-v1",
+      "aliases": [
+        "aws/anthropic/claude-haiku-4-5-v1"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.69",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.069",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "us/gcp/google/eccn-gemini-3.1-flash-lite",
+      "aliases": [
+        "us/gcp/google/eccn-gemini-3.1-flash-lite"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.19",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.019",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.6-terra",
+      "aliases": [
+        "openai/gpt-5.6-terra",
+        "azure/openai/gpt-5.6-terra"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.4",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "8.4",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "aliases": [
+        "gpt-5.6-luna",
+        "openai/openai/gpt-5.6-luna"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1468",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.8808",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.01468",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-opus-4-8",
+      "aliases": [
+        "azure/anthropic/claude-opus-4-8"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "aliases": [
+        "gpt-5.4-mini",
+        "openai/openai/gpt-5.4-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.5505",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.303",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.05505",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.4-mini",
+      "aliases": [
+        "openai/gpt-5.4-mini",
+        "azure/openai/gpt-5.4-mini"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.525",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.15",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0525",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-sonnet-5",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-sonnet-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.38",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "6.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.138",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-sonnet-5",
+      "aliases": [
+        "azure/anthropic/claude-sonnet-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.38",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "6.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.138",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.6-luna",
+      "aliases": [
+        "openai/gpt-5.6-luna",
+        "azure/openai/gpt-5.6-luna"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.84",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.014",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "aliases": [
+        "gpt-5.6-terra",
+        "openai/openai/gpt-5.6-terra"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.468",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "8.808",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.1468",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3-pro-image",
+      "aliases": [
+        "gcp/google/gemini-3-pro-image"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.52",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "9.12",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.1-flash-image",
+      "aliases": [
+        "gcp/google/gemini-3.1-flash-image"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.38",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.28",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.1-flash-lite",
+      "aliases": [
+        "gcp/google/gemini-3.1-flash-lite"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.19",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.019",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-image-2",
+      "aliases": [
+        "gpt-image-2",
+        "openai/openai/gpt-image-2"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.67",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.9175",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.6-flash",
+      "aliases": [
+        "gcp/google/gemini-3.6-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.57",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.85",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.057",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.2",
+      "aliases": [
+        "switchyard/openai/gpt-5.2"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.6-luna",
+      "aliases": [
+        "switchyard/openai/gpt-5.6-luna"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.5",
+      "aliases": [
+        "switchyard/openai/gpt-5.5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.6-terra",
+      "aliases": [
+        "switchyard/openai/gpt-5.6-terra"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.4",
+      "aliases": [
+        "switchyard/openai/gpt-5.4"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3-flash-preview",
+      "aliases": [
+        "gcp/google/gemini-3-flash-preview"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.38",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.28",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.038",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gemini-omni-flash-preview",
+      "aliases": [
+        "gemini-omni-flash-preview"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "6.84",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "aliases": [
+        "gpt-5.6-sol",
+        "openai/openai/gpt-5.6-sol"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.936",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "14.68",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.2936",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "switchyard/openai/gpt-5.6-sol",
+      "aliases": [
+        "switchyard/openai/gpt-5.6-sol"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.5-flash-lite",
+      "aliases": [
+        "gcp/google/gemini-3.5-flash-lite"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.9",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.0228",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.1-flash-lite-image",
+      "aliases": [
+        "gcp/google/gemini-3.1-flash-lite-image"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.19",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.14",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.019",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.7-flash",
+      "aliases": [
+        "gcp/google/gemini-3.7-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.57",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.85",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.057",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "model": "aws/anthropic/bedrock-claude-opus-5",
+      "aliases": [
+        "aws/anthropic/bedrock-claude-opus-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure_ai",
+      "model": "azure/anthropic/claude-opus-5",
+      "aliases": [
+        "azure/anthropic/claude-opus-5"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "3.45",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "17.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.345",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-5.6-sol",
+      "aliases": [
+        "openai/gpt-5.6-sol",
+        "azure/openai/gpt-5.6-sol"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.8",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "14.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.28",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "xai/grok-4.6",
+      "aliases": [
+        "xai/grok-4.6",
+        "xai/xai/grok-4.6"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "6.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "vertex_ai",
+      "model": "gcp/google/gemini-3.8-flash",
+      "aliases": [
+        "gcp/google/gemini-3.8-flash"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.57",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.85",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.057",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "xai/grok-4.3",
+      "aliases": [
+        "xai/grok-4.3",
+        "xai/xai/grok-4.3"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "1.25",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "2.5",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.2",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "aliases": [
+        "gpt-6-astra",
+        "openai/openai/gpt-6-astra"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.34",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "36.7",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.734",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "provider": "azure",
+      "model": "openai/gpt-6-astra",
+      "aliases": [
+        "openai/gpt-6-astra",
+        "azure/openai/gpt-6-astra"
+      ],
+      "source": {
+        "url": "https://inference-backend.internal/api/v1/cost/rates",
+        "kind": "official",
+        "checked_at": "2026-09-10T00:00:00Z"
+      },
+      "rates": [
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "7.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "output",
+          "modality": "text",
+          "cache_role": "none",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "35.0",
+          "effective_from": "1970-01-01T00:00:00Z"
+        },
+        {
+          "direction": "input",
+          "modality": "text",
+          "cache_role": "read",
+          "unit": "tokens",
+          "scale": 1000000,
+          "usd": "0.7",
+          "effective_from": "1970-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ]
+}

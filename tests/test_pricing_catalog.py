@@ -474,8 +474,8 @@ def test_switchyard_model_uses_average_of_nonzero_equivalent_provider_rates(tmp_
     input_rate = catalog.resolve_rate(provider="inferencehub", model="switchyard/openai/gpt-5.6-luna", direction="input")
     output_rate = catalog.resolve_rate(provider="inferencehub", model="switchyard/openai/gpt-5.6-luna", direction="output")
 
-    assert input_rate is not None and input_rate.usd == Decimal("0.57")
-    assert output_rate is not None and output_rate.usd == Decimal("3.42")
+    assert input_rate is not None and input_rate.usd == Decimal("0.16")
+    assert output_rate is not None and output_rate.usd == Decimal("0.96")
     assert input_rate.source_kind == output_rate.source_kind == "inferred"
 
 
@@ -522,6 +522,14 @@ def test_successful_refresh_clears_review_needed_state_from_an_older_failed_run(
     catalog.refresh([valid], fetch=lambda *_args: (200, {}, json.dumps(payload).encode()))
 
     assert catalog.status()["state"] == "fresh"
+
+
+def test_packaged_internal_rates_overlay_seed_luna_identity():
+    catalog = PricingCatalog()
+    rate = catalog.resolve_rate(provider="openai", model="openai/openai/gpt-5.6-luna", direction="input")
+    assert rate is not None
+    assert rate.usd == Decimal("0.1468")
+    assert rate.source_url == "https://inference-backend.internal/api/v1/cost/rates"
 
 
 def test_refresh_coordinator_returns_immediately_and_coalesces_in_process(tmp_path):
@@ -648,6 +656,7 @@ def test_public_rate_and_catalog_payload_expose_only_safe_source_evidence(tmp_pa
     assert public["status"]["state"] == "seed-only"
     assert public["sources"] == [
         {"kind": "seed", "url": "https://developers.openai.com/api/docs/pricing", "revision": seed_revision},
+        {"kind": "seed", "url": "https://inference-backend.internal/api/v1/cost/rates", "revision": seed_revision},
         {"kind": "seed", "url": "https://platform.claude.com/docs/en/about-claude/pricing", "revision": seed_revision},
     ]
     assert safe_source_url("javascript:alert(1)") == ""
