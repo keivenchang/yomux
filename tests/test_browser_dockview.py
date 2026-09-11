@@ -8092,6 +8092,47 @@ def test_dockview_real_edge_drop_matrix_clears_drag_ui(
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
+def test_dockview_active_drop_preview_has_one_visible_yellow_box(browser, tmp_path):
+    browser.set_window_size(1300, 900)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=left&tabs=left:1,2",
+        sessions=["1", "2"],
+        grid_width=1200,
+        grid_height=500,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
+    target = browser.execute_script(
+        """
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]').closest('.dv-groupview');
+        const rect = group.getBoundingClientRect();
+        return {x: Math.round(rect.left + rect.width * 0.5), y: Math.round(rect.top + rect.height * 0.5)};
+        """
+    )
+    try:
+        cdp_drag_hold(browser, start, target, steps=32)
+        preview = browser.execute_script(
+            """
+            const visible = node => {
+              const rect = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+            };
+            return {
+              native: Array.from(document.querySelectorAll('.dv-drop-target-selection, .dv-drop-target-anchor')).filter(visible).length,
+              custom: Array.from(document.querySelectorAll('.drag-over, .drop-preview')).filter(visible).map(node => node.className || node.tagName),
+              root: document.querySelector('.grid')?.classList.contains('drop-preview-root') || false,
+            };
+            """
+        )
+    finally:
+        cdp_release(browser, target)
+    assert preview["native"] == 1 and preview["custom"] == [], preview
+    assert preview["root"] is False, preview
+
+
 def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_row_order(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

@@ -40751,9 +40751,9 @@ function dockviewTrackRootBoundaryOverlay(event) {
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
-  if (paneInfo?.intent?.zone === 'middle') {
-    // Dockview owns the center-drop preview. Clear any legacy grid/root overlay first; otherwise
-    // the native center preview is painted together with the stale full-pane split preview.
+  if (paneInfo?.intent) {
+    // Dockview owns previews for every pane-content zone. Clear any legacy custom group/grid
+    // overlay first; otherwise native and app previews render as multiple yellow boxes.
     clearDropPreview();
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearTabInsertionPreview();
@@ -41354,14 +41354,9 @@ function dockviewTrackTabPointerDrag(event) {
   if (!contentRegion) return;
   const zone = dropZoneForRect(pointerEvent, contentRegion.rect);
   if (!layoutSplitZone(zone)) return;
-  showDropPreview({
-    item: state.item,
-    sourceSlot: state.slot,
-    targetSlot: contentRegion.slot,
-    targetRect: contentRegion.rect,
-    previewNode: contentRegion.group,
-    zone,
-  });
+  // Dockview owns the pane-content edge preview. Painting a custom group overlay here as well
+  // creates two visible yellow boxes for one drag gesture.
+  clearDropPreview();
 }
 
 function dockviewFinishTabPointerDrag(event) {
