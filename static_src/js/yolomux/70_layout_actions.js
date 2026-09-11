@@ -2246,6 +2246,7 @@ async function createNextSession(agent, options = {}) {
       {session: reservedSession, serverGeneration},
       () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
       async payload => {
+        adoptTopologyGeneration(payload);
         markPendingTmuxSession(payload.session);
         const previousActive = activeSessions.slice();
         updateSessionList(payload.sessions || []);
@@ -2488,6 +2489,7 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
+        adoptTopologyGeneration(payload);
         const layoutGeneration = beginLayoutMutationCompletion();
         replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
         await Promise.all([
@@ -2536,8 +2538,9 @@ async function killTmuxSession(session) {
       'kill',
       {session},
       () => apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST', lifecycleBypass: true}),
-      async payload => {
-        const previousActive = activeSessions.slice();
+       async payload => {
+         adoptTopologyGeneration(payload);
+         const previousActive = activeSessions.slice();
         clearPendingTmuxSession(session);
         stopSessionUi(session);
         const sessionsChanged = updateSessionList(payload.sessions || []);

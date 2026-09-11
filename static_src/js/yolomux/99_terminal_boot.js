@@ -5612,6 +5612,10 @@ function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
 
 function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (Number(payload.topology_generation || 0) < tmuxTopologyGeneration) {
+    return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
+  adoptTopologyGeneration(payload);
   if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
     return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
@@ -6080,6 +6084,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
     return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
+  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
+    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
+  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -6102,6 +6110,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
+  adoptTopologyGeneration(payload);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish

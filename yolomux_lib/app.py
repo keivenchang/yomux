@@ -8064,6 +8064,7 @@ system_status_projector_for = partial(composed_owner_for, name="_system_status_p
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
+        self.topology_generation = 0
         self.session_reservation_lock = threading.Lock()
         self.session_reservation_generation = 0
         self.dangerously_yolo = dangerously_yolo
@@ -10196,6 +10197,8 @@ class TmuxWebtermApp:
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
         membership_changed = set(roster) != set(self.sessions)
         self.sessions = roster
+        if membership_changed:
+            self.topology_generation = getattr(self, "topology_generation", 0) + 1
         if not roster:
             self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
@@ -10206,6 +10209,10 @@ class TmuxWebtermApp:
             # must not publish a second transcript-metadata stream from its internal app.
             self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic())
         return membership_changed
+
+    def advance_topology_generation(self) -> int:
+        self.topology_generation = getattr(self, "topology_generation", 0) + 1
+        return self.topology_generation
 
     def rotate_activity_heartbeats_if_due(self, now: float | None = None) -> int:
         moment = time.monotonic() if now is None else float(now)
@@ -13998,6 +14005,7 @@ class TmuxWebtermApp:
         identity = self.metadata_identity(generation)
         payload["metadata_identity"] = identity
         payload["metadata_generation"] = identity["generation"]
+        payload["topology_generation"] = getattr(self, "topology_generation", 0)
         return identity
 
     def start_metadata_refresh_for_request(
@@ -16338,6 +16346,8 @@ class TmuxWebtermApp:
 
         self.stop_auto_approve_worker(session)
         self.refresh_sessions()
+        self.advance_topology_generation()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             new_name,
             "session_renamed",
@@ -16346,7 +16356,7 @@ class TmuxWebtermApp:
             message_key="common.renamed",
             message_params={"oldName": session, "newName": new_name},
         )
-        return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+        return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
 
     @requires_known_session(refresh=True)
     def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -16379,6 +16389,7 @@ class TmuxWebtermApp:
 
         self.stop_auto_approve_worker(session)
         self.refresh_sessions()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             None,
             "session_killed",
@@ -16387,7 +16398,7 @@ class TmuxWebtermApp:
             message_key="status.sessionKilled",
             message_params={"session": session},
         )
-        return {"session": session, "killed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+        return {"session": session, "killed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
         if session not in self.sessions or direction not in {"up", "down"}:
@@ -16629,6 +16640,7 @@ class TmuxWebtermApp:
         if theme_result.get("errors"):
             logger.debug("tmux theme apply failed for new session %s: %s", session, theme_result.get("errors"))
         self.refresh_sessions()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             session,
             "session_started",
@@ -16640,6 +16652,7 @@ class TmuxWebtermApp:
         return {
             "session": session,
             "sessions": self.sessions,
+            "topology_generation": self.topology_generation,
             "agent": agent,
             "created": True,
             "cwd": str(cwd),
@@ -18508,6 +18521,7 @@ class TmuxWebtermApp:
         payload: AutoApproveStatusPayload = {
             "session_order": self.sessions,
             "sessions": sessions_payload,
+            "topology_generation": self.topology_generation,
             "errors": [*refresh_errors, *discovery_errors],
             "rules": self.yolo_rules_payload(),
         }

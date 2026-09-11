@@ -164,6 +164,7 @@ class PersistentStatusService(LocalRpcServiceState):
         self.snapshot_refresh_supersessions = 0
         self.invalidation_reason = "startup"
         self.invalidation_generation = 0
+        self.requested_topology_generation = 0
         self.last_error = ""
         self.inventory: tuple[dict[str, object], bytes] | None = None
         self.inventory_generation = 0
@@ -281,14 +282,24 @@ class PersistentStatusService(LocalRpcServiceState):
     def _ensure_app(self, sessions: tuple[str, ...]) -> TmuxWebtermApp:
         if self.app is None:
             self.app = TmuxWebtermApp(list(sessions), status_service_mode=True)
-        self.app.sessions = list(sessions)
+            if hasattr(self.app, "topology_generation"):
+                self.app.topology_generation = self.requested_topology_generation
+        apply_roster = getattr(self.app, "apply_session_roster", None)
+        if callable(apply_roster):
+            apply_roster(list(sessions))
+        else:
+            self.app.sessions = list(sessions)
         self.session_names = sessions
         return self.app
 
     def _ensure_activity_app(self, sessions: tuple[str, ...]) -> TmuxWebtermApp:
         if self.activity_app is None:
             self.activity_app = TmuxWebtermApp(list(sessions), status_service_mode=True)
-        self.activity_app.sessions = list(sessions)
+        apply_roster = getattr(self.activity_app, "apply_session_roster", None)
+        if callable(apply_roster):
+            apply_roster(list(sessions))
+        else:
+            self.activity_app.sessions = list(sessions)
         return self.activity_app
 
     def _build(self, sessions: tuple[str, ...]) -> tuple[StatusSnapshotMetadata, bytes]:
@@ -773,9 +784,17 @@ class PersistentStatusService(LocalRpcServiceState):
         return self._wait_generation(request)
 
     def _handle_invalidate(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        sessions = self._sessions(request) if "sessions" in request else None
         with self.lock:
             self.invalidation_generation += 1
             self.invalidation_reason = str(request.get("reason") or "external")[:80]
+            topology_generation = request.get("topology_generation")
+            if topology_generation is not None:
+                self.requested_topology_generation = max(self.requested_topology_generation, topology_generation)
+                if self.app is not None and hasattr(self.app, "topology_generation"):
+                    self.app.topology_generation = max(self.app.topology_generation, topology_generation)
+            if sessions is not None:
+                self._retain_refresh_request(sessions)
             self.lock.notify_all()
         return {"ok": True, "generation": self.generation}, b""
 

@@ -6034,7 +6034,8 @@ def test_forced_session_metadata_on_a_cold_cache_names_a_build_identity():
         # The scalar stays only as a projection of the identity object.
         assert cache["pending_generation"] == pending["generation"]
         # And the payload the client is being asked to replace names the same server.
-        assert payload["metadata_identity"] == {"epoch": webapp.server_epoch, "generation": 0}
+        assert payload["metadata_identity"]["epoch"] == webapp.server_epoch
+        assert payload["metadata_identity"]["generation"] == 0
         assert payload["metadata_generation"] == 0
     finally:
         webapp.background_owner.stop()
@@ -6079,7 +6080,8 @@ def test_metadata_identity_epoch_is_per_process_and_survives_invalidation():
         assert first["metadata_identity"]["epoch"] == second["metadata_identity"]["epoch"] == webapp.server_epoch
         assert second["metadata_identity"]["generation"] > first["metadata_identity"]["generation"]
         assert other.server_epoch != webapp.server_epoch, "each server process owns its own epoch"
-        assert other.metadata_identity(0) == {"epoch": other.server_epoch, "generation": 0}
+        assert other.metadata_identity(0)["epoch"] == other.server_epoch
+        assert other.metadata_identity(0)["generation"] == 0
     finally:
         for instance in (webapp, other):
             instance.background_owner.stop()

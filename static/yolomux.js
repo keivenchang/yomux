@@ -697,6 +697,7 @@ const terminalStartupPromises = new Map();
 const tmuxSessionLifecycleRecords = new Map();
 let tmuxSessionLifecycleGeneration = 0;
 let tmuxTopologyEpoch = 0;
+let tmuxTopologyGeneration = 0;
 const pendingTmuxSessionGraceMs = 30000;
 const tmuxSessionLifecyclePendingPhases = new Set(['creating', 'renaming-in']);
 const tmuxSessionLifecycleBlockedPhases = new Set(['renaming-out', 'killing', 'retired']);
@@ -1662,6 +1663,11 @@ function sessionMetadataIdentity(value) {
 }
 function sessionMetadataPayloadIdentity(payload) {
   return sessionMetadataIdentity(payload?.metadata_identity);
+}
+function adoptTopologyGeneration(payload) {
+  const value = Number(payload?.topology_generation || 0);
+  if (Number.isSafeInteger(value) && value >= tmuxTopologyGeneration) tmuxTopologyGeneration = value;
+  return tmuxTopologyGeneration;
 }
 // The build a forced read must wait for. Generation zero is not a build identity -- every payload
 // already satisfies it -- so a force that is offered zero has been told no build was accepted.
@@ -12640,7 +12646,8 @@ function tmuxSessionLifecycleStaleRequestError(session) {
 function pruneExpiredPendingTmuxSessions(now = Date.now()) {
   let changed = false;
   for (const record of tmuxSessionLifecycleRecords.values()) {
-    if (!tmuxSessionLifecyclePendingPhases.has(record.phase) || Number(record.pendingUntil) > now) continue;
+    if (!tmuxSessionLifecyclePendingPhases.has(record.phase)
+        || Number(record.pendingUntil) > now) continue;
     record.phase = 'stable';
     record.pendingUntil = 0;
     changed = true;
@@ -38202,6 +38209,7 @@ async function createNextSession(agent, options = {}) {
       {session: reservedSession, serverGeneration},
       () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
       async payload => {
+        adoptTopologyGeneration(payload);
         markPendingTmuxSession(payload.session);
         const previousActive = activeSessions.slice();
         updateSessionList(payload.sessions || []);
@@ -38444,6 +38452,7 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
+        adoptTopologyGeneration(payload);
         const layoutGeneration = beginLayoutMutationCompletion();
         replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
         await Promise.all([
@@ -38492,8 +38501,9 @@ async function killTmuxSession(session) {
       'kill',
       {session},
       () => apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST', lifecycleBypass: true}),
-      async payload => {
-        const previousActive = activeSessions.slice();
+       async payload => {
+         adoptTopologyGeneration(payload);
+         const previousActive = activeSessions.slice();
         clearPendingTmuxSession(session);
         stopSessionUi(session);
         const sessionsChanged = updateSessionList(payload.sessions || []);
@@ -84315,6 +84325,10 @@ function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
 
 function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (Number(payload.topology_generation || 0) < tmuxTopologyGeneration) {
+    return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
+  adoptTopologyGeneration(payload);
   if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
     return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
@@ -84783,6 +84797,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
     return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
+  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
+    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
+  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -84805,6 +84823,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
+  adoptTopologyGeneration(payload);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish

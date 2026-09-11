@@ -2207,7 +2207,8 @@ function tmuxSessionLifecycleStaleRequestError(session) {
 function pruneExpiredPendingTmuxSessions(now = Date.now()) {
   let changed = false;
   for (const record of tmuxSessionLifecycleRecords.values()) {
-    if (!tmuxSessionLifecyclePendingPhases.has(record.phase) || Number(record.pendingUntil) > now) continue;
+    if (!tmuxSessionLifecyclePendingPhases.has(record.phase)
+        || Number(record.pendingUntil) > now) continue;
     record.phase = 'stable';
     record.pendingUntil = 0;
     changed = true;
