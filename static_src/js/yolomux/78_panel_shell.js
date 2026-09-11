@@ -868,6 +868,7 @@ function bindPaneTabPopover(tab, session) {
     item: session,
     sourceSlot: () => slotForItem(session),
     popover: () => paneTabPopoverForAnchor(tab),
+    hover: false,
     positionDetail: () => {
       const currentPopover = paneTabPopoverForAnchor(tab);
       if (currentPopover) positionPaneTabPopover(tab, currentPopover);

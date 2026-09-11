@@ -9971,8 +9971,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
-    if (!slotIsSidePane(sourceSlot)) appendDescription();
     appendTabSplitCommands(menu, item, options);
+    if (!slotIsSidePane(sourceSlot)) appendDescription();
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
         menu,
@@ -44087,6 +44087,7 @@ function bindPaneTabPopover(tab, session) {
     item: session,
     sourceSlot: () => slotForItem(session),
     popover: () => paneTabPopoverForAnchor(tab),
+    hover: false,
     positionDetail: () => {
       const currentPopover = paneTabPopoverForAnchor(tab);
       if (currentPopover) positionPaneTabPopover(tab, currentPopover);

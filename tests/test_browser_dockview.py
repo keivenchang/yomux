@@ -623,6 +623,10 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert result["keyboardPrevented"] is True and result["keyboardDescription"].startswith("More desc: 2"), result
     assert result["active"] == "1", result
     assert result["description"].startswith("More desc: 2"), result
+    description_index = result["initial"].index(result["description"])
+    if "Expand pane" in result["initial"] or "Restore pane" in result["initial"]:
+        expand_index = next(index for index, label in enumerate(result["initial"]) if label in {"Expand pane", "Restore pane"})
+        assert expand_index == description_index + 1, result
     assert 0 < result["menuWidth"] <= result["menuCapacity"] + 1, result
     assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
     assert result["detailClosesOnTerminalEngagement"] is True, result
@@ -1435,7 +1439,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     assert metrics[1]["textOffset"] - metrics[0]["textOffset"] < 20, metrics
 
 
-def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
+def test_dockview_tab_hover_does_not_show_session_detail_popover(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -1451,49 +1455,13 @@ def test_dockview_tab_hover_shows_session_detail_popover(browser, tmp_path):
     )
     wait_for_dockview(browser, min_tabs=2)
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    browser.execute_script(
-        """
-        popoverShowDelayMs = 0;
-        popoverHideDelayMs = 1000;
-        """
-    )
+    browser.execute_script("popoverShowDelayMs = 0;")
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
-    metrics = WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
-            const popover = document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover');
-            if (!tab || !popover) return false;
-            const style = getComputedStyle(popover);
-            const rect = popover.getBoundingClientRect();
-            const tabRect = tab.getBoundingClientRect();
-            const visible = style.visibility === 'visible'
-              && Number.parseFloat(style.opacity) > 0.9
-              && rect.width > 100
-              && rect.height > 40;
-            if (!visible) return false;
-            return {
-              text: popover.textContent,
-              parentTag: popover.parentElement?.tagName || '',
-              top: Math.round(rect.top),
-              left: Math.round(rect.left),
-              bottom: Math.round(rect.bottom),
-              tabBottom: Math.round(tabRect.bottom),
-              pointerEvents: style.pointerEvents,
-              zIndex: style.zIndex,
-            };
-            """
-        )
-    )
-    assert "/home/test/yolomux.dev1" in metrics["text"], metrics
-    assert "yolo-tab-dock-rewrite" in metrics["text"], metrics
-    assert "tmux session 1" in metrics["text"], metrics
-    assert metrics["parentTag"] == "BODY", metrics
-    assert metrics["top"] >= metrics["tabBottom"], metrics
-    assert metrics["pointerEvents"] == "auto", metrics
+    browser.execute_async_script("const done = arguments[arguments.length - 1]; setTimeout(done, 250);")
+    assert browser.execute_script("return document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover') === null;")
 
 
-def test_dockview_tab_hover_popover_survives_tab_refresh_without_pointer_move(browser, tmp_path):
+def test_dockview_tab_hover_does_not_reopen_after_tab_refresh(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -1509,62 +1477,20 @@ def test_dockview_tab_hover_popover_survives_tab_refresh_without_pointer_move(br
     )
     wait_for_dockview(browser, min_tabs=2)
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    browser.execute_script(
-        """
-        popoverShowDelayMs = 0;
-        popoverHideDelayMs = 120;
-        """
-    )
+    browser.execute_script("popoverShowDelayMs = 0;")
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const popover = document.querySelector('.pane-tab-detached-popover.popover-open');
-            if (!popover) return false;
-            const style = getComputedStyle(popover);
-            const rect = popover.getBoundingClientRect();
-            return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
-            """
-        )
-    )
+    browser.execute_async_script("const done = arguments[arguments.length - 1]; setTimeout(done, 250);")
+    assert browser.execute_script("return document.querySelector('.pane-tab-detached-popover.popover-open') === null;")
     browser.execute_script(
         """
-        const popover = document.querySelector('.pane-tab-detached-popover.popover-open');
-        window.__popoverBeforeDockviewRefresh = popover;
         dockviewRefreshTabs();
         """
     )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        setTimeout(done, 260);
-        """
-    )
-    metrics = browser.execute_script(
-        """
-        const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
-        const popover = document.querySelector('.pane-tab-detached-popover.popover-open');
-        const style = popover ? getComputedStyle(popover) : null;
-        const rect = popover?.getBoundingClientRect?.();
-        return {
-          visible: Boolean(popover && style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40),
-          samePopover: popover === window.__popoverBeforeDockviewRefresh,
-          parentTag: popover?.parentElement?.tagName || '',
-          detachedRef: tab?.__yolomuxDetachedPopover === popover,
-          hoverState: tab?.dataset?.popoverHoverState || '',
-          tabOpen: tab?.classList?.contains('popover-open') || false,
-        };
-        """
-    )
-    assert metrics["visible"] is True, metrics
-    assert metrics["samePopover"] is True, metrics
-    assert metrics["parentTag"] == "BODY", metrics
-    assert metrics["detachedRef"] is True, metrics
-    assert metrics["hoverState"] == "open", metrics
-    assert metrics["tabOpen"] is True, metrics
+    browser.execute_async_script("const done = arguments[arguments.length - 1]; setTimeout(done, 260);")
+    assert browser.execute_script("return document.querySelector('.pane-tab-detached-popover.popover-open') === null;")
 
 
-def test_dockview_pin_toggle_updates_open_hover_popover_tab(browser, tmp_path):
+def test_dockview_pin_toggle_does_not_open_hover_popover_tab(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -1582,14 +1508,10 @@ def test_dockview_pin_toggle_updates_open_hover_popover_tab(browser, tmp_path):
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
     browser.execute_script("popoverShowDelayMs = 0;")
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            "return Boolean(document.querySelector('.pane-tab-detached-popover.popover-open'));"
-        )
-    )
+    browser.execute_async_script("const done = arguments[arguments.length - 1]; setTimeout(done, 250);")
+    assert browser.execute_script("return document.querySelector('.pane-tab-detached-popover.popover-open') === null;")
     browser.execute_script("setTabPinned('1', true);")
-    metrics = WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
+    metrics = browser.execute_script(
             """
             const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
             if (!tab?.classList.contains('pinned-tab')) return false;
@@ -1600,8 +1522,7 @@ def test_dockview_pin_toggle_updates_open_hover_popover_tab(browser, tmp_path):
             };
             """
         )
-    )
-    assert metrics == {"pinned": True, "hasPinIcon": True, "popoverOpen": True}, metrics
+    assert metrics == {"pinned": True, "hasPinIcon": True, "popoverOpen": False}, metrics
 
 
 def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser, tmp_path):
