@@ -6060,6 +6060,111 @@ def test_unforced_session_metadata_on_a_cold_cache_names_no_build_identity():
         webapp.control_server.stop()
 
 
+def test_cold_lightweight_metadata_reads_are_single_flight(monkeypatch):
+    webapp, record = transcripts_payload_guard_app()
+    entered = threading.Event()
+    release = threading.Event()
+    builds = []
+
+    def blocking_build(*, lightweight=False):
+        assert lightweight is True
+        builds.append(1)
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"sessions": {}, "session_order": [], "build": len(builds)}
+
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", blocking_build)
+    results = []
+    errors = []
+
+    def read():
+        try:
+            results.append(webapp.cold_lightweight_metadata_payload())
+        except Exception as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=read) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    assert entered.wait(timeout=5)
+    release.set()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert errors == []
+    assert builds == [1]
+    assert results == [{"sessions": {}, "session_order": [], "build": 1}] * 4
+    assert record.lightweight_future is None
+
+
+def test_cold_lightweight_metadata_failure_is_shared_then_cleared(monkeypatch):
+    webapp, record = transcripts_payload_guard_app()
+    calls = []
+
+    def failing_build(*, lightweight=False):
+        calls.append(lightweight)
+        raise RuntimeError("metadata build failed")
+
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", failing_build)
+    with pytest.raises(RuntimeError, match="metadata build failed"):
+        webapp.cold_lightweight_metadata_payload()
+    assert record.lightweight_future is None
+
+    def successful_build(*, lightweight=False):
+        calls.append(lightweight)
+        return {"sessions": {}, "session_order": [], "build": len(calls)}
+
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", successful_build)
+    assert webapp.cold_lightweight_metadata_payload()["build"] == 2
+    assert calls == [True, True]
+
+
+def test_cold_lightweight_metadata_invalidation_releases_waiters(monkeypatch):
+    webapp, record = transcripts_payload_guard_app()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_build(*, lightweight=False):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"sessions": {}, "session_order": []}
+
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", blocking_build)
+    owner_errors = []
+    follower_result = []
+    follower_errors = []
+
+    def call_owner():
+        try:
+            webapp.cold_lightweight_metadata_payload()
+        except BaseException as error:
+            owner_errors.append(error)
+
+    def call_follower():
+        try:
+            follower_result.append(webapp.cold_lightweight_metadata_payload())
+        except BaseException as error:
+            follower_errors.append(error)
+
+    owner = threading.Thread(target=call_owner, daemon=True)
+    owner.start()
+    assert entered.wait(timeout=5)
+    follower = threading.Thread(target=call_follower, daemon=True)
+    follower.start()
+    webapp.clear_transcript_caches()
+    follower.join(timeout=5)
+    release.set()
+    owner.join(timeout=5)
+
+    assert not follower.is_alive()
+    assert follower_result == []
+    assert len(owner_errors) == 1
+    assert len(follower_errors) == 1
+    assert str(owner_errors[0]) == "transcript metadata cache invalidated"
+    assert str(follower_errors[0]) == "transcript metadata cache invalidated"
+    assert record.lightweight_future is None
+
+
 def test_metadata_identity_epoch_is_per_process_and_survives_invalidation():
     """The epoch partitions generations; it never orders them.
 

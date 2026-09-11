@@ -4101,6 +4101,11 @@ class WatchBridge:
             record.generation += 1
             record.stored_at = None
             record.payload = None
+            future = record.lightweight_future
+            record.lightweight_future = None
+            record.lightweight_generation = record.generation
+            if future is not None and not future.done():
+                future.set_exception(RuntimeError("transcript metadata cache invalidated"))
             # Invalidation supersedes the in-flight build, so it must release the whole guard, not
             # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
             # intent behind that belonged to a caller this invalidation had already superseded.
@@ -11832,6 +11837,8 @@ class TmuxWebtermApp:
             self.stamp_metadata_identity(payload, generation)
             record.stored_at = time.monotonic()
             record.payload = copy.deepcopy(payload)
+            if record.lightweight_future is not None and record.lightweight_future.done():
+                record.lightweight_future = None
             return True
 
     def finish_transcripts_payload_work(
@@ -11868,6 +11875,11 @@ class TmuxWebtermApp:
             record.active_workers.clear()
             record.rebuild_requested = False
             record.rebuild_publish = False
+            future = record.lightweight_future
+            record.lightweight_future = None
+            record.lightweight_generation = record.generation
+            if future is not None and not future.done():
+                future.set_exception(RuntimeError("transcript metadata cache stopped"))
         for worker in workers:
             if isinstance(worker, threading.Timer):
                 worker.cancel()
@@ -14292,6 +14304,36 @@ class TmuxWebtermApp:
     def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
         return self.build_session_metadata_payload(lightweight=lightweight)
 
+    def cold_lightweight_metadata_payload(self) -> dict[str, Any]:
+        """Share the one cold lightweight read without making callers wait for the full rebuild."""
+
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            if record.stopped:
+                raise RuntimeError("transcript metadata cache is stopped")
+            future = record.lightweight_future
+            generation = record.generation
+            owner = future is None
+            if owner:
+                future = Future()
+                record.lightweight_future = future
+                record.lightweight_generation = generation
+        assert future is not None
+        if owner:
+            try:
+                payload = self.build_session_metadata_payload(lightweight=True)
+                if not future.done():
+                    future.set_result(payload)
+            except BaseException as error:
+                if not future.done():
+                    future.set_exception(error)
+                raise
+            finally:
+                with self.activity_transcript_service.transcripts_payload_cache_lock:
+                    if record.lightweight_future is future and record.generation == generation:
+                        record.lightweight_future = None
+        return copy.deepcopy(future.result())
+
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
         return {
             "agentAuth": agent_auth_status_payload(agent_auth_status(force=True)) if force else cached_agent_auth_status_snapshot(),
@@ -14324,7 +14366,7 @@ class TmuxWebtermApp:
                 if force:
                     payload["cache"].update(self.forced_metadata_pending_cache_fields(pending_generation))
             return payload
-        payload = self.build_session_metadata_payload(lightweight=True)
+        payload = self.cold_lightweight_metadata_payload()
         # A cold miss is the one case where the response carries nothing built at all, so it is also
         # the case where a forced caller most needs the identity of the build that will answer it.
         # Emitting no pending identity here handed the browser target zero, which every payload

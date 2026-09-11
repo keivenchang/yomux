@@ -286,6 +286,8 @@ class TranscriptsPayloadCacheRecord:
     # Fixture shutdown fences new refreshes before it joins the in-flight worker.  A request that
     # races teardown must not publish a new filesystem-writing worker after that join completes.
     stopped: bool = False
+    lightweight_future: Future[dict[str, Any]] | None = None
+    lightweight_generation: int = 0
 
     def release_worker(self) -> None:
         """Release the single-flight build guard and every intent scoped to that worker.

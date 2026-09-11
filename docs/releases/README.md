@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.8.6 | `v0.8.6` | `v0.8.6^{commit}` | [v0.8.6-evidence.md](v0.8.6-evidence.md) | coalesced cold session-metadata reads to reduce request-driven CPU and metadata rebuilds |
 | 0.8.5 | `v0.8.5` | `v0.8.5^{commit}` | [v0.8.5-evidence.md](v0.8.5-evidence.md) | OpenCode/session stats attribution, internal pricing coverage, terminal URL continuation, autosave conflict prevention, and Dockview drop-preview fixes |
 | 0.8.3 | `v0.8.3` | `v0.8.3^{commit}` | [v0.8.3-evidence.md](v0.8.3-evidence.md) | ProseMirror link editing, Finder/Dockview interaction fixes, reduced indexed filesystem churn, and Defender-aware startup admission |
 | 0.8.2 | `v0.8.2` | `v0.8.2^{commit}` | [v0.8.2-evidence.md](v0.8.2-evidence.md) | direct raw Markdown image loading and reduced terminal filesystem resolution traffic |
