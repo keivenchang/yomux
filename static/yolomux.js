@@ -697,6 +697,7 @@ const terminalStartupPromises = new Map();
 const tmuxSessionLifecycleRecords = new Map();
 let tmuxSessionLifecycleGeneration = 0;
 let tmuxTopologyEpoch = 0;
+let tmuxTopologyGeneration = 0;
 const pendingTmuxSessionGraceMs = 30000;
 const tmuxSessionLifecyclePendingPhases = new Set(['creating', 'renaming-in']);
 const tmuxSessionLifecycleBlockedPhases = new Set(['renaming-out', 'killing', 'retired']);
@@ -1662,6 +1663,11 @@ function sessionMetadataIdentity(value) {
 }
 function sessionMetadataPayloadIdentity(payload) {
   return sessionMetadataIdentity(payload?.metadata_identity);
+}
+function adoptTopologyGeneration(payload) {
+  const value = Number(payload?.topology_generation || 0);
+  if (Number.isSafeInteger(value) && value >= tmuxTopologyGeneration) tmuxTopologyGeneration = value;
+  return tmuxTopologyGeneration;
 }
 // The build a forced read must wait for. Generation zero is not a build identity -- every payload
 // already satisfies it -- so a force that is offered zero has been told no build was accepted.
@@ -7632,7 +7638,7 @@ function terminalTailIsUnterminatedUrl(text) {
 
 function terminalTailHasUrlSplitBoundary(text) {
   const value = String(text || '');
-  return terminalTailIsUnterminatedUrl(value) && /[-/?&=#%]$/.test(value);
+  return terminalTailIsUnterminatedUrl(value) && /[-./?&=#%]$/.test(value);
 }
 
 function terminalRowStartsNewUrlToken(text) {
@@ -7674,7 +7680,7 @@ function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
   if (!match || !match[1]) return null;
   const indent = match[1].length;
   const text = raw.slice(indent);
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
   return {indent, text};
 }
@@ -7683,7 +7689,7 @@ function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
   const line = buffer.getLine(index);
   const text = terminalBufferLineText(line);
   if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
-  if (!['/', '-', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
   return {text};
 }
 
@@ -7695,7 +7701,7 @@ function terminalUrlContinuationTextIsStrong(baseText, continuationText, require
   if (/\s/.test(continuation)) return false;
   if (!terminalUrlContinuationCharactersAreValid(continuation)) return false;
   const delimiter = base.at(-1);
-  if (requireSplitDelimiter && !['/', '-', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
+  if (requireSplitDelimiter && !['/', '-', '.', '?', '&', '=', '#', '%'].includes(delimiter)) return false;
   if (delimiter === '%' && !/^[0-9A-Fa-f]/.test(continuation)) return false;
   return true;
 }
@@ -7853,12 +7859,12 @@ function terminalWrappedLineGroup(term, y) {
       const repeatedContinuation = repeatedGutterGroup
         && rowShape.indent > 0
         && continuationAllowed
-        && (index > start + 1 || /[-/?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
+        && (index > start + 1 || /[-./?&=#%]$/.test(joined) || (joined.includes('?') && joined.includes('=')));
       const zeroIndentContinuation = zeroIndentGroup
         && rowShape.indent === 0
         && continuationAllowed;
       const quoteGutterReachedEdge = terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols);
-      const quoteGutterSplitBoundary = /[-/?&=#%]$/.test(joined);
+      const quoteGutterSplitBoundary = /[-./?&=#%]$/.test(joined);
       const quoteGutterContinuation = Boolean(quoteGutterBase && quoteShape
         && quoteShape.prefix === quoteGutterBase.prefix
         && (quoteGutterReachedEdge || quoteGutterSplitBoundary)
@@ -8390,6 +8396,7 @@ function installTerminalLinkProvider(session, term, container) {
     },
   });
 }
+
 
 function terminalRenderCellDimensions(term) {
   const renderService = term?._core?._renderService;
@@ -9964,8 +9971,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
-    if (!slotIsSidePane(sourceSlot)) appendDescription();
     appendTabSplitCommands(menu, item, options);
+    if (!slotIsSidePane(sourceSlot)) appendDescription();
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
         menu,
@@ -12640,7 +12647,8 @@ function tmuxSessionLifecycleStaleRequestError(session) {
 function pruneExpiredPendingTmuxSessions(now = Date.now()) {
   let changed = false;
   for (const record of tmuxSessionLifecycleRecords.values()) {
-    if (!tmuxSessionLifecyclePendingPhases.has(record.phase) || Number(record.pendingUntil) > now) continue;
+    if (!tmuxSessionLifecyclePendingPhases.has(record.phase)
+        || Number(record.pendingUntil) > now) continue;
     record.phase = 'stable';
     record.pendingUntil = 0;
     changed = true;
@@ -28686,7 +28694,15 @@ function fileEditorSelfWriteAcknowledged(path, entry) {
   const finalMatch = !ack.pending && fileMtimesMatch(mtime, ack.mtime) && Number(size) === Number(ack.size);
   const transientMatch = ack.pending === true && Number(size) === 0;
   if (!finalMatch && !transientMatch) return false;
-  if (finalMatch) fileEditorSelfWriteAcks.delete(path);
+  return true;
+}
+
+function fileEditorSelfWritePending(path) {
+  const ack = fileEditorSelfWriteAcks.get(path);
+  if (!ack || ack.expiresAt < Date.now()) {
+    fileEditorSelfWriteAcks.delete(path);
+    return false;
+  }
   return true;
 }
 
@@ -29055,7 +29071,7 @@ function openFileAutosaveReady(path, state = fileState.get(path)) {
     && fileEditorAutosaveEnabled
     && state?.kind === 'text'
     && state.dirty
-    && !state.externalChanged
+    && (!state.externalChanged || fileEditorSelfWritePending(path))
     && !state.externalMissing
     && !state.externalError;
 }
@@ -32649,6 +32665,27 @@ function previewFindPanelForHost(host = null) {
   return host?.querySelector?.('.file-editor-preview-find-panel') || null;
 }
 
+function fileEditorSearchSurfaceForHost(host = null) {
+  if (!host) return 'editor';
+  const mode = fileEditorPanelMode(host);
+  if (mode === 'preview') return 'preview';
+  if (mode !== 'split') return 'editor';
+  if (host._fileEditorSearchSurface === 'preview' || host._fileEditorSearchSurface === 'editor') {
+    return host._fileEditorSearchSurface;
+  }
+  const active = document.activeElement;
+  if (active && host.querySelector('.file-editor-preview-pane-panel')?.contains(active)) return 'preview';
+  if (active && host.querySelector('.file-editor-codemirror-panel')?.contains(active)) return 'editor';
+  return host._fileEditorSearchSurface === 'preview' ? 'preview' : 'editor';
+}
+
+function rememberFileEditorSearchSurface(host = null, surface = 'editor') {
+  if (!host || !['editor', 'preview'].includes(surface)) return;
+  host._fileEditorSearchSurface = surface;
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-preview', surface === 'preview');
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-editor', surface === 'editor');
+}
+
 function fileEditorFindOverviewForHost(host = null) {
   return host?.querySelector?.('.file-editor-find-overview') || null;
 }
@@ -32680,19 +32717,42 @@ function updateFileEditorFindOverview(host = null, positions = [], activeIndex =
 
 function previewFindStateForHost(host = null, create = false) {
   if (!host) return null;
-  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1};
+  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1, open: false};
   return host._previewFindState || null;
 }
 
 function previewFindClearMatches(host = null) {
   const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
   if (!preview) return;
+  if (host?._pmView?.dom && CSS.highlights) {
+    CSS.highlights.delete('yolomux-find-match');
+    CSS.highlights.delete('yolomux-find-active');
+  }
   for (const match of preview.querySelectorAll('.file-editor-preview-find-match')) {
     const parent = match.parentNode;
     match.replaceWith(document.createTextNode(match.textContent || ''));
     parent?.normalize?.();
   }
   clearFileEditorFindOverview(host);
+}
+
+function previewFindUsesTextHighlights(host = null) {
+  return Boolean(host?._pmView?.dom && CSS.highlights && typeof Highlight === 'function');
+}
+
+function previewFindSetReadOnly(host = null, readOnly = false) {
+  const view = host?._pmView;
+  if (!view) return;
+  host._pmSearchReadOnly = readOnly === true;
+  view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
+  view.dom.setAttribute('contenteditable', String(host._pmSearchReadOnly !== true));
+}
+
+function previewFindSetDomObserver(host = null, running = true) {
+  const observer = host?._pmView?.domObserver;
+  if (!observer) return;
+  if (running) observer.start?.();
+  else observer.stop?.();
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -32743,8 +32803,17 @@ function previewFindSelectMatch(host = null, index = 0) {
   const state = previewFindStateForHost(host);
   if (!state?.matches.length) return false;
   state.index = (index + state.matches.length) % state.matches.length;
-  state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
-  state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  if (previewFindUsesTextHighlights(host)) {
+    CSS.highlights.set('yolomux-find-match', new Highlight(...state.matches));
+    CSS.highlights.set('yolomux-find-active', new Highlight(state.matches[state.index]));
+    state.matches[state.index].getBoundingClientRect?.();
+    const range = state.matches[state.index];
+    const element = range.startContainer.parentElement;
+    element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else {
+    state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
+    state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  }
   previewFindUpdateOverview(host);
   previewFindUpdatePanel(host);
   return true;
@@ -32765,7 +32834,8 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
   state.index = -1;
   const needle = state.query.toLocaleLowerCase();
   if (needle) {
-    const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    const root = previewFindUsesTextHighlights(host) ? host._pmView.dom : preview;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
@@ -32779,6 +32849,15 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       let from = 0;
       let index = folded.indexOf(needle, from);
       if (index < 0) continue;
+      if (previewFindUsesTextHighlights(host)) {
+        for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
+          const range = document.createRange();
+          range.setStart(node, matchIndex);
+          range.setEnd(node, matchIndex + needle.length);
+          state.matches.push(range);
+        }
+        continue;
+      }
       const fragment = document.createDocumentFragment();
       while (index >= 0) {
         fragment.append(document.createTextNode(text.slice(from, index)));
@@ -32807,6 +32886,10 @@ function openPreviewFind(host = null) {
   const panel = previewFindPanelForHost(host);
   if (!panel) return false;
   panel.hidden = false;
+  const state = previewFindStateForHost(host, true);
+  state.open = true;
+  previewFindSetReadOnly(host, true);
+  previewFindSetDomObserver(host, false);
   const input = panel.querySelector('input');
   previewFindApplyQuery(host, input?.value || '');
   input?.focus();
@@ -32818,7 +32901,10 @@ function closePreviewFind(host = null) {
   const panel = previewFindPanelForHost(host);
   if (!panel) return false;
   previewFindClearMatches(host);
+  previewFindSetReadOnly(host, false);
+  previewFindSetDomObserver(host, true);
   const state = previewFindStateForHost(host, true);
+  state.open = false;
   state.matches = [];
   state.index = -1;
   panel.hidden = true;
@@ -32829,6 +32915,16 @@ function closePreviewFind(host = null) {
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
   previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function restorePreviewFindAfterRender(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state || state.open !== true) return;
+  panel.hidden = false;
+  previewFindSetReadOnly(host, true);
+  previewFindSetDomObserver(host, false);
+  previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
 }
 
 function fileEditorPreviewSelectionOffsets(pane = null) {
@@ -32906,7 +33002,9 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   if (!pane) return false;
   if (host?._pmRequired && previewKindForPath(path) === 'markdown') return false;
   if (host?._pmView && host._pmPath === path && host._pmView.dom?.isConnected) {
-    return syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+    const result = syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+    restorePreviewFindAfterRender(host);
+    return result;
   }
   if (options.force !== true && previewScrollUserOwnsElementNow(pane)) {
     void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
@@ -32919,7 +33017,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
   const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
-  refreshPreviewFind(host);
+  restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
   return rendered;
 }
@@ -32932,9 +33030,9 @@ function updateEditorFindButton(button, state, host = null) {
   const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
   button.title = label;
   button.setAttribute('aria-label', label);
-  const previewMode = fileEditorPanelMode(host) === 'preview';
-  button.setAttribute('aria-pressed', previewMode ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
-  if (!previewMode) refreshCodeMirrorFindOverview(host);
+  const previewSurface = fileEditorSearchSurfaceForHost(host) === 'preview';
+  button.setAttribute('aria-pressed', previewSurface ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
+  if (!previewSurface) refreshCodeMirrorFindOverview(host);
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -33027,12 +33125,18 @@ async function closeEditorFind(host = null) {
 }
 
 async function toggleEditorFind(host = null) {
-  if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
+  }
   return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
 }
 
 async function openEditorFindShortcut(host = null) {
-  if (fileEditorPanelMode(host) === 'preview') return openPreviewFind(host);
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return openPreviewFind(host);
+  }
   return openEditorFind(host);
 }
 
@@ -38114,6 +38218,7 @@ async function createNextSession(agent, options = {}) {
       {session: reservedSession, serverGeneration},
       () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
       async payload => {
+        adoptTopologyGeneration(payload);
         markPendingTmuxSession(payload.session);
         const previousActive = activeSessions.slice();
         updateSessionList(payload.sessions || []);
@@ -38356,12 +38461,14 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
+        adoptTopologyGeneration(payload);
         const layoutGeneration = beginLayoutMutationCompletion();
         replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
         await Promise.all([
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
+        closeSessionRenameDialog();
       },
     );
     if (!mutation.committed) return false;
@@ -38404,8 +38511,9 @@ async function killTmuxSession(session) {
       'kill',
       {session},
       () => apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST', lifecycleBypass: true}),
-      async payload => {
-        const previousActive = activeSessions.slice();
+       async payload => {
+         adoptTopologyGeneration(payload);
+         const previousActive = activeSessions.slice();
         clearPendingTmuxSession(session);
         stopSessionUi(session);
         const sessionsChanged = updateSessionList(payload.sessions || []);
@@ -39569,6 +39677,7 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
+  clearTerminalRemovalLatency('session', session);
   if (terminals.get(session) === item) terminals.delete(session);
   if (item.reconnectTimer) {
     clearTimeout(item.reconnectTimer);
@@ -39655,11 +39764,6 @@ function sessionConfirmedGone(session, order) {
   return isTmuxSession(session) && !isPendingTmuxSession(session) && Array.isArray(order) && !order.includes(session);
 }
 
-function terminalSocketCloseLooksFinal(event = null) {
-  const code = Number(event?.code || 0);
-  return event?.wasClean === true || code === 1000 || code === 1001;
-}
-
 // Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
 // cleanup without the confirm/POST, for sessions that ended outside this client.
 function pruneDeadSession(session) {
@@ -39675,20 +39779,15 @@ function pruneDeadSession(session) {
   statusOk(localizedHtml('status.sessionEnded', {session: sessionLabel(session)}));
 }
 
-// On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
-// prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
+// A WebSocket close describes the transport, not the tmux session. Confirm the session through the
+// live tmux roster before pruning; a clean close can still be a transient transport disconnect.
 async function confirmSessionGoneOrReconnect(session, item, event = null, lifecycleToken = item?.sessionLifecycleToken || tmuxSessionLifecycleToken(session)) {
-  if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
+  if (item.manualClose || item.closeHandled || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
   const closeDetails = {
     origin: 'ws-close',
     closeCode: Number(event?.code || 0),
     wasClean: event?.wasClean === true,
   };
-  if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
-    noteTerminalRemovalLatencyStart('session', session, closeDetails);
-    pruneDeadSession(session);
-    return;
-  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
@@ -39697,7 +39796,11 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
   item.confirmingGone = true;
   try {
     const exists = await tmuxSessionExistsForReconnect(session);
-    if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
+    if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
+      if (terminals.get(session) === item) clearTerminalRemovalLatency('session', session);
+      return;
+    }
+    item.closeHandled = true;
     if (exists === false) {
       pruneDeadSession(session);
       return;
@@ -40649,6 +40752,14 @@ function dockviewTrackRootBoundaryOverlay(event) {
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
   const paneInfo = dockviewPaneContentDropInfo(event);
+  if (paneInfo?.intent) {
+    // Dockview owns previews for every pane-content zone. Clear any legacy custom group/grid
+    // overlay first; otherwise native and app previews render as multiple yellow boxes.
+    clearDropPreview();
+    dockviewLayoutState.pendingRootBoundaryDrop = null;
+    dockviewClearTabInsertionPreview();
+    return;
+  }
   const pointerCapacityRefusal = customPointerInsertion
     ? dropIntentCapacityRefusalStatus(customPointerInsertion.item, {
         targetSlot: customPointerInsertion.targetSlot,
@@ -41244,14 +41355,9 @@ function dockviewTrackTabPointerDrag(event) {
   if (!contentRegion) return;
   const zone = dropZoneForRect(pointerEvent, contentRegion.rect);
   if (!layoutSplitZone(zone)) return;
-  showDropPreview({
-    item: state.item,
-    sourceSlot: state.slot,
-    targetSlot: contentRegion.slot,
-    targetRect: contentRegion.rect,
-    previewNode: contentRegion.group,
-    zone,
-  });
+  // Dockview owns the pane-content edge preview. Painting a custom group overlay here as well
+  // creates two visible yellow boxes for one drag gesture.
+  clearDropPreview();
 }
 
 function dockviewFinishTabPointerDrag(event) {
@@ -43982,6 +44088,7 @@ function bindPaneTabPopover(tab, session) {
     item: session,
     sourceSlot: () => slotForItem(session),
     popover: () => paneTabPopoverForAnchor(tab),
+    hover: false,
     positionDetail: () => {
       const currentPopover = paneTabPopoverForAnchor(tab);
       if (currentPopover) positionPaneTabPopover(tab, currentPopover);
@@ -52658,6 +52765,7 @@ function bindPreferencesPanel(panel) {
   function currentStatsCanonicalSessionKey(value) {
     const full = String(value || '').trim();
     if (!full) return '';
+    if (full.startsWith('opencode-process:')) return full;
     const parts = full.split('|');
     if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
@@ -52670,6 +52778,7 @@ function bindPreferencesPanel(panel) {
     if (!full) return 'Unknown';
     const sessionKey = currentStatsCanonicalSessionKey(full);
     if (sessionKey !== full) return sessionKey;
+    if (full.startsWith('opencode-process:')) return full;
     if (full.startsWith('claude-bg:')) {
       const [, projectValue = '', sessionValue = ''] = full.split(':');
       const projectParts = projectValue.split('-').filter(Boolean);
@@ -68764,7 +68873,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted) {
+  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -69196,6 +69305,14 @@ function createFileEditorPanel(item) {
   });
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const previewFindPanel = panel.querySelector('.file-editor-preview-find-panel');
+  panel.addEventListener('pointerdown', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
+  panel.addEventListener('focusin', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
   previewFindPanel?.addEventListener('submit', event => event.preventDefault());
   previewFindPanel?.addEventListener('input', event => {
     if (event.target.matches('input')) previewFindApplyQuery(panel, event.target.value);
@@ -76151,7 +76268,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
     updateEditorWrapButton(parts.wrapButton);
   }
   updateEditorFindButton(parts.findButton, state, panel);
-  if (mode !== 'preview') closePreviewFind(panel);
+  if (mode !== 'preview' && mode !== 'split') closePreviewFind(panel);
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
@@ -77341,7 +77458,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && (state.externalChanged || state.externalMissing)) {
+  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};
@@ -83632,6 +83749,7 @@ function connectTerminalSocket(session, item) {
   item.socket = socket;
   item.sessionLifecycleToken = lifecycleToken;
   item.manualClose = false;
+  item.closeHandled = false;
   socket.onopen = () => {
     if (!socketIsCurrent()) return;
     clearTerminalRemovalLatency('session', session);
@@ -83667,7 +83785,7 @@ function connectTerminalSocket(session, item) {
     }
   };
   socket.onclose = event => {
-    if (item.manualClose || !socketIsCurrent()) return;
+    if (item.manualClose || item.closeHandled || !socketIsCurrent()) return;
     tmuxSessionLifecycleReleaseSource(lifecycleToken, socket);
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
@@ -84221,6 +84339,10 @@ function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
 
 function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (Number(payload.topology_generation || 0) < tmuxTopologyGeneration) {
+    return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
+  adoptTopologyGeneration(payload);
   if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
     return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
@@ -84689,6 +84811,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
     return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
+  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
+    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
+  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -84711,6 +84837,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
+  adoptTopologyGeneration(payload);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish

@@ -603,6 +603,212 @@ def test_markdown_preview_prosemirror_pure_view_is_visible(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_view_editor_search_is_read_only_and_counts_matches(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/SEARCH.md';
+            const original = '# Search\\n\\nThe theme has the word the three times.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const waitFor = window.__yolomuxTestWaitFor;
+            await waitFor(() => panel._pmView?.dom?.textContent.includes('The theme'));
+            const findButton = panel.querySelector('.file-editor-find-panel');
+            findButton.click();
+            const input = panel.querySelector('.file-editor-preview-find-panel input');
+            input.value = 'the';
+            input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: 'the'}));
+            await waitFor(() => panel.querySelector('.file-editor-preview-find-count')?.textContent === '1/4');
+            const before = fileEditorPanelState(panel).content;
+            const view = panel._pmView;
+            const afterSearch = {
+              count: panel.querySelector('.file-editor-preview-find-count')?.textContent || '',
+              contentEditable: view.dom.getAttribute('contenteditable'),
+              readOnly: view.props.editable?.(view.state) === false,
+              sourceUnchanged: fileEditorPanelState(panel).content === original,
+              matchCount: panel.querySelectorAll('.file-editor-preview-find-match').length,
+              highlightMatches: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+            };
+            view.dom.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: 'X'}));
+            await new Promise(resolve => setTimeout(resolve, 50));
+            return {before, afterSearch, finalContent: fileEditorPanelState(panel).content};
+          } catch (error) {
+            return {error: String(error?.stack || error)};
+          }
+        })().then(done);
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["afterSearch"]["count"] == "1/4", metrics
+    assert metrics["afterSearch"]["contentEditable"] == "false", metrics
+    assert metrics["afterSearch"]["readOnly"] is True, metrics
+    assert metrics["afterSearch"]["sourceUnchanged"] is True, metrics
+    assert metrics["afterSearch"]["matchCount"] == 0, metrics
+    assert metrics["afterSearch"]["highlightMatches"] == 4, metrics
+    assert metrics["finalContent"] == metrics["before"], metrics
+
+
+def test_split_search_follows_the_active_editor_surface(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/SPLIT-SEARCH.md';
+            const original = '# Split\\n\\nThe left source has alpha.\\nThe right view has alpha.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const waitFor = window.__yolomuxTestWaitFor;
+            await waitFor(() => panel._cmView && panel._pmView);
+            panel.querySelector('.file-editor-codemirror-panel').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
+            await toggleEditorFind(panel);
+            await waitFor(() => panel.querySelector('.cm-search'));
+            const leftOpen = {
+              surface: panel._fileEditorSearchSurface,
+              left: Boolean(panel.querySelector('.cm-search')),
+              right: panel.querySelector('.file-editor-preview-find-panel')?.hidden !== false,
+            };
+            await closeEditorFind(panel);
+            rememberFileEditorSearchSurface(panel, 'preview');
+            const openedPreview = await toggleEditorFind(panel);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            const rightOpen = {
+              surface: panel._fileEditorSearchSurface,
+              opened: openedPreview,
+              left: Boolean(panel.querySelector('.cm-search')),
+              right: panel.querySelector('.file-editor-preview-find-panel')?.hidden === false,
+              hidden: panel.querySelector('.file-editor-preview-find-panel')?.hidden,
+            };
+            return {leftOpen, rightOpen};
+          } catch (error) {
+            return {error: String(error?.stack || error)};
+          }
+        })().then(done);
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["leftOpen"] == {"surface": "editor", "left": True, "right": True}, metrics
+    assert metrics["rightOpen"]["surface"] == "preview", metrics
+    assert metrics["rightOpen"]["left"] is False, metrics
+    assert metrics["rightOpen"]["right"] is True, metrics
+
+
+def test_split_view_search_stays_open_after_query_redraw(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/SPLIT-SEARCH-REDRAW.md';
+            const original = '# Split\\n\\nThe right view has alpha and alpha again.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const waitFor = window.__yolomuxTestWaitFor;
+            await waitFor(() => panel._cmView && panel._pmView);
+            rememberFileEditorSearchSurface(panel, 'preview');
+            await toggleEditorFind(panel);
+            const input = panel.querySelector('.file-editor-preview-find-panel input');
+            input.value = 'alpha';
+            input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: 'alpha'}));
+            await waitFor(() => panel.querySelector('.file-editor-preview-find-count')?.textContent === '1/2');
+            renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
+            setFileState(path, {kind: 'text', content: original + '\\n', original, dirty: false, language: 'markdown'});
+            renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, original + '\\n', {force: true});
+            await waitFor(() => panel.querySelector('.file-editor-preview-find-panel')?.hidden === false);
+            return {
+              visible: panel.querySelector('.file-editor-preview-find-panel')?.hidden === false,
+              query: panel.querySelector('.file-editor-preview-find-panel input')?.value || '',
+              count: panel.querySelector('.file-editor-preview-find-count')?.textContent || '',
+              highlights: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+            };
+          } catch (error) {
+            return {error: String(error?.stack || error)};
+          }
+        })().then(done);
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics == {"visible": True, "query": "alpha", "count": "1/2", "highlights": 2}, metrics
+
+
+def test_markdown_view_editor_search_marks_only_the_query_text(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/SEARCH-LO.md';
+            const original = '# Search\\n\\nA long line has local color and a label.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const waitFor = window.__yolomuxTestWaitFor;
+            await waitFor(() => panel._pmView?.dom?.textContent.includes('long line'));
+            panel.querySelector('.file-editor-find-panel').click();
+            const input = panel.querySelector('.file-editor-preview-find-panel input');
+            input.value = 'lo';
+            input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: 'lo'}));
+            await waitFor(() => panel.querySelector('.file-editor-preview-find-count')?.textContent === '1/3');
+            return {
+              count: panel.querySelector('.file-editor-preview-find-count')?.textContent || '',
+              marks: Array.from(panel.querySelectorAll('.file-editor-preview-find-match')).map(node => node.textContent),
+              highlightMatches: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+              source: fileEditorPanelState(panel).content,
+            };
+          } catch (error) {
+            return {error: String(error?.stack || error)};
+          }
+        })().then(done);
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["count"] == "1/3", metrics
+    assert metrics["marks"] == [], metrics
+    assert metrics["highlightMatches"] == 3, metrics
+    assert metrics["source"] == "# Search\n\nA long line has local color and a label.\n", metrics
+
+
 def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(

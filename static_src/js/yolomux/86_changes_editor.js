@@ -3373,7 +3373,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
   }
-  if (state.externalChanged && !state.externalChangeEditPrompted) {
+  if (state.externalChanged && !state.externalChangeEditPrompted && !fileEditorSelfWritePending(path)) {
     promptExternalChangeBeforeEditing(path, panel);
   }
   if (state.dirty && options.deferAutosave !== true) scheduleFileAutosave(path);
@@ -3805,6 +3805,14 @@ function createFileEditorPanel(item) {
   });
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const previewFindPanel = panel.querySelector('.file-editor-preview-find-panel');
+  panel.addEventListener('pointerdown', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
+  panel.addEventListener('focusin', event => {
+    if (event.target.closest?.('.file-editor-preview-pane-panel')) rememberFileEditorSearchSurface(panel, 'preview');
+    else if (event.target.closest?.('.file-editor-codemirror-panel')) rememberFileEditorSearchSurface(panel, 'editor');
+  });
   previewFindPanel?.addEventListener('submit', event => event.preventDefault());
   previewFindPanel?.addEventListener('input', event => {
     if (event.target.matches('input')) previewFindApplyQuery(panel, event.target.value);

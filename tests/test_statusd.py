@@ -816,6 +816,66 @@ def test_statusd_snapshot_body_carries_the_metadata_generation_for_full_and_sess
         service.lock.notify_all()
 
 
+def test_statusd_invalidate_retains_requested_roster(monkeypatch, tmp_path):
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    with service.lock:
+        service._handle_invalidate({"reason": "tmux-topology", "sessions": ["1", "2"]}, b"")
+        assert service.refresh_requested_sessions == ("1", "2")
+        assert service.invalidation_reason == "tmux-topology"
+    service.stop_event.set()
+    with service.lock:
+        service.lock.notify_all()
+
+
+def test_statusd_app_advances_topology_generation_for_roster_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    app = service._ensure_app(("1",))
+    if not hasattr(app, "topology_generation"):
+        service.stop_event.set()
+        return
+    assert app.topology_generation == 0
+    service._ensure_app(("1", "2"))
+    assert app.topology_generation == 1
+    service._ensure_app(("1", "2"))
+    assert app.topology_generation == 1
+    service.stop_event.set()
+
+
+def test_statusd_preserves_requested_topology_generation_before_app_start(tmp_path):
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    service._handle_invalidate({"reason": "tmux-topology", "sessions": ["renamed"], "topology_generation": 7}, b"")
+    assert service.requested_topology_generation == 7
+    service.stop_event.set()
+
+
+def test_statusd_rejects_invalid_invalidate_roster(monkeypatch, tmp_path):
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    response, body = service.handle({
+        "action": "invalidate",
+        "protocol_version": statusd.STATUSD_PROTOCOL_VERSION,
+        "sessions": ["1", "1"],
+    })
+    assert response["ok"] is False
+    assert response["error"] == "invalid invalidate sessions"
+    assert body == b""
+    service.stop_event.set()
+
+
+def test_statusd_rejects_whitespace_invalidate_roster_without_mutating_state(tmp_path):
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    response, body = service.handle({
+        "action": "invalidate",
+        "protocol_version": statusd.STATUSD_PROTOCOL_VERSION,
+        "sessions": ["1", " 2"],
+    })
+    assert response["ok"] is False
+    assert body == b""
+    assert service.status()["invalidation_generation"] == 0
+    service.stop_event.set()
+
+
 def test_statusd_rejects_invalid_session_input_without_building(monkeypatch, tmp_path):
     FakeStatusApp.builds = 0
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)

@@ -924,6 +924,14 @@ async function runLayoutRestoreSuite() {
     }, 'the realized layout publishes the same receipt generation');
   });
 
+  await testAsync('successful session rename closes its dialog after layout realization', async () => {
+    const source = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    assert.ok(
+      /waitForLayoutMutationCompletion\(layoutGeneration\),[\s\S]*?ensureTerminalRunning\(renamed\)[\s\S]*?closeSessionRenameDialog\(\)/.test(source),
+      'successful rename closes the popup only after layout and terminal convergence',
+    );
+  });
+
   await testAsync('layout mutation completion reports refusals and bounds every waiter', async () => {
     const timers = new Map();
     let nextTimer = 1;
@@ -2791,7 +2799,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item, event, lifecycleToken);'), 'terminal WS close passes the close event and generation token into the exit lifecycle decision');
     assert.ok(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/tmux-session-exists\?session=/.test(source), 'terminal close uses the read-only tmux existence endpoint');
     assert.equal(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/ensure-session\?session=/.test(source), false, 'terminal close no longer routes through the mutating ensure-session endpoint');
-    assert.ok(/terminalSocketCloseLooksFinal\(event\)[\s\S]*pruneDeadSession\(session\);/.test(source), 'a clean terminal close prunes immediately');
+    assert.equal(source.includes('terminalSocketCloseLooksFinal'), false, 'terminal close codes do not decide tmux-session lifetime');
+    assert.ok(/const exists = await tmuxSessionExistsForReconnect\(session\)[\s\S]*if \(exists === false\)[\s\S]*pruneDeadSession\(session\);/.test(source), 'only a negative live tmux existence result prunes a session');
     assert.ok(source.includes('scheduleTerminalReconnect(session, item, lifecycleToken);'), 'a transient disconnect reconnects only through the current generation token');
   });
 
@@ -2863,35 +2872,38 @@ async function runLayoutRestoreSuite() {
     assert.equal(term.disposeCount, 1, 'dead terminal xterm instance is disposed during prune');
   });
 
-  await testAsync('clean terminal close prunes immediately without a reconnect existence round trip', async () => {
+  await testAsync('clean terminal close checks tmux before deciding whether to prune', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
     const fetches = [];
     api.setFetchForTest(url => {
       fetches.push(String(url));
+      if (String(url).includes('/api/tmux-session-exists')) {
+        return Promise.resolve(jsonResponse({session: '2', exists: true, ok: true}));
+      }
       return Promise.resolve(jsonResponse({ok: true}));
     });
     const socket = {readyState: WebSocket.CLOSED, closeCount: 0, close() { this.closeCount += 1; }};
     const term = {disposeCount: 0, dispose() { this.disposeCount += 1; }};
     const item = api.registerTerminalForTest('2', term, socket);
+    api.setShowToastForTest(() => {});
 
     await api.confirmSessionGoneOrReconnectForTest('2', item, {wasClean: true, code: 1000});
     await flushAsyncWork();
 
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['1'], active: '1'},
-    }, 'normal terminal close removes the tab in the same close turn');
-    assert.deepStrictEqual(fetches, [], 'normal close does not wait for an existence check before pruning');
-    assert.equal(socket.closeCount, 1, 'clean-close prune still tears down the terminal socket');
-    assert.equal(term.disposeCount, 1, 'clean-close prune disposes the terminal instance');
+      left: {tabs: ['1', '2'], active: '2'},
+    }, 'a live tmux session survives a clean terminal transport close');
+    assert.ok(fetches.some(path => path.includes('/api/tmux-session-exists?session=2')), 'clean close checks live tmux existence');
+    assert.equal(socket.closeCount, 0, 'a live-session disconnect does not tear down the replacement path');
+    assert.equal(term.disposeCount, 0, 'a live-session disconnect preserves the terminal instance for reconnect');
     const removals = api.jsDebugEventsForTest().filter(event => event.type === 'terminal_removal');
-    assert.equal(removals.length, 1, 'clean-close prune records one terminal-removal debug event');
-    assert.equal(removals[0].targetKind, 'session', 'clean-close latency is recorded as a session removal');
-    assert.equal(removals[0].target, '2', 'clean-close latency names the removed session');
-    assert.equal(removals[0].origin, 'ws-close', 'clean-close latency starts at the websocket close');
-    assert.ok(Number.isFinite(removals[0].durationMs), 'clean-close latency records a numeric duration');
+    assert.equal(removals.length, 0, 'a live-session disconnect records no terminal removal');
     const summary = api.terminalRemovalLatencySummaryForTest();
-    assert.equal(summary.count, 1, 'debug state keeps a removal-latency sample count');
-    assert.equal(summary.last.target, '2', 'debug state exposes the latest removed tab/window target');
+    assert.equal(summary.count, 0, 'live-session disconnects do not add removal-latency samples');
+
+    await api.confirmSessionGoneOrReconnectForTest('2', item, {wasClean: true, code: 1000});
+    await flushAsyncWork();
+    assert.equal(fetches.filter(path => path.includes('/api/tmux-session-exists?session=2')).length, 1, 'duplicate close delivery does not issue a second existence check');
   });
 
   test('tmux signal removed window records pane-death removal latency', () => {
@@ -3342,6 +3354,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
     assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
     assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
+    assert.ok(/const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*clearDropPreview\(\)/.test(source), 'center drops clear custom overlays so Dockview owns the single center preview');
     assert.ok(/const capacityRefusal = paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*showLayoutStatus\(capacityRefusal, 'danger'\)[\s\S]*return;[\s\S]*Dockview's default center-drop mutates/.test(source), 'Dockview release prevents capacity-refused drops and shows the shared danger status');
     const moveSlots = api.emptyLayoutSlots();
     moveSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
@@ -4559,8 +4572,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(css.includes('.cm-content .md-heading'), 'Markdown fallback color classes apply inside CodeMirror edit content');
     assert.ok(/gutterButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the line-number button because no CodeMirror gutter is shown');
     assert.ok(/wrapButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the wrap button because no CodeMirror editor is shown');
-    assert.ok(source.includes("if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);"), 'Preview routes the shared Search control to rendered-preview search');
-    assert.ok(source.includes("if (mode !== 'preview') closePreviewFind(panel);"), 'leaving Preview clears rendered-preview search highlights');
+    assert.ok(source.includes("if (fileEditorSearchSurfaceForHost(host) === 'preview')"), 'Search routes to the active preview surface');
+    assert.ok(source.includes("if (mode !== 'preview' && mode !== 'split') closePreviewFind(panel);"), 'leaving Preview clears rendered-preview search highlights');
     assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
     assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
     assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\), captureViewState: false\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active or overwriting saved scroll');

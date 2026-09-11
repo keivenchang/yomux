@@ -696,6 +696,7 @@ const terminalStartupPromises = new Map();
 const tmuxSessionLifecycleRecords = new Map();
 let tmuxSessionLifecycleGeneration = 0;
 let tmuxTopologyEpoch = 0;
+let tmuxTopologyGeneration = 0;
 const pendingTmuxSessionGraceMs = 30000;
 const tmuxSessionLifecyclePendingPhases = new Set(['creating', 'renaming-in']);
 const tmuxSessionLifecycleBlockedPhases = new Set(['renaming-out', 'killing', 'retired']);
@@ -1661,6 +1662,11 @@ function sessionMetadataIdentity(value) {
 }
 function sessionMetadataPayloadIdentity(payload) {
   return sessionMetadataIdentity(payload?.metadata_identity);
+}
+function adoptTopologyGeneration(payload) {
+  const value = Number(payload?.topology_generation || 0);
+  if (Number.isSafeInteger(value) && value >= tmuxTopologyGeneration) tmuxTopologyGeneration = value;
+  return tmuxTopologyGeneration;
 }
 // The build a forced read must wait for. Generation zero is not a build identity -- every payload
 // already satisfies it -- so a force that is offered zero has been told no build was accepted.

@@ -31,6 +31,7 @@ STATUSD_PRIVATE_FIELDS = frozenset({
 # keys must never appear in an inventory body: they mark work that belongs to a
 # refresh product, not to the lightweight roster the daemon discovers itself.
 STATUSD_INVENTORY_MAX_SESSIONS = 256
+STATUSD_MAX_SESSIONS = STATUSD_INVENTORY_MAX_SESSIONS
 STATUSD_INVENTORY_HEAVY_FIELDS = frozenset({
     "git", "repo", "repos", "transcript", "transcripts", "diff", "content",
     "pull_request", "linear", "branches", "session_files", "activity",
@@ -226,6 +227,20 @@ def validate_request(request: object) -> dict[str, Any]:
             raise StatusProtocolError("invalid activity hours")
         if request.get("work_by_session_binary") is not True or "work_by_session" in request:
             raise StatusProtocolError("invalid activity work_by_session_binary")
+    if action == "invalidate" and "sessions" in request:
+        sessions = request.get("sessions")
+        if (
+            not isinstance(sessions, list)
+            or len(sessions) > STATUSD_MAX_SESSIONS
+            or any(not isinstance(session, str) or not session.strip() for session in sessions)
+            or any(session != session.strip() for session in sessions)
+            or len(set(sessions)) != len(sessions)
+        ):
+            raise StatusProtocolError("invalid invalidate sessions")
+    if action == "invalidate" and "topology_generation" in request:
+        topology_generation = request.get("topology_generation")
+        if isinstance(topology_generation, bool) or not isinstance(topology_generation, int) or topology_generation < 0:
+            raise StatusProtocolError("invalid invalidate topology generation")
     return dict(request)
 
 

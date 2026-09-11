@@ -103,8 +103,18 @@ class StatusClient(LocalServiceClient):
     def release_generation_lease(self, lease_id: str) -> dict[str, Any]:
         return self.registry.release_lease(lease_id)
 
-    def invalidate(self, reason: str) -> dict[str, Any]:
-        return self.request(stamped_request("invalidate", reason=str(reason)[:80]), timeout=0.25)
+    def invalidate(
+        self,
+        reason: str,
+        sessions: list[str] | None = None,
+        topology_generation: int | None = None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {"reason": str(reason)[:80]}
+        if sessions is not None:
+            fields["sessions"] = list(sessions)
+        if topology_generation is not None:
+            fields["topology_generation"] = int(topology_generation)
+        return self.request(stamped_request("invalidate", **fields), timeout=0.25)
 
     def runtime_status(self) -> dict[str, Any]:
         """Build statusd's whole System/health row.

@@ -94,13 +94,18 @@ def _catalog_provider(provider: str, model: str) -> tuple[str, str]:
     lowered_model = catalog_model.lower()
     if lowered_model.startswith("switchyard/openai/"):
         return "openai", catalog_model.split("/", 2)[2]
+    if route == "inferencehub" and lowered_model.startswith("openai/"):
+        while catalog_model.lower().startswith("openai/"):
+            catalog_model = catalog_model.split("/", 1)[1]
+        return "openai", catalog_model
     if route == "switchyard" and "/" in catalog_model:
         routed_provider, catalog_model = catalog_model.split("/", 1)
         route = routed_provider
     if route == "switchyard":
         route = "openai"
-    if route == "openai" and catalog_model.lower().startswith("openai/"):
-        catalog_model = catalog_model.split("/", 1)[1]
+    if route == "openai":
+        while catalog_model.lower().startswith("openai/"):
+            catalog_model = catalog_model.split("/", 1)[1]
     return route, catalog_model
 
 

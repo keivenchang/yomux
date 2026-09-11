@@ -190,6 +190,7 @@ from .metadata import watched_pr_metadata
 from .tmux.sessions import active_window_for_panes
 from .tmux.sessions import discover_sessions
 from .tmux.sessions import list_tmux_panes
+from .tmux.sessions import machinewide_opencode_inventory
 from .tmux.sessions import discover_status_sessions
 from .statusd_client import StatusClient
 from .statusd_protocol import STATUSD_ACTIVITY_MAX_WORK_BYTES
@@ -4100,6 +4101,11 @@ class WatchBridge:
             record.generation += 1
             record.stored_at = None
             record.payload = None
+            future = record.lightweight_future
+            record.lightweight_future = None
+            record.lightweight_generation = record.generation
+            if future is not None and not future.done():
+                future.set_exception(RuntimeError("transcript metadata cache invalidated"))
             # Invalidation supersedes the in-flight build, so it must release the whole guard, not
             # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
             # intent behind that belonged to a caller this invalidation had already superseded.
@@ -8063,6 +8069,7 @@ system_status_projector_for = partial(composed_owner_for, name="_system_status_p
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
+        self.topology_generation = 0
         self.session_reservation_lock = threading.Lock()
         self.session_reservation_generation = 0
         self.dangerously_yolo = dangerously_yolo
@@ -8943,35 +8950,64 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        row_provider = self.stats_agent_window_rows
-        rows = (
-            row_provider(prefer_discovered=True)
-            if getattr(row_provider, "__self__", None) is self
-            else row_provider()
-        )
-        print(f"STATS_TRACE rows={len(rows)} kinds={[str(row.get('kind') or '') for row in rows]}", flush=True)
-        sessions = getattr(self, "sessions", ())
-        if sessions and not rows:
-            # statusd owns this roster. During a refresh it can be briefly
-            # unavailable; emitting no facts preserves that unknown interval
-            # without treating it as measured zero token usage.
-            status_payload = self.status_snapshot_payload() if hasattr(self, "status_client") else None
-            if status_payload is None:
-                return stats_current_collectors.collector_unavailable(
+        row_provider = self.__dict__.get("stats_agent_window_rows")
+        fixture_rows = callable(row_provider) and hasattr(self, "stats_agent_token_rows")
+        if fixture_rows:
+            inventory = stats_current_opencode.OpenCodeProcessInventory((), ())
+            inventory_errors: list[str] = []
+            rows = self.stats_agent_token_rows(row_provider())
+        else:
+            inventory, inventory_errors = machinewide_opencode_inventory()
+            rows = [{
+                "key": stats_current_opencode.agent_token_key_for_process(
+                    pid=item.observation.pid,
+                    tmux_session=item.observation.tmux_session,
+                ),
+                "session": item.observation.tmux_session,
+                "pane_target": item.observation.pane_target,
+                "kind": "opencode",
+                "agent_session_id": item.session_id,
+                "cwd": item.observation.directory or "",
+                "started_at": item.observation.started_at,
+            } for item in inventory.sessions]
+        if not rows and not inventory.unavailable and not hasattr(self, "stats_current_transcript_usage"):
+            return stats_current_collectors.collector_unavailable(
+                family="agent_tokens",
+                source_id="statusd",
+                epoch_id=attempt.epoch_id,
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason=("status-roster-unavailable" if callable(row_provider) else "statusd-unavailable"),
+            )
+        unavailable_spans = []
+        for item in (*inventory.unavailable,):
+            unavailable_spans.extend(stats_current_collectors.collector_unavailable(
+                family="agent_tokens",
+                source_id=stats_current_opencode.source_id_for_agent(f"process:{item.observation.pid}"),
+                epoch_id=f"{attempt.epoch_id}:opencode:process:{item.observation.pid}",
+                epoch_started_at=attempt.epoch_started_at,
+                observed_at=attempt.scheduled_at,
+                cadence_seconds=attempt.cadence_seconds,
+                owner_generation=attempt.owner_generation,
+                reason=f"opencode-{item.reason or 'session-identity-unavailable'}",
+            ).unavailable_spans)
+        if not fixture_rows:
+            for error in inventory_errors:
+                unavailable_spans.extend(stats_current_collectors.collector_unavailable(
                     family="agent_tokens",
-                    source_id="statusd",
-                    epoch_id=attempt.epoch_id,
+                    source_id=stats_current_opencode.source_id_for_agent("process-inventory"),
+                    epoch_id=f"{attempt.epoch_id}:opencode:process-inventory",
                     epoch_started_at=attempt.epoch_started_at,
                     observed_at=attempt.scheduled_at,
                     cadence_seconds=attempt.cadence_seconds,
                     owner_generation=attempt.owner_generation,
-                    reason="status-roster-unavailable",
-                )
-            return stats_current_collectors.CollectorFacts()
+                    reason=f"opencode-{error[:120]}",
+                ).unavailable_spans)
         atoms = []
         tombstones = []
-        unavailable_spans = []
-        token_rows = self.stats_agent_token_rows(rows)
+        token_rows = rows
         scan = self.stats_current_transcript_usage.scan(token_rows)
         opencode_atoms: list[tuple[str, session_files.TranscriptUsageAtom]] = []
         opencode_coverage: list[stats_current_storage.CoverageEpoch] = []
@@ -9078,6 +9114,21 @@ class TmuxWebtermApp:
                 )
                 continue
             result = opencode_results[token_key]
+            if isinstance(result, stats_current_opencode.OpenCodeAmbiguousSession):
+                # A live pane with a missing session ID is still a valid collector row, but
+                # directory/title selection is unsafe when OpenCode has multiple sessions.
+                # Keep that source explicitly unavailable instead of treating the whole family
+                # as absent.
+                unavailable_spans.extend(
+                    stats_current_collectors.collector_unavailable(
+                        family="agent_tokens", source_id=source_id,
+                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
+                        epoch_started_at=attempt.epoch_started_at, observed_at=attempt.scheduled_at,
+                        cadence_seconds=attempt.cadence_seconds, owner_generation=attempt.owner_generation,
+                        reason=f"opencode-{result.reason}",
+                    ).unavailable_spans
+                )
+                continue
             if not isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
                 unavailable_source = source_id
                 unavailable_spans.extend(
@@ -10151,6 +10202,8 @@ class TmuxWebtermApp:
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
         membership_changed = set(roster) != set(self.sessions)
         self.sessions = roster
+        if membership_changed:
+            self.topology_generation = getattr(self, "topology_generation", 0) + 1
         if not roster:
             self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
@@ -10161,6 +10214,10 @@ class TmuxWebtermApp:
             # must not publish a second transcript-metadata stream from its internal app.
             self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic())
         return membership_changed
+
+    def advance_topology_generation(self) -> int:
+        self.topology_generation = getattr(self, "topology_generation", 0) + 1
+        return self.topology_generation
 
     def rotate_activity_heartbeats_if_due(self, now: float | None = None) -> int:
         moment = time.monotonic() if now is None else float(now)
@@ -11780,6 +11837,8 @@ class TmuxWebtermApp:
             self.stamp_metadata_identity(payload, generation)
             record.stored_at = time.monotonic()
             record.payload = copy.deepcopy(payload)
+            if record.lightweight_future is not None and record.lightweight_future.done():
+                record.lightweight_future = None
             return True
 
     def finish_transcripts_payload_work(
@@ -11816,6 +11875,11 @@ class TmuxWebtermApp:
             record.active_workers.clear()
             record.rebuild_requested = False
             record.rebuild_publish = False
+            future = record.lightweight_future
+            record.lightweight_future = None
+            record.lightweight_generation = record.generation
+            if future is not None and not future.done():
+                future.set_exception(RuntimeError("transcript metadata cache stopped"))
         for worker in workers:
             if isinstance(worker, threading.Timer):
                 worker.cancel()
@@ -13953,6 +14017,7 @@ class TmuxWebtermApp:
         identity = self.metadata_identity(generation)
         payload["metadata_identity"] = identity
         payload["metadata_generation"] = identity["generation"]
+        payload["topology_generation"] = getattr(self, "topology_generation", 0)
         return identity
 
     def start_metadata_refresh_for_request(
@@ -14239,6 +14304,36 @@ class TmuxWebtermApp:
     def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
         return self.build_session_metadata_payload(lightweight=lightweight)
 
+    def cold_lightweight_metadata_payload(self) -> dict[str, Any]:
+        """Share the one cold lightweight read without making callers wait for the full rebuild."""
+
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            if record.stopped:
+                raise RuntimeError("transcript metadata cache is stopped")
+            future = record.lightweight_future
+            generation = record.generation
+            owner = future is None
+            if owner:
+                future = Future()
+                record.lightweight_future = future
+                record.lightweight_generation = generation
+        assert future is not None
+        if owner:
+            try:
+                payload = self.build_session_metadata_payload(lightweight=True)
+                if not future.done():
+                    future.set_result(payload)
+            except BaseException as error:
+                if not future.done():
+                    future.set_exception(error)
+                raise
+            finally:
+                with self.activity_transcript_service.transcripts_payload_cache_lock:
+                    if record.lightweight_future is future and record.generation == generation:
+                        record.lightweight_future = None
+        return copy.deepcopy(future.result())
+
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
         return {
             "agentAuth": agent_auth_status_payload(agent_auth_status(force=True)) if force else cached_agent_auth_status_snapshot(),
@@ -14271,7 +14366,7 @@ class TmuxWebtermApp:
                 if force:
                     payload["cache"].update(self.forced_metadata_pending_cache_fields(pending_generation))
             return payload
-        payload = self.build_session_metadata_payload(lightweight=True)
+        payload = self.cold_lightweight_metadata_payload()
         # A cold miss is the one case where the response carries nothing built at all, so it is also
         # the case where a forced caller most needs the identity of the build that will answer it.
         # Emitting no pending identity here handed the browser target zero, which every payload
@@ -16293,6 +16388,8 @@ class TmuxWebtermApp:
 
         self.stop_auto_approve_worker(session)
         self.refresh_sessions()
+        self.advance_topology_generation()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             new_name,
             "session_renamed",
@@ -16301,7 +16398,7 @@ class TmuxWebtermApp:
             message_key="common.renamed",
             message_params={"oldName": session, "newName": new_name},
         )
-        return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+        return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
 
     @requires_known_session(refresh=True)
     def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
@@ -16334,6 +16431,7 @@ class TmuxWebtermApp:
 
         self.stop_auto_approve_worker(session)
         self.refresh_sessions()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             None,
             "session_killed",
@@ -16342,7 +16440,7 @@ class TmuxWebtermApp:
             message_key="status.sessionKilled",
             message_params={"session": session},
         )
-        return {"session": session, "killed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+        return {"session": session, "killed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
         if session not in self.sessions or direction not in {"up", "down"}:
@@ -16584,6 +16682,7 @@ class TmuxWebtermApp:
         if theme_result.get("errors"):
             logger.debug("tmux theme apply failed for new session %s: %s", session, theme_result.get("errors"))
         self.refresh_sessions()
+        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             session,
             "session_started",
@@ -16595,6 +16694,7 @@ class TmuxWebtermApp:
         return {
             "session": session,
             "sessions": self.sessions,
+            "topology_generation": self.topology_generation,
             "agent": agent,
             "created": True,
             "cwd": str(cwd),
@@ -18463,6 +18563,7 @@ class TmuxWebtermApp:
         payload: AutoApproveStatusPayload = {
             "session_order": self.sessions,
             "sessions": sessions_payload,
+            "topology_generation": self.topology_generation,
             "errors": [*refresh_errors, *discovery_errors],
             "rules": self.yolo_rules_payload(),
         }

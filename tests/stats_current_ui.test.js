@@ -558,6 +558,12 @@ test('session token chart consolidates OpenCode panes by the canonical tmux sess
   assert.equal(api.canonicalAgentLabel('workspace|0|%17|opencode'), 'workspace');
 });
 
+test('session token chart preserves process fallback identity', () => {
+  const api = loadNamespace();
+  assert.equal(api.canonicalSessionKey('opencode-process:12345'), 'opencode-process:12345');
+  assert.equal(api.canonicalAgentLabel('opencode-process:12345'), 'opencode-process:12345');
+});
+
 test('normalizes saved choices and builds one exact current request', () => {
   const controller = loadController({
     capabilities: capabilities(), savedRange: 900, savedResolution: 120, clientId: 'browser-a',

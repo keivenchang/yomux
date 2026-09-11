@@ -1344,7 +1344,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
     updateEditorWrapButton(parts.wrapButton);
   }
   updateEditorFindButton(parts.findButton, state, panel);
-  if (mode !== 'preview') closePreviewFind(panel);
+  if (mode !== 'preview' && mode !== 'split') closePreviewFind(panel);
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
@@ -2534,7 +2534,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const contentPanel = panel || state.contentOwnerPanel || null;
   flushProseMirrorSource(contentPanel, statePath);
   syncOpenFileContentFromPanels(statePath, contentPanel);
-  if (!options.force && (state.externalChanged || state.externalMissing)) {
+  if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return {conflict: true, message: ''};

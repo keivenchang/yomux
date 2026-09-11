@@ -2340,6 +2340,7 @@
   function currentStatsCanonicalSessionKey(value) {
     const full = String(value || '').trim();
     if (!full) return '';
+    if (full.startsWith('opencode-process:')) return full;
     const parts = full.split('|');
     if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
       return parts[0] || full;
@@ -2352,6 +2353,7 @@
     if (!full) return 'Unknown';
     const sessionKey = currentStatsCanonicalSessionKey(full);
     if (sessionKey !== full) return sessionKey;
+    if (full.startsWith('opencode-process:')) return full;
     if (full.startsWith('claude-bg:')) {
       const [, projectValue = '', sessionValue = ''] = full.split(':');
       const projectParts = projectValue.split('-').filter(Boolean);
