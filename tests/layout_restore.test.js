@@ -924,6 +924,14 @@ async function runLayoutRestoreSuite() {
     }, 'the realized layout publishes the same receipt generation');
   });
 
+  await testAsync('successful session rename closes its dialog after layout realization', async () => {
+    const source = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    assert.ok(
+      /waitForLayoutMutationCompletion\(layoutGeneration\),[\s\S]*?ensureTerminalRunning\(renamed\)[\s\S]*?closeSessionRenameDialog\(\)/.test(source),
+      'successful rename closes the popup only after layout and terminal convergence',
+    );
+  });
+
   await testAsync('layout mutation completion reports refusals and bounds every waiter', async () => {
     const timers = new Map();
     let nextTimer = 1;

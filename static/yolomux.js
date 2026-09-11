@@ -38468,6 +38468,7 @@ async function renameTmuxSession(session, proposedName) {
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
+        closeSessionRenameDialog();
       },
     );
     if (!mutation.committed) return false;
