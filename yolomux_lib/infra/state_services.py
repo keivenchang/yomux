@@ -84,6 +84,7 @@ class ClientEventWatcherRecord:
     next_watched_pr_poll_at: float = 0.0
     next_yoagent_job_poll_at: float = 0.0
     next_search_progress_poll_at: float = 0.0
+    next_watch_snapshot_refresh_at: float = 0.0
     # Fixed-vocabulary recurring-work diagnostics. Keys are supplied only by the
     # app's static catalog, so a caller can never create path/user/cardinality state.
     recurring_work: dict[str, dict[str, float | int]] = field(default_factory=dict)
@@ -288,6 +289,12 @@ class TranscriptsPayloadCacheRecord:
     stopped: bool = False
     lightweight_future: Future[dict[str, Any]] | None = None
     lightweight_generation: int = 0
+    # Source generation is separate from the cache/build generation: a source invalidation can
+    # arrive while a full payload worker is still materializing Git metadata.
+    input_generation: int = 0
+    committed_input_generation: int = -1
+    watch_refreshed_at: float | None = None
+    publication_lock: threading.RLock = field(default_factory=threading.RLock)
 
     def release_worker(self) -> None:
         """Release the single-flight build guard and every intent scoped to that worker.

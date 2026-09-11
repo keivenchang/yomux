@@ -682,6 +682,7 @@ SESSION_FILES_BATCH_MAX_WORKERS = 2
 SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
+TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS = WATCHD_DESCRIPTOR_RESYNC_SECONDS
 # A single-flight refresh worker that outlives this deadline is treated as stalled and
 # may be superseded, so a hung heavy build cannot pin the guard and refuse every future
 # refresh (which froze the aggregate session-metadata header indefinitely). Far above a
@@ -3144,6 +3145,7 @@ class WatchBridge:
                 for repo in changed_repos:
                     if repo in app.session_files_service.repo_dirty_generations:
                         app.session_files_service.repo_dirty_generations[repo] += 1
+            app.invalidate_transcripts_payload_inputs()
         filesystem_roots = {Path(root) for root in (*previous_filesystem_roots, *roots)}
         filesystem_changed = any(
             filesystem_paths_intersect(path, root)
@@ -3176,8 +3178,8 @@ class WatchBridge:
             app.publish_client_event("settings_changed", {"data": app.settings_payload()}, trigger="watchd", cache="ready")
             events.append("settings_changed")
         if revision.get("transcripts_changed"):
-            app.clear_transcript_caches()
-            app.publish_client_event("transcripts_changed", {"refresh": True}, trigger="watchd", cache="refresh")
+            app.clear_transcript_content_caches()
+            app.invalidate_transcripts_payload_inputs()
             events.append("transcripts_changed")
         if files_changed:
             app.publish_client_event("files_changed", {"files": files_changed, "count": len(files_changed)}, trigger="watchd", cache="ready")
@@ -3380,6 +3382,8 @@ class WatchBridge:
                 if not app.sync_watchd_descriptors(record):
                     record.watchd_stop_event.wait(1.0)
                     continue
+                if record.next_watch_snapshot_refresh_at > 0 and time.monotonic() >= record.next_watch_snapshot_refresh_at:
+                    app.start_client_watch_snapshot_publish()
                 # The descriptor set is the sole demand owner for watchd. Once the final
                 # descriptor has been removed successfully, do not arm another revision wait:
                 # release the lease in ``finally`` while the parent event worker keeps serving
@@ -4096,20 +4100,24 @@ class WatchBridge:
 
     def clear_transcript_caches(self, app) -> None:
         app.clear_transcript_content_caches()
-        with app.activity_transcript_service.transcripts_payload_cache_lock:
-            record = app.activity_transcript_service.transcripts_payload_cache_record
-            record.generation += 1
-            record.stored_at = None
-            record.payload = None
-            future = record.lightweight_future
-            record.lightweight_future = None
-            record.lightweight_generation = record.generation
-            if future is not None and not future.done():
-                future.set_exception(RuntimeError("transcript metadata cache invalidated"))
+        record = app.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                record.generation += 1
+                record.input_generation += 1
+                record.committed_input_generation = -1
+                record.watch_refreshed_at = None
+                record.stored_at = None
+                record.payload = None
+                future = record.lightweight_future
+                record.lightweight_future = None
+                record.lightweight_generation = record.generation
+                if future is not None and not future.done():
+                    future.set_exception(RuntimeError("transcript metadata cache invalidated"))
             # Invalidation supersedes the in-flight build, so it must release the whole guard, not
             # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
             # intent behind that belonged to a caller this invalidation had already superseded.
-            record.release_worker()
+                record.release_worker()
         # A queued follow-up build is a promise to a forced caller waiting on a named generation.
         # The invalidated worker can no longer keep it -- its finish is a generation mismatch and
         # returns before the drain -- so the promise was left sitting on the record until some
@@ -4118,19 +4126,27 @@ class WatchBridge:
         # with no worker and no queued intent.
         app.start_queued_transcripts_payload_rebuild()
 
+    def invalidate_transcripts_payload_inputs(self, app) -> None:
+        """Advance the source fence and coalesce one complete publishing rebuild."""
+        requested_at = time.monotonic()
+        record = app.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            app.advance_transcripts_payload_input_generation()
+        app.start_transcripts_payload_refresh(publish=True, not_before=requested_at)
+
     def start_client_watch_snapshot_publish(self, app) -> bool:
         generation = 0
         worker: threading.Thread | None = None
         with self.state.lock:
             watcher_record = self.state.event_watcher_record
-            if watcher_record.snapshot_worker is not None:
+            if watcher_record.stop_event.is_set() or watcher_record.snapshot_worker is not None:
                 return False
             def run() -> None:
                 app.publish_client_watch_snapshot(watcher_record, generation)
 
             worker = threading.Thread(target=run, daemon=True)
             watcher_record.snapshot_worker = worker
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
+            generation = app.begin_transcripts_payload_work(worker)
             if generation <= 0:
                 watcher_record.snapshot_worker = None
                 return False
@@ -4171,35 +4187,65 @@ class WatchBridge:
     ) -> None:
         worker = threading.current_thread()
         guarded = record is not None
+        completed = False
         if generation is None:
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
+            generation = app.begin_transcripts_payload_work(worker)
             if generation <= 0:
                 return
         try:
             started = time.perf_counter()
-            payload = app.build_transcripts_payload()
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                source_generation = payload_record.input_generation
+                cache_age = (
+                    time.monotonic() - payload_record.watch_refreshed_at
+                    if payload_record.watch_refreshed_at is not None
+                    else None
+                )
+                reusable_payload = (
+                    payload_record.payload is not None
+                    and payload_record.payload.get("metadata_loading") is not True
+                    and payload_record.committed_input_generation == source_generation
+                    and cache_age is not None
+                    and cache_age <= TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
+                )
+                payload = copy.deepcopy(payload_record.payload) if reusable_payload else None
+            if payload is None:
+                payload = app.build_transcripts_payload()
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
-            if not app.commit_transcripts_payload_cache(payload, generation):
+            if not reusable_payload and not app.commit_transcripts_payload_cache(
+                payload,
+                generation,
+                input_generation=source_generation,
+            ):
                 return
-            signature = app.transcripts_payload_event_signature(payload)
-            with self.state.lock:
-                if guarded and (
-                    self.state.event_watcher_record is not record
-                    or record.snapshot_worker is not worker
-                    or record.stop_event.is_set()
-                ):
-                    return
-                previous_signature = self.state.transcripts_payload_signature
-                self.state.transcripts_payload_signature = signature
-            if previous_signature != signature:
-                app.publish_client_event(
-                    "transcripts_changed",
-                    {"signature": signature, "refresh": True},
-                    trigger="watch_state",
-                    cache="ready",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                )
+            with app.activity_transcript_service.transcripts_payload_cache_record.publication_lock:
+                with app.activity_transcript_service.transcripts_payload_cache_lock:
+                    payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                    if payload_record.input_generation != source_generation:
+                        return
+                    if reusable_payload:
+                        payload_record.watch_refreshed_at = time.monotonic()
+                    signature = app.transcripts_payload_event_signature(payload)
+                with self.state.lock:
+                    if guarded and (
+                        self.state.event_watcher_record is not record
+                        or record.snapshot_worker is not worker
+                        or record.stop_event.is_set()
+                    ):
+                        return
+                    previous_signature = self.state.transcripts_payload_signature
+                    self.state.transcripts_payload_signature = signature
+                    should_publish = previous_signature != signature
+                if should_publish:
+                    app.publish_client_event(
+                        "transcripts_changed",
+                        {"signature": signature, "refresh": True, "data": copy.deepcopy(payload)},
+                        trigger="watch_state",
+                        cache="ready",
+                        compute_ms=(time.perf_counter() - started) * 1000,
+                    )
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
             app.publish_context_items_ready_events(trigger="watch_state")
@@ -4209,7 +4255,12 @@ class WatchBridge:
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
             app.publish_session_files_ready_events(trigger="watch_state")
+            completed = True
         finally:
+            if guarded and completed:
+                with self.state.lock:
+                    if self.state.event_watcher_record is record and record.snapshot_worker is worker:
+                        record.next_watch_snapshot_refresh_at = time.monotonic() + TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
             app.finish_transcripts_payload_work(generation, worker)
             with self.state.lock:
                 if guarded and self.state.event_watcher_record is record and record.snapshot_worker is worker:
@@ -4683,6 +4734,7 @@ class WatchBridge:
             # The snapshot build can be blocked in tmux or metadata work that has no cancellation
             # boundary. Generation invalidation above fences its result; do not hold the SSE request
             # open waiting for uncancellable work to return.
+        app.fence_transcripts_payload_work()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
@@ -10171,6 +10223,8 @@ class TmuxWebtermApp:
         self.sessions = roster
         if membership_changed:
             self.topology_generation = getattr(self, "topology_generation", 0) + 1
+            if self.activity_transcript_service is not None:
+                self.advance_transcripts_payload_input_generation()
         if not roster:
             self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
@@ -11419,6 +11473,17 @@ class TmuxWebtermApp:
     def clear_transcript_caches(self) -> None:
         return composed_owner_for(self, "_watch_bridge", WatchBridge).clear_transcript_caches(self)
 
+    def invalidate_transcripts_payload_inputs(self) -> None:
+        return composed_owner_for(self, "_watch_bridge", WatchBridge).invalidate_transcripts_payload_inputs(self)
+
+    def advance_transcripts_payload_input_generation(self) -> int:
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                record.input_generation += 1
+                record.watch_refreshed_at = None
+                return record.input_generation
+
     def start_client_watch_snapshot_publish(self) -> bool:
         return self._watch_bridge.start_client_watch_snapshot_publish(self)
 
@@ -11792,10 +11857,21 @@ class TmuxWebtermApp:
                 pending_generation_out.append(record.generation)
             return record.generation
 
-    def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
+    def commit_transcripts_payload_cache(
+        self,
+        payload: dict[str, Any],
+        generation: int,
+        *,
+        input_generation: int | None = None,
+    ) -> bool:
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
-            if generation <= 0 or record.generation != generation:
+            committed_input_generation = record.input_generation if input_generation is None else input_generation
+            if (
+                generation <= 0
+                or record.generation != generation
+                or committed_input_generation != record.input_generation
+            ):
                 return False
             # Stamp the committing identity into the payload itself, not beside it. Every consumer
             # -- the HTTP cache hit, the client-events push, and a direct build -- carries the same
@@ -11804,6 +11880,8 @@ class TmuxWebtermApp:
             self.stamp_metadata_identity(payload, generation)
             record.stored_at = time.monotonic()
             record.payload = copy.deepcopy(payload)
+            record.committed_input_generation = committed_input_generation
+            record.watch_refreshed_at = record.stored_at
             if record.lightweight_future is not None and record.lightweight_future.done():
                 record.lightweight_future = None
             return True
@@ -11850,6 +11928,21 @@ class TmuxWebtermApp:
         for worker in workers:
             if isinstance(worker, threading.Timer):
                 worker.cancel()
+        for worker in workers:
+            if worker is threading.current_thread():
+                continue
+            worker.join(timeout=30)
+            assert not worker.is_alive(), "transcript payload rebuild did not stop"
+
+    def fence_transcripts_payload_work(self) -> None:
+        """Fence watcher-owned payload work without disabling future HTTP refreshes."""
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            record.generation += 1
+            workers = tuple(record.active_workers)
+            record.release_worker()
+            record.rebuild_requested = False
+            record.rebuild_publish = False
         for worker in workers:
             if worker is threading.current_thread():
                 continue
@@ -11955,26 +12048,35 @@ class TmuxWebtermApp:
             if generation <= 0:
                 return
         try:
-            payload = self.build_transcripts_payload()
-            if not self.commit_transcripts_payload_cache(payload, generation):
-                return
             with self.activity_transcript_service.transcripts_payload_cache_lock:
-                record = self.activity_transcript_service.transcripts_payload_cache_record
-                should_publish = publish or (
-                    record.generation == generation
-                    and record.worker is current_worker
-                    and record.publish_requested
-                )
-            if should_publish:
-                payload_signature = self.transcripts_payload_event_signature(payload)
-                with self.client_watch_service.lock:
-                    self.client_watch_service.transcripts_payload_signature = payload_signature
-                self.publish_client_event(
-                    "transcripts_changed",
-                    {"data": payload},
-                    trigger="transcripts_refresh",
-                    cache="ready",
-                )
+                input_generation = self.activity_transcript_service.transcripts_payload_cache_record.input_generation
+            payload = self.build_transcripts_payload()
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            with record.publication_lock:
+                if not self.commit_transcripts_payload_cache(
+                    payload,
+                    generation,
+                    input_generation=input_generation,
+                ):
+                    return
+                with self.activity_transcript_service.transcripts_payload_cache_lock:
+                    should_publish = publish or (
+                        record.generation == generation
+                        and record.worker is current_worker
+                        and record.publish_requested
+                    )
+                    if record.input_generation != input_generation:
+                        return
+                if should_publish:
+                    payload_signature = self.transcripts_payload_event_signature(payload)
+                    with self.client_watch_service.lock:
+                        self.client_watch_service.transcripts_payload_signature = payload_signature
+                    self.publish_client_event(
+                        "transcripts_changed",
+                        {"data": copy.deepcopy(payload)},
+                        trigger="transcripts_refresh",
+                        cache="ready",
+                    )
         finally:
             self.finish_transcripts_payload_work(generation, current_worker)
 

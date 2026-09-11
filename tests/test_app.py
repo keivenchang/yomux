@@ -6582,21 +6582,18 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
     webapp = app_module.TmuxWebtermApp([])
     events = []
     graph = metadata.empty_work_graph()
-    payloads = [
-        {
-            "server_time": "2026-06-24 12:00:00 PDT",
-            "server_uptime_seconds": 1.0,
-            "session_order": ["5"],
-            "sessions": {"5": {"session": "5", "work_graph": graph}},
-        },
-        {
-            "server_time": "2026-06-24 12:00:05 PDT",
-            "server_uptime_seconds": 6.0,
-            "session_order": ["5"],
-            "sessions": {"5": {"session": "5", "work_graph": graph}},
-        },
-    ]
-    monkeypatch.setattr(webapp, "build_transcripts_payload", lambda: payloads.pop(0))
+    builds = []
+    payload = {
+        "server_time": "2026-06-24 12:00:00 PDT",
+        "server_uptime_seconds": 1.0,
+        "session_order": ["5"],
+        "sessions": {"5": {"session": "5", "work_graph": graph}},
+    }
+    def build_payload():
+        builds.append(1)
+        return copy.deepcopy(payload)
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", build_payload)
     monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
@@ -6610,9 +6607,69 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
         webapp.control_server.stop()
 
     assert [event_type for event_type, _payload, _kwargs in events] == ["transcripts_changed"]
+    assert len(builds) == 1
     assert events[0][2]["trigger"] == "watch_state"
     assert events[0][1]["refresh"] is True
-    assert "data" not in events[0][1]
+    assert events[0][1]["data"]["sessions"]["5"]["session"] == "5"
+
+
+def test_client_watch_snapshot_safety_deadline_allows_one_rebuild(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    builds = []
+    payload = {"session_order": [], "sessions": {}}
+    monkeypatch.setattr(webapp, "build_transcripts_payload", lambda: builds.append(1) or copy.deepcopy(payload))
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    try:
+        webapp.publish_client_watch_snapshot()
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            webapp.activity_transcript_service.transcripts_payload_cache_record.watch_refreshed_at -= (
+                app_module.TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS + 1.0
+            )
+        webapp.publish_client_watch_snapshot()
+    finally:
+        webapp.control_server.stop()
+
+    assert len(builds) == 2
+
+
+def test_transcript_watch_invalidations_coalesce_behind_one_full_build(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    entered = threading.Event()
+    release = threading.Event()
+    builds = []
+    payloads = [{"marker": "old"}, {"marker": "new"}]
+
+    def build_payload():
+        builds.append(len(builds) + 1)
+        entered.set()
+        if len(builds) == 1:
+            assert release.wait(timeout=5)
+        return copy.deepcopy(payloads[min(len(builds) - 1, 1)])
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", build_payload)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    try:
+        assert webapp.start_transcripts_payload_refresh(publish=True) is True
+        assert entered.wait(timeout=2)
+        webapp.invalidate_transcripts_payload_inputs()
+        webapp.invalidate_transcripts_payload_inputs()
+        webapp.invalidate_transcripts_payload_inputs()
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(builds) < 2:
+            time.sleep(0.01)
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
+    finally:
+        release.set()
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+    assert builds == [1, 2]
+    assert cached["marker"] == "new"
 
 
 def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
@@ -8733,7 +8790,8 @@ def test_transcripts_payload_refresh_start_is_atomic_with_fixture_teardown(monke
         def build_transcripts_payload(self):
             return {"sessions": {}}
 
-        def commit_transcripts_payload_cache(self, _payload, _generation):
+        def commit_transcripts_payload_cache(self, _payload, _generation, *, input_generation=None):
+            assert input_generation is not None
             return False
 
         def stop_client_event_watcher(self):
