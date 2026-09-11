@@ -1017,8 +1017,8 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusSta
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
     ownsRole,
-    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
-    state: ownsRole ? 'leader' : 'follower',
+    mode: 'leader',
+    state: 'leader',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner ? backgroundServerLabel(owner) : '',
     status: String(role.status || data.status || ''),
@@ -1037,8 +1037,8 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.
     ...summary,
     ownsIndex,
     ownsRole: ownsIndex,
-    mode: ownsIndex ? 'leader' : 'follower',
-    state: ownsIndex ? 'leader' : 'follower',
+    mode: 'leader',
+    state: 'leader',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
     status: String(searchIndex.status || summary.status || data.status || ''),

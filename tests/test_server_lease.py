@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from yolomux_lib.infra.host_identity import HostIdentity
 from yolomux_lib import server_lease
 from yolomux_lib.server_lease import acquire_server_port_lease
+from yolomux_lib.server_lease import acquire_instance_root_lease
 
 
 def test_server_port_lease_allows_exactly_one_live_owner(tmp_path):
@@ -62,3 +63,12 @@ def test_server_port_lease_refuses_when_owner_status_is_uncertain(tmp_path, monk
 
     assert acquire_server_port_lease(9123, state_dir=tmp_path, host_identity=identity) is None
     assert json.loads(path.read_text(encoding="utf-8")) == record
+
+
+def test_instance_root_lease_blocks_a_second_server_on_another_port(tmp_path):
+    first = acquire_instance_root_lease(tmp_path / "root")
+    assert first is not None
+    try:
+        assert acquire_instance_root_lease(tmp_path / "root") is None
+    finally:
+        first.release()

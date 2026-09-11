@@ -148,7 +148,7 @@ When the last valid external claim disappears, `stop_event` is a request the lis
 
 ## Web-process coordination owners
 
-The background owner is a role elected among web processes sharing one local `YOLOMUX_RUNTIME_DIR`; it is not a seventh service. The elected process owns recurring refresh coordination, watch-root intent consumption, metric-family collectors, and warmer lifecycles. Followers serve ready or stale shared products and ask the owner to refresh rather than starting duplicate background work. Election uses a process lock plus heartbeat/generation records, while each local service retains its own service lock and writer rules.
+Each YOLOmux server owns its recurring refresh coordination, watch-root intent consumption, metric-family collectors, warmer lifecycles, and local services. Startup claims the complete product root with an exclusive instance lease, so two servers cannot share IDX/STATS/SESS state. There is no web-process leader/follower election or takeover path; each local service retains its own service lock and writer rules as defense-in-depth.
 
 `BackendHealthObserver` runs inside each web process. It samples the six-service roster on a bounded cadence without demand-starting absent services and writes retained per-port history through `BackendHealthStore`. The web process's own metrics remain explicitly unobserved by that service probe instead of being fabricated.
 

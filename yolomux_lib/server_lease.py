@@ -35,6 +35,32 @@ class ServerPortLease:
             self.fd = -1
 
 
+def acquire_instance_root_lease(root: Path) -> ServerPortLease | None:
+    """Claim an entire YOLOmux product root, independent of its HTTP port.
+
+    IDX, STATS, and SESS are process-local services. Sharing their root between
+    two servers creates split-brain state, so a root is exclusive even when the
+    servers chose different listener ports.
+    """
+
+    root = Path(root).expanduser().resolve(strict=False)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / "instance.lock"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    identity = current_host_identity()
+    payload = json.dumps({**identity.process_record_fields(), "root": str(root)}, sort_keys=True) + "\n"
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, payload.encode("utf-8"))
+    os.fsync(fd)
+    return ServerPortLease(port=0, path=path, fd=fd)
+
+
 def lease_owner_status(record: dict, identity: HostIdentity):
     """Classify a persisted owner through the shared host/process fence."""
 

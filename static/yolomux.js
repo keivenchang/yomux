@@ -14067,9 +14067,10 @@ function updateTopbarActivityStatus() {
 function topbarOwnerStatusCombinedHtml(summaries = []) {
   const activeSummaries = summaries.filter(item => item && typeof item === 'object');
   if (!activeSummaries.length) return '';
-  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
+  const state = 'leader';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(t(`backgroundOwner.role.${state}`))}</span></span>`;
+  const stateLabel = t(`backgroundOwner.role.${state}`);
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(stateLabel)}</span></span>`;
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
@@ -14085,7 +14086,7 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   }));
   const roleStateLines = roleExplainers.map(item => {
     const state = item.summary?.mode;
-    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
+    const stateLabel = state;
     return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
   });
   const lines = [
@@ -14152,21 +14153,7 @@ function showBackgroundOwnerContextMenu(event) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu background-owner-context-menu';
   menu.setAttribute('role', 'menu');
-  const alreadyLeader = backgroundOwnerOwnsAllRoles();
-  if (alreadyLeader || readOnlyMode) {
-    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
-  } else {
-    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
-      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
-      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
-      if (backgroundOwnerCurrentOwnerLive(payload)) {
-        const label = backgroundServerLabel(owner, t('common.unknown'));
-        const message = t('backgroundOwner.takeoverConfirm', {server: label});
-        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
-      }
-      claimBackgroundOwnerLeader();
-    }, () => backgroundOwnerContextMenu.close());
-  }
+  appendContextMenuButton(menu, t('backgroundOwner.thisServer'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
   backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
 }
 
@@ -19247,7 +19234,7 @@ function createTopbarRightTools() {
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
   // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
   return group;
 }
 
@@ -79744,8 +79731,8 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusSta
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
     ownsRole,
-    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
-    state: ownsRole ? 'leader' : 'follower',
+    mode: 'leader',
+    state: 'leader',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner ? backgroundServerLabel(owner) : '',
     status: String(role.status || data.status || ''),
@@ -79764,8 +79751,8 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.
     ...summary,
     ownsIndex,
     ownsRole: ownsIndex,
-    mode: ownsIndex ? 'leader' : 'follower',
-    state: ownsIndex ? 'leader' : 'follower',
+    mode: 'leader',
+    state: 'leader',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
     status: String(searchIndex.status || summary.status || data.status || ''),

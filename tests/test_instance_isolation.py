@@ -339,6 +339,13 @@ def test_caller_set_root_never_selects_the_managed_local_owner_adapter(tmp_path:
 def test_legacy_default_and_explicit_root_are_quiet(tmp_path: Path):
     assert resolve_instance_environment(7110, {}, platform="Linux").environment == {}
     assert is_managed_instance_port(7110, {}) is False
+
+
+def test_same_root_is_the_single_instance_identity():
+    one = resolve_instance_environment(7111, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
+    two = resolve_instance_environment(7112, {YOLOMUX_ROOT_ENV: one.environment[YOLOMUX_ROOT_ENV]}, platform="Linux")
+    assert two.error == ""
+    assert two.environment == {}
     custom = {YOLOMUX_ROOT_ENV: f"/tmp/yolomux-explicit-{os.getpid()}"}
     assert resolve_instance_environment(7111, custom, platform="Linux").error == ""
 

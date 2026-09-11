@@ -1059,8 +1059,6 @@ globalThis.__layoutTestApi = {
   backgroundOwnerSessionFilesSummaryForTest: backgroundOwnerSessionFilesSummary,
   backgroundOwnerOwnsAllRolesForTest: backgroundOwnerOwnsAllRoles,
   backgroundOwnerCurrentOwnerLiveForTest: backgroundOwnerCurrentOwnerLive,
-  topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
-  topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
   createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
   showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {

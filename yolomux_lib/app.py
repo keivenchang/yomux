@@ -9439,47 +9439,14 @@ class TmuxWebtermApp:
         return self.latest_stats_sample(), False
 
     def start_background_owner(self, port: int | None = None, priority: int = 0, *, managed_instance: bool = False) -> bool:
-        if managed_instance:
-            # The launcher allocated this root from the port before importing the
-            # product, so all background work is private to this process.  Keep
-            # the owner API intact for callers while bypassing same-root election.
-            self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
-            file_index.set_background_owner_checker(self.search_index_can_build)
-            self.background_owner.start()
-            self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
-            return True
-        self.background_owner = BackgroundOwnerRegistry(
-            control_socket=str(self.control_server.path),
-            port=port,
-            project_root=str(PROJECT_ROOT),
-            on_demote=self.demote_background_owner,
-            on_acquire=self.handle_background_owner_acquired,
-            priority=priority,
-            capabilities={
-                "stats_writer_build": stats_current_storage.MIN_WRITER_BUILD,
-            },
-        )
+        # The server lease now exclusively owns the complete product root. There
+        # is no same-root follower or role election to perform: this process owns
+        # IDX, STATS, and SESS for its lifetime.
+        self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
         file_index.set_background_owner_checker(self.search_index_can_build)
-        acquired = self.background_owner.start()
-        if not acquired:
-            acquired = self.background_owner.attempt_required_capability_takeover(
-                "stats_writer_build",
-                stats_current_storage.MIN_WRITER_BUILD,
-            )
-        if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
-            self.log_event(
-                None,
-                "background_owner_blocked",
-                "Background owner takeover blocked",
-                self.background_owner.status_payload(),
-                message_key="events.message.backgroundOwner.blocked",
-            )
-        if not acquired:
-            with self.client_events.lock:
-                has_subscribers = bool(self.client_events.subscribers)
-            if has_subscribers:
-                self.replay_shared_background_client_events()
-        return acquired
+        self.background_owner.start()
+        self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
+        return True
 
     def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
         transition = str(status.get("last_transition") or "acquired")
