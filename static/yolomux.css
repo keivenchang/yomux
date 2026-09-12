@@ -15645,6 +15645,36 @@ body:not(.editor-theme-light) .file-editor-content .markdown-body :is(th, td)[bg
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.45;
 }
+.prosemirror-editor.vanilla-preview-body {
+  background: var(--paint-white) !important;
+  color: var(--markdown-html-light-text) !important;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.45;
+}
+.file-editor-content .prosemirror-editor.vanilla-preview-body :is(h1, h2, h3, h4, h5, h6),
+body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--markdown-html-light-text) !important;
+  background: transparent;
+}
+.prosemirror-editor.vanilla-preview-body a { color: var(--vanilla-preview-link); }
+.prosemirror-editor.vanilla-preview-body :is(strong, em) { color: inherit; }
+.prosemirror-editor.vanilla-preview-body :is(code, pre) {
+  color: var(--markdown-html-light-text);
+  background: var(--lt-panel);
+  border-color: var(--lt-line);
+}
+.file-editor-preview-pane.vanilla-preview-body pre code,
+.file-editor-preview-pane-panel.vanilla-preview-body pre code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
+.file-editor-preview-pane.vanilla-preview-body pre code *,
+.file-editor-preview-pane-panel.vanilla-preview-body pre code *,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code *,
+.prosemirror-editor.vanilla-preview-body pre code,
+.prosemirror-editor.vanilla-preview-body pre code * {
+  color: inherit !important;
+  background: transparent !important;
+  border-color: transparent;
+}
 .file-editor-preview-pane.vanilla-preview-body h1,
 .file-editor-preview-pane.vanilla-preview-body h2,
 .file-editor-preview-pane.vanilla-preview-body h3,
@@ -15678,26 +15708,6 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
   color: inherit;
-}
-.file-editor-preview-pane.vanilla-preview-body code,
-.file-editor-preview-pane-panel.vanilla-preview-body code,
-.file-editor-preview-pane.vanilla-preview-body pre,
-.file-editor-preview-pane-panel.vanilla-preview-body pre,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
-  color: var(--markdown-html-light-text);
-  background: var(--lt-panel);
-  border-color: var(--lt-line);
-}
-.file-editor-preview-pane.vanilla-preview-body pre code,
-.file-editor-preview-pane-panel.vanilla-preview-body pre code,
-.file-editor-preview-pane.vanilla-preview-body pre code *,
-.file-editor-preview-pane-panel.vanilla-preview-body pre code *,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
-body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
-  color: inherit !important;
-  background: transparent !important;
-  border-color: transparent;
 }
 /* Firefox has supported the standard ::selection pseudo-element since version 62. Keeping the legacy
    ::-moz-selection pseudo-element in this selector list invalidates the whole rule in Chrome. */

@@ -6169,6 +6169,39 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
     assert "Vanilla preview" in metrics["vanilla"]["buttonTitle"], metrics
 
 
+def test_viewedit_vanilla_mode_updates_existing_prosemirror_surface(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/VIEWEDIT-VANILLA.md';
+            const source = '# Heading\\n\\nRegular text';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane'); panel.style.width = '900px'; panel.style.height = '500px';
+            panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('h1'));
+            setFileEditorPreviewDisplayMode('vanilla');
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'));
+            const heading = panel._pmView.dom.querySelector('h1');
+            done({classes: panel._pmView.dom.className, background: getComputedStyle(panel._pmView.dom).backgroundColor, color: getComputedStyle(panel._pmView.dom).color, headingColor: getComputedStyle(heading).color, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert "vanilla-preview-body" in metrics["classes"], metrics
+    assert metrics["background"] == "rgb(255, 255, 255)", metrics
+    assert metrics["color"] == "rgb(17, 24, 39)", metrics
+    assert metrics["headingColor"] == metrics["color"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
     css = app_css()
     bundle_uri = fixture_asset_url("static", "codemirror.js")

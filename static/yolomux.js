@@ -6815,6 +6815,7 @@ const searchRankWeights = Object.freeze({
     command: {pane: 6000, command: 3000, setting: 3000, file: 0},
   },
   fileNamePrefix: 3500,
+  fileNameExact: 100000,
   fileNameContains: 1800,
   fileNameSubsequence: 600,
   paneNameContiguous: {files: 50000, command: 100000},
@@ -15628,7 +15629,8 @@ function commandPaletteFileNameBonus(item, query) {
   for (const token of tokens) {
     const canonicalToken = fuzzyCanonicalPrefixText(token);
     if (!canonicalToken) continue;
-    if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
+    if (canonicalName === canonicalToken) bonus += searchRankWeights.fileNameExact;
+    else if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
     else if (canonicalName.includes(canonicalToken)) bonus += searchRankWeights.fileNameContains;
     else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += searchRankWeights.fileNameSubsequence;
   }
@@ -73328,7 +73330,9 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  container.classList.toggle('vanilla-preview-body', vanilla);
+  container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {
@@ -78032,6 +78036,12 @@ function installProseMirrorContextMenuGuard() {
 
 function syncProseMirrorPanelSource(panel, path, state) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  panel._pmView.dom.classList.toggle('vanilla-preview-body', vanilla);
+  panel._pmView.dom.classList.toggle('editor-preview-vanilla', vanilla);
+  panel._pmView.dom.style.setProperty('background-color', vanilla ? '#ffffff' : '');
+  panel._pmView.dom.style.setProperty('color', vanilla ? '#111827' : '');
+  panel._pmView.dom.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', vanilla ? '#111827' : '', 'important'));
   const next = normalizeLegacyBreakMarkup(state.content || '');
   if (panel._pmSource === next) return true;
   if (panel._pmSerializeTimer) return true;
@@ -78390,6 +78400,12 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const doc = parser.parse(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  container.classList.toggle('vanilla-preview-body', vanilla);
+  container.classList.toggle('editor-preview-vanilla', vanilla);
+  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
+  container.style.setProperty('color', vanilla ? '#111827' : '');
+  if (vanilla) container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', '#111827', 'important'));
   container.setAttribute('data-prosemirror-editor', 'true');
   const plugins = [
     api.keymap({

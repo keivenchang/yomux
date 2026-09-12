@@ -5188,7 +5188,8 @@ function commandPaletteFileNameBonus(item, query) {
   for (const token of tokens) {
     const canonicalToken = fuzzyCanonicalPrefixText(token);
     if (!canonicalToken) continue;
-    if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
+    if (canonicalName === canonicalToken) bonus += searchRankWeights.fileNameExact;
+    else if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
     else if (canonicalName.includes(canonicalToken)) bonus += searchRankWeights.fileNameContains;
     else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += searchRankWeights.fileNameSubsequence;
   }
