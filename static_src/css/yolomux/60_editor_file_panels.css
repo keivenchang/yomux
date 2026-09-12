@@ -1183,6 +1183,11 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   color: inherit !important;
   background: var(--editor-native-selection-bg) !important;
 }
+body.editor-scheme-yolomux-light .file-editor-codemirror .cm-content ::selection,
+body.editor-scheme-yolomux-light .file-editor-codemirror-panel .cm-content ::selection {
+  color: var(--active-control-text) !important;
+  background: var(--active-control-bg) !important;
+}
 .file-editor-preview-pane.vanilla-preview-body blockquote,
 .file-editor-preview-pane-panel.vanilla-preview-body blockquote {
   color: var(--pane-meta-desc);
@@ -1245,6 +1250,10 @@ body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body
   font-size: var(--ui-font-size);
   font-weight: 700;
   white-space: nowrap;
+}
+body.theme-light .file-editor-panel .file-editor-title,
+body.theme-light .file-editor-panel .file-editor-title * {
+  color: var(--chrome-text-strong) !important;
 }
 .file-tree-rename-input {
   width: min(280px, 100%);
@@ -2312,10 +2321,71 @@ body.editor-theme-light .file-editor-content .markdown-body h1,
 body.editor-theme-light .file-editor-content .markdown-body h2 {
   background: transparent;
 }
+body.theme-light .file-editor-content .markdown-body,
+body.editor-theme-light .file-editor-content .markdown-body,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body {
+  --text: var(--light-readable-text);
+  --muted: #374151;
+  --line: var(--light-readable-line);
+  --markdown-heading: var(--light-readable-text);
+  --markdown-link: var(--light-readable-link);
+  --markdown-strong: var(--light-readable-text);
+  --markdown-emphasis: #1f2937;
+  color: var(--light-readable-text) !important;
+  background: var(--light-readable-bg);
+}
+body.theme-light .file-editor-content .markdown-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
+body.editor-theme-light .file-editor-content .markdown-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td),
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body :is(h1,h2,h3,h4,h5,h6,p,li,blockquote,summary,strong,em,th,td) {
+  color: var(--light-readable-text) !important;
+}
+body.theme-light .file-editor-content .markdown-body a,
+body.editor-theme-light .file-editor-content .markdown-body a,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body a {
+  color: var(--light-readable-link) !important;
+}
+body.theme-light .file-editor-content .markdown-body th,
+body.theme-light .file-editor-content .markdown-body td,
+body.editor-theme-light .file-editor-content .markdown-body th,
+body.editor-theme-light .file-editor-content .markdown-body td {
+  border-color: var(--light-readable-line);
+  background: var(--light-readable-bg);
+}
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body th,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body td {
+  border-color: var(--light-readable-line);
+  background: var(--light-readable-bg);
+}
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body th {
+  background: var(--light-readable-heading-bg);
+}
+body.theme-light .file-editor-content .markdown-body th,
+body.editor-theme-light .file-editor-content .markdown-body th {
+  background: var(--light-readable-heading-bg);
+}
+body.theme-light .file-editor-content .markdown-body :is(code,pre),
+body.editor-theme-light .file-editor-content .markdown-body :is(code,pre),
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body :is(code,pre) {
+  color: var(--light-readable-text) !important;
+  background: var(--light-readable-code-bg);
+  border-color: var(--light-readable-line);
+}
 body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
+}
+body.editor-scheme-yolomux-light .file-editor-raw-panel .md-heading,
+body.editor-scheme-yolomux-light .file-editor-code-preview .md-heading,
+body.editor-scheme-yolomux-light .file-editor-raw-panel .md-heading-1,
+body.editor-scheme-yolomux-light .file-editor-code-preview .md-heading-1 {
+  color: var(--light-readable-text) !important;
+}
+body.editor-scheme-yolomux-light .file-editor-raw-panel .md-bold,
+body.editor-scheme-yolomux-light .file-editor-code-preview .md-bold,
+body.editor-scheme-yolomux-light .file-editor-raw-panel .md-italic,
+body.editor-scheme-yolomux-light .file-editor-code-preview .md-italic {
+  color: var(--light-readable-text) !important;
 }
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
   background: var(--paint-white);

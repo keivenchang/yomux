@@ -446,7 +446,7 @@ function installProseMirrorContextMenuGuard() {
 
 function syncProseMirrorPanelSource(panel, path, state) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  const vanilla = false;
   panel._pmView.dom.classList.toggle('vanilla-preview-body', vanilla);
   panel._pmView.dom.classList.toggle('editor-preview-vanilla', vanilla);
   panel._pmView.dom.style.setProperty('background-color', vanilla ? '#ffffff' : '');

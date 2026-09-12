@@ -3784,7 +3784,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
+  return 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {

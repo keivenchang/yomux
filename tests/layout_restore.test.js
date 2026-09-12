@@ -1635,6 +1635,13 @@ async function runLayoutRestoreSuite() {
     assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'vanilla preview uses the shared opaque-white paint and stable neutral email-friendly text token');
     assert.ok(/\.prosemirror-editor\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'ViewEdit Vanilla uses the regular white/black surface');
+    assert.ok(!/body\.editor-theme-light \.file-editor-panel \.file-editor-title/.test(editorCss), 'editor theme does not recolor app-chrome editor titles');
+    assert.ok(/body\.theme-light \.yolomux-dockview[\s\S]*\.session-button-name[\s\S]*color:\s*var\(--chrome-text-strong\) !important/.test(editorCss), 'light-mode active tab titles remain dark on white theme surfaces');
+    assert.ok(/body\.theme-light \.file-editor-content \.markdown-body[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode Markdown content remains dark on white surfaces');
+    assert.ok(/body\.theme-light \.panel \.pane-tab:not\(\.active\)[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode inactive tabs remain dark on light surfaces');
+    assert.ok(/body\.theme-light \.yolomux-dockview \.yolomux-dockview-core[\s\S]*--dv-activegroup-visiblepanel-tab-color:\s*var\(--light-readable-text\)/.test(editorCss), 'light-mode Dockview tabs remain dark on light surfaces');
+    assert.ok(!/body\.editor-(?:theme|contrast)-light \.yolomux-dockview/.test(editorCss), 'editor theme does not recolor Dockview chrome');
+    assert.ok(/body\.editor-scheme-yolomux-light \.file-editor-raw-panel \.md-heading[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'Moon White light editor headings remain dark');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--markdown-html-light-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
     assert.ok(/--vanilla-preview-link:\s*#0645ad/.test(editorCss) && /\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*var\(--vanilla-preview-link\)/.test(editorCss), 'vanilla preview links use one conventional-blue token instead of copied scheme colors');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
@@ -4509,8 +4516,8 @@ async function runLayoutRestoreSuite() {
       'editor toolbar keeps Reload with the trailing command buttons'
     );
     assert.equal(source.includes("cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'})"), false, 'editor theme button never falls back to two-state dark/light based on view mode');
-    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'editor theme button always cycles Bright/Dark/Vanilla');
-    assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'editor theme button always renders the visible three-state label');
+    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\)/.test(source), 'editor theme button cycles only Dark/Light');
+    assert.ok(/updateEditorThemeButton\(themeButton\)/.test(source), 'editor theme button renders two-state labels');
     assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorFrameControlsEnd)), '#42: only frame controls remain before the shared toolbar slot');
     assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
     assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');

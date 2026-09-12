@@ -96,14 +96,12 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
 }
 
 function editorPreviewThemeState() {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
   return activeEditorScheme().dark ? 'dark' : 'light';
 }
 
@@ -133,7 +131,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': 'var(--active-accent)',
+    '--markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--markdown-heading-bg': 'transparent',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
@@ -164,7 +162,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': 'var(--active-accent)',
+    '--lt-markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--lt-markdown-heading-bg': 'transparent',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
@@ -197,15 +195,15 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 
 function updateEditorThemeButton(button, options = {}) {
   if (!button) return;
-  const includeVanilla = options.includeVanilla !== false;
+  const includeVanilla = false;
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
-  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
+  const nextState = previewState === 'dark' ? 'light' : 'dark';
   button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
   button.classList.toggle(themeBodyClass('light'), previewState === 'light');
-  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.classList.remove('theme-vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
-  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.dataset.editorTheme = scheme.id;
   button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
   button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
   button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
@@ -245,7 +243,8 @@ function applyEditorThemeMode(options = {}) {
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
+  document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
+  document.body?.classList.remove(EDITOR_PREVIEW_VANILLA_CLASS);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
@@ -268,14 +267,9 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const includeVanilla = options.includeVanilla !== false;
   const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
-    return;
-  }
-  if (previewState === 'light' && includeVanilla) {
-    setFileEditorPreviewDisplayMode('vanilla');
     return;
   }
   fileEditorPreviewDisplayMode = 'theme';

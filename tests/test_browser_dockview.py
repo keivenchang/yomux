@@ -8054,6 +8054,57 @@ def test_dockview_active_drop_preview_has_one_visible_yellow_box(browser, tmp_pa
     assert preview["root"] is False, preview
 
 
+def test_moon_white_editor_theme_does_not_change_dark_app_tab_chrome(browser, tmp_path):
+    browser.set_window_size(1300, 900)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,file%3A%2Fhome%2Ftest%2Ft5t.md&layout=right&tabs=right:1,file%3A%2Fhome%2Ftest%2Ft5t.md*",
+        sessions=["1"],
+        settings={"appearance": {"theme": "dark", "active_color": "white", "editor_light_color_scheme": "yolomux-light"}},
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_script(
+        """
+        const tabMetrics = () => Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => {
+          const label = tab.querySelector('.session-button-name, .session-button-dir');
+          const style = getComputedStyle(tab);
+          return {
+            active: tab.closest('.dv-tab')?.classList.contains('dv-active-tab') || false,
+            background: style.backgroundColor,
+            borderColor: style.borderColor,
+            color: style.color,
+            labelColor: label ? getComputedStyle(label).color : '',
+          };
+        });
+        const before = tabMetrics();
+        setFileEditorThemeMode('yolomux-light');
+        const source = document.createElement('div');
+        source.className = 'file-editor-raw-panel';
+        source.innerHTML = '<span class="md-heading md-heading-1"># Moon White source heading</span>';
+        const preview = document.createElement('div');
+        preview.className = 'file-editor-content';
+        preview.innerHTML = '<div class="markdown-body"><h1>Moon White heading</h1></div>';
+        document.body.append(source, preview);
+        const result = {
+          body: document.body.className,
+          before,
+          after: tabMetrics(),
+          sourceHeadingColor: getComputedStyle(source.querySelector('.md-heading')).color,
+          previewHeadingColor: getComputedStyle(preview.querySelector('h1')).color,
+        };
+        source.remove();
+        preview.remove();
+        return result;
+        """
+    )
+    assert "editor-theme-light" in metrics["body"] and "editor-contrast-light" in metrics["body"], metrics
+    assert {tab["active"] for tab in metrics["before"]} == {False, True}, metrics
+    assert metrics["after"] == metrics["before"], metrics
+    assert metrics["sourceHeadingColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["previewHeadingColor"] == "rgb(17, 24, 39)", metrics
+
+
 def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_row_order(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

@@ -955,7 +955,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   if (!doc) return;
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
+  if (themeButton) updateEditorThemeButton(themeButton);
   updateEditorPreviewFontControls(doc);
   hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
 }
@@ -975,7 +975,7 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   };
   bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {
     event.preventDefault();
-    cycleEditorThemeMode({includeVanilla: true});
+    cycleEditorThemeMode();
   });
   bind(doc.querySelector('.file-editor-preview-font-panel'), 'click', event => {
     const button = event.target?.closest?.('[data-editor-preview-font-step]');

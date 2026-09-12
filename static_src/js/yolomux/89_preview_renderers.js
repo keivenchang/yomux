@@ -1406,7 +1406,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  const vanilla = false;
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});

@@ -6320,7 +6320,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
+  return 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {
@@ -32503,14 +32503,12 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
 }
 
 function editorPreviewThemeState() {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
   return activeEditorScheme().dark ? 'dark' : 'light';
 }
 
@@ -32540,7 +32538,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': 'var(--active-accent)',
+    '--markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--markdown-heading-bg': 'transparent',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
@@ -32571,7 +32569,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': 'var(--active-accent)',
+    '--lt-markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--lt-markdown-heading-bg': 'transparent',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
@@ -32604,15 +32602,15 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 
 function updateEditorThemeButton(button, options = {}) {
   if (!button) return;
-  const includeVanilla = options.includeVanilla !== false;
+  const includeVanilla = false;
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
-  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
+  const nextState = previewState === 'dark' ? 'light' : 'dark';
   button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
   button.classList.toggle(themeBodyClass('light'), previewState === 'light');
-  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.classList.remove('theme-vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
-  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.dataset.editorTheme = scheme.id;
   button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
   button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
   button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
@@ -32652,7 +32650,8 @@ function applyEditorThemeMode(options = {}) {
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
+  document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
+  document.body?.classList.remove(EDITOR_PREVIEW_VANILLA_CLASS);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
@@ -32675,14 +32674,9 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const includeVanilla = options.includeVanilla !== false;
   const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
-    return;
-  }
-  if (previewState === 'light' && includeVanilla) {
-    setFileEditorPreviewDisplayMode('vanilla');
     return;
   }
   fileEditorPreviewDisplayMode = 'theme';
@@ -49704,12 +49698,12 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
       preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ]}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
       preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
@@ -69288,7 +69282,7 @@ function createFileEditorPanel(item) {
         renderFileEditorPanel(panel, item);
       }
     },
-    'editor-theme': () => cycleEditorThemeMode({includeVanilla: true}),
+    'editor-theme': () => cycleEditorThemeMode(),
   }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -71663,7 +71657,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (fileEditorPreviewDisplayMode !== 'vanilla') {
+  if (true) {
     container.querySelectorAll('pre code').forEach(block => {
       if (typeof window.hljs !== 'undefined') {
         try { window.hljs.highlightElement(block); } catch (_) {}
@@ -73441,7 +73435,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  const vanilla = false;
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
@@ -74781,7 +74775,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   if (!doc) return;
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
+  if (themeButton) updateEditorThemeButton(themeButton);
   updateEditorPreviewFontControls(doc);
   hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
 }
@@ -74801,7 +74795,7 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   };
   bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {
     event.preventDefault();
-    cycleEditorThemeMode({includeVanilla: true});
+    cycleEditorThemeMode();
   });
   bind(doc.querySelector('.file-editor-preview-font-panel'), 'click', event => {
     const button = event.target?.closest?.('[data-editor-preview-font-step]');
@@ -78147,7 +78141,7 @@ function installProseMirrorContextMenuGuard() {
 
 function syncProseMirrorPanelSource(panel, path, state) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  const vanilla = false;
   panel._pmView.dom.classList.toggle('vanilla-preview-body', vanilla);
   panel._pmView.dom.classList.toggle('editor-preview-vanilla', vanilla);
   panel._pmView.dom.style.setProperty('background-color', vanilla ? '#ffffff' : '');

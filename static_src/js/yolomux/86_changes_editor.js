@@ -3750,7 +3750,7 @@ function createFileEditorPanel(item) {
         renderFileEditorPanel(panel, item);
       }
     },
-    'editor-theme': () => cycleEditorThemeMode({includeVanilla: true}),
+    'editor-theme': () => cycleEditorThemeMode(),
   }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {

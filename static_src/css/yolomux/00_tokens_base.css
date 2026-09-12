@@ -11,6 +11,12 @@
 }
 
 :root {
+  --light-readable-text: #111827;
+  --light-readable-bg: var(--paint-white);
+  --light-readable-line: #c7ced8;
+  --light-readable-link: #0645ad;
+  --light-readable-heading-bg: #eef1f5;
+  --light-readable-code-bg: #f3f4f6;
   color-scheme: dark;
   --bg: #0f1115;
   --panel: #151922;

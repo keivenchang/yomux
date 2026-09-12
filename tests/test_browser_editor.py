@@ -6301,13 +6301,13 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
         .file-editor-panel {{ width: 920px; height: 520px; }}
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
-        <body class="theme-light theme-resolved-light editor-theme-light">
+        <body class="theme-dark theme-resolved-dark editor-theme-light">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.__markdownColorReady = (async () => {{
-              applyActiveColor('blue');
+              applyActiveColor('white');
               setFileEditorThemeMode('yolomux-light');
               codeMirrorLanguageExtension = function() {{
                 return [{{notARealCodeMirrorExtension: true}}];
@@ -6341,6 +6341,12 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
               const visibleHeading = heading?.querySelector('span') || heading;
               const bold = panel.querySelector('.cm-content .md-bold');
               const link = panel.querySelector('.cm-content .md-link');
+              const headingText = heading?.textContent || '';
+              const headingColor = heading ? getComputedStyle(heading).color : '';
+              const headingBg = heading ? getComputedStyle(heading).backgroundColor : '';
+              const visibleHeadingColor = visibleHeading ? getComputedStyle(visibleHeading).color : '';
+              const visibleHeadingBg = visibleHeading ? getComputedStyle(visibleHeading).backgroundColor : '';
+              const expectedHeading = probePaint('color:var(--markdown-heading)', panel).color;
               setFileEditorThemeMode('yolomux-dark');
               for (let attempt = 0; attempt < 20; attempt += 1) await frame();
               const headingAfterTheme = panel.querySelector('.cm-content .md-heading');
@@ -6349,15 +6355,15 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
               return {{
                 cmMode: panel._cmMode || '',
                 plainFallback: panel._cmPlainFallback === true,
-                headingText: heading?.textContent || '',
-                headingColor: heading ? getComputedStyle(heading).color : '',
-                headingBg: heading ? getComputedStyle(heading).backgroundColor : '',
-                visibleHeadingColor: visibleHeading ? getComputedStyle(visibleHeading).color : '',
-                visibleHeadingBg: visibleHeading ? getComputedStyle(visibleHeading).backgroundColor : '',
+                headingText,
+                headingColor,
+                headingBg,
+                visibleHeadingColor,
+                visibleHeadingBg,
                 afterHeadingText: headingAfterTheme?.textContent || '',
                 afterHeadingColor: headingAfterTheme ? getComputedStyle(headingAfterTheme).color : '',
                 afterHeadingBg: headingAfterTheme ? getComputedStyle(headingAfterTheme).backgroundColor : '',
-                expectedHeading: probePaint('color:var(--markdown-heading)', panel).color,
+                expectedHeading,
                 hasBold: Boolean(bold),
                 hasLink: Boolean(link),
                 hasBoldAfterTheme: Boolean(boldAfterTheme),
@@ -6378,13 +6384,14 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert metrics["plainFallback"] is True, metrics
     assert metrics["headingText"].startswith("# YOLOmux"), metrics
     assert metrics["headingColor"] == metrics["expectedHeading"], metrics
+    assert metrics["headingColor"] == "rgb(0, 0, 0)", metrics
     assert metrics["headingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["visibleHeadingColor"] == metrics["expectedHeading"], metrics
     assert metrics["visibleHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBold"] is True, metrics
     assert metrics["hasLink"] is True, metrics
     assert metrics["afterHeadingText"].startswith("# YOLOmux"), metrics
-    assert metrics["afterHeadingColor"] == metrics["expectedHeading"], metrics
+    assert metrics["afterHeadingColor"] == "rgb(232, 237, 242)", metrics
     assert metrics["afterHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBoldAfterTheme"] is True, metrics
     assert metrics["hasLinkAfterTheme"] is True, metrics

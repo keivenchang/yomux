@@ -1957,7 +1957,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (fileEditorPreviewDisplayMode !== 'vanilla') {
+  if (true) {
     container.querySelectorAll('pre code').forEach(block => {
       if (typeof window.hljs !== 'undefined') {
         try { window.hljs.highlightElement(block); } catch (_) {}
