@@ -877,7 +877,10 @@ function completeApiOperationRecord(record, payload) {
   const result = payload.result;
   record.phase = 'terminal';
   record.cursor = {...payload.operation.cursor};
-  record.source?.close?.();
+  if (typeof currentClientEventTransportLifecycleScope === 'function') {
+    currentClientEventTransportLifecycleScope().release(`operation-replay:${record.id}`, record.source);
+  }
+  if (record.source) record.source.close?.();
   record.source = null;
   apiOperationState.pending.delete(record.id);
   settleApiOperationWaiters(record.id, payload);
@@ -891,6 +894,11 @@ function completeApiOperationRecord(record, payload) {
   }
   window.dispatchEvent(new CustomEvent('yolomux:operation-terminal', {detail: payload}));
   enqueueOperationTerminalAck(record.id, record.cursor);
+  if (typeof record.resolveCompletion === 'function') {
+    const resolveCompletion = record.resolveCompletion;
+    record.resolveCompletion = null;
+    resolveCompletion({id: record.id, state: 'terminal'});
+  }
   return true;
 }
 
@@ -1047,6 +1055,9 @@ function startApiOperationTransport(record) {
   // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
   // cover a terminal published before the server subscribes it.
   if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
+  if (typeof repairClientEventOperationTerminalResource === 'function') {
+    repairClientEventOperationTerminalResource(`operation_terminal:${record?.id || ''}`, {pendingOnly: true});
+  }
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -1058,6 +1069,10 @@ function registerApiOperationReceipt(pending) {
   const existing = apiOperationState.records.get(operationId);
   if (existing) return existing;
   const context = operation.context && typeof operation.context === 'object' ? {...operation.context} : {};
+  let resolveCompletion;
+  const completionPromise = new Promise(resolve => {
+    resolveCompletion = resolve;
+  });
   const record = {
     id: operationId,
     request: {...(pending.request || {})},
@@ -1071,6 +1086,8 @@ function registerApiOperationReceipt(pending) {
     journeyId: newClientJourneyId('operation'),
     handlerInvocations: 0,
     phase: 'accepted',
+    completionPromise,
+    resolveCompletion,
     sessionLifecycleToken: context.session && typeof tmuxSessionLifecycleToken === 'function'
       ? tmuxSessionLifecycleToken(context.session)
       : null,
@@ -1079,6 +1096,7 @@ function registerApiOperationReceipt(pending) {
   apiOperationState.pending.set(operationId, record);
   const terminal = apiOperationState.terminal.get(operationId);
   if (terminal && apiOperationTerminalMatchesRecord(record, terminal)) {
+    apiOperationState.repairs.delete(operationId);
     apiOperationState.terminal.delete(operationId);
     apiOperationState.terminal.set(operationId, terminal);
     completeApiOperationRecord(record, terminal);
@@ -3317,7 +3335,7 @@ function writeStoredInfoSubTab(value) {
 }
 
 function readStoredEditorWrap() {
-  return storageGet(fileEditorWrapStorageKey) !== '0';
+  return storageGet(fileEditorWrapStorageKey) === '1';
 }
 
 function writeStoredEditorWrap(value) {
@@ -3784,7 +3802,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return 'theme';
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {
@@ -5058,10 +5076,17 @@ function terminalTextLinks(lineText, rangeForOffsets, y = null) {
 }
 
 function terminalLineLinks(lineText, y) {
-  return terminalTextLinks(lineText, (startIndex, endIndex) => ({
-    start: {x: startIndex + 1, y},
-    end: {x: endIndex, y},
-  }));
+  return terminalTextLinks(lineText, (startIndex, endIndex) => {
+    const range = {
+      start: {x: startIndex + 1, y},
+      end: {x: endIndex, y},
+    };
+    Object.defineProperty(range, 'segments', {
+      value: [{start: {...range.start}, end: {...range.end}}],
+      enumerable: false,
+    });
+    return range;
+  });
 }
 
 function terminalBufferLineText(line) {
@@ -6661,15 +6686,15 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   const url = String(href || '');
   if (!url) return false;
   const selectedText = String(options.selectionText || '');
+  const label = (key, fallback) => {
+    const translated = t(key);
+    return translated === key ? fallback : translated;
+  };
   const action = (reason, handler) => (
     options.term || options.container
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
   appendContextMenuButton(menu, label('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
   appendContextMenuButton(menu, label('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
@@ -7485,8 +7510,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
-    appendTabSplitCommands(menu, item, options);
     if (!slotIsSidePane(sourceSlot)) appendDescription();
+    appendTabSplitCommands(menu, item, options);
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
         menu,

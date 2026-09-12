@@ -569,6 +569,7 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
             await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
             fileEditorAutosaveEnabled = true;
             fileEditorAutosaveDelaySeconds = 0.5;
+            rescheduleAllFileAutosaves();
             await window.__yolomuxTestWaitFor(() => writes.length === 1, {timeoutMs: 5000, description: 'first autosave timer request'});
             replaceDocument(secondPanel, 'second panel\\n');
             await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'second panel\\n', {timeoutMs: 5000, description: 'second panel edit'});

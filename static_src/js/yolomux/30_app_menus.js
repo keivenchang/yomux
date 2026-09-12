@@ -1369,7 +1369,7 @@ function createTopbarRightTools() {
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
   // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
   return group;
 }
 

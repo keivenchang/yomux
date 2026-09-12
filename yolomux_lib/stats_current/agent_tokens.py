@@ -439,12 +439,11 @@ class AgentTokenCollector:
                 f"process:{item.observation.pid}",
                 f"opencode-{item.reason or 'session-identity-unavailable'}",
             ))
-        if self.rows_provider is None:
-            for error in errors:
-                spans.extend(self._unavailable(
-                    attempt,
-                    opencode.source_id_for_agent("process-inventory"),
-                    "process-inventory",
-                    f"opencode-{error}",
-                ))
+        for error in errors:
+            spans.extend(self._unavailable(
+                attempt,
+                opencode.source_id_for_agent("process-inventory"),
+                "process-inventory",
+                f"opencode-{error}",
+            ))
         return spans

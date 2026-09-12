@@ -1992,5 +1992,5 @@ function endSessionDrag(event) {
   flushDeferredJsDebugPanelRefresh();
   // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
-  dragTimingReport();
+  if (!layoutStatusSurfaceOwnsMessage?.()) dragTimingReport();
 }

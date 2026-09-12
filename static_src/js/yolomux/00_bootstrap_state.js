@@ -1787,6 +1787,7 @@ const apiOperationState = {
   records: new Map(),
   pending: new Map(),
   terminal: new Map(),
+  repairs: new Set(),
   waiters: new Map(),
 };
 const apiOperationReplayLimit = 128;
@@ -1809,6 +1810,18 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  async awaitPendingOperationReceipts() {
+    while (true) {
+      const pending = Array.from(apiOperationState.pending.values());
+      const baseline = serverWatchRootsState.watchDiffPromise;
+      await Promise.all([
+        ...pending.map(record => record.completionPromise || Promise.resolve()),
+        ...(baseline ? [Promise.resolve(baseline)] : []),
+      ]);
+      const state = this.operationState();
+      if (!state.pending.length && !state.watchRootsPending) return state;
+    }
+  },
   operationState() {
     const finderVisible = typeof fileExplorerTreePaneIsVisible === 'function'
       && fileExplorerTreePaneIsVisible();

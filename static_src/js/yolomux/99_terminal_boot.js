@@ -1017,8 +1017,8 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusSta
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
     ownsRole,
-    mode: 'leader',
-    state: 'leader',
+    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
+    state: ownsRole ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner ? backgroundServerLabel(owner) : '',
     status: String(role.status || data.status || ''),
@@ -1037,8 +1037,8 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.
     ...summary,
     ownsIndex,
     ownsRole: ownsIndex,
-    mode: 'leader',
-    state: 'leader',
+    mode: ownsIndex ? 'leader' : 'follower',
+    state: ownsIndex ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
     status: String(searchIndex.status || summary.status || data.status || ''),
@@ -3531,7 +3531,7 @@ function bindFileUpload(panel, session) {
     if (panel.contains(event.relatedTarget)) return;
     panel.classList.remove(CLS.fileDragOver);
   });
-  panel.addEventListener('drop', event => {
+  panel.addEventListener('drop', async event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -3539,7 +3539,9 @@ function bindFileUpload(panel, session) {
     // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
     // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
-    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    const dropped = event.dataTransfer?.files?.length
+      ? event.dataTransfer.files
+      : await dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
@@ -6100,9 +6102,6 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
-  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
-    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
-  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -6117,10 +6116,13 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const priorPayload = epochChanged ? {} : transcriptMetadataState.payload;
   const nextPayload = transcriptPayloadWithTmuxWindowOverrides({...payload, sessions: filteredSessions, session_order: filteredOrder}, priorPayload);
   const currentSessions = priorPayload?.sessions || {};
+  const payloadIdentity = sessionMetadataPayloadIdentity(payload);
+  const newerMetadataBuild = payloadIdentity?.epoch === transcriptMetadataState.epoch
+    && payloadIdentity.generation > transcriptMetadataState.generation;
   for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
-    if (nextGeneration > 0 && currentGeneration > nextGeneration) {
+    if (!newerMetadataBuild && nextGeneration > 0 && currentGeneration > nextGeneration) {
       return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
@@ -6211,14 +6213,17 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
 }
 
 function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {
+  const previousApply = transcriptMetadataState.lastApply;
   transcriptMetadataState.lastApply = {
-    ...(transcriptMetadataState.lastApply || {}),
+    ...(previousApply || {}),
     applied: false,
     reason,
     epoch: transcriptMetadataState.epoch,
     awaitedGeneration: Number(target || 0),
     appliedGeneration: Number(transcriptMetadataState.generation || 0),
     at: Date.now(),
+    previousApplyReason: String(previousApply?.reason || ''),
+    previousApplyPayloadGeneration: Number(previousApply?.payloadGeneration || 0),
     ...details,
   };
   // The diagnostic record stays -- it is what a Debug pane reads -- but the verdict is also
@@ -6253,6 +6258,12 @@ async function settleForcedSessionMetadata(target) {
   const topologyIsCurrent = () => topologyEpoch === tmuxTopologyEpoch;
   const serverIsCurrent = () => target.epoch === transcriptMetadataState.epoch;
   const requestIsCurrent = () => topologyIsCurrent() && serverIsCurrent();
+  // Preserve the target as shared diagnostic state even when the response that named it loses a
+  // render race. The forced caller and the failure record must report the same generation the server
+  // promised, not a later transient payload's zero pending field.
+  if (serverIsCurrent() && target.generation > transcriptMetadataState.pendingGeneration) {
+    transcriptMetadataState.pendingGeneration = target.generation;
+  }
   const settleGround = () => (serverIsCurrent() ? 'forced_settle_topology_changed' : 'forced_settle_epoch_changed');
   const deadline = Date.now() + forcedSessionMetadataSettleTimeoutMs;
   // The ground is checked BEFORE the applied generation on every pass, because a replacement

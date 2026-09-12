@@ -390,7 +390,10 @@ function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) 
 }
 
 function previewPopoutBodyClassName() {
-  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => document.body?.classList?.contains(name));
+  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => (
+    document.body?.classList?.contains(name)
+    || (name === EDITOR_PREVIEW_VANILLA_CLASS && fileEditorPreviewDisplayMode === 'vanilla')
+  ));
   classes.push('file-preview-popout-window');
   return classes.join(' ');
 }
@@ -434,18 +437,24 @@ function previewPopoutVariableStyle() {
     const value = root.getPropertyValue(source).trim();
     return value ? `${target}: ${value}` : '';
   });
+  if (fileEditorPreviewDisplayMode === 'vanilla') {
+    copied.push('--editor-preview-bg: var(--paint-white)', '--editor-scheme-fg: var(--markdown-html-light-text)');
+  }
   return [...copied, ...aliased].filter(Boolean)
     .join('; ');
 }
 
 function previewPopoutToolbarHtml() {
+  const themeState = editorPreviewThemeState();
+  const themeShort = editorPreviewThemeShortLabel(themeState);
+  const themeNext = editorPreviewThemeShortLabel(themeState === 'dark' ? 'light' : (themeState === 'light' ? 'vanilla' : 'dark'));
   return `
       <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
         <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
         <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
         <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
       </span>
-      <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
+      <button type="button" class="file-editor-theme-panel theme-with-label" data-preview-popout-theme data-editor-theme="${esc(themeState)}" data-editor-theme-short="${esc(themeShort)}" data-editor-theme-next="${esc(themeNext)}" title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span><span class="file-editor-theme-label">${esc(themeShort)}</span></button>`;
 }
 
 function snapshotRenderedPreviewContainer(scratch) {
@@ -955,7 +964,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   if (!doc) return;
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton);
+  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorPreviewFontControls(doc);
   hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
 }

@@ -1,6 +1,16 @@
 import json
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
+from tests.gate_harness import HttpPortLease
+from tests.isolated_dev_server import build_environment
+from tests.isolated_dev_server import build_paths
+from tests.isolated_dev_server import start_isolated_dev_server
+from tests.isolated_dev_server import stop_and_reap_daemons
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yolomux_lib.infra.host_identity import HostIdentity
 from yolomux_lib import server_lease
 from yolomux_lib.server_lease import acquire_server_port_lease
@@ -72,3 +82,43 @@ def test_instance_root_lease_blocks_a_second_server_on_another_port(tmp_path):
         assert acquire_instance_root_lease(tmp_path / "root") is None
     finally:
         first.release()
+
+
+def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypatch, tmp_path):
+    source_root = Path(__file__).resolve().parents[1]
+    paths = build_paths(tmp_path / "server")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
+    first = None
+    second = None
+    try:
+        first = start_isolated_dev_server("root-lease-owner", source_root, paths, runtime)
+        second_port_lease = HttpPortLease.reserve()
+        second_port = second_port_lease.release()
+        second = subprocess.run(
+            [
+                sys.executable,
+                "-u",
+                str(source_root / "yolomux.py"),
+                "--http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(second_port),
+                "--sessions",
+                runtime.sessions[0],
+            ],
+            cwd=source_root,
+            env=build_environment(source_root, paths, runtime, second_port),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    finally:
+        if first is not None:
+            stop_and_reap_daemons(first)
+        stop_isolated_tmux_runtime(runtime)
+
+    assert second is not None
+    assert second.returncode == 1
+    assert "product root is already owned" in second.stderr

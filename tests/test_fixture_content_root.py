@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from urllib.error import HTTPError
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -113,6 +114,14 @@ def test_integrated_fixture_http_origin_preserves_pages_static_special_endpoints
         assert response.read() == b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
         assert response.headers["Content-Type"] == "image/svg+xml"
         assert response.headers["Cache-Control"] == "no-store, must-revalidate"
+    with urllib.request.urlopen(f"{origin}/api/fs/fast/list?path=%2F") as response:
+        assert json.loads(response.read()) == {"path": "/", "parent": None, "entries": []}
+    try:
+        urllib.request.urlopen(f"{origin}/api/fs/fast/list?path=%2Fmissing")
+    except HTTPError as error:
+        assert error.code == 404
+    else:
+        raise AssertionError("fixture filesystem route must reject non-root paths")
     with urllib.request.urlopen(f"{origin}/favicon.ico") as response:
         assert response.status == 204
         assert response.read() == b""

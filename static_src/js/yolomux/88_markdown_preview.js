@@ -1203,6 +1203,18 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
+function prosemirrorPreviewImageSource(image, path) {
+  if (!image || !path) return Promise.resolve(false);
+  const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
+  if (!target || target.external) return Promise.resolve(false);
+  return installRawFileMediaSource(image, target.path, {
+    onFailure: error => {
+      image.classList.add('prosemirror-image-error');
+      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+    },
+  }).then(result => result.ok === true);
+}
+
 function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
@@ -1243,8 +1255,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser does not discard a load from a detached image.
+    // request after attachment so the browser cannot start a relative request before authentication.
     img.dataset.markdownRawPath = target.path;
+    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -1347,9 +1360,13 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  appendContextMenuButton(menu, t('contextmenu.copyText'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  const label = (key, fallback) => {
+    const translated = t(key);
+    return translated === key ? fallback : translated;
+  };
+  appendContextMenuButton(menu, label('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
-  appendContextMenuButton(menu, t('contextmenu.copyWithStyle'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
+  appendContextMenuButton(menu, label('contextmenu.copyWithStyle', 'Copy with style'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -1476,7 +1493,7 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (path && panel) void saveFileEditor(path, panel);
     });
     scope.ownEvent('input', container, 'input', event => {
-      if (event.target?.closest?.('.ProseMirror')) return;
+      if (event.target?.closest?.('.ProseMirror') && !event.target?.closest?.('[data-markdown-preview-editable="true"]')) return;
       const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
         || container._markdownPreviewActiveBlock
         || markdownPreviewSelectionContext(container)?.block;
@@ -1933,10 +1950,23 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    img.src = rawFileUrl(rawPath);
+    if (img.isConnected) {
+      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
+        onFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+        onDecodeFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+      }));
+    }
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -1945,7 +1975,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages]);
+  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -1957,14 +1987,9 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (true) {
-    container.querySelectorAll('pre code').forEach(block => {
-      if (typeof window.hljs !== 'undefined') {
-        try { window.hljs.highlightElement(block); } catch (_) {}
-      }
-      applyMarkdownFenceFallbackHighlight(block);
-    });
-  }
+  container.querySelectorAll('pre code').forEach(block => {
+    applyMarkdownFenceHighlight(block);
+  });
 }
 
 function markdownFenceLanguage(block) {
@@ -1973,7 +1998,25 @@ function markdownFenceLanguage(block) {
     const match = String(className || '').match(/^(?:language|lang)-(.+)$/);
     if (match) return match[1].toLowerCase();
   }
-  return '';
+  const params = block?.parentElement?.getAttribute?.('data-params') || '';
+  return String(params).trim().split(/\s+/, 1)[0].toLowerCase();
+}
+
+function applyMarkdownFenceHighlight(block) {
+  if (!block) return;
+  const language = markdownFenceLanguage(block);
+  if (language && !Array.from(block.classList).some(className => /^(?:language|lang)-/.test(className))) {
+    block.classList.add(`language-${language}`);
+  }
+  if (fileEditorPreviewDisplayMode === 'vanilla') return;
+  if (typeof window.hljs !== 'undefined') {
+    try { window.hljs.highlightElement(block); } catch (_) {}
+  }
+  applyMarkdownFenceFallbackHighlight(block);
+}
+
+function refreshMarkdownFenceHighlights(container) {
+  container?.querySelectorAll?.('pre > code').forEach(applyMarkdownFenceHighlight);
 }
 
 function isMermaidFenceLanguage(language) {

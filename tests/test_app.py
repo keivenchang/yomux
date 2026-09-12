@@ -668,7 +668,7 @@ def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
                 "usage": {"last_accepted_at": 1.0, "quarantined_conflict_count": 2},
             },
         })
-        monkeypatch.setattr(webapp.stats_current_transcript_usage, "status", lambda: {
+        monkeypatch.setattr(webapp.stats_current_client, "agent_token_usage_status", lambda: {
             "committed_appended_bytes": 14,
             "last_visible_append_at": time.time(),
             "visible_append_age_seconds": 0.0,
@@ -2861,7 +2861,9 @@ def test_roster_adoption_publishes_metadata_only_from_web_consumer(
     monkeypatch.setattr(
         webapp,
         "start_transcripts_payload_refresh",
-        lambda *, publish, not_before: refreshes.append((publish, not_before)) or True,
+        lambda *, publish, not_before, lifecycle_owner: refreshes.append(
+            (publish, not_before, lifecycle_owner)
+        ) or True,
     )
     try:
         assert webapp.refresh_sessions(maintenance=False) == []
@@ -2871,7 +2873,10 @@ def test_roster_adoption_publishes_metadata_only_from_web_consumer(
 
     assert webapp.sessions == ["one", "two"]
     assert len(refreshes) == expected_refreshes
-    assert all(publish is True and not_before > 0 for publish, not_before in refreshes)
+    assert all(
+        publish is True and not_before > 0 and lifecycle_owner is True
+        for publish, not_before, lifecycle_owner in refreshes
+    )
 
 
 def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
@@ -3180,6 +3185,41 @@ def test_status_generation_waiter_publishes_a_minimal_revision_only_patch(monkey
     assert event_payload["refresh"] is False
     assert record.status_generation == 8
     assert webapp.client_watch_service.auto_approve_payload["agent_window_snapshot_revision"] == 8
+
+
+def test_status_generation_waiter_publishes_a_full_roster_for_new_sessions(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["one"])
+    record = webapp.client_watch_service.event_watcher_record
+    record.status_generation = 7
+    webapp.client_watch_service.auto_approve_payload = {
+        "agent_window_snapshot_revision": 7,
+        "session_order": ["one"],
+        "sessions": {"one": {"agent_windows": [{"window_index": 0, "state": "idle"}]}},
+    }
+    events = []
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: {"ok": True, "changed": True, "generation": 8})
+    monkeypatch.setattr(
+        webapp.status_client,
+        "snapshot",
+        lambda _sessions, timeout: (
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"agent_window_snapshot_revision":8,"session_order":["one","two"],"sessions":{"one":{"agent_windows":[{"window_index":0,"state":"idle"}]},"two":{"agent_windows":[{"window_index":1,"state":"working"}]}}}',
+        ),
+    )
+    def publish_then_stop(event_type, payload=None, **_kwargs):
+        events.append((event_type, payload or {}))
+        record.status_generation_stop_event.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
+    try:
+        webapp.status_generation_wait_loop(record)
+    finally:
+        webapp.control_server.stop()
+
+    assert events[0][0] == "auto_approve_changed"
+    assert events[0][1]["refresh"] is False
+    assert events[0][1]["fields"]["agent_window_snapshot_revision"] == 8
+    assert events[0][1]["changes"]["two"]["agent_windows"][0]["state"] == "working"
 
 
 def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monkeypatch):
@@ -5565,6 +5605,75 @@ def test_forced_metadata_refresh_runs_a_build_that_starts_after_the_request(monk
         release.set()
         webapp.background_owner.stop()
         webapp.control_server.stop()
+
+
+def test_forced_metadata_refresh_queues_behind_lifecycle_owned_build(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    entered = threading.Event()
+    release = threading.Event()
+    builds: list[int] = []
+    published: list[int] = []
+
+    def build_payload(lightweight: bool = False) -> dict[str, object]:
+        del lightweight
+        builds.append(len(builds) + 1)
+        entered.set()
+        if len(builds) == 1:
+            assert release.wait(timeout=10)
+        return {"sessions": {}, "session_order": [], "build": len(builds)}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", build_payload)
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda _name, payload, **_kwargs: published.append(
+            int((payload.get("data") or {}).get("metadata_generation") or 0)
+        ),
+    )
+    try:
+        assert webapp.apply_session_roster(["1"]) is True
+        assert entered.wait(timeout=5)
+        forced = webapp.session_metadata_payload(force=True)
+        pending = int(forced["cache"]["pending_generation"])
+        release.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(builds) < 2:
+            time.sleep(0.02)
+        assert builds == [1, 2]
+        assert pending > int(forced["cache"]["generation"])
+        assert pending in published
+    finally:
+        release.set()
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+
+def test_session_roster_transition_invalidates_status_before_metadata_publish(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    calls = []
+    monkeypatch.setattr(
+        webapp.status_client,
+        "invalidate",
+        lambda reason, sessions=None, topology_generation=None: calls.append(
+            ("status", reason, tuple(sessions or ()), topology_generation)
+        ) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        webapp,
+        "start_transcripts_payload_refresh",
+        lambda *, publish=False, not_before=None, lifecycle_owner=False, **_kwargs: calls.append(
+            ("metadata", publish, lifecycle_owner, not_before is not None)
+        ) or True,
+    )
+    try:
+        assert webapp.apply_session_roster(["1"]) is True
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == [
+        ("status", "tmux-topology", ("1",), 1),
+        ("metadata", True, True, True),
+    ]
 
 
 def test_forced_metadata_refresh_reuses_a_build_that_already_started_after_the_request(monkeypatch):
@@ -18536,6 +18645,7 @@ def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(mon
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     webapp.sessions = ["1", "2"]
     webapp.status_service_mode = False
+    webapp.status_client = SimpleNamespace(invalidate=lambda *_args, **_kwargs: {"ok": True})
     webapp.start_transcripts_payload_refresh = lambda **_kwargs: True
     webapp.refresh_sessions = lambda maintenance=True: []
 

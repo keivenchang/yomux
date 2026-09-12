@@ -217,12 +217,12 @@ def test_version_status_displays_post_release_commits_and_dirty_worktree(monkeyp
     results = iter((type("GitResult", (), {"stdout": commits})(), type("GitResult", (), {"stdout": " M app.py\n"})()))
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
 
-    assert common.yolomux_version_metadata()[0] == "0.8.2(3)*"
+    assert common.yolomux_version_metadata()[0] == f"{common.YOLOMUX_VERSION}(3)*"
 
 
 @pytest.mark.parametrize(
     ("commit_count", "status_output", "expected"),
-    [("", "", "0.8.2"), ("", "?? new.txt\n", "0.8.2*"), ("2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n", "", "0.8.2(3)"),],
+    [("", "", common.YOLOMUX_VERSION), ("", "?? new.txt\n", f"{common.YOLOMUX_VERSION}*"), ("2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n", "", f"{common.YOLOMUX_VERSION}(3)"),],
 )
 def test_version_status_formats_clean_and_dirty_variants(monkeypatch, commit_count, status_output, expected):
     results = iter((type("GitResult", (), {"stdout": commit_count})(), type("GitResult", (), {"stdout": status_output})()))
@@ -249,8 +249,8 @@ def test_version_status_uses_peeled_release_tag_and_fails_closed_on_status_error
 
     monkeypatch.setattr(common.subprocess, "run", run)
 
-    assert common.yolomux_version_metadata()[0] == "0.8.2(3)*"
-    assert "v0.8.2^{}..HEAD" in calls[0]
+    assert common.yolomux_version_metadata()[0] == f"{common.YOLOMUX_VERSION}(3)*"
+    assert f"v{common.YOLOMUX_VERSION}^{{}}..HEAD" in calls[0]
 
 
 def test_post_release_commits_use_peeled_release_tag(monkeypatch):
@@ -259,7 +259,7 @@ def test_post_release_commits_use_peeled_release_tag(monkeypatch):
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: calls.append(args[0]) or result)
 
     assert common.yolomux_version_metadata()[1] == []
-    assert "v0.8.2^{}..HEAD" in calls[0]
+    assert f"v{common.YOLOMUX_VERSION}^{{}}..HEAD" in calls[0]
 
 
 def test_main_page_bootstrap_includes_version_commit(monkeypatch):

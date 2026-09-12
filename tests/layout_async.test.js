@@ -4507,7 +4507,7 @@ async function runLayoutAsyncSuite() {
     const terminalCases = [
       ['malformed_payload', null, quiet],
       ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
-      ['older_work_graph_generation', metadataFor(4, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      ['older_work_graph_generation', metadataFor(1, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
       // The committed-render outcome is current at the entry gate and superseded at the render
       // gate, which is the only way to reach the fourth terminal exit.
       ['committed_render_superseded', metadataFor(5, ['1']), {
@@ -4568,7 +4568,7 @@ async function runLayoutAsyncSuite() {
     );
   });
 
-  await testAsync('metadata apply records the generation it rendered and a machine-readable reason for every drop', async () => {
+  await testAsync('metadata apply records build freshness and rejects only stale same-epoch work graphs', async () => {
     // Regression: a dropped metadata payload returned a bare `false` that no caller read, and the
     // rendered model carried no identity, so "the refresh landed and had nothing new" and "the
     // refresh was silently discarded" were indistinguishable. A create-session gate could only tell
@@ -4592,18 +4592,29 @@ async function runLayoutAsyncSuite() {
       {applied: true, reason: 'applied', payloadGeneration: 7},
     );
 
-    const dropped = await api.applySessionMetadataPayloadForTest({
+    const newerBuild = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 8},
       session_order: ['1'],
-      sessions: {'1': {panes: [], work_graph: {version: 1, generation: 3}}},
+      sessions: {'1': {panes: [], marker: 'newer-build', work_graph: {version: 1, generation: 3}}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    const afterNewerBuild = api.transcriptMetadataStateForTest();
+    assert.equal(newerBuild, true, 'a newer same-epoch metadata build may carry an older work-graph generation');
+    assert.equal(afterNewerBuild.payload.sessions['1'].marker, 'newer-build');
+    assert.equal(afterNewerBuild.generation, 8, 'the newer metadata build becomes the rendered identity');
+
+    const dropped = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 7},
+      session_order: ['1'],
+      sessions: {'1': {panes: [], marker: 'stale-build', work_graph: {version: 1, generation: 2}}},
     }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
     const afterDrop = api.transcriptMetadataStateForTest();
-    assert.equal(dropped, false, 'an older session work graph is still refused');
+    assert.equal(dropped, false, 'an older same-epoch metadata build with an older graph is refused');
     assert.deepStrictEqual(
       {applied: afterDrop.lastApply.applied, reason: afterDrop.lastApply.reason, session: afterDrop.lastApply.session},
       {applied: false, reason: 'older_work_graph_generation', session: '1'},
     );
-    assert.equal(afterDrop.generation, 7, 'a refused payload cannot advance the rendered generation');
+    assert.equal(afterDrop.generation, 8, 'a refused payload cannot move the rendered generation backward');
+    assert.equal(afterDrop.payload.sessions['1'].marker, 'newer-build', 'a stale payload cannot replace the newer build');
 
     const superseded = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 9},
@@ -4625,7 +4636,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(unidentified, true, 'an identity-less payload is still rendered');
     assert.equal(afterUnidentified.payload.sessions['1'].marker, 'legacy-server');
     assert.equal(afterUnidentified.epoch, 'epoch-a', 'an identity-less payload cannot change which server the client is tracking');
-    assert.equal(afterUnidentified.generation, 7, 'a bare generation scalar cannot advance the applied identity');
+    assert.equal(afterUnidentified.generation, 8, 'a bare generation scalar cannot advance the applied identity');
   });
 
   await testAsync('a superseded response still records the build the server promised', async () => {
@@ -4869,13 +4880,14 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.payload.sessions['1'].work_graph.generation, 5, 'the previous epoch\'s work graph is not carried forward');
     assert.deepStrictEqual(canonical(state.payload.indexed_repos), [], 'nor its indexed-repo baseline');
 
-    // Negative control: inside ONE epoch the same refusal still applies, so the acceptance above is
-    // caused by the epoch change and not by the work-graph comparison having been removed.
+    // Negative control: inside ONE epoch, an old/equal metadata build still cannot replace a newer
+    // work graph. The acceptance above is caused by the epoch change, not by stale protection being
+    // removed.
     const refused = await api.applySessionMetadataPayloadForTest(
-      metadataPayload(EPOCH_B, 2, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
+      metadataPayload(EPOCH_B, 1, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
       {refreshAuto: false, refreshActivity: false, refreshContext: false},
     );
-    assert.equal(refused, false, 'an older work graph within the same epoch is still refused');
+    assert.equal(refused, false, 'an old same-epoch metadata build is still refused');
     assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_work_graph_generation');
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['1'].marker, 'new-server-lightweight');
   });
@@ -6043,7 +6055,7 @@ async function runLayoutAsyncSuite() {
       globalThemeMode: 'light',
       terminalThemeMode: 'light',
       themeMode: 'github-light',
-      previewDisplayMode: 'vanilla',
+      previewDisplayMode: 'theme',
       wrapEnabled: true,
       lineNumbersEnabled: false,
       blameEnabled: true,
@@ -8851,9 +8863,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(has(dt({types: ['text/plain'], data: {'text/plain': 'hello'}})), false, '78.5: plain text is not image-bearing');
       assert.equal(has(dt({items: [{kind: 'file', type: 'application/pdf', getAsFile() { return {name: 'a.pdf', type: 'application/pdf'}; }}]})), false, '78.5: a non-image file item is not image-bearing');
       assert.equal(has(null), false, '78.5: missing payload is not image-bearing');
-      assert.equal(files(dt({items: [fileItem(), fileItem('image/jpeg')]})).length, 2, '78.5: extracts every image File item (multi-image)');
-      assert.equal(files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]})).length, 1, '78.5: extracts only image entries from a plain File list');
-      assert.equal(files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}})).length, 1, '78.5: extracts image data URLs from rich text/html');
+      assert.equal((await files(dt({items: [fileItem(), fileItem('image/jpeg')]}))).length, 2, '78.5: extracts every image File item (multi-image)');
+      assert.equal((await files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]}))).length, 1, '78.5: extracts only image entries from a plain File list');
+      assert.equal((await files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}}))).length, 1, '78.5: extracts image data URLs from rich text/html');
     }
 
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
@@ -8980,6 +8992,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(content, 'hello\n![one](note/one.png)\n![two file](note/two%20file.png)', 'Markdown editor paste preserves original image filenames as alt text and inserts file-directory links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
+      assert.equal(api.markdownPreviewImageTarget('note/one.png', path).path, '/repo/docs/note/one.png', 'uploaded Markdown references retain relative source semantics for the owning Markdown file');
     }
 
     // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
@@ -9021,7 +9034,8 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.equal(pasteEvent.defaultPrevented, true, 'remote Markdown image paste is claimed');
       assert.equal(pasteEvent.propagationStopped, true, 'remote Markdown image paste stops propagation');
-      assert.equal(calls.length, 0, 'remote Markdown image paste does not upload without an extractable File');
+      assert.equal(calls.length, 1, 'remote Markdown image paste fetches the rich image source before deciding whether it is uploadable');
+      assert.equal(calls[0].url, 'https://example.com/remote.png', 'remote Markdown image paste fetches the image source');
       assert.equal(sent.length, 0, 'remote Markdown image paste never leaks to xterm');
     }
 
@@ -9066,10 +9080,10 @@ async function runLayoutAsyncSuite() {
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
       const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      assert.ok(/scope\.ownEvent\('paste', document, 'paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
-      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
+      assert.ok(/scope\.ownEvent\('paste', document, 'paste', async event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
+      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', async event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
-      assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
+      assert.ok(/const files = await dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
       assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
       assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
     }
@@ -10594,7 +10608,7 @@ async function runLayoutAsyncSuite() {
       const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8').includes('ClipboardItem'));
       assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\)[\s\S]*copyTextToClipboard\(text\)\.then\([\s\S]*showCopyFeedback\(options\)/, 'one parent owns text-copy success and failure feedback');
       assert.deepEqual(rawTextWriterFiles, ['10_core_utils.js'], 'the raw text writer stays private to the shared feedback parent');
-      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
+      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js', '88_markdown_preview.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
       assert.equal([...core.matchAll(/copyTextToClipboard\(/g)].length, 2, 'only the shared feedback parent may invoke the raw text clipboard writer');
       assert.match(files, /navigator\.clipboard\.write\(\[new ClipboardItem[\s\S]*showCopyFeedback\(/, 'image clipboard writes report through the shared feedback parent');
       assert.match(core, /function copyTerminalSelectionToClipboardEvent[\s\S]*showCopyFeedback\(/, 'the synchronous terminal copy-event path keeps activation while reporting feedback');

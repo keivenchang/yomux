@@ -2383,6 +2383,8 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, option
   const layoutOptions = {
     focusSession: newSession,
     prune: false,
+    message: localizedHtml('common.renamed', {oldName: oldSession, newName: newSession}),
+    messageKind: 'advisory',
   };
   if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
     layoutOptions.completionGeneration = options.completionGeneration;
@@ -2496,6 +2498,7 @@ async function renameTmuxSession(session, proposedName) {
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
+        showLayoutStatus(localizedHtml('common.renamed', {oldName: session, newName: renamed}), 'advisory');
         closeSessionRenameDialog();
       },
     );

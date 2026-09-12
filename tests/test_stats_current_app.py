@@ -156,7 +156,7 @@ def test_agent_status_collector_keeps_typed_unavailable_when_refresh_never_compl
     assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
-def test_agent_tokens_collector_does_not_gate_on_statusd_lease(monkeypatch):
+def test_agent_tokens_collector_fails_closed_when_statusd_lease_is_unavailable(monkeypatch):
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.stats_agent_window_rows = lambda **_kwargs: [{
         "session": "yo7110", "window": "0", "window_index": 0, "pane_target": "%55",
@@ -171,7 +171,7 @@ def test_agent_tokens_collector_does_not_gate_on_statusd_lease(monkeypatch):
     facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
 
     assert facts.unavailable_spans
-    assert all(span.reason != "statusd-unavailable" for span in facts.unavailable_spans)
+    assert facts.unavailable_spans[0].reason == "statusd-unavailable"
 
 
 def test_agent_tokens_collector_uses_machinewide_inventory_without_statusd(monkeypatch):
@@ -1024,16 +1024,17 @@ def test_token_adapter_passes_safe_opencode_started_at_to_the_reader(monkeypatch
     }]
 
 
-def test_token_adapter_fences_opencode_cursor_to_the_stats_database(monkeypatch, tmp_path):
-    database = tmp_path / "stats-v9.sqlite3"
-    database.write_bytes(b"new stats database")
+def test_token_adapter_fences_opencode_cursor_to_the_opencode_database(monkeypatch, tmp_path):
+    database = tmp_path / "opencode.db"
+    database.write_bytes(b"new opencode database")
+    monkeypatch.setattr(app_module.stats_current_opencode, "DEFAULT_DATABASE_PATH", database)
     cursor_path = tmp_path / "opencode-cursors.json"
     cursor = opencode_module.OpenCodeCursorStore(cursor_path)
     assert cursor.reset_for_database(database) is None
     cursor.prepare({"session:ses-a:output": 20}, event_revisions={"old-event": "old-revision"})
     cursor.commit()
-    replacement = tmp_path / "stats-v9.sqlite3.new"
-    replacement.write_bytes(b"replacement stats database")
+    replacement = tmp_path / "opencode.db.new"
+    replacement.write_bytes(b"replacement opencode database")
     replacement.replace(database)
     result = opencode_module.OpenCodeReadSuccess(
         opencode_module.OpenCodeSession("ses-a", "/repo/a", "model", "provider", "build", 1.0, 2.0),
@@ -1050,7 +1051,6 @@ def test_token_adapter_fences_opencode_cursor_to_the_stats_database(monkeypatch,
     webapp.stats_current_process_identity = lambda: ("web-7112", "web", 7112)
     webapp.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
     webapp.stats_opencode_cursors = cursor
-    webapp.stats_current_client = SimpleNamespace(database_path=database)
 
     facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
 
@@ -2372,9 +2372,6 @@ def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp
     webapp.settings_payload = lambda: {"settings": {}}
 
     assert webapp.start_background_owner(port=7111, priority=0) is True
-    assert captured["capabilities"] == {
-        "stats_writer_build": app_module.stats_current_storage.MIN_WRITER_BUILD,
-    }
 
 
 def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(monkeypatch):

@@ -152,8 +152,8 @@ from .stats_current import host_collectors as stats_current_host_collectors
 from .stats_current import families as stats_current_families
 from .stats_current.http import StatsHttpForwarder
 from .stats_current.runtime import StatsCurrentRuntime
-from .stats_current import storage as stats_current_storage
 from .stats_current import opencode as stats_current_opencode
+from .stats_current.agent_tokens import AgentTokenCollector
 from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
@@ -4132,7 +4132,7 @@ class WatchBridge:
         record = app.activity_transcript_service.transcripts_payload_cache_record
         with record.publication_lock:
             app.advance_transcripts_payload_input_generation()
-        app.start_transcripts_payload_refresh(publish=True, not_before=requested_at)
+        app.start_transcripts_payload_refresh(publish=True, not_before=requested_at, lifecycle_owner=True)
 
     def start_client_watch_snapshot_publish(self, app) -> bool:
         generation = 0
@@ -4146,7 +4146,7 @@ class WatchBridge:
 
             worker = threading.Thread(target=run, daemon=True)
             watcher_record.snapshot_worker = worker
-            generation = app.begin_transcripts_payload_work(worker)
+            generation = app.begin_transcripts_payload_work(worker, lifecycle_owner=True)
             if generation <= 0:
                 watcher_record.snapshot_worker = None
                 return False
@@ -4214,7 +4214,46 @@ class WatchBridge:
                 payload = app.build_transcripts_payload()
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
-            if not reusable_payload and not app.commit_transcripts_payload_cache(
+            if (
+                not app.status_service_mode
+                and app.client_events.has_demand("transcripts")
+            ):
+                live_sessions, _live_sessions_error = list_tmux_session_names()
+                if live_sessions:
+                    # A browser metadata watcher can be the first owner to observe a new tmux
+                    # roster. Register that exact roster with statusd before publishing metadata;
+                    # otherwise statusd keeps its old snapshot roster and the browser receives
+                    # transcript bytes for sessions whose status rows never get a new revision.
+                    app.sessions = list(live_sessions)
+                    status_response, status_body = app.status_client.snapshot(live_sessions, timeout=5.0)
+                    if status_response.get("ok") is True and status_body:
+                        try:
+                            status_metadata = validate_status_snapshot(status_response, status_body)
+                            status_payload = json.loads(status_body)
+                        except (StatusProtocolError, ValueError, TypeError):
+                            status_payload = None
+                        if isinstance(status_payload, dict) and status_metadata.generation == int(status_response.get("generation") or 0):
+                            app.publish_client_event(
+                                "auto_approve_changed",
+                                {
+                                    "status": int(status_response.get("status") or HTTPStatus.OK),
+                                    "refresh": False,
+                                    "generation": status_metadata.generation,
+                                    "signature": f"statusd:{status_metadata.generation}:{int(status_response.get('status') or HTTPStatus.OK)}",
+                                    "data": status_payload,
+                                },
+                                trigger="metadata-watch-lifecycle",
+                                cache="ready",
+                            )
+                    app.wake_client_event_watcher()
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                publish_requested = payload_record.publish_requested
+            # An ordinary watch refresh may reuse a fresh payload without changing its identity.
+            # A forced request that joined this worker is different: its promised generation must be
+            # materialized and published by this same owner, even when the bytes are reusable.
+            commit_reused_payload = reusable_payload and publish_requested
+            if (not reusable_payload or commit_reused_payload) and not app.commit_transcripts_payload_cache(
                 payload,
                 generation,
                 input_generation=source_generation,
@@ -4237,7 +4276,7 @@ class WatchBridge:
                         return
                     previous_signature = self.state.transcripts_payload_signature
                     self.state.transcripts_payload_signature = signature
-                    should_publish = previous_signature != signature
+                    should_publish = previous_signature != signature or payload_record.publish_requested
                 if should_publish:
                     app.publish_client_event(
                         "transcripts_changed",
@@ -4382,12 +4421,22 @@ class WatchBridge:
         trigger: str,
         force: bool = False,
         compute_ms: float | None = None,
+        completion: dict[str, Any] | None = None,
     ) -> bool:
         """Publish one already-materialized session-files generation to local SSE clients."""
         event_payload = {"request": copy.deepcopy(request), "status": int(status), "data": copy.deepcopy(payload)}
+        if isinstance(completion, dict):
+            completion_identity = {
+                key: str(completion[key])
+                for key in ("cache_key_hash", "cache_view_id")
+                if completion.get(key) not in (None, "")
+            }
+            if completion_identity:
+                event_payload["completion"] = completion_identity
         stable_event_payload = copy.deepcopy(event_payload)
         if isinstance(stable_event_payload.get("data"), dict):
             stable_event_payload["data"].pop("cache", None)
+        stable_event_payload.pop("completion", None)
         signature = app.client_event_payload_signature(stable_event_payload)
         key = app.client_event_payload_signature(request)
         with self.state.lock:
@@ -5752,6 +5801,10 @@ class SessionFilesCoordinator:
                 status,
                 trigger=trigger,
                 compute_ms=compute_ms,
+                completion={
+                    "cache_key_hash": refresh_details.get("cache_key_hash", ""),
+                    "cache_view_id": refresh_details["cache_view_id"],
+                },
             )
             done_details = dict(refresh_details)
             done_details["compute_ms"] = round(compute_ms, 3)
@@ -8994,36 +9047,49 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        """Compatibility test adapter; production token collection is owned by statsd."""
-        compatibility_scanner = not hasattr(self, "stats_current_transcript_usage")
-        if compatibility_scanner:
-            self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
-        if not hasattr(self, "stats_opencode_cursors"):
-            self.stats_opencode_cursors = stats_current_opencode.OpenCodeCursorStore(
-                None if "stats_current_client" not in self.__dict__ else
+        """Compatibility adapter for tests; statsd owns token collection."""
+        stats_client = self.__dict__.get("stats_current_client")
+        scanner = self.__dict__.get("stats_current_transcript_usage")
+        compatibility_scanner = scanner is None
+        if scanner is None:
+            scanner = StatsCurrentTranscriptUsageScanner()
+            self.stats_current_transcript_usage = scanner
+        cursors = self.__dict__.get("stats_opencode_cursors")
+        if not isinstance(cursors, stats_current_opencode.OpenCodeCursorStore):
+            cursors = stats_current_opencode.OpenCodeCursorStore(
                 stats_current_opencode.OpenCodeCursorStore.default_path()
+                if stats_client is not None else None
             )
+            self.stats_opencode_cursors = cursors
+        database = stats_current_opencode.DEFAULT_DATABASE_PATH
         row_provider = self.__dict__.get("stats_agent_window_rows")
         fixture_rows = callable(row_provider) and hasattr(self, "stats_agent_token_rows")
-        if fixture_rows:
-            inventory = stats_current_opencode.OpenCodeProcessInventory((), ())
-            inventory_errors: list[str] = []
-            rows = self.stats_agent_token_rows(row_provider())
-        else:
-            inventory, inventory_errors = machinewide_opencode_inventory()
-            rows = [{
-                "key": stats_current_opencode.agent_token_key_for_process(
-                    pid=item.observation.pid,
-                    tmux_session=item.observation.tmux_session,
-                ),
-                "session": item.observation.tmux_session,
-                "pane_target": item.observation.pane_target,
-                "kind": "opencode",
-                "agent_session_id": item.session_id,
-                "cwd": item.observation.directory or "",
-                "started_at": item.observation.started_at,
-            } for item in inventory.sessions]
-        if not rows and not inventory.unavailable and compatibility_scanner:
+        inventory_result: tuple[stats_current_opencode.OpenCodeProcessInventory, list[str]] | None = None
+
+        if hasattr(self, "start_status_collector_lease"):
+            if not self.start_status_collector_lease():
+                return stats_current_collectors.collector_unavailable(
+                    family="agent_tokens",
+                    source_id="statusd",
+                    epoch_id=attempt.epoch_id,
+                    epoch_started_at=attempt.epoch_started_at,
+                    observed_at=attempt.scheduled_at,
+                    cadence_seconds=attempt.cadence_seconds,
+                    owner_generation=attempt.owner_generation,
+                    reason="statusd-unavailable",
+                )
+
+        def inventory_provider() -> tuple[stats_current_opencode.OpenCodeProcessInventory, list[str]]:
+            nonlocal inventory_result
+            if inventory_result is None:
+                inventory_result = (
+                    stats_current_opencode.OpenCodeProcessInventory((), ()), []
+                ) if fixture_rows else machinewide_opencode_inventory()
+            return inventory_result
+
+        rows_provider = None
+        fixture_rows_value = row_provider() if fixture_rows else None
+        if compatibility_scanner and fixture_rows and not fixture_rows_value:
             return stats_current_collectors.collector_unavailable(
                 family="agent_tokens",
                 source_id="statusd",
@@ -9032,430 +9098,36 @@ class TmuxWebtermApp:
                 observed_at=attempt.scheduled_at,
                 cadence_seconds=attempt.cadence_seconds,
                 owner_generation=attempt.owner_generation,
-                reason=("status-roster-unavailable" if callable(row_provider) else "statusd-unavailable"),
+                reason="status-roster-unavailable",
             )
-        unavailable_spans = []
-        for item in (*inventory.unavailable,):
-            unavailable_spans.extend(stats_current_collectors.collector_unavailable(
-                family="agent_tokens",
-                source_id=stats_current_opencode.source_id_for_agent(f"process:{item.observation.pid}"),
-                epoch_id=f"{attempt.epoch_id}:opencode:process:{item.observation.pid}",
-                epoch_started_at=attempt.epoch_started_at,
-                observed_at=attempt.scheduled_at,
-                cadence_seconds=attempt.cadence_seconds,
-                owner_generation=attempt.owner_generation,
-                reason=f"opencode-{item.reason or 'session-identity-unavailable'}",
-            ).unavailable_spans)
-        if not fixture_rows:
-            for error in inventory_errors:
-                unavailable_spans.extend(stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("process-inventory"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:process-inventory",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{error[:120]}",
-                ).unavailable_spans)
-        atoms = []
-        tombstones = []
-        token_rows = rows
-        scan = self.stats_current_transcript_usage.scan(token_rows)
-        opencode_atoms: list[tuple[str, session_files.TranscriptUsageAtom]] = []
-        opencode_coverage: list[stats_current_storage.CoverageEpoch] = []
-        opencode_cursors = self.__dict__.get("stats_opencode_cursors")
-        if not isinstance(opencode_cursors, stats_current_opencode.OpenCodeCursorStore):
-            opencode_cursors = stats_current_opencode.OpenCodeCursorStore()
-            self.__dict__["stats_opencode_cursors"] = opencode_cursors
-        stats_client = self.__dict__.get("stats_current_client")
-        stats_database = getattr(stats_client, "database_path", None)
-        if isinstance(stats_database, Path):
-            cursor_fence = opencode_cursors.reset_for_database(stats_database)
-            if cursor_fence is not None:
-                return stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state-fence",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{cursor_fence.reason}",
-                )
-        cursor_state = opencode_cursors.state()
-        cursor_values = cursor_state.values if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState) else {}
-        cursor_epochs = (
-            cursor_state.epochs
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.epochs is not None else {}
-        )
-        cursor_sequences = (
-            cursor_state.sequences
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.sequences is not None else {}
-        )
-        cursor_presence = (
-            cursor_state.presence
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.presence is not None else {}
-        )
-        cursor_event_revisions = (
-            cursor_state.event_revisions
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.event_revisions is not None else {}
-        )
-        cursor_unavailable = cursor_state if isinstance(cursor_state, stats_current_opencode.OpenCodeUnavailable) else None
-        proposed_cursor_values = dict(cursor_values)
-        proposed_cursor_epochs = dict(cursor_epochs)
-        proposed_cursor_sequences = dict(cursor_sequences)
-        proposed_cursor_presence = dict(cursor_presence)
-        proposed_cursor_event_revisions = dict(cursor_event_revisions)
-        transcript_atoms_accepted = 0
-        opencode_results: dict[str, stats_current_opencode.OpenCodeReadResult] = {}
-        opencode_claims: dict[str, set[str]] = {}
-        for row_index, row in enumerate(token_rows):
-            if str(row.get("kind") or "").lower() != "opencode":
-                continue
-            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
-            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
-            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
-            started_at = row.get("started_at")
-            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
-                started_at = None
-            result = stats_current_opencode.read_usage(
-                session_id=session_id,
-                directory=directory,
-                started_at=started_at,
-                now=attempt.scheduled_at,
-                known_event_revisions=proposed_cursor_event_revisions,
-                incremental=True,
-            )
-            opencode_results[token_key] = result
-            if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
-                opencode_claims.setdefault(result.session.session_id, set()).add(token_key)
-        conflicting_opencode_keys = {
-            token_key
-            for claimants in opencode_claims.values()
-            if len(claimants) > 1
-            for token_key in claimants
-        }
-        for row_index, row in enumerate(token_rows):
-            if str(row.get("kind") or "").lower() != "opencode":
-                continue
-            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
-            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
-            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
-            started_at = row.get("started_at")
-            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
-                started_at = None
-            source_id = stats_current_opencode.source_id_for_selector(
-                session_id=session_id, directory=directory, agent_key=token_key,
-            )
-            if cursor_unavailable is not None:
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{cursor_unavailable.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            result = opencode_results[token_key]
-            if isinstance(result, stats_current_opencode.OpenCodeAmbiguousSession):
-                # A live pane with a missing session ID is still a valid collector row, but
-                # directory/title selection is unsafe when OpenCode has multiple sessions.
-                # Keep that source explicitly unavailable instead of treating the whole family
-                # as absent.
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens", source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at, observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds, owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{result.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            if not isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
-                unavailable_source = source_id
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=unavailable_source,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{result.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            if token_key in conflicting_opencode_keys:
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason="opencode-session-claimed-by-multiple-agents",
-                    ).unavailable_spans
-                )
-                continue
-            source_id = stats_current_opencode.source_id_for_session(result.session.session_id)
-            # OpenCode reports reasoning and cache-write counters, but the current atom contract
-            # has no exact representation for either dimension. Keep input/cache-read/output
-            # atoms and mark them partial instead of shading the whole source as unavailable.
-            opencode_omits_dimensions = any(
-                component.dimension not in stats_current_opencode._ATOM_DIMENSIONS
-                for component in result.components
-            )
-            # Each step-finish part is already a completed-step quantity. Do not subtract the
-            # session's cumulative counters, which turns historical work into a latest-bucket burst.
-            # Value-only cursors from the previous implementation are retained for reset recovery,
-            # but cannot identify historical parts and therefore do not suppress this backfill.
-            opencode_coverage.append(stats_current_storage.CoverageEpoch(
-                "agent_tokens", source_id,
-                f"{attempt.epoch_id}:opencode:{result.session.session_id}",
-                attempt.epoch_started_at, attempt.scheduled_at + attempt.cadence_seconds,
-                attempt.cadence_seconds, attempt.owner_generation,
-            ))
-            for component in result.components:
-                if component.dimension not in stats_current_opencode._ATOM_DIMENSIONS:
-                    continue
-                cursor_key = stats_current_opencode.cursor_key(
-                    component.session_id, component.dimension,
-                )
-                if not component.source_revision:
-                    # Fixtures and pre-revision adapters may still provide cumulative snapshots.
-                    # Keep that compatibility path isolated from the real per-part reader.
-                    previous = proposed_cursor_values.get(cursor_key)
-                    if previous is not None and component.tokens < previous:
-                        proposed_cursor_epochs[cursor_key] = proposed_cursor_epochs.get(cursor_key, 0) + 1
-                        proposed_cursor_sequences[cursor_key] = 0
-                        proposed_cursor_values[cursor_key] = component.tokens
-                        continue
-                    quantity = component.tokens - previous if previous is not None else component.tokens
-                    proposed_cursor_values[cursor_key] = component.tokens
-                    if quantity <= 0:
-                        continue
-                    proposed_cursor_sequences[cursor_key] = proposed_cursor_sequences.get(cursor_key, 0) + 1
-                    event_id = stats_current_opencode.delta_event_id(
-                        component.session_id, component.dimension,
-                        proposed_cursor_epochs.get(cursor_key, 0),
-                        proposed_cursor_sequences[cursor_key],
-                    )
-                else:
-                    quantity = component.tokens
-                    event_id = component.event_id
-                if quantity <= 0:
-                    continue
-                if component.source_revision:
-                    previous_revision = proposed_cursor_event_revisions.get(event_id)
-                    if previous_revision == component.source_revision:
-                        continue
-                    if previous_revision is not None and previous_revision != component.source_revision:
-                        unavailable_spans.extend(
-                            stats_current_collectors.collector_unavailable(
-                                family="agent_tokens", source_id=source_id,
-                                epoch_id=f"{attempt.epoch_id}:opencode:revision",
-                                epoch_started_at=attempt.epoch_started_at,
-                                observed_at=attempt.scheduled_at,
-                                cadence_seconds=attempt.cadence_seconds,
-                                owner_generation=attempt.owner_generation,
-                                reason="opencode-source-revision-changed",
-                            ).unavailable_spans
-                        )
-                        continue
-                    proposed_cursor_event_revisions[event_id] = component.source_revision
-                if component.dimension == "input":
-                    direction, cache_role = "input", "none"
-                elif component.dimension == "cache_read":
-                    direction, cache_role = "input", "read"
-                elif component.dimension == "output":
-                    direction, cache_role = "output", "none"
-                else:
-                    # The current atom contract has no exact role for OpenCode's cache-write
-                    # lifetime or reasoning counter. Do not relabel either as billable input/output.
-                    continue
-                opencode_atoms.append((
-                    token_key,
-                    session_files.TranscriptUsageAtom(
-                        source=f"opencode:{component.session_id}",
-                        timestamp=component.observed_at,
-                        event_id=event_id,
-                        provider=component.provider,
-                        model=component.model,
-                        model_evidence=component.model_evidence,
-                        effort="unknown",
-                        direction=direction,
-                        modality="text",
-                        cache_role=cache_role,
-                        unit="tokens",
-                        quantity=float(quantity),
-                        root_thread_id=component.session_id,
-                        agent_thread_id=component.session_id,
-                        endpoint="opencode",
-                        # OpenCode also reports cache-write and reasoning counters. They have no
-                        # exact current atom representation, so supported atoms remain usable but
-                        # explicitly partial rather than claiming complete telemetry.
-                        telemetry_complete=(
-                            component.telemetry_complete and not opencode_omits_dimensions
-                        ),
-                    ),
-                ))
-        cursor_prepared = False
-        try:
-            if (
-                proposed_cursor_values != cursor_values
-                or proposed_cursor_epochs != cursor_epochs
-                or proposed_cursor_sequences != cursor_sequences
-                or proposed_cursor_presence != cursor_presence
-                or proposed_cursor_event_revisions != cursor_event_revisions
-            ):
-                opencode_cursors.prepare(
-                    proposed_cursor_values,
-                    proposed_cursor_epochs,
-                    proposed_cursor_sequences,
-                    expected_values=cursor_values,
-                    expected_epochs=cursor_epochs,
-                    expected_sequences=cursor_sequences,
-                    presence=proposed_cursor_presence,
-                    expected_presence=cursor_presence,
-                    event_revisions=proposed_cursor_event_revisions,
-                    expected_event_revisions=cursor_event_revisions,
-                )
-                cursor_prepared = True
-        except (OSError, ValueError) as error:
-            unavailable_spans.extend(
-                stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{str(error)[:120] or 'cursor-state-unavailable'}",
-                ).unavailable_spans
-            )
-            opencode_atoms = []
-            opencode_coverage = []
-        current_settings = self.settings_payload().get("settings", {})
-        rejection_reasons: dict[str, int] = {}
-        for item in scan.items:
-            fields = dict(vars(item.atom))
-            fields["tmux_key"] = item.tmux_key
-            fields["agent_kind"] = item.agent_kind
-            if fields.get("pricing_profile", "default") == "default":
-                fields["pricing_profile"] = configured_usage_pricing_profile(
-                    current_settings,
-                    provider=str(fields.get("provider") or ""),
-                    execution_source=item.agent_kind,
-                    endpoint=str(fields.get("endpoint") or ""),
-                    observed_at=item.atom.timestamp,
-                )
-            try:
-                atoms.append(stats_current_usage.usage_atom_from_source(fields))
-                transcript_atoms_accepted += 1
-            except stats_current_usage.UsageValidationError as error:
-                reason = str(error)[:160] or "usage_validation_error"
-                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-                continue
-        for tmux_key, atom in opencode_atoms:
-            fields = dict(vars(atom))
-            fields["tmux_key"] = tmux_key
-            fields["agent_kind"] = "opencode"
-            fields["agent_id"] = tmux_key
-            if fields.get("pricing_profile", "default") == "default":
-                fields["pricing_profile"] = configured_usage_pricing_profile(
-                    current_settings,
-                    provider=str(fields.get("provider") or ""),
-                    execution_source="opencode",
-                    endpoint=str(fields.get("endpoint") or ""),
-                    observed_at=atom.timestamp,
-                )
-            try:
-                atoms.append(stats_current_usage.usage_atom_from_source(fields))
-            except stats_current_usage.UsageValidationError as error:
-                reason = str(error)[:160] or "usage_validation_error"
-                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-        if "stats_current_client" in self.__dict__ and isinstance(self.stats_current_client, StatsCurrentClient):
-            self.stats_current_client.set_usage_atom_backfill_status(
-                self.stats_current_transcript_usage.usage_atom_backfill_status_for_scan(
-                    scan,
-                    atoms_accepted=transcript_atoms_accepted,
-                    rejection_reasons=rejection_reasons,
-                )
-            )
-        for item in scan.tombstones:
-            tombstones.append(
-                stats_current_usage.legacy_fork_usage_tombstone_from_source(
-                    vars(item.atom)
-                )
-            )
-        process_id, _label, _port = (
-            self.stats_current_process_identity()
+        if fixture_rows:
+            rows_provider = lambda _inventory: self.stats_agent_token_rows(fixture_rows_value)
+        source_identity_provider = (
+            lambda: self.stats_current_process_identity()[0]
             if hasattr(self, "background_owner")
-            else ("web-test", "web-test", 0)
+            else "web-test"
         )
-        cursor_changed = (
-            proposed_cursor_values != cursor_values
-            or proposed_cursor_epochs != cursor_epochs
-            or proposed_cursor_sequences != cursor_sequences
-            or proposed_cursor_presence != cursor_presence
-            or proposed_cursor_event_revisions != cursor_event_revisions
+        backfill_status_sink = (
+            stats_client.set_usage_atom_backfill_status
+            if isinstance(stats_client, StatsCurrentClient)
+            else None
         )
-        transcript_committed = False
-        cursor_committed = not cursor_prepared
+        def read_usage(**kwargs: Any) -> Any:
+            kwargs.pop("database", None)
+            return stats_current_opencode.read_usage(**kwargs)
 
-        def commit_receipt() -> None:
-            nonlocal transcript_committed, cursor_committed
-            if not transcript_committed:
-                self.stats_current_transcript_usage.commit(scan.receipt_id)
-                transcript_committed = True
-            if cursor_prepared and not cursor_committed:
-                opencode_cursors.commit()
-                cursor_committed = True
-
-        def rollback_receipt() -> None:
-            if not transcript_committed:
-                try:
-                    self.stats_current_transcript_usage.rollback(scan.receipt_id)
-                finally:
-                    if cursor_prepared and not cursor_committed:
-                        opencode_cursors.rollback()
-            elif cursor_prepared and not cursor_committed:
-                # The transcript receipt is already durable. Discarding the pending cursor is
-                # safe because the next deterministic atom reuses its event ID and statsd dedupes it.
-                opencode_cursors.rollback()
-        receipt = stats_current_collectors.CollectorReceipt(
-            commit_receipt,
-            rollback_receipt,
+        collector = AgentTokenCollector(
+            scanner=scanner,
+            cursors=cursors,
+            database=database,
+            inventory_provider=inventory_provider,
+            rows_provider=rows_provider,
+            settings_provider=lambda: self.settings_payload().get("settings", {}),
+            source_identity_provider=source_identity_provider,
+            read_usage=read_usage,
+            backfill_status_sink=backfill_status_sink,
         )
-        return stats_current_collectors.usage_scan_success(
-            atoms,
-            tombstones,
-            receipt,
-            epoch_id=attempt.epoch_id,
-            epoch_started_at=attempt.epoch_started_at,
-            observed_at=attempt.scheduled_at,
-            cadence_seconds=attempt.cadence_seconds,
-            owner_generation=attempt.owner_generation,
-            source_id=process_id,
-            unavailable_spans=unavailable_spans,
-            additional_coverage=opencode_coverage,
-            budget_exhausted_follow_up=scan.budget_exhausted,
-        )
+        return collector.collect(attempt)
 
     def latest_stats_sample(self) -> dict[str, Any]:
         """Read the last scheduler-owned CPU sample without collecting in an API thread.
@@ -10207,10 +9879,10 @@ class TmuxWebtermApp:
             self.record_background_fallback(role, result, payload)
         return result
 
-    def refresh_sessions(self, maintenance: bool = True) -> list[str]:
+    def refresh_sessions(self, maintenance: bool = True, *, invalidate_status: bool = True) -> list[str]:
         sessions, error = list_tmux_session_names()
         if error is None:
-            self.apply_session_roster(sessions)
+            self.apply_session_roster(sessions, invalidate_status=invalidate_status)
             if not maintenance:
                 return []
             self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
@@ -10220,7 +9892,7 @@ class TmuxWebtermApp:
             return []
         return [error]
 
-    def apply_session_roster(self, sessions: list[str]) -> bool:
+    def apply_session_roster(self, sessions: list[str], *, invalidate_status: bool = True) -> bool:
         """Install one tmux-session roster and invalidate metadata on membership transitions."""
 
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
@@ -10233,12 +9905,18 @@ class TmuxWebtermApp:
         if not roster:
             self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
+            # The web roster is also the statusd snapshot request's roster owner. Invalidate the
+            # daemon at the same lifecycle boundary so its next generation carries every session
+            # the metadata build just observed; otherwise transcripts and status rows converge on
+            # different rosters until an unrelated status change occurs.
+            if invalidate_status:
+                self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
             # Record the transition only after installing the roster. A build that started before
             # this instant cannot have observed the new membership, so the existing single-flight
             # web owner must either start now or queue one publishing follow-up behind that older
             # build. statusd owns roster production only; it has no browser metadata consumer and
             # must not publish a second transcript-metadata stream from its internal app.
-            self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic())
+            self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
         return membership_changed
 
     def advance_topology_generation(self) -> int:
@@ -11524,6 +11202,7 @@ class TmuxWebtermApp:
         trigger: str,
         force: bool = False,
         compute_ms: float | None = None,
+        completion: dict[str, Any] | None = None,
     ) -> bool:
         return self._watch_bridge.publish_session_files_ready_payload(
             self,
@@ -11533,6 +11212,7 @@ class TmuxWebtermApp:
             trigger=trigger,
             force=force,
             compute_ms=compute_ms,
+            completion=completion,
         )
 
     def start_status_generation_watcher(self, record: ClientEventWatcherRecord) -> bool:
@@ -11808,6 +11488,7 @@ class TmuxWebtermApp:
         replace: bool = False,
         queue_rebuild_after: float | None = None,
         queue_rebuild_publish: bool = False,
+        lifecycle_owner: bool = False,
         pending_generation_out: list[int] | None = None,
     ) -> int:
         """Claim the single-flight build guard, or queue one follow-up build for a caller it cannot answer.
@@ -11839,7 +11520,15 @@ class TmuxWebtermApp:
                 # build cannot refuse every future refresh; the stale worker's later
                 # commit/finish is a no-op because the generation has advanced.
                     if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
-                        if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
+                        lifecycle_owner_observes_current_input = (
+                            lifecycle_owner
+                            and record.worker_lifecycle_owner
+                            and record.worker_input_generation == record.input_generation
+                        )
+                        if queue_rebuild_after is not None and (
+                            started_at is None
+                            or (started_at < queue_rebuild_after and not lifecycle_owner_observes_current_input)
+                        ):
                             record.rebuild_requested = True
                             record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
                             # The queued follow-up commits the generation after the in-flight one.
@@ -11857,6 +11546,8 @@ class TmuxWebtermApp:
             if worker is not None:
                 record.active_workers.add(worker)
             record.worker_started_at = time.monotonic()
+            record.worker_input_generation = record.input_generation
+            record.worker_lifecycle_owner = lifecycle_owner
             record.publish_requested = False
             if pending_generation_out is not None:
                 pending_generation_out.append(record.generation)
@@ -11984,6 +11675,7 @@ class TmuxWebtermApp:
         defer: bool = False,
         *,
         not_before: float | None = None,
+        lifecycle_owner: bool = False,
         pending_generation_out: list[int] | None = None,
     ) -> bool:
         """Start a metadata rebuild.
@@ -12015,6 +11707,7 @@ class TmuxWebtermApp:
             worker,
             queue_rebuild_after=not_before,
             queue_rebuild_publish=publish,
+            lifecycle_owner=lifecycle_owner,
             pending_generation_out=pending_generation_out,
         )
         if generation <= 0:
@@ -16504,8 +16197,8 @@ class TmuxWebtermApp:
             }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
-        self.refresh_sessions()
-        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
+        self.refresh_sessions(invalidate_status=False)
+        self.invalidate_status_topology_async()
         self.log_event(
             None,
             "session_killed",
@@ -16515,6 +16208,20 @@ class TmuxWebtermApp:
             message_params={"session": session},
         )
         return {"session": session, "killed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
+
+    def invalidate_status_topology_async(self) -> None:
+        """Publish a topology invalidation without making the destructive API wait on statusd."""
+        sessions = list(self.sessions)
+        topology_generation = self.topology_generation
+
+        def invalidate() -> None:
+            try:
+                self.status_client.invalidate("tmux-topology", sessions, topology_generation)
+            except Exception:
+                logging.exception("status topology invalidation failed")
+
+        worker = threading.Thread(target=invalidate, name="status-topology-invalidate", daemon=True)
+        common.start_thread_with_rollback(worker, lambda: None)
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
         if session not in self.sessions or direction not in {"up", "down"}:

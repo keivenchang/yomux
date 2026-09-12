@@ -1788,6 +1788,7 @@ const apiOperationState = {
   records: new Map(),
   pending: new Map(),
   terminal: new Map(),
+  repairs: new Set(),
   waiters: new Map(),
 };
 const apiOperationReplayLimit = 128;
@@ -1810,6 +1811,18 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  async awaitPendingOperationReceipts() {
+    while (true) {
+      const pending = Array.from(apiOperationState.pending.values());
+      const baseline = serverWatchRootsState.watchDiffPromise;
+      await Promise.all([
+        ...pending.map(record => record.completionPromise || Promise.resolve()),
+        ...(baseline ? [Promise.resolve(baseline)] : []),
+      ]);
+      const state = this.operationState();
+      if (!state.pending.length && !state.watchRootsPending) return state;
+    }
+  },
   operationState() {
     const finderVisible = typeof fileExplorerTreePaneIsVisible === 'function'
       && fileExplorerTreePaneIsVisible();
@@ -3413,7 +3426,10 @@ function completeApiOperationRecord(record, payload) {
   const result = payload.result;
   record.phase = 'terminal';
   record.cursor = {...payload.operation.cursor};
-  record.source?.close?.();
+  if (typeof currentClientEventTransportLifecycleScope === 'function') {
+    currentClientEventTransportLifecycleScope().release(`operation-replay:${record.id}`, record.source);
+  }
+  if (record.source) record.source.close?.();
   record.source = null;
   apiOperationState.pending.delete(record.id);
   settleApiOperationWaiters(record.id, payload);
@@ -3427,6 +3443,11 @@ function completeApiOperationRecord(record, payload) {
   }
   window.dispatchEvent(new CustomEvent('yolomux:operation-terminal', {detail: payload}));
   enqueueOperationTerminalAck(record.id, record.cursor);
+  if (typeof record.resolveCompletion === 'function') {
+    const resolveCompletion = record.resolveCompletion;
+    record.resolveCompletion = null;
+    resolveCompletion({id: record.id, state: 'terminal'});
+  }
   return true;
 }
 
@@ -3583,6 +3604,9 @@ function startApiOperationTransport(record) {
   // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
   // cover a terminal published before the server subscribes it.
   if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
+  if (typeof repairClientEventOperationTerminalResource === 'function') {
+    repairClientEventOperationTerminalResource(`operation_terminal:${record?.id || ''}`, {pendingOnly: true});
+  }
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -3594,6 +3618,10 @@ function registerApiOperationReceipt(pending) {
   const existing = apiOperationState.records.get(operationId);
   if (existing) return existing;
   const context = operation.context && typeof operation.context === 'object' ? {...operation.context} : {};
+  let resolveCompletion;
+  const completionPromise = new Promise(resolve => {
+    resolveCompletion = resolve;
+  });
   const record = {
     id: operationId,
     request: {...(pending.request || {})},
@@ -3607,6 +3635,8 @@ function registerApiOperationReceipt(pending) {
     journeyId: newClientJourneyId('operation'),
     handlerInvocations: 0,
     phase: 'accepted',
+    completionPromise,
+    resolveCompletion,
     sessionLifecycleToken: context.session && typeof tmuxSessionLifecycleToken === 'function'
       ? tmuxSessionLifecycleToken(context.session)
       : null,
@@ -3615,6 +3645,7 @@ function registerApiOperationReceipt(pending) {
   apiOperationState.pending.set(operationId, record);
   const terminal = apiOperationState.terminal.get(operationId);
   if (terminal && apiOperationTerminalMatchesRecord(record, terminal)) {
+    apiOperationState.repairs.delete(operationId);
     apiOperationState.terminal.delete(operationId);
     apiOperationState.terminal.set(operationId, terminal);
     completeApiOperationRecord(record, terminal);
@@ -5853,7 +5884,7 @@ function writeStoredInfoSubTab(value) {
 }
 
 function readStoredEditorWrap() {
-  return storageGet(fileEditorWrapStorageKey) !== '0';
+  return storageGet(fileEditorWrapStorageKey) === '1';
 }
 
 function writeStoredEditorWrap(value) {
@@ -6320,7 +6351,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return 'theme';
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {
@@ -7594,10 +7625,17 @@ function terminalTextLinks(lineText, rangeForOffsets, y = null) {
 }
 
 function terminalLineLinks(lineText, y) {
-  return terminalTextLinks(lineText, (startIndex, endIndex) => ({
-    start: {x: startIndex + 1, y},
-    end: {x: endIndex, y},
-  }));
+  return terminalTextLinks(lineText, (startIndex, endIndex) => {
+    const range = {
+      start: {x: startIndex + 1, y},
+      end: {x: endIndex, y},
+    };
+    Object.defineProperty(range, 'segments', {
+      value: [{start: {...range.start}, end: {...range.end}}],
+      enumerable: false,
+    });
+    return range;
+  });
 }
 
 function terminalBufferLineText(line) {
@@ -9197,15 +9235,15 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   const url = String(href || '');
   if (!url) return false;
   const selectedText = String(options.selectionText || '');
+  const label = (key, fallback) => {
+    const translated = t(key);
+    return translated === key ? fallback : translated;
+  };
   const action = (reason, handler) => (
     options.term || options.container
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
   appendContextMenuButton(menu, label('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
   appendContextMenuButton(menu, label('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
@@ -10021,8 +10059,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
-    appendTabSplitCommands(menu, item, options);
     if (!slotIsSidePane(sourceSlot)) appendDescription();
+    appendTabSplitCommands(menu, item, options);
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
         menu,
@@ -14117,7 +14155,7 @@ function updateTopbarActivityStatus() {
 function topbarOwnerStatusCombinedHtml(summaries = []) {
   const activeSummaries = summaries.filter(item => item && typeof item === 'object');
   if (!activeSummaries.length) return '';
-  const state = 'leader';
+  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
   const stateLabel = t(`backgroundOwner.role.${state}`);
   return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(stateLabel)}</span></span>`;
@@ -14136,7 +14174,7 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   }));
   const roleStateLines = roleExplainers.map(item => {
     const state = item.summary?.mode;
-    const stateLabel = state;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
     return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
   });
   const lines = [
@@ -14203,7 +14241,21 @@ function showBackgroundOwnerContextMenu(event) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu background-owner-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, t('backgroundOwner.thisServer'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  const alreadyLeader = backgroundOwnerOwnsAllRoles();
+  if (alreadyLeader || readOnlyMode) {
+    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  } else {
+    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
+      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
+      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
+      if (backgroundOwnerCurrentOwnerLive(payload)) {
+        const label = backgroundServerLabel(owner, t('common.unknown'));
+        const message = t('backgroundOwner.takeoverConfirm', {server: label});
+        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+      }
+      claimBackgroundOwnerLeader();
+    }, () => backgroundOwnerContextMenu.close());
+  }
   backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
 }
 
@@ -17707,11 +17759,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
+  if (options.message) showLayoutStatus(options.message, options.messageKind || '');
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
-  } else if (options.message && activeSessions.length) {
-    showLayoutStatus(options.message, options.messageKind || '');
-  } else {
+  } else if (!options.message) {
     resetLayoutStatusSurface();
     updateStatus();
   }
@@ -17810,6 +17861,8 @@ function beginLayoutMutationCompletion(state = null) {
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
   const options = {...current.options, ...next.options};
+  if (next.options.message) options.message = next.options.message;
+  if (next.options.messageKind) options.messageKind = next.options.messageKind;
   const completionGeneration = layoutCompletionGeneration(
     current.options.completionGeneration,
     next.options.completionGeneration,
@@ -19285,7 +19338,7 @@ function createTopbarRightTools() {
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
   // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
   return group;
 }
 
@@ -21392,6 +21445,17 @@ async function installRawFileMediaSource(media, path, options = {}) {
 function releaseRawFileMediaSources(root) {
   for (const media of Array.from(root?.querySelectorAll?.('img, audio, video') || [])) releaseRawFileMediaSource(media);
 }
+
+function waitForImageDecode(image) {
+  if (!image) return Promise.resolve(false);
+  if (Number(image.naturalWidth || 0) > 0 && Number(image.naturalHeight || 0) > 0) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = () => resolve(Number(image.naturalWidth || 0) > 0 && Number(image.naturalHeight || 0) > 0);
+    image.addEventListener?.('load', finish, {once: true});
+    image.addEventListener?.('error', finish, {once: true});
+    if (typeof image.decode === 'function') image.decode().then(finish, finish);
+  });
+}
 function toggleFileExplorer() {
   if (!fileExplorer) return;
   const opening = fileExplorer.hasAttribute('hidden');
@@ -23247,7 +23311,11 @@ function fileExplorerSyncPlan(preferredItem = null) {
 function fileExplorerSyncPlanForFile(path) {
   const target = normalizeDirectoryPath(path || '');
   if (!target) return {session: '', root: '', expandPaths: [], affectedDirs: []};
-  const repo = typeof fileRepoForPath === 'function' ? normalizeDirectoryPath(fileRepoForPath(target)) : '';
+  const payload = fileExplorerFinderSessionFilesState.payload;
+  const payloadFiles = Array.isArray(payload?.files) ? payload.files : [];
+  const payloadFile = payloadFiles.find(file => normalizeDirectoryPath(file?.abs_path || '') === target) || null;
+  const payloadRepo = normalizeDirectoryPath(payloadFile?.repo || '');
+  const repo = payloadRepo || (typeof fileRepoForPath === 'function' ? normalizeDirectoryPath(fileRepoForPath(target)) : '');
   const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
   const targetDir = normalizeDirectoryPath(dirnameOf(target));
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
@@ -23258,7 +23326,8 @@ function fileExplorerSyncPlanForFile(path) {
   if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
     root = normalizedHome;
   }
-  const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
+  const session = String(payload?.session || '')
+    || (typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '');
   const expandPaths = root && targetDir !== root && pathIsInsideDirectory(targetDir, root) ? [targetDir] : [];
   return {
     session,
@@ -23861,9 +23930,11 @@ async function syncFileExplorerRootToActiveFile(path, options = {}) {
 function fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths = []) {
   const root = normalizeDirectoryPath(plan?.root || '');
   if (!root) return [];
+  const affectedAncestors = (plan?.affectedDirs || []).flatMap(path => ancestorPathsUnderRoot(root, path));
   return fileExplorerExpandedPathsForRoot(root, [
     ...rememberedExpandedPaths,
     ...fileExplorerSyncExpansionPaths(plan),
+    ...affectedAncestors,
   ]).filter(path => !fileExplorerSyncPathSuppressed(path));
 }
 
@@ -25427,7 +25498,8 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   const target = normalizeDirectoryPath(path);
   const root = normalizeDirectoryPath(currentFileExplorerRoot());
   updateFileExplorerCurrentFileHighlight();
-  if (!fileExplorerIsOpen() || !pathIsInsideDirectory(target, root)) return;
+  if (!fileExplorerIsOpen()) return;
+  if (!pathIsInsideDirectory(target, root)) return;
   if (!fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'))) return;
   const generation = ++fileExplorerSyncState.generation;
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
@@ -29080,12 +29152,15 @@ function updateOpenFileDirtyFlag(path) {
 
 function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelState(panel)?.historical === true) return false;
+  if (fileEditorPanelMode(panel) === 'diff') return false;
+  if (panel?._cmMergeView) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
   flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
-  state.content = cmContent;
+  const preserveFinalNewline = state.original.endsWith('\n') && cmContent !== state.original && !cmContent.endsWith('\n');
+  state.content = preserveFinalNewline ? `${cmContent}\n` : cmContent;
   updateOpenFileDirtyFlag(path);
   return true;
 }
@@ -29551,7 +29626,8 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffFromRef = payload.from_ref || '';
   state.diffToRef = payload.to_ref || '';
   state.diffWorkingMissing = payload.working_missing === true;
-  if (state.externalMissing && state.diffWorkingMissing) state.content = '';
+  if (!state.dirty && state.externalMissing && state.diffWorkingMissing) state.content = '';
+  if (state.dirty && state.original.endsWith('\n') && !state.content.endsWith('\n')) state.content += '\n';
   state.untracked = payload.untracked === true;
   state.diffLoaded = true;
   state.diffUnavailable = false;
@@ -32422,8 +32498,7 @@ function editorViewModeFor(path, item = null) {
 }
 
 function fileEditorWrapForPath(path, state = null) {
-  if (fileEditorWrapEnabled) return true;
-  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
+  return fileEditorWrapEnabled;
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -32503,12 +32578,14 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
+  if (mode === fileEditorThemeMode && fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
 }
 
 function editorPreviewThemeState() {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
   return activeEditorScheme().dark ? 'dark' : 'light';
 }
 
@@ -32602,15 +32679,15 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 
 function updateEditorThemeButton(button, options = {}) {
   if (!button) return;
-  const includeVanilla = false;
+  const includeVanilla = options.includeVanilla !== false;
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
-  const nextState = previewState === 'dark' ? 'light' : 'dark';
+  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
   button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
   button.classList.toggle(themeBodyClass('light'), previewState === 'light');
-  button.classList.remove('theme-vanilla');
+  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
   button.classList.toggle('theme-with-label', includeVanilla);
-  button.dataset.editorTheme = scheme.id;
+  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
   button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
   button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
   button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
@@ -32620,7 +32697,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button);
+  updateEditorThemeButton(button, {includeVanilla: false});
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));
@@ -32651,8 +32728,12 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
-  document.body?.classList.remove(EDITOR_PREVIEW_VANILLA_CLASS);
-  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
+  document.querySelectorAll('.file-editor-theme-panel').forEach(button => {
+    const panel = button.closest('.file-editor-panel');
+    const state = panel ? fileEditorPanelState(panel) : null;
+    updateEditorThemeButton(button, {includeVanilla: !panel || state?.kind === 'text'});
+  });
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
@@ -32675,8 +32756,13 @@ function setFileEditorPreviewDisplayMode(mode) {
 
 function cycleEditorThemeMode(options = {}) {
   const previewState = editorPreviewThemeState();
+  const includeVanilla = options.includeVanilla !== false;
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
+    return;
+  }
+  if (previewState === 'light' && includeVanilla) {
+    setFileEditorPreviewDisplayMode('vanilla');
     return;
   }
   fileEditorPreviewDisplayMode = 'theme';
@@ -33047,7 +33133,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
-  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state, force: true});
   if (rendered === false) return false;
   restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -36000,7 +36086,7 @@ function endSessionDrag(event) {
   flushDeferredJsDebugPanelRefresh();
   // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
-  dragTimingReport();
+  if (!layoutStatusSurfaceOwnsMessage?.()) dragTimingReport();
 }
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
@@ -38387,6 +38473,8 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, option
   const layoutOptions = {
     focusSession: newSession,
     prune: false,
+    message: localizedHtml('common.renamed', {oldName: oldSession, newName: newSession}),
+    messageKind: 'advisory',
   };
   if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
     layoutOptions.completionGeneration = options.completionGeneration;
@@ -38500,6 +38588,7 @@ async function renameTmuxSession(session, proposedName) {
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
+        showLayoutStatus(localizedHtml('common.renamed', {oldName: session, newName: renamed}), 'advisory');
         closeSessionRenameDialog();
       },
     );
@@ -40530,10 +40619,11 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
   return (Number(rect.height) || 0) >= DOCKVIEW_MIN_LAYOUT_HEIGHT;
 }
 
-function dockviewRootBoundaryDropIntent(event) {
+function dockviewRootBoundaryDropIntent(event, classification = null) {
   if (event?.kind === 'tab') return null;
   if (narrowSingleColumnMode()) return null;
-  const region = dockviewContentDropRegionForEvent(event);
+  classification ||= dockviewDropClassification(event, {skipRoot: true});
+  const region = classification.region;
   if (!region) return null;
   const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
   if (event?.nativeEvent && tabPointerDrag?.item) {
@@ -40544,13 +40634,13 @@ function dockviewRootBoundaryDropIntent(event) {
     // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
     // overlay here would recreate the false top-root drop after the shared pointer resolver
     // rejected it.
-    return dockviewTabPointerRootBoundaryIntentWithMemory(event.nativeEvent, tabPointerDrag);
+    return dockviewTabPointerRootBoundaryIntentWithMemory(classification.pointerEvent, tabPointerDrag);
   }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
   if (!isLayoutItem(item)) return null;
-  const nativeEvent = event.nativeEvent;
+  const nativeEvent = classification.pointerEvent;
   const target = rootBoundaryLayoutTarget();
   const targetRect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   const zoneRect = dockviewRootBoundaryZoneRect(region, targetRect);
@@ -40582,7 +40672,11 @@ function dockviewDragRegionForPoint(x, y) {
   if (!group) return {kind: 'outside', group: null, slot: '', rect: null};
   const slot = dockviewSlotForGroupElement(group);
   const headerRect = dockviewGroupHeaderRect(group);
-  if (dockviewPointInRect(x, y, headerRect)) return {kind: 'tabs', group, slot, rect: headerRect};
+  const groupRect = group.getBoundingClientRect?.();
+  if (dockviewPointInRect(x, y, headerRect)
+    || (groupRect && headerRect && x >= groupRect.left && x <= groupRect.right && y >= groupRect.top && y <= headerRect.bottom)) {
+    return {kind: 'tabs', group, slot, rect: headerRect};
+  }
   const content = Array.from(group.querySelectorAll?.('[data-dockview-region="content"]') || []).find(node =>
     dockviewPointInRect(x, y, node.getBoundingClientRect?.()),
   );
@@ -40595,9 +40689,33 @@ function dockviewDragRegionForEvent(event) {
   return dockviewDragRegionForPoint(Number(event?.clientX), Number(event?.clientY));
 }
 
+function dockviewDropClassification(event, options = {}) {
+  const state = options.state || (options.skipPointerState ? null : dockviewLayoutState.tabPointerDrag);
+  const nativeEvent = event?.nativeEvent || event;
+  const pointerEvent = state ? dockviewTabPointerEvent(nativeEvent, state) : nativeEvent;
+  const region = dockviewDragRegionForEvent(pointerEvent);
+  const zone = region.kind === 'content'
+    ? (narrowSingleColumnMode() ? 'middle' : dropZoneForRect(pointerEvent, region.rect))
+    : null;
+  const classification = {event, nativeEvent, pointerEvent, region, zone, state, rootIntent: null};
+  if (!options.skipRoot && event?.kind !== 'tab' && (region.kind === 'content' || (state?.item && !options.tabInsertion))) {
+    classification.rootIntent = state?.item
+      ? dockviewTabPointerRootBoundaryIntentWithMemory(pointerEvent, state)
+      : dockviewRootBoundaryDropIntent(event, classification);
+  }
+  if (!classification.rootIntent && options.pendingIntent && !options.hasCoordinates) {
+    classification.rootIntent = options.pendingIntent;
+  }
+  if (classification.rootIntent && dockviewPinnedTabRootBoundaryViolation(classification.rootIntent)) {
+    classification.rootIntent = null;
+  }
+  classification.owner = classification.rootIntent ? 'root' : region.kind;
+  return classification;
+}
+
 function dockviewContentDropRegionForEvent(event) {
-  const region = dockviewDragRegionForEvent(event?.nativeEvent || event);
-  return region.kind === 'content' ? region : null;
+  const classification = dockviewDropClassification(event, {skipPointerState: true});
+  return classification.region.kind === 'content' ? classification.region : null;
 }
 
 function dockviewRootBoundaryZoneRect(region, rootRect) {
@@ -40616,16 +40734,16 @@ function dockviewRootBoundaryDropZoneForEvent(event, rect, preferredZone = null)
   return rootBoundaryDropZoneForEvent(event, rect, preferredZone);
 }
 
-function dockviewPaneContentDropInfo(event) {
+function dockviewPaneContentDropInfo(event, classification = dockviewDropClassification(event)) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const region = dockviewContentDropRegionForEvent(event);
+  const region = classification.region;
   if (!region || dockviewTabDropTargetActive(event)) return null;
   const targetSlot = region.slot;
   const targetRect = region.rect;
   const zone = narrowSingleColumnMode()
     ? 'middle'
-    : (event.nativeEvent && targetRect
-      ? dropZoneForRect(event.nativeEvent, targetRect)
+    : (classification.nativeEvent && targetRect
+      ? dropZoneForRect(classification.nativeEvent, targetRect)
       : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
@@ -40649,7 +40767,8 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
   if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return null;
-  const region = dockviewContentDropRegionForEvent(nativeEvent);
+  const classification = dockviewDropClassification(event, {state});
+  const region = classification.region;
   if (!region) return null;
   if (dockviewTabDropTargetActive(event)) return null;
   const dx = Math.abs(pointerX - (Number(state.x) || 0));
@@ -40691,6 +40810,14 @@ function dockviewCommitSideVerticalDrop(intent) {
   });
 }
 
+function dockviewCommitOwnedDrop(event, intent, commit) {
+  if (!intent || typeof commit !== 'function') return false;
+  event?.preventDefault?.();
+  dockviewLayoutState.tabDropHandledAt = Date.now();
+  commit();
+  return true;
+}
+
 function dockviewPaneContentDropIntent(event) {
   const info = dockviewPaneContentDropInfo(event);
   return dockviewPaneContentSplitAllowed(info) ? info.intent : null;
@@ -40712,14 +40839,41 @@ function dockviewPaneContentSplitAllowed(info) {
   );
 }
 
-function dockviewShouldSuppressPaneContentDrop(event) {
-  const info = dockviewPaneContentDropInfo(event);
+function dockviewShouldSuppressPaneContentDrop(event, classification = dockviewDropClassification(event)) {
+  const info = dockviewPaneContentDropInfo(event, classification);
   return Boolean(info && (
     (narrowSingleColumnMode() && event.position !== 'center')
       ||
     !dockviewPaneContentDropAllowed(info)
       || (layoutSplitZone(info.intent.zone) && !dockviewPaneContentSplitAllowed(info))
   ));
+}
+
+function dockviewCommitPaneDrop(event, intent) {
+  if (!intent) return false;
+  if (intent.zone === 'middle') {
+    if (!dockviewPaneContentDropAllowed({item: intent.item, intent})) return false;
+    return dockviewCommitOwnedDrop(event, intent, () => {
+      void moveSessionToSlot(intent.item, intent.targetSlot, intent.sourceSlot, paneTabs(intent.targetSlot).length);
+    });
+  }
+  if (!dockviewPaneContentSplitAllowed({item: intent.item, intent})) return false;
+  return dockviewCommitOwnedDrop(event, intent, () => {
+    void splitSessionAtSlot(intent.item, intent.targetSlot, intent.zone, intent.sourceSlot);
+  });
+}
+
+function dockviewPointerContentDropIntent(event, state) {
+  const classification = dockviewDropClassification(event, {state});
+  if (classification.owner !== 'content' || !classification.region.slot) return null;
+  return {
+    item: state.item,
+    sourceSlot: state.slot,
+    targetSlot: classification.region.slot,
+    targetRect: classification.region.rect,
+    zone: 'middle',
+    createsPane: false,
+  };
 }
 
 function dockviewClearRootBoundaryPreview() {
@@ -40750,8 +40904,9 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const pointerEvent = dockviewTabPointerEvent(event?.nativeEvent);
-  const region = dockviewDragRegionForEvent(pointerEvent);
-  if (event?.kind === 'tab') {
+  const classification = dockviewDropClassification(event);
+  const region = classification.region;
+  if (classification.owner === 'tabs') {
     const tabInsertion = dockviewTabInsertionInfo(event);
     if (tabInsertion) {
       const capacityRefusal = dropIntentCapacityRefusalStatus(tabInsertion.item, {
@@ -40767,7 +40922,7 @@ function dockviewTrackRootBoundaryOverlay(event) {
       return;
     }
   }
-  if (region.kind === 'chrome' || region.kind === 'outside' || (event?.kind === 'tab' && dockviewTabDropTargetActive(event))) {
+  if (classification.owner === 'none' || (event?.kind === 'tab' && dockviewTabDropTargetActive(event))) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearTabInsertionPreview();
     dockviewClearRootBoundaryPreview();
@@ -40783,13 +40938,27 @@ function dockviewTrackRootBoundaryOverlay(event) {
       || dockviewTabStripEndDropViolatesPinnedPartition(customPointerInsertion)
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
-  const paneInfo = dockviewPaneContentDropInfo(event);
-  if (paneInfo?.intent) {
-    // Dockview owns previews for every pane-content zone. Clear any legacy custom group/grid
-    // overlay first; otherwise native and app previews render as multiple yellow boxes.
-    clearDropPreview();
+  const paneInfo = dockviewPaneContentDropInfo(event, classification);
+  if (classification.owner === 'root' && classification.rootIntent) {
+    dockviewLayoutState.pendingRootBoundaryDrop = {
+      ...classification.rootIntent,
+      signature: layoutSlotsSignature(layoutSlots),
+    };
+    dockviewClearTabInsertionPreview();
+    dockviewShowRootBoundaryPreview(classification.rootIntent);
+    event.preventDefault?.();
+    return;
+  }
+  if (classification.owner === 'content') {
+    // Dockview owns pane-content previews. Retire only custom owners; clearing the shared preview
+    // here also clears Dockview's native edge preview before it can paint.
+    dockviewClearRootBoundaryPreview();
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearTabInsertionPreview();
+    if (paneInfo && dockviewShouldSuppressPaneContentDrop(event, classification)) {
+      dockviewSetInvalidTabDropPreview(true);
+      event.preventDefault?.();
+    }
     return;
   }
   const pointerCapacityRefusal = customPointerInsertion
@@ -40817,7 +40986,7 @@ function dockviewTrackRootBoundaryOverlay(event) {
     dockviewClearRootBoundaryPreview();
     return;
   }
-  const intent = dockviewRootBoundaryDropIntent(event);
+  const intent = dockviewRootBoundaryDropIntent(event, classification);
   if (dockviewPinnedTabRootBoundaryViolation(intent)) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
@@ -41349,16 +41518,8 @@ function dockviewTrackTabPointerDrag(event) {
   state.dragged = true;
   beginLayoutMutationCompletion(state);
   const tabInsertion = dockviewTabInsertionInfoForPointer(pointerEvent, state);
-  const targetGroup = dockviewGroupForPoint(pointerEvent.clientX, pointerEvent.clientY);
-  const targetHeader = dockviewGroupHeaderRect(targetGroup);
-  const targetRect = targetGroup?.getBoundingClientRect?.();
-  const overTabHeader = Boolean(
-    tabInsertion
-      && targetHeader
-      && targetRect
-      && pointerEvent.clientY >= targetRect.top
-      && pointerEvent.clientY <= targetHeader.bottom,
-  );
+  const classification = dockviewDropClassification(pointerEvent, {state, tabInsertion});
+  const overTabHeader = Boolean(tabInsertion && classification.region.kind === 'tabs');
   if (overTabHeader) {
     state.lastTabInsertion = tabInsertion;
     const capacityRefusal = dropIntentCapacityRefusalStatus(tabInsertion.item, {
@@ -41382,6 +41543,7 @@ function dockviewTrackTabPointerDrag(event) {
     dockviewShowRootBoundaryPreview(intent);
     return;
   }
+  if (classification.region.kind === 'tabs') return;
   dockviewClearRootBoundaryPreview();
   const contentRegion = dockviewContentDropRegionForEvent(pointerEvent);
   if (!contentRegion) return;
@@ -41395,7 +41557,8 @@ function dockviewTrackTabPointerDrag(event) {
 function dockviewFinishTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   const releaseEvent = dockviewTabPointerEvent(event, state);
-  const releaseRegion = dockviewDragRegionForEvent(releaseEvent);
+  const classification = dockviewDropClassification(releaseEvent, {state});
+  const releaseRegion = classification.region;
   dockviewLayoutState.tabPointerDrag = null;
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
@@ -41438,24 +41601,20 @@ function dockviewFinishTabPointerDrag(event) {
     // This gesture belongs to the app layout, not Dockview's center-stack transaction. Commit it
     // before Dockview can flatten the tab back into one group. Keep propagation intact so Dockview
     // can remove its own drag ghost; preventDefault marks the release as app-owned.
-    releaseEvent.preventDefault?.();
-    dockviewLayoutState.tabDropHandledAt = Date.now();
-    void dockviewCommitSideVerticalDrop(sideIntent);
+    dockviewCommitOwnedDrop(releaseEvent, sideIntent, () => void dockviewCommitSideVerticalDrop(sideIntent));
     return;
   }
   const hasReleaseCoordinates = Number.isFinite(Number(event?.clientX))
     && Number.isFinite(Number(event?.clientY))
     && (Number(event.clientX) !== 0 || Number(event.clientY) !== 0);
   const rootIntent = releaseRegion.kind === 'content'
-    ? dockviewTabPointerRootBoundaryIntentWithMemory(releaseEvent, state)
+    ? (classification.rootIntent || state.lastRootBoundaryIntent)
     : (hasReleaseCoordinates ? null : state.lastRootBoundaryIntent);
   if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
     // The app owns the visible root-edge preview. Commit it before Dockview's generic tab-drop
     // stamp can make the pointer fallback stand down without producing the requested root split.
-    releaseEvent.preventDefault?.();
-    dockviewLayoutState.tabDropHandledAt = Date.now();
     beginLayoutMutationCompletion(state);
-    void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
+    dockviewCommitOwnedDrop(releaseEvent, rootIntent, () => void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot));
     return;
   }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(releaseEvent, state);
@@ -41466,16 +41625,8 @@ function dockviewFinishTabPointerDrag(event) {
     }, 0);
     return;
   }
-  const contentRegion = dockviewContentDropRegionForEvent(releaseEvent);
-  const contentTargetSlot = contentRegion?.slot || '';
-  const contentIntent = contentTargetSlot ? {
-    item: state.item,
-    sourceSlot: state.slot,
-    targetSlot: contentTargetSlot,
-    targetRect: contentRegion?.rect || null,
-    zone: 'middle',
-    createsPane: false,
-  } : null;
+  const contentIntent = dockviewPointerContentDropIntent(releaseEvent, state);
+  const contentTargetSlot = contentIntent?.targetSlot || '';
   if (
     contentTargetSlot
     && contentTargetSlot !== state.slot
@@ -41535,7 +41686,8 @@ function dockviewFinishPendingRootBoundaryDrop(event) {
   const x = Number(event?.clientX);
   const y = Number(event?.clientY);
   const hasCoordinates = Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0);
-  if (hasCoordinates && dockviewDragRegionForEvent(event).kind !== 'content') {
+  const classification = dockviewDropClassification(event, {pendingIntent: pending, hasCoordinates});
+  if (hasCoordinates && classification.owner !== 'content') {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     return;
   }
@@ -42019,7 +42171,8 @@ function dockviewInit() {
         }
       }
       const pointerEvent = dockviewTabPointerEvent(event.nativeEvent);
-      const region = dockviewDragRegionForEvent(pointerEvent);
+      const classification = dockviewDropClassification(event);
+      const region = classification.region;
       if (region.kind === 'chrome' || region.kind === 'outside') {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -42071,7 +42224,7 @@ function dockviewInit() {
         });
         return;
       }
-      const rootIntent = dockviewRootBoundaryDropIntent(event);
+      const rootIntent = classification.rootIntent || dockviewRootBoundaryDropIntent(event, classification);
       if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -42142,7 +42295,7 @@ function dockviewInit() {
         });
         return;
       }
-      const paneInfo = dockviewPaneContentDropInfo(event);
+      const paneInfo = dockviewPaneContentDropInfo(event, classification);
       const capacityRefusal = paneInfo?.intent?.zone === 'middle'
         ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
         : '';
@@ -42156,27 +42309,19 @@ function dockviewInit() {
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.
-      if (paneInfo && paneInfo.intent.zone === 'middle' && dockviewPaneContentDropAllowed(paneInfo)) {
+      if (paneInfo && paneInfo.intent.zone === 'middle' && dockviewCommitPaneDrop(event, paneInfo.intent)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
-        event.preventDefault();
-        queueMicrotask(() => {
-          void moveSessionToSlot(paneInfo.item, paneInfo.intent.targetSlot, paneInfo.intent.sourceSlot, paneTabs(paneInfo.intent.targetSlot).length);
-        });
         return;
       }
       const paneIntent = dockviewPaneContentDropIntent(event);
       if (paneIntent) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
-        event.preventDefault();
-        dockviewLayoutState.tabDropHandledAt = Date.now();
-        queueMicrotask(() => {
-          void splitSessionAtSlot(paneIntent.item, paneIntent.targetSlot, paneIntent.zone, paneIntent.sourceSlot);
-        });
+        dockviewCommitPaneDrop(event, paneIntent);
         return;
       }
-      if (dockviewShouldSuppressPaneContentDrop(event)) {
+      if (dockviewShouldSuppressPaneContentDrop(event, classification)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
@@ -49698,12 +49843,12 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
       preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
-      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ]}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
       preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
       preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
       preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
@@ -66743,6 +66888,9 @@ async function fetchSessionFiles(options = {}) {
   const backgroundRefresh = options.background === true;
   const cacheOnly = options.cacheOnly === true;
   const cacheView = String(options.cacheView || '');
+  const completionIdentity = String(options.completionIdentity || '');
+  const completionStateKey = String(options.completionStateKey || '');
+  const applyCompletion = options.applyCompletion !== false;
   const visible = surface.visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
@@ -66806,6 +66954,17 @@ async function fetchSessionFiles(options = {}) {
     const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
+    if (completionIdentity) {
+      const completion = sessionFilesCompletionRevalidations.get(completionStateKey);
+      if (completion?.identity !== completionIdentity) return false;
+      if (applyCompletion) {
+        if (completion.applicationClaimed) return true;
+        completion.applicationClaimed = true;
+      } else {
+        return true;
+      }
+      if (signature === sessionFilesSignatureForDestination(destination)) return true;
+    }
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     if (cacheOnly && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return true;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -66896,6 +67055,19 @@ function sessionFilesCompletionIdentity(completion = {}) {
   return cacheView && generation ? `${generation}\x1f${cacheView}` : '';
 }
 
+function claimSessionFilesCompletionApplication(destination, session, completionIdentity) {
+  if (!completionIdentity) return true;
+  const stateKey = `${destination}\x1f${session}`;
+  const existing = sessionFilesCompletionRevalidations.get(stateKey);
+  if (existing?.identity === completionIdentity) {
+    if (existing.applicationClaimed) return false;
+    existing.applicationClaimed = true;
+    return true;
+  }
+  sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, applicationClaimed: true, promise: null});
+  return true;
+}
+
 function sessionFilesCompletionCandidates(completion = {}) {
   const completedSession = String(completion.session || '');
   const requestDescriptor = String(completion.request_descriptor || '');
@@ -66921,10 +67093,14 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
   for (const candidate of sessionFilesCompletionCandidates(completion)) {
     const stateKey = `${candidate.destination}\x1f${candidate.request.session}`;
     const existing = sessionFilesCompletionRevalidations.get(stateKey);
-    if (existing?.identity === completionIdentity) {
-      attempts.push(existing.promise || Promise.resolve(existing.acknowledged));
+    if (existing?.identity === completionIdentity && existing.promise) {
+      attempts.push(existing.promise);
       continue;
     }
+    const state = existing?.identity === completionIdentity
+      ? existing
+      : {identity: completionIdentity, applicationClaimed: false, promise: null};
+    sessionFilesCompletionRevalidations.set(stateKey, state);
     const run = async () => {
       // A completion cannot be acknowledged while an ordinary request owns this destination:
       // that response may be older than the opaque view. Wait for it to settle, then read the
@@ -66937,6 +67113,9 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
         silent: true,
         cacheOnly: true,
         cacheView,
+        completionIdentity,
+        completionStateKey: stateKey,
+        applyCompletion: state.applicationClaimed !== true,
       });
       const current = sessionFilesCompletionRevalidations.get(stateKey);
       if (current?.identity !== completionIdentity) return false;
@@ -66949,18 +67128,20 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
     // A newer completion is serialized after the destination's finite older cache read. Starting
     // both would abort the old response and turn normal EventSource ordering into a timing race.
     const promise = (existing?.promise ? existing.promise.then(run, run) : run());
-    sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, acknowledged: false, promise});
+    state.promise = promise;
     attempts.push(promise);
   }
   const outcomes = await Promise.all(attempts);
   return outcomes.some(Boolean);
 }
 
-function applySessionFilesPayloadToDestination(destination, payload, request, session) {
+function applySessionFilesPayloadToDestination(destination, payload, request, session, completionIdentity = '') {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+  if (completionIdentity && signature === sessionFilesSignatureForDestination(destination)) return false;
   const wasLoading = sessionFilesLoadingForDestination(destination);
+  if (!wasLoading && signature === sessionFilesSignatureForDestination(destination)) return false;
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   // The accepted payload owns the visible state, but aborting an already-dispatched finite
@@ -66986,14 +67167,16 @@ function applySessionFilesPeerPayloadToDestination(destination, payload, request
   return applySessionFilesPayloadToDestination(destination, payload, request, session);
 }
 
-function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+function applySessionFilesPayloadFromPush(payload = {}, request = {}, options = {}) {
   const session = String(payload.session || request.session || '');
   if (!session) return false;
+  const completionIdentity = sessionFilesCompletionIdentity(options.completion || {});
   const destinations = sessionFilesDestinationsForRequest(request, session);
   if (!destinations.length) return false;
   let applied = false;
   for (const destination of destinations) {
-    applied = applySessionFilesPayloadToDestination(destination, payload, request, session) || applied;
+    if (!claimSessionFilesCompletionApplication(destination, session, completionIdentity)) continue;
+    applied = applySessionFilesPayloadToDestination(destination, payload, request, session, completionIdentity) || applied;
   }
   if (applied && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   return applied;
@@ -67749,9 +67932,10 @@ function syncFileExplorerDiffSessionControls() {
 
 function syncFileExplorerSessionControlVisibility(scope = document) {
   for (const control of scope.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
-    const visible = fileExplorerRootMode === 'sync';
-    control.hidden = !visible;
-    control.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    // The selected session remains useful in fixed mode for session-files state and later Sync
+    // activation. Root movement is owned by scheduleFileExplorerActiveTabSync, which is Sync-only.
+    control.hidden = false;
+    control.setAttribute('aria-hidden', 'false');
   }
 }
 
@@ -68637,7 +68821,7 @@ function createFileExplorerPanel(item = finderItemId) {
           </div>
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
-            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
+             ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row">
             <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
@@ -68889,10 +69073,13 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
   if (options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
-    if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
-    else if (options.sourceSurface !== 'view-editor') renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    if (!panel?._pmView && options.sourceSurface !== 'view-editor') {
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    }
   }
-  if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+  if (panel?._pmView && options.sourceSurface !== 'view-editor') {
+    syncProseMirrorPanelSource(panel, path, state, {sourceSurface: options.sourceSurface});
+  }
   if (options.sourceSurface === 'view-editor') syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'view-editor');
   else if (panel?._cmView && options.previewEdit !== true) syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'text-editor');
   if (options.previewEdit === true) scheduleFileEditorPreviewPropagation(panel, path);
@@ -69282,7 +69469,7 @@ function createFileEditorPanel(item) {
         renderFileEditorPanel(panel, item);
       }
     },
-    'editor-theme': () => cycleEditorThemeMode(),
+    'editor-theme': () => cycleEditorThemeMode({includeVanilla: fileEditorPanelState(panel)?.kind === 'text'}),
   }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -70903,6 +71090,18 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
+function prosemirrorPreviewImageSource(image, path) {
+  if (!image || !path) return Promise.resolve(false);
+  const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
+  if (!target || target.external) return Promise.resolve(false);
+  return installRawFileMediaSource(image, target.path, {
+    onFailure: error => {
+      image.classList.add('prosemirror-image-error');
+      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+    },
+  }).then(result => result.ok === true);
+}
+
 function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
@@ -70943,8 +71142,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser does not discard a load from a detached image.
+    // request after attachment so the browser cannot start a relative request before authentication.
     img.dataset.markdownRawPath = target.path;
+    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -71047,9 +71247,13 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  appendContextMenuButton(menu, t('contextmenu.copyText'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  const label = (key, fallback) => {
+    const translated = t(key);
+    return translated === key ? fallback : translated;
+  };
+  appendContextMenuButton(menu, label('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
-  appendContextMenuButton(menu, t('contextmenu.copyWithStyle'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
+  appendContextMenuButton(menu, label('contextmenu.copyWithStyle', 'Copy with style'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -71176,7 +71380,7 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (path && panel) void saveFileEditor(path, panel);
     });
     scope.ownEvent('input', container, 'input', event => {
-      if (event.target?.closest?.('.ProseMirror')) return;
+      if (event.target?.closest?.('.ProseMirror') && !event.target?.closest?.('[data-markdown-preview-editable="true"]')) return;
       const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
         || container._markdownPreviewActiveBlock
         || markdownPreviewSelectionContext(container)?.block;
@@ -71633,10 +71837,23 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    img.src = rawFileUrl(rawPath);
+    if (img.isConnected) {
+      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
+        onFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+        onDecodeFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+      }));
+    }
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -71645,7 +71862,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages]);
+  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -71657,14 +71874,9 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (true) {
-    container.querySelectorAll('pre code').forEach(block => {
-      if (typeof window.hljs !== 'undefined') {
-        try { window.hljs.highlightElement(block); } catch (_) {}
-      }
-      applyMarkdownFenceFallbackHighlight(block);
-    });
-  }
+  container.querySelectorAll('pre code').forEach(block => {
+    applyMarkdownFenceHighlight(block);
+  });
 }
 
 function markdownFenceLanguage(block) {
@@ -71673,7 +71885,25 @@ function markdownFenceLanguage(block) {
     const match = String(className || '').match(/^(?:language|lang)-(.+)$/);
     if (match) return match[1].toLowerCase();
   }
-  return '';
+  const params = block?.parentElement?.getAttribute?.('data-params') || '';
+  return String(params).trim().split(/\s+/, 1)[0].toLowerCase();
+}
+
+function applyMarkdownFenceHighlight(block) {
+  if (!block) return;
+  const language = markdownFenceLanguage(block);
+  if (language && !Array.from(block.classList).some(className => /^(?:language|lang)-/.test(className))) {
+    block.classList.add(`language-${language}`);
+  }
+  if (fileEditorPreviewDisplayMode === 'vanilla') return;
+  if (typeof window.hljs !== 'undefined') {
+    try { window.hljs.highlightElement(block); } catch (_) {}
+  }
+  applyMarkdownFenceFallbackHighlight(block);
+}
+
+function refreshMarkdownFenceHighlights(container) {
+  container?.querySelectorAll?.('pre > code').forEach(applyMarkdownFenceHighlight);
 }
 
 function isMermaidFenceLanguage(language) {
@@ -72121,6 +72351,11 @@ function previewZoomStateForAction(actionId, currentScale) {
   return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
 }
 
+function previewZoomStateForRender(options = {}) {
+  const state = previewZoomReadState(options);
+  return state.mode === 'fit' ? {mode: 'fit', scale: 1} : state;
+}
+
 function clampPreviewZoomScale(scale) {
   const value = Number.parseFloat(String(scale || ''));
   if (!Number.isFinite(value)) return 1;
@@ -72268,7 +72503,7 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
   const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
   const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
   const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
-  const state = previewZoomReadState({...options, shell});
+  const state = previewZoomStateForRender({...options, shell});
   const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
   const size = previewZoomContentSize(content);
   const scaledWidth = Math.max(1, Math.round(size.width * scale));
@@ -73435,10 +73670,11 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  const vanilla = false;
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  refreshMarkdownFenceHighlights(container);
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {
     owner: 'preview-render-restore', previewSurface: renderer.id, renderContext: previewContext, renderGeneration,
@@ -74210,7 +74446,10 @@ function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) 
 }
 
 function previewPopoutBodyClassName() {
-  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => document.body?.classList?.contains(name));
+  const classes = PREVIEW_POPOUT_BODY_CLASSES.filter(name => (
+    document.body?.classList?.contains(name)
+    || (name === EDITOR_PREVIEW_VANILLA_CLASS && fileEditorPreviewDisplayMode === 'vanilla')
+  ));
   classes.push('file-preview-popout-window');
   return classes.join(' ');
 }
@@ -74254,18 +74493,24 @@ function previewPopoutVariableStyle() {
     const value = root.getPropertyValue(source).trim();
     return value ? `${target}: ${value}` : '';
   });
+  if (fileEditorPreviewDisplayMode === 'vanilla') {
+    copied.push('--editor-preview-bg: var(--paint-white)', '--editor-scheme-fg: var(--markdown-html-light-text)');
+  }
   return [...copied, ...aliased].filter(Boolean)
     .join('; ');
 }
 
 function previewPopoutToolbarHtml() {
+  const themeState = editorPreviewThemeState();
+  const themeShort = editorPreviewThemeShortLabel(themeState);
+  const themeNext = editorPreviewThemeShortLabel(themeState === 'dark' ? 'light' : (themeState === 'light' ? 'vanilla' : 'dark'));
   return `
       <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
         <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
         <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
         <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
       </span>
-      <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
+      <button type="button" class="file-editor-theme-panel theme-with-label" data-preview-popout-theme data-editor-theme="${esc(themeState)}" data-editor-theme-short="${esc(themeShort)}" data-editor-theme-next="${esc(themeNext)}" title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span><span class="file-editor-theme-label">${esc(themeShort)}</span></button>`;
 }
 
 function snapshotRenderedPreviewContainer(scratch) {
@@ -74775,7 +75020,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   if (!doc) return;
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton);
+  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorPreviewFontControls(doc);
   hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc);
 }
@@ -75168,15 +75413,23 @@ function codeMirrorContextMenuSelectionExtension(api) {
     let pending = null;
     let clearTimer = null;
     const handlers = api.EditorView.domEventHandlers({
+      mousedown(event, view) {
+        if (event.button !== 2) return false;
+        pending = {selection: view.state.selection};
+        clearTimeout(clearTimer);
+        clearTimer = setTimeout(() => { pending = null; }, 250);
+        return false;
+      },
       contextmenu(event, view) {
         // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
         // CodeMirror then observes that DOM change and replaces its own selection, which is especially
         // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = view.state.selection;
+        const selection = pending?.selection || view.state.selection;
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
-        if (!clickedSelection) return false;
         const panel = view.dom.closest('.file-editor-panel');
+        const isDiff = panel?._cmMode === 'diff';
+        const clickedSelection = isDiff || selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
+        if (!clickedSelection) return false;
         const path = panel?.dataset?.filePath || '';
         if (previewKindForPath(path) === 'markdown') {
           const range = selection.main;
@@ -75198,6 +75451,15 @@ function codeMirrorContextMenuSelectionExtension(api) {
         clearTimer = setTimeout(() => {
           if (pending === captured) pending = null;
         }, 250);
+        requestAnimationFrame(() => {
+          if (pending !== captured || !view.dom?.isConnected) return;
+          if (!view.state.selection.eq(captured.selection)) {
+            view.dispatch({selection: captured.selection});
+            updateCodeMirrorCursorStatus(view.dom.closest('.file-editor-panel'));
+          }
+          pending = null;
+          clearTimeout(clearTimer);
+        });
         return false;
       },
     });
@@ -75427,7 +75689,11 @@ function reconfigureCodeMirrorPanelEditorOptions(panel) {
   const compartment = panel?._cmEditorOptionCompartment;
   const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
-  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
+  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, {
+    ...(panel._cmEditorOptionConfig || {}),
+    path: panel._cmPath,
+    state: fileState.get(panel._cmPath),
+  }));
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
@@ -76424,7 +76690,8 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    else renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state, force: true});
   }
 }
 
@@ -76438,7 +76705,10 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    if (mode === 'split') {
+      if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
+      else renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: mode, state, force: true});
+    }
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -76472,10 +76742,14 @@ function renderFileEditorPanel(panel, item, options = {}) {
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
-    const previousActiveFile = activeFile;
     activeFile = path;
-    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
-    else updateFileExplorerCurrentFileHighlight();
+    if (fileExplorerRootModeValue?.() === 'sync') {
+      requestAnimationFrame(() => {
+        syncFileExplorerRootToActiveFile(path, {force: true}).catch(error => {
+          console.warn('Finder active file sync failed', error);
+        });
+      });
+    } else scheduleFileExplorerActiveFileReveal(path);
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }
@@ -77705,10 +77979,13 @@ function prosemirrorFailureMessage(error) {
 function renderProseMirrorFailure(panel, path, parts, error) {
   const pane = parts?.previewPane;
   if (!pane) return false;
+  const source = fileEditorPanelState(panel)?.content || '';
+  if (pane.dataset.prosemirrorState === 'error' && panel._pmFailureSource === source) return true;
   const message = prosemirrorFailureMessage(error);
   panel._pmError = message;
+  panel._pmFailureSource = source;
   panel._pmRequired = true;
-  renderMarkdownPreviewInto(pane, fileEditorPanelState(panel)?.content || '', path, {context: fileEditorPanelMode(panel), readOnly: true});
+  renderMarkdownPreviewInto(pane, source, path, {context: fileEditorPanelMode(panel), readOnly: true, historical: true});
   const failure = document.createElement('section');
   failure.className = 'file-editor-prosemirror-error file-editor-prosemirror-watermark';
   failure.setAttribute('role', 'alert');
@@ -77869,9 +78146,26 @@ function prosemirrorMarkdownParser(api, schema) {
     const ignoredCommentRanges = [];
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
       const normalized = [];
+      let listItemDepth = 0;
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if (token.type === 'list_item_open') listItemDepth += 1;
+        if (token.type === 'inline' && listItemDepth > 0) {
+          const firstText = token.children?.find(child => child.type === 'text');
+          const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\]\s+/);
+          if (taskMarker) {
+            token.content = token.content.slice(taskMarker[0].length);
+            let remaining = taskMarker[0].length;
+            for (const child of token.children || []) {
+              if (remaining <= 0 || child.type !== 'text') continue;
+              const removed = Math.min(remaining, child.content.length);
+              child.content = child.content.slice(removed);
+              remaining -= removed;
+            }
+            token.children = (token.children || []).filter(child => child.type !== 'text' || child.content);
+          }
+        }
         if ((token.type === 'html_inline' || token.type === 'html_block') && /^<!--[\s\S]*-->$/.test(html)) {
           // Keep comments in the document as hidden atoms so ViewEditor never paints them but a
           // later edit/save can serialize their exact contents instead of deleting user metadata.
@@ -77922,10 +78216,15 @@ function prosemirrorMarkdownParser(api, schema) {
         }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
+        if (token.type === 'list_item_close') listItemDepth = Math.max(0, listItemDepth - 1);
       }
       return normalized;
     };
-    const tokens = normalizeHtmlTokens(markdownItParse(source, environment));
+    const parseSource = String(source || '').replace(
+      /<details>\s*\n\s*<summary>([\s\S]*?)<\/summary>/gi,
+      '<details><summary>$1</summary>',
+    );
+    const tokens = normalizeHtmlTokens(markdownItParse(parseSource, environment));
     // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
     // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
     const spacedTokens = [];
@@ -77997,6 +78296,27 @@ function prosemirrorMarkdownParser(api, schema) {
     superscript: {mark: 'superscript'},
   };
   return new api.MarkdownParser(schema, tokenizer, tokens);
+}
+
+const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
+const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
+  'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
+  'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'div', 'dl', 'dt', 'em',
+  'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+  'hgroup', 'html', 'i', 'iframe', 'input', 'ins', 'label', 'legend', 'li', 'link', 'main', 'map', 'menu',
+  'meta', 'meter', 'nav', 'noscript', 'object', 'ol', 'optgroup', 'option', 'output', 'p', 'picture', 'pre',
+  'progress', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'script', 'section', 'select', 'small', 'source', 'span',
+  'strong', 'style', 'sub', 'summary', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead',
+  'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video',
+]);
+
+function prosemirrorUnsupportedHtmlSource(source) {
+  const tags = String(source || '').matchAll(/<\/?([a-z][a-z0-9:-]*)\b[^>]*>/gi);
+  for (const match of tags) {
+    const name = match[1].toLowerCase();
+    if (PROSEMIRROR_KNOWN_HTML_TAGS.has(name) && !PROSEMIRROR_SAFE_HTML_TAGS.has(name)) return match[0];
+  }
+  return null;
 }
 
 function prosemirrorMarkdownSerializer(api) {
@@ -78087,20 +78407,159 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   image.alt = node.attrs.alt || '';
   if (node.attrs.title) image.title = node.attrs.title;
   image.dataset.originalSrc = original;
+  image.loading = 'eager';
+  image.decoding = 'async';
+  image.style.display = 'inline-block';
+  image.style.verticalAlign = 'text-bottom';
   const target = markdownPreviewImageTarget(original, markdownPath);
   if (!target) {
     image.src = original;
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(waitForImageDecode(image));
   } else if (target.external) {
     image.src = target.src;
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(waitForImageDecode(image));
   } else {
     image.dataset.resolvedPath = target.path;
-    image.src = rawFileUrl(target.path);
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(new Promise(resolve => requestAnimationFrame(() => (
+      prosemirrorPreviewImageSource(image, markdownPath).then(resolve)
+    ))));
     image.addEventListener('error', () => {
       image.classList.add('prosemirror-image-error');
       image.title = t('preview.markdown.imageUnavailable', {path: target.path});
     }, {once: true});
   }
   return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function prosemirrorCodeBlockNodeView(node, panel, markdownPath) {
+  const language = String(node.attrs.params || '').trim().split(/\s+/, 1)[0].toLowerCase();
+  if (!isMermaidFenceLanguage(language)) {
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    if (language) {
+      pre.dataset.params = language;
+      code.className = `language-${language}`;
+    }
+    pre.appendChild(code);
+    let observer = null;
+    const highlight = () => {
+      if (!code.isConnected || !code.textContent) return;
+      observer?.disconnect();
+      observer = null;
+      applyMarkdownFenceHighlight(code);
+    };
+    if (typeof MutationObserver === 'function') {
+      observer = new MutationObserver(highlight);
+      observer.observe(code, {childList: true, subtree: true, characterData: true});
+    }
+    requestAnimationFrame(highlight);
+    return {dom: pre, contentDOM: code, destroy() { observer?.disconnect(); }};
+  }
+  const host = document.createElement('div');
+  host.className = 'mermaid-preview-host';
+  panel._pmMediaPromises ||= [];
+  panel._pmMediaPromises.push(renderMermaidSourceInto(host, node.textContent || '', {
+    full: false,
+    path: markdownPath,
+    zoomKey: 'mermaid',
+  }));
+  return {dom: host};
+}
+
+function hydrateProseMirrorExternalImages(panel, path) {
+  const promises = [];
+  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image') || [])) {
+    if (image.naturalWidth > 0) continue;
+    const target = markdownPreviewImageTarget(image.dataset.originalSrc || '', path);
+    if (!target?.external) continue;
+    image.src = target.src;
+    promises.push(waitForImageDecode(image));
+  }
+  if (promises.length) panel._pmMediaPromises = [...(panel._pmMediaPromises || []), ...promises];
+}
+
+function prosemirrorTaskListItemNodeView(task) {
+  const dom = document.createElement('li');
+  const contentDOM = document.createElement('div');
+  if (task) {
+    const input = document.createElement('input');
+    input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
+    input.type = 'checkbox';
+    input.checked = task.checked;
+    input.dataset.sourceLine = String(task.line);
+    dom.appendChild(input);
+  }
+  dom.appendChild(contentDOM);
+  return {dom, contentDOM};
+}
+
+function applyProseMirrorPreviewDisplayMode(container) {
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  container.classList.toggle('vanilla-preview-body', vanilla);
+  container.classList.toggle('editor-preview-vanilla', vanilla);
+  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
+  container.style.setProperty('color', vanilla ? '#111827' : '');
+  container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => {
+    node.style.setProperty('color', vanilla ? '#111827' : '', 'important');
+  });
+}
+
+function bindProseMirrorTaskCheckboxes(container, source, markdownPath) {
+  if (!container) return;
+  if (markdownPath) container.dataset.mdPath = markdownPath;
+  const tasks = String(source || '').split('\n').map((line, index) => {
+    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
+    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
+  }).filter(Boolean);
+  const items = Array.from(container.querySelectorAll('li')).filter(item => item.parentElement?.tagName === 'UL' || item.parentElement?.tagName === 'OL');
+  for (const [index, item] of items.entries()) {
+    const task = tasks[index];
+    if (!task) continue;
+    const input = Array.from(item.children).find(child => child.tagName === 'INPUT' && child.type === 'checkbox') || document.createElement('input');
+    input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
+    input.type = 'checkbox';
+    input.checked = task.checked;
+    input.dataset.sourceLine = String(task.line);
+    input.disabled = readOnlyMode || container._markdownReadOnly === true;
+    input.dataset.sourceLine = String(task.line || index + 1);
+    if (!input.parentElement) item.insertBefore(input, item.firstChild);
+  }
+  if (markdownPath) {
+    bindMarkdownTaskCheckboxes(container, source, markdownPath);
+    container.addEventListener('change', event => {
+      const input = event.target?.closest?.('input.markdown-task-checkbox[data-source-line]');
+      if (!input) return;
+      updateMarkdownTaskFromPreview(container, input);
+    }, {once: true});
+  }
+}
+
+function applyProseMirrorCodeBlockLanguages(view, source = '') {
+  if (!view?.dom) return;
+  const sourceLanguages = String(source).split('\n')
+    .filter(line => line.startsWith('```'))
+    .map(line => line.slice(3).trim().split(/\s+/, 1)[0].toLowerCase());
+  Array.from(view.dom.querySelectorAll('pre')).forEach((pre, index) => {
+    const code = pre?.querySelector('code');
+    const language = String(pre.dataset.params || code?.dataset.params || '').trim().split(/\s+/, 1)[0].toLowerCase()
+      || sourceLanguages[index] || '';
+    if (code && language) {
+      pre.dataset.params = language;
+      code.classList.add(`language-${language}`);
+    }
+  });
+  refreshMarkdownFenceHighlights(view.dom);
+}
+
+function scheduleProseMirrorCodeBlockHighlight(view, source) {
+  const apply = () => applyProseMirrorCodeBlockLanguages(view, source);
+  requestAnimationFrame(apply);
+  setTimeout(apply, 0);
+  setTimeout(apply, 50);
+  setTimeout(apply, 250);
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -78139,35 +78598,69 @@ function installProseMirrorContextMenuGuard() {
   document.__yolomuxProseMirrorContextMenuGuard = guard;
 }
 
-function syncProseMirrorPanelSource(panel, path, state) {
+function prosemirrorSelectionForDocument(api, doc, anchor, head) {
+  const max = doc.content.size;
+  if (max <= 0) return null;
+  const from = Math.max(0, Math.min(Number(anchor) || 0, max));
+  const to = Math.max(0, Math.min(Number(head) || 0, max));
+  if (from === to) return api.Selection.near(doc.resolve(from));
+  return api.TextSelection.between(doc.resolve(from), doc.resolve(to));
+}
+
+function setProseMirrorSelection(view, from, to) {
+  const api = window.YOLOmuxProseMirror;
+  const selection = prosemirrorSelectionForDocument(api, view.state.doc, from, to);
+  if (!selection) return false;
+  view.dispatch(view.state.tr.setSelection(selection));
+  return true;
+}
+
+function syncProseMirrorPanelSource(panel, path, state, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
-  const vanilla = false;
-  panel._pmView.dom.classList.toggle('vanilla-preview-body', vanilla);
-  panel._pmView.dom.classList.toggle('editor-preview-vanilla', vanilla);
-  panel._pmView.dom.style.setProperty('background-color', vanilla ? '#ffffff' : '');
-  panel._pmView.dom.style.setProperty('color', vanilla ? '#111827' : '');
-  panel._pmView.dom.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', vanilla ? '#111827' : '', 'important'));
+  restoreProseMirrorPanelDom(panel, {previewPane: panel._pmPreviewPane});
+  applyProseMirrorPreviewDisplayMode(panel._pmView.dom);
   const next = normalizeLegacyBreakMarkup(state.content || '');
+  const textEditorCommit = options.sourceSurface === 'text-editor';
+  if (textEditorCommit) {
+    if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+    panel._pmSerializeTimer = null;
+    panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+    panel._pmSource = null;
+  }
   if (panel._pmSource === next) return true;
-  if (panel._pmSerializeTimer) return true;
+  if (!textEditorCommit && panel._pmSerializeTimer && panel._pmSource === null) return true;
   if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
   panel._pmSerializeTimer = null;
   panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
   try {
     const doc = panel._pmParser.parse(next);
     const selection = panel._pmView.state.selection;
-    const max = doc.content.size;
-    const anchor = Math.min(selection.anchor, max);
-    const head = Math.min(selection.head, max);
     const api = window.YOLOmuxProseMirror;
-    const nextSelection = api.TextSelection.create(doc, anchor, head);
-    panel._pmView.updateState(api.EditorState.create({doc, selection: nextSelection, plugins: panel._pmPlugins || []}));
+    const options = {doc, plugins: panel._pmPlugins || []};
+    const nextSelection = prosemirrorSelectionForDocument(api, doc, selection.anchor, selection.head);
+    if (nextSelection) options.selection = nextSelection;
+    panel._pmView.updateState(api.EditorState.create(options));
+    bindProseMirrorTaskCheckboxes(panel._pmView.dom, next, path);
+    applyProseMirrorCodeBlockLanguages(panel._pmView);
     panel._pmSource = next;
     return true;
   } catch (error) {
     renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
     return false;
   }
+}
+
+function restoreProseMirrorPanelDom(panel, parts) {
+  const view = panel?._pmView;
+  const pane = parts?.previewPane;
+  if (!view || !pane || view.dom.isConnected) return Boolean(view?.dom?.isConnected);
+  cleanupStandardPreviewStrategy(pane);
+  disposeMarkdownPreviewEditing(pane);
+  pane._previewRendererId = null;
+  pane.replaceChildren(view.dom);
+  clearProseMirrorFallback(parts);
+  pane.dataset.prosemirrorState = 'ready';
+  return true;
 }
 
 function prosemirrorSupportedSource(path, state) {
@@ -78213,7 +78706,7 @@ function syncCodeMirrorToCanonicalPanels(path, content, sourcePanel = null, sour
       syncCodeMirrorDocument(linked._cmView, content, {path});
     }
     if (linked._pmView && !(linked === sourcePanel && sourceSurface === 'view-editor')) {
-      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked));
+      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked), {sourceSurface});
     }
   }
 }
@@ -78276,7 +78769,10 @@ function insertProseMirrorEnter(api, schema) {
   return (state, dispatch) => {
     const {$from} = state.selection;
     if ($from.parentOffset >= $from.parent.content.size) {
-      if (dispatch) dispatch(state.tr.split($from.pos).scrollIntoView());
+      if (dispatch) {
+        const transaction = state.tr.split($from.pos).scrollIntoView();
+        dispatch(transaction);
+      }
       return true;
     }
     return insertProseMirrorSoftBreak(api, schema)(state, dispatch);
@@ -78323,7 +78819,7 @@ function prosemirrorSelectionAtClientPoint(view, event) {
           to = Math.max(to, nodePosition + node.nodeSize);
         });
         if (from < to) {
-          view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, from, to)));
+          setProseMirrorSelection(view, from, to);
           return prosemirrorSelectionContext(view);
         }
       }
@@ -78342,7 +78838,7 @@ function prosemirrorSelectionAtClientPoint(view, event) {
   while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
   while (end < text.length && !/\s/.test(text[end])) end += 1;
   const base = $from.start();
-  view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, base + start, base + end)));
+  setProseMirrorSelection(view, base + start, base + end);
   return prosemirrorSelectionContext(view);
 }
 
@@ -78504,20 +79000,20 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
 
 function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (!parts?.previewPane) return false;
+  panel._pmMediaPromises = [];
   installProseMirrorContextMenuGuard();
   const schema = prosemirrorMarkdownSchema(api);
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
   const parseEnvironment = {};
+  const unsupportedHtml = prosemirrorUnsupportedHtmlSource(state.content || '');
+  if (unsupportedHtml) {
+    throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
+  }
   const doc = parser.parse(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
-  container.classList.toggle('vanilla-preview-body', vanilla);
-  container.classList.toggle('editor-preview-vanilla', vanilla);
-  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
-  container.style.setProperty('color', vanilla ? '#111827' : '');
-  if (vanilla) container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', '#111827', 'important'));
+  applyProseMirrorPreviewDisplayMode(container);
   container.setAttribute('data-prosemirror-editor', 'true');
   const plugins = [
     api.keymap({
@@ -78541,6 +79037,11 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     panel._pmContextMenuDispose?.();
     panel._pmView.destroy();
   }
+  const taskEntries = String(state.content || '').split('\n').map((line, index) => {
+    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
+    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
+  }).filter(Boolean);
+  let taskNodeViewIndex = 0;
   cleanupStandardPreviewStrategy(parts.previewPane);
   disposeMarkdownPreviewEditing(parts.previewPane);
   parts.previewPane._previewRendererId = null;
@@ -78551,6 +79052,11 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     nodeViews: {
       details: prosemirrorDetailsNodeView,
       image: node => prosemirrorImageNodeView(node, panel, path),
+      list_item: () => {
+        const index = taskNodeViewIndex++;
+        const task = taskEntries[index] || null;
+        return prosemirrorTaskListItemNodeView(task);
+      },
     },
     dispatchTransaction(transaction) {
       const nextState = view.state.apply(transaction);
@@ -78562,6 +79068,14 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       }
     },
   });
+  panel._pmView = view;
+  hydrateProseMirrorExternalImages(panel, path);
+  applyProseMirrorPreviewDisplayMode(view.dom);
+  bindMarkdownPreviewEditing(parts.previewPane, state.content || '', path);
+  parts.previewPane._previewAsync = Promise.all(panel._pmMediaPromises || []);
+  applyProseMirrorCodeBlockLanguages(view, state.content || '');
+  scheduleProseMirrorCodeBlockHighlight(view, state.content || '');
+  requestAnimationFrame(() => requestAnimationFrame(() => refreshMarkdownFenceHighlights(view.dom)));
   const attachSourceLines = () => Array.from(view.dom.children).forEach((element, index) => {
     const sourceLine = Number(parseEnvironment.yolomuxTopLevelSourceLines?.[index]);
     if (Number.isFinite(sourceLine) && sourceLine > 0) element.dataset.sourceLine = String(sourceLine);
@@ -78587,10 +79101,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   attachHeadingSourceLines();
   setTimeout(attachHeadingSourceLines, 0);
   requestAnimationFrame(attachHeadingSourceLines);
-  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
-  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   container._prosemirrorView = view;
-  panel._pmView = view;
   panel._pmPreviewPane = parts.previewPane;
   panel._pmPath = path;
   panel._pmSchema = schema;
@@ -78598,13 +79109,18 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
+  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
+  bindProseMirrorTaskCheckboxes(view.dom, state.content || '', path);
   attachSourceLines();
   attachHeadingSourceLines();
+  setTimeout(() => bindProseMirrorTaskCheckboxes(view.dom, panel._pmSource, path), 0);
   requestAnimationFrame(() => {
     attachSourceLines();
     attachHeadingSourceLines();
   });
   delete panel._pmError;
+  delete panel._pmFailureSource;
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);
   return true;
@@ -78612,7 +79128,10 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
 
 async function ensureProseMirrorPanel(panel, item, path, state, parts) {
   if (!prosemirrorSupportedSource(path, state)) return false;
-  if (panel._pmView && panel._pmPath === path) return syncProseMirrorPanelSource(panel, path, state);
+  if (panel._pmView && panel._pmPath === path) {
+    restoreProseMirrorPanelDom(panel, parts);
+    return syncProseMirrorPanelSource(panel, path, state);
+  }
   if (panel._pmEnsurePromise) return panel._pmEnsurePromise;
   destroyProseMirrorPanel(panel);
   const promise = (async () => {
@@ -78655,7 +79174,9 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
     renderProseMirrorFailure(panel, path, parts, panel._pmError);
     return true;
   }
-  void ensureProseMirrorPanel(panel, item, path, state, parts).then(ready => {
+  const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts);
+  parts.previewPane._previewAsync = ensurePromise;
+  void ensurePromise.then(ready => {
     if (ensureGeneration !== panel._pmEnsureGeneration) return;
     if (!ready && panel.dataset.filePath === path) {
       renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
@@ -79859,8 +80380,8 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusSta
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
   return {
     ownsRole,
-    mode: 'leader',
-    state: 'leader',
+    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
+    state: ownsRole ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner ? backgroundServerLabel(owner) : '',
     status: String(role.status || data.status || ''),
@@ -79879,8 +80400,8 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.
     ...summary,
     ownsIndex,
     ownsRole: ownsIndex,
-    mode: 'leader',
-    state: 'leader',
+    mode: ownsIndex ? 'leader' : 'follower',
+    state: ownsIndex ? 'leader' : 'follower',
     currentLabel: backgroundServerLabel(current),
     ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
     status: String(searchIndex.status || summary.status || data.status || ''),
@@ -82373,7 +82894,7 @@ function bindFileUpload(panel, session) {
     if (panel.contains(event.relatedTarget)) return;
     panel.classList.remove(CLS.fileDragOver);
   });
-  panel.addEventListener('drop', event => {
+  panel.addEventListener('drop', async event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -82381,7 +82902,9 @@ function bindFileUpload(panel, session) {
     // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
     // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
-    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    const dropped = event.dataTransfer?.files?.length
+      ? event.dataTransfer.files
+      : await dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
@@ -84942,9 +85465,6 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
-  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
-    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
-  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -84959,10 +85479,13 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const priorPayload = epochChanged ? {} : transcriptMetadataState.payload;
   const nextPayload = transcriptPayloadWithTmuxWindowOverrides({...payload, sessions: filteredSessions, session_order: filteredOrder}, priorPayload);
   const currentSessions = priorPayload?.sessions || {};
+  const payloadIdentity = sessionMetadataPayloadIdentity(payload);
+  const newerMetadataBuild = payloadIdentity?.epoch === transcriptMetadataState.epoch
+    && payloadIdentity.generation > transcriptMetadataState.generation;
   for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
-    if (nextGeneration > 0 && currentGeneration > nextGeneration) {
+    if (!newerMetadataBuild && nextGeneration > 0 && currentGeneration > nextGeneration) {
       return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
@@ -85053,14 +85576,17 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
 }
 
 function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {
+  const previousApply = transcriptMetadataState.lastApply;
   transcriptMetadataState.lastApply = {
-    ...(transcriptMetadataState.lastApply || {}),
+    ...(previousApply || {}),
     applied: false,
     reason,
     epoch: transcriptMetadataState.epoch,
     awaitedGeneration: Number(target || 0),
     appliedGeneration: Number(transcriptMetadataState.generation || 0),
     at: Date.now(),
+    previousApplyReason: String(previousApply?.reason || ''),
+    previousApplyPayloadGeneration: Number(previousApply?.payloadGeneration || 0),
     ...details,
   };
   // The diagnostic record stays -- it is what a Debug pane reads -- but the verdict is also
@@ -85095,6 +85621,12 @@ async function settleForcedSessionMetadata(target) {
   const topologyIsCurrent = () => topologyEpoch === tmuxTopologyEpoch;
   const serverIsCurrent = () => target.epoch === transcriptMetadataState.epoch;
   const requestIsCurrent = () => topologyIsCurrent() && serverIsCurrent();
+  // Preserve the target as shared diagnostic state even when the response that named it loses a
+  // render race. The forced caller and the failure record must report the same generation the server
+  // promised, not a later transient payload's zero pending field.
+  if (serverIsCurrent() && target.generation > transcriptMetadataState.pendingGeneration) {
+    transcriptMetadataState.pendingGeneration = target.generation;
+  }
   const settleGround = () => (serverIsCurrent() ? 'forced_settle_topology_changed' : 'forced_settle_epoch_changed');
   const deadline = Date.now() + forcedSessionMetadataSettleTimeoutMs;
   // The ground is checked BEFORE the applied generation on every pass, because a replacement
@@ -86099,11 +86631,67 @@ function repairClientEventPatchResource(resource, envelope = {}) {
   return true;
 }
 
+function repairClientEventOperationTerminalResource(resource, options = {}) {
+  const prefix = 'operation_terminal:';
+  if (!resource.startsWith(prefix)) return false;
+  const operationId = resource.slice(prefix.length);
+  if (!operationId) return true;
+  const record = apiOperationState.records.get(operationId);
+  if (!record) {
+    apiOperationState.repairs.delete(operationId);
+    apiOperationState.repairs.add(operationId);
+    while (apiOperationState.repairs.size > apiOperationReplayLimit) {
+      apiOperationState.repairs.delete(apiOperationState.repairs.values().next().value);
+    }
+    return true;
+  }
+  if (options.pendingOnly === true && !apiOperationState.repairs.delete(operationId)) return true;
+  apiOperationState.repairs.delete(operationId);
+  if (record.phase !== 'accepted' || record.source || !record.eventsUrl) return true;
+  if (typeof EventSource === 'undefined') {
+    apiOperationState.repairs.add(operationId);
+    return true;
+  }
+  let source;
+  try {
+    source = new EventSource(record.eventsUrl);
+  } catch (error) {
+    apiOperationState.repairs.add(operationId);
+    console.warn('operation terminal replay stream failed', error);
+    return true;
+  }
+  record.source = source;
+  const lifecycleScope = currentClientEventTransportLifecycleScope();
+  lifecycleScope.ownStream(`operation-replay:${operationId}`, source);
+  source.onerror = () => {
+    if (record.source !== source || record.phase !== 'accepted') return;
+    record.source = null;
+    apiOperationState.repairs.add(operationId);
+    lifecycleScope.release(`operation-replay:${operationId}`, source);
+  };
+  source.addEventListener('operation_terminal', event => {
+    if (record.source !== source || record.phase !== 'accepted') return;
+    const envelope = clientEventEnvelope(event);
+    recordSseDebugEvent('operation_terminal', envelope, event);
+    handleClientPushEvent('operation_terminal', clientEventPayloadFromEnvelope(envelope), envelope);
+  });
+  return true;
+}
+
+function retryPendingOperationTerminalRepairs() {
+  for (const operationId of [...apiOperationState.repairs]) {
+    const record = apiOperationState.records.get(operationId);
+    if (!record || record.phase !== 'accepted' || record.source) continue;
+    repairClientEventOperationTerminalResource(`operation_terminal:${operationId}`);
+  }
+}
+
 function repairClientEventResources(resources = [], envelope = {}, watchRootsForceOptions = null) {
   const genericResources = [];
   for (const rawResource of resources || []) {
     const resource = String(rawResource || '');
-    if (!repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
+    if (!repairClientEventOperationTerminalResource(resource)
+        && !repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
   }
   const channels = clientEventRepairChannels(genericResources);
   if (channels.size) {
@@ -86586,7 +87174,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       return;
     }
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
-      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
+      applySessionFilesPayloadFromPush(payload.data, payload.request || {}, {completion: payload.completion});
     }
     return;
   }
@@ -86925,6 +87513,7 @@ function openClientEventStream(descriptor, options = {}) {
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
+    retryPendingOperationTerminalRepairs();
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
@@ -87016,6 +87605,12 @@ function installClientEventStream() {
 }
 
 function disposeClientEventTransportLifecycle(reason = 'disposed') {
+  for (const record of apiOperationState.records.values()) {
+    if (record.phase === 'accepted' && record.source) apiOperationState.repairs.add(record.id);
+  }
+  while (apiOperationState.repairs.size > apiOperationReplayLimit) {
+    apiOperationState.repairs.delete(apiOperationState.repairs.values().next().value);
+  }
   clientEventTransportLifecycleScope?.dispose(reason);
   clientEventTransportState.source = null;
   clientEventTransportState.replacementSource = null;
@@ -87026,6 +87621,9 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportState.demandTimer = null;
   clientEventTransportState.frame = 0;
   clientEventTransportState.resyncTimer = null;
+  for (const record of apiOperationState.records.values()) {
+    if (record.source) record.source = null;
+  }
 }
 
 registerTerminalAuthenticationRetirement('long-lived-browser-transports', () => {

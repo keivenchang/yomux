@@ -140,11 +140,67 @@ function repairClientEventPatchResource(resource, envelope = {}) {
   return true;
 }
 
+function repairClientEventOperationTerminalResource(resource, options = {}) {
+  const prefix = 'operation_terminal:';
+  if (!resource.startsWith(prefix)) return false;
+  const operationId = resource.slice(prefix.length);
+  if (!operationId) return true;
+  const record = apiOperationState.records.get(operationId);
+  if (!record) {
+    apiOperationState.repairs.delete(operationId);
+    apiOperationState.repairs.add(operationId);
+    while (apiOperationState.repairs.size > apiOperationReplayLimit) {
+      apiOperationState.repairs.delete(apiOperationState.repairs.values().next().value);
+    }
+    return true;
+  }
+  if (options.pendingOnly === true && !apiOperationState.repairs.delete(operationId)) return true;
+  apiOperationState.repairs.delete(operationId);
+  if (record.phase !== 'accepted' || record.source || !record.eventsUrl) return true;
+  if (typeof EventSource === 'undefined') {
+    apiOperationState.repairs.add(operationId);
+    return true;
+  }
+  let source;
+  try {
+    source = new EventSource(record.eventsUrl);
+  } catch (error) {
+    apiOperationState.repairs.add(operationId);
+    console.warn('operation terminal replay stream failed', error);
+    return true;
+  }
+  record.source = source;
+  const lifecycleScope = currentClientEventTransportLifecycleScope();
+  lifecycleScope.ownStream(`operation-replay:${operationId}`, source);
+  source.onerror = () => {
+    if (record.source !== source || record.phase !== 'accepted') return;
+    record.source = null;
+    apiOperationState.repairs.add(operationId);
+    lifecycleScope.release(`operation-replay:${operationId}`, source);
+  };
+  source.addEventListener('operation_terminal', event => {
+    if (record.source !== source || record.phase !== 'accepted') return;
+    const envelope = clientEventEnvelope(event);
+    recordSseDebugEvent('operation_terminal', envelope, event);
+    handleClientPushEvent('operation_terminal', clientEventPayloadFromEnvelope(envelope), envelope);
+  });
+  return true;
+}
+
+function retryPendingOperationTerminalRepairs() {
+  for (const operationId of [...apiOperationState.repairs]) {
+    const record = apiOperationState.records.get(operationId);
+    if (!record || record.phase !== 'accepted' || record.source) continue;
+    repairClientEventOperationTerminalResource(`operation_terminal:${operationId}`);
+  }
+}
+
 function repairClientEventResources(resources = [], envelope = {}, watchRootsForceOptions = null) {
   const genericResources = [];
   for (const rawResource of resources || []) {
     const resource = String(rawResource || '');
-    if (!repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
+    if (!repairClientEventOperationTerminalResource(resource)
+        && !repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
   }
   const channels = clientEventRepairChannels(genericResources);
   if (channels.size) {
@@ -627,7 +683,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       return;
     }
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
-      applySessionFilesPayloadFromPush(payload.data, payload.request || {});
+      applySessionFilesPayloadFromPush(payload.data, payload.request || {}, {completion: payload.completion});
     }
     return;
   }
@@ -966,6 +1022,7 @@ function openClientEventStream(descriptor, options = {}) {
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
+    retryPendingOperationTerminalRepairs();
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
@@ -1057,6 +1114,12 @@ function installClientEventStream() {
 }
 
 function disposeClientEventTransportLifecycle(reason = 'disposed') {
+  for (const record of apiOperationState.records.values()) {
+    if (record.phase === 'accepted' && record.source) apiOperationState.repairs.add(record.id);
+  }
+  while (apiOperationState.repairs.size > apiOperationReplayLimit) {
+    apiOperationState.repairs.delete(apiOperationState.repairs.values().next().value);
+  }
   clientEventTransportLifecycleScope?.dispose(reason);
   clientEventTransportState.source = null;
   clientEventTransportState.replacementSource = null;
@@ -1067,6 +1130,9 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportState.demandTimer = null;
   clientEventTransportState.frame = 0;
   clientEventTransportState.resyncTimer = null;
+  for (const record of apiOperationState.records.values()) {
+    if (record.source) record.source = null;
+  }
 }
 
 registerTerminalAuthenticationRetirement('long-lived-browser-transports', () => {

@@ -2816,6 +2816,7 @@ def wait_for_fixture_client_event_demand(driver, timeout: float = 4.0, *, expect
 # timeout. Waiting on that one promise as a receipt is correct; raising the general timeout to paper
 # over it is not. This bound is the fail-closed limit on a baseline that never delivers its receipt.
 _WATCH_DIFF_BASELINE_RECEIPT_SECONDS = 20.0
+_FILESYSTEM_OPERATION_RECEIPT_SECONDS = 20.0
 
 
 def _read_fixture_operation_state(driver) -> dict[str, Any]:
@@ -2958,6 +2959,88 @@ def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
     })
 
 
+def _blocked_only_by_filesystem_operation_receipt(state: Mapping[str, Any]) -> bool:
+    """Return whether pending work identifies only browser-owned filesystem receipts.
+
+    The editor can observe the completed write before the operation-terminal event has reached the
+    browser.  The receipt remains pending in that interval, so teardown must await the receipt's
+    own completion barrier instead of treating the write as an unrelated operation beside a watch
+    baseline.  Anonymous or mixed pending work still fails closed through the ordinary timeout.
+    """
+
+    if state.get("diagnosticMode") != "retained-js":
+        return False
+    pending = set(state.get("pending") or [])
+    details = state.get("pendingDetails")
+    if not pending or not isinstance(details, list) or state.get("pendingDetailsTruncated") is True:
+        return False
+    if {detail.get("id") for detail in details} != pending:
+        return False
+    if any(
+        detail.get("kind") != "filesystem_operation"
+        or detail.get("contextOperation") != "write"
+        or detail.get("waiterCount") != 1
+        for detail in details
+    ):
+        return False
+    return not any(
+        int(state.get(field) or 0) != 0
+        for field in (
+            "batchQueued",
+            "batchPending",
+            "batchOperations",
+            "startupActive",
+            "startupQueued",
+        )
+    ) and state.get("activityRefreshing") is not True and all(
+        state.get(field, False) is False
+        for field in (
+            "watchRootsPending",
+            "watchRootsTimerPending",
+            "watchRootsRegistrationPending",
+            "watchRootsInFlight",
+            "watchRootsBaselinePending",
+        )
+    ) and state.get("finderWatchReady", True) is True
+
+
+def _await_filesystem_operation_receipts(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Await the lifecycle-owned filesystem receipt barrier, bounded fail-closed."""
+
+    receipt = driver.execute_async_script(
+        """
+        const boundMs = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const lifecycle = window.__yolomuxFixtureLifecycle;
+        if (!lifecycle || typeof lifecycle.awaitPendingOperationReceipts !== 'function') {
+          done({available: false});
+          return;
+        }
+        let finished = false;
+        const finish = result => { if (finished) return; finished = true; done(result); };
+        const timer = setTimeout(() => finish({available: true, settled: false, timedOut: true}), boundMs);
+        lifecycle.awaitPendingOperationReceipts().then(
+          state => { clearTimeout(timer); finish({available: true, settled: true, state}); },
+          error => { clearTimeout(timer); finish({available: true, settled: false, error: String(error?.stack || error)}); },
+        );
+        """,
+        int(max(0.0, float(_FILESYSTEM_OPERATION_RECEIPT_SECONDS)) * 1000),
+    )
+    if not isinstance(receipt, Mapping) or receipt.get("available") is not True:
+        raise AssertionError(
+            "filesystem operation receipt barrier is unavailable: "
+            f"blocked={json.dumps(dict(blocked_state), sort_keys=True)} receipt={receipt}"
+        )
+    if receipt.get("settled") is not True:
+        raise AssertionError(
+            "filesystem operation receipt did not deliver its completion barrier before the fail-closed bound: "
+            f"blocked={json.dumps(dict(blocked_state), sort_keys=True)} receipt={json.dumps(dict(receipt), sort_keys=True)}"
+        )
+    state = _read_fixture_operation_state(driver)
+    state["filesystemOperationReceiptBarrier"] = dict(receipt)
+    return state
+
+
 def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str, Any]:
     """Wait on the in-flight full watch-diff promise as a completion receipt, bounded fail-closed."""
 
@@ -3006,6 +3089,14 @@ def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, An
             # await call. Re-read before classifying any remaining work.
             state = _read_fixture_operation_state(driver)
             if state.get("watchRootsBaselinePending", False) is True:
+                if any(
+                    int(state.get(field) or 0) != 0
+                    for field in ("batchQueued", "batchPending", "batchOperations", "startupActive", "startupQueued")
+                ):
+                    # The baseline promise has settled, but its owned watch reconciliation
+                    # descendants are still delivering. Keep those descendants inside the same
+                    # bounded receipt rather than declaring a contradiction while they are live.
+                    continue
                 raise AssertionError(
                     "watch-diff baseline was reported pending with no in-flight promise to await: "
                     f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
@@ -3067,7 +3158,9 @@ def wait_for_fixture_api_quiescence(driver, timeout: float = 12.0) -> dict[str, 
     try:
         settled_state = WebDriverWait(driver, float(timeout)).until(settled)
     except TimeoutException as error:
-        if last_state is not None and _blocked_only_by_watch_diff_baseline(last_state):
+        if last_state is not None and _blocked_only_by_filesystem_operation_receipt(last_state):
+            settled_state = _await_filesystem_operation_receipts(driver, last_state)
+        elif last_state is not None and _blocked_only_by_watch_diff_baseline(last_state):
             # The one remaining surface is a known in-flight full watch-diff baseline. Wait on its
             # completion receipt rather than reporting a hang that is not one.
             settled_state = _wait_out_watch_diff_baseline_receipt(driver, last_state)

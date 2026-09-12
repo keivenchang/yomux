@@ -10,10 +10,13 @@ function prosemirrorFailureMessage(error) {
 function renderProseMirrorFailure(panel, path, parts, error) {
   const pane = parts?.previewPane;
   if (!pane) return false;
+  const source = fileEditorPanelState(panel)?.content || '';
+  if (pane.dataset.prosemirrorState === 'error' && panel._pmFailureSource === source) return true;
   const message = prosemirrorFailureMessage(error);
   panel._pmError = message;
+  panel._pmFailureSource = source;
   panel._pmRequired = true;
-  renderMarkdownPreviewInto(pane, fileEditorPanelState(panel)?.content || '', path, {context: fileEditorPanelMode(panel), readOnly: true});
+  renderMarkdownPreviewInto(pane, source, path, {context: fileEditorPanelMode(panel), readOnly: true, historical: true});
   const failure = document.createElement('section');
   failure.className = 'file-editor-prosemirror-error file-editor-prosemirror-watermark';
   failure.setAttribute('role', 'alert');
@@ -174,9 +177,26 @@ function prosemirrorMarkdownParser(api, schema) {
     const ignoredCommentRanges = [];
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
       const normalized = [];
+      let listItemDepth = 0;
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
+        if (token.type === 'list_item_open') listItemDepth += 1;
+        if (token.type === 'inline' && listItemDepth > 0) {
+          const firstText = token.children?.find(child => child.type === 'text');
+          const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\]\s+/);
+          if (taskMarker) {
+            token.content = token.content.slice(taskMarker[0].length);
+            let remaining = taskMarker[0].length;
+            for (const child of token.children || []) {
+              if (remaining <= 0 || child.type !== 'text') continue;
+              const removed = Math.min(remaining, child.content.length);
+              child.content = child.content.slice(removed);
+              remaining -= removed;
+            }
+            token.children = (token.children || []).filter(child => child.type !== 'text' || child.content);
+          }
+        }
         if ((token.type === 'html_inline' || token.type === 'html_block') && /^<!--[\s\S]*-->$/.test(html)) {
           // Keep comments in the document as hidden atoms so ViewEditor never paints them but a
           // later edit/save can serialize their exact contents instead of deleting user metadata.
@@ -227,10 +247,15 @@ function prosemirrorMarkdownParser(api, schema) {
         }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
+        if (token.type === 'list_item_close') listItemDepth = Math.max(0, listItemDepth - 1);
       }
       return normalized;
     };
-    const tokens = normalizeHtmlTokens(markdownItParse(source, environment));
+    const parseSource = String(source || '').replace(
+      /<details>\s*\n\s*<summary>([\s\S]*?)<\/summary>/gi,
+      '<details><summary>$1</summary>',
+    );
+    const tokens = normalizeHtmlTokens(markdownItParse(parseSource, environment));
     // markdown-it collapses extra blank lines. Preserve the additional empty paragraphs that
     // ViewEditor creates with consecutive Enter presses so a later source sync cannot erase them.
     const spacedTokens = [];
@@ -302,6 +327,27 @@ function prosemirrorMarkdownParser(api, schema) {
     superscript: {mark: 'superscript'},
   };
   return new api.MarkdownParser(schema, tokenizer, tokens);
+}
+
+const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
+const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
+  'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
+  'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'div', 'dl', 'dt', 'em',
+  'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+  'hgroup', 'html', 'i', 'iframe', 'input', 'ins', 'label', 'legend', 'li', 'link', 'main', 'map', 'menu',
+  'meta', 'meter', 'nav', 'noscript', 'object', 'ol', 'optgroup', 'option', 'output', 'p', 'picture', 'pre',
+  'progress', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'script', 'section', 'select', 'small', 'source', 'span',
+  'strong', 'style', 'sub', 'summary', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead',
+  'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video',
+]);
+
+function prosemirrorUnsupportedHtmlSource(source) {
+  const tags = String(source || '').matchAll(/<\/?([a-z][a-z0-9:-]*)\b[^>]*>/gi);
+  for (const match of tags) {
+    const name = match[1].toLowerCase();
+    if (PROSEMIRROR_KNOWN_HTML_TAGS.has(name) && !PROSEMIRROR_SAFE_HTML_TAGS.has(name)) return match[0];
+  }
+  return null;
 }
 
 function prosemirrorMarkdownSerializer(api) {
@@ -392,20 +438,159 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   image.alt = node.attrs.alt || '';
   if (node.attrs.title) image.title = node.attrs.title;
   image.dataset.originalSrc = original;
+  image.loading = 'eager';
+  image.decoding = 'async';
+  image.style.display = 'inline-block';
+  image.style.verticalAlign = 'text-bottom';
   const target = markdownPreviewImageTarget(original, markdownPath);
   if (!target) {
     image.src = original;
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(waitForImageDecode(image));
   } else if (target.external) {
     image.src = target.src;
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(waitForImageDecode(image));
   } else {
     image.dataset.resolvedPath = target.path;
-    image.src = rawFileUrl(target.path);
+    panel._pmMediaPromises ||= [];
+    panel._pmMediaPromises.push(new Promise(resolve => requestAnimationFrame(() => (
+      prosemirrorPreviewImageSource(image, markdownPath).then(resolve)
+    ))));
     image.addEventListener('error', () => {
       image.classList.add('prosemirror-image-error');
       image.title = t('preview.markdown.imageUnavailable', {path: target.path});
     }, {once: true});
   }
   return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+}
+
+function prosemirrorCodeBlockNodeView(node, panel, markdownPath) {
+  const language = String(node.attrs.params || '').trim().split(/\s+/, 1)[0].toLowerCase();
+  if (!isMermaidFenceLanguage(language)) {
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    if (language) {
+      pre.dataset.params = language;
+      code.className = `language-${language}`;
+    }
+    pre.appendChild(code);
+    let observer = null;
+    const highlight = () => {
+      if (!code.isConnected || !code.textContent) return;
+      observer?.disconnect();
+      observer = null;
+      applyMarkdownFenceHighlight(code);
+    };
+    if (typeof MutationObserver === 'function') {
+      observer = new MutationObserver(highlight);
+      observer.observe(code, {childList: true, subtree: true, characterData: true});
+    }
+    requestAnimationFrame(highlight);
+    return {dom: pre, contentDOM: code, destroy() { observer?.disconnect(); }};
+  }
+  const host = document.createElement('div');
+  host.className = 'mermaid-preview-host';
+  panel._pmMediaPromises ||= [];
+  panel._pmMediaPromises.push(renderMermaidSourceInto(host, node.textContent || '', {
+    full: false,
+    path: markdownPath,
+    zoomKey: 'mermaid',
+  }));
+  return {dom: host};
+}
+
+function hydrateProseMirrorExternalImages(panel, path) {
+  const promises = [];
+  for (const image of Array.from(panel?._pmView?.dom?.querySelectorAll?.('img.prosemirror-image') || [])) {
+    if (image.naturalWidth > 0) continue;
+    const target = markdownPreviewImageTarget(image.dataset.originalSrc || '', path);
+    if (!target?.external) continue;
+    image.src = target.src;
+    promises.push(waitForImageDecode(image));
+  }
+  if (promises.length) panel._pmMediaPromises = [...(panel._pmMediaPromises || []), ...promises];
+}
+
+function prosemirrorTaskListItemNodeView(task) {
+  const dom = document.createElement('li');
+  const contentDOM = document.createElement('div');
+  if (task) {
+    const input = document.createElement('input');
+    input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
+    input.type = 'checkbox';
+    input.checked = task.checked;
+    input.dataset.sourceLine = String(task.line);
+    dom.appendChild(input);
+  }
+  dom.appendChild(contentDOM);
+  return {dom, contentDOM};
+}
+
+function applyProseMirrorPreviewDisplayMode(container) {
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  container.classList.toggle('vanilla-preview-body', vanilla);
+  container.classList.toggle('editor-preview-vanilla', vanilla);
+  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
+  container.style.setProperty('color', vanilla ? '#111827' : '');
+  container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => {
+    node.style.setProperty('color', vanilla ? '#111827' : '', 'important');
+  });
+}
+
+function bindProseMirrorTaskCheckboxes(container, source, markdownPath) {
+  if (!container) return;
+  if (markdownPath) container.dataset.mdPath = markdownPath;
+  const tasks = String(source || '').split('\n').map((line, index) => {
+    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
+    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
+  }).filter(Boolean);
+  const items = Array.from(container.querySelectorAll('li')).filter(item => item.parentElement?.tagName === 'UL' || item.parentElement?.tagName === 'OL');
+  for (const [index, item] of items.entries()) {
+    const task = tasks[index];
+    if (!task) continue;
+    const input = Array.from(item.children).find(child => child.tagName === 'INPUT' && child.type === 'checkbox') || document.createElement('input');
+    input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
+    input.type = 'checkbox';
+    input.checked = task.checked;
+    input.dataset.sourceLine = String(task.line);
+    input.disabled = readOnlyMode || container._markdownReadOnly === true;
+    input.dataset.sourceLine = String(task.line || index + 1);
+    if (!input.parentElement) item.insertBefore(input, item.firstChild);
+  }
+  if (markdownPath) {
+    bindMarkdownTaskCheckboxes(container, source, markdownPath);
+    container.addEventListener('change', event => {
+      const input = event.target?.closest?.('input.markdown-task-checkbox[data-source-line]');
+      if (!input) return;
+      updateMarkdownTaskFromPreview(container, input);
+    }, {once: true});
+  }
+}
+
+function applyProseMirrorCodeBlockLanguages(view, source = '') {
+  if (!view?.dom) return;
+  const sourceLanguages = String(source).split('\n')
+    .filter(line => line.startsWith('```'))
+    .map(line => line.slice(3).trim().split(/\s+/, 1)[0].toLowerCase());
+  Array.from(view.dom.querySelectorAll('pre')).forEach((pre, index) => {
+    const code = pre?.querySelector('code');
+    const language = String(pre.dataset.params || code?.dataset.params || '').trim().split(/\s+/, 1)[0].toLowerCase()
+      || sourceLanguages[index] || '';
+    if (code && language) {
+      pre.dataset.params = language;
+      code.classList.add(`language-${language}`);
+    }
+  });
+  refreshMarkdownFenceHighlights(view.dom);
+}
+
+function scheduleProseMirrorCodeBlockHighlight(view, source) {
+  const apply = () => applyProseMirrorCodeBlockLanguages(view, source);
+  requestAnimationFrame(apply);
+  setTimeout(apply, 0);
+  setTimeout(apply, 50);
+  setTimeout(apply, 250);
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -444,35 +629,69 @@ function installProseMirrorContextMenuGuard() {
   document.__yolomuxProseMirrorContextMenuGuard = guard;
 }
 
-function syncProseMirrorPanelSource(panel, path, state) {
+function prosemirrorSelectionForDocument(api, doc, anchor, head) {
+  const max = doc.content.size;
+  if (max <= 0) return null;
+  const from = Math.max(0, Math.min(Number(anchor) || 0, max));
+  const to = Math.max(0, Math.min(Number(head) || 0, max));
+  if (from === to) return api.Selection.near(doc.resolve(from));
+  return api.TextSelection.between(doc.resolve(from), doc.resolve(to));
+}
+
+function setProseMirrorSelection(view, from, to) {
+  const api = window.YOLOmuxProseMirror;
+  const selection = prosemirrorSelectionForDocument(api, view.state.doc, from, to);
+  if (!selection) return false;
+  view.dispatch(view.state.tr.setSelection(selection));
+  return true;
+}
+
+function syncProseMirrorPanelSource(panel, path, state, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
-  const vanilla = false;
-  panel._pmView.dom.classList.toggle('vanilla-preview-body', vanilla);
-  panel._pmView.dom.classList.toggle('editor-preview-vanilla', vanilla);
-  panel._pmView.dom.style.setProperty('background-color', vanilla ? '#ffffff' : '');
-  panel._pmView.dom.style.setProperty('color', vanilla ? '#111827' : '');
-  panel._pmView.dom.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', vanilla ? '#111827' : '', 'important'));
+  restoreProseMirrorPanelDom(panel, {previewPane: panel._pmPreviewPane});
+  applyProseMirrorPreviewDisplayMode(panel._pmView.dom);
   const next = normalizeLegacyBreakMarkup(state.content || '');
+  const textEditorCommit = options.sourceSurface === 'text-editor';
+  if (textEditorCommit) {
+    if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
+    panel._pmSerializeTimer = null;
+    panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
+    panel._pmSource = null;
+  }
   if (panel._pmSource === next) return true;
-  if (panel._pmSerializeTimer) return true;
+  if (!textEditorCommit && panel._pmSerializeTimer && panel._pmSource === null) return true;
   if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
   panel._pmSerializeTimer = null;
   panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
   try {
     const doc = panel._pmParser.parse(next);
     const selection = panel._pmView.state.selection;
-    const max = doc.content.size;
-    const anchor = Math.min(selection.anchor, max);
-    const head = Math.min(selection.head, max);
     const api = window.YOLOmuxProseMirror;
-    const nextSelection = api.TextSelection.create(doc, anchor, head);
-    panel._pmView.updateState(api.EditorState.create({doc, selection: nextSelection, plugins: panel._pmPlugins || []}));
+    const options = {doc, plugins: panel._pmPlugins || []};
+    const nextSelection = prosemirrorSelectionForDocument(api, doc, selection.anchor, selection.head);
+    if (nextSelection) options.selection = nextSelection;
+    panel._pmView.updateState(api.EditorState.create(options));
+    bindProseMirrorTaskCheckboxes(panel._pmView.dom, next, path);
+    applyProseMirrorCodeBlockLanguages(panel._pmView);
     panel._pmSource = next;
     return true;
   } catch (error) {
     renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
     return false;
   }
+}
+
+function restoreProseMirrorPanelDom(panel, parts) {
+  const view = panel?._pmView;
+  const pane = parts?.previewPane;
+  if (!view || !pane || view.dom.isConnected) return Boolean(view?.dom?.isConnected);
+  cleanupStandardPreviewStrategy(pane);
+  disposeMarkdownPreviewEditing(pane);
+  pane._previewRendererId = null;
+  pane.replaceChildren(view.dom);
+  clearProseMirrorFallback(parts);
+  pane.dataset.prosemirrorState = 'ready';
+  return true;
 }
 
 function prosemirrorSupportedSource(path, state) {
@@ -518,7 +737,7 @@ function syncCodeMirrorToCanonicalPanels(path, content, sourcePanel = null, sour
       syncCodeMirrorDocument(linked._cmView, content, {path});
     }
     if (linked._pmView && !(linked === sourcePanel && sourceSurface === 'view-editor')) {
-      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked));
+      syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked), {sourceSurface});
     }
   }
 }
@@ -581,7 +800,10 @@ function insertProseMirrorEnter(api, schema) {
   return (state, dispatch) => {
     const {$from} = state.selection;
     if ($from.parentOffset >= $from.parent.content.size) {
-      if (dispatch) dispatch(state.tr.split($from.pos).scrollIntoView());
+      if (dispatch) {
+        const transaction = state.tr.split($from.pos).scrollIntoView();
+        dispatch(transaction);
+      }
       return true;
     }
     return insertProseMirrorSoftBreak(api, schema)(state, dispatch);
@@ -628,7 +850,7 @@ function prosemirrorSelectionAtClientPoint(view, event) {
           to = Math.max(to, nodePosition + node.nodeSize);
         });
         if (from < to) {
-          view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, from, to)));
+          setProseMirrorSelection(view, from, to);
           return prosemirrorSelectionContext(view);
         }
       }
@@ -647,7 +869,7 @@ function prosemirrorSelectionAtClientPoint(view, event) {
   while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
   while (end < text.length && !/\s/.test(text[end])) end += 1;
   const base = $from.start();
-  view.dispatch(view.state.tr.setSelection(window.YOLOmuxProseMirror.TextSelection.create(view.state.doc, base + start, base + end)));
+  setProseMirrorSelection(view, base + start, base + end);
   return prosemirrorSelectionContext(view);
 }
 
@@ -809,20 +1031,20 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
 
 function createProseMirrorPanel(panel, item, path, state, parts, api) {
   if (!parts?.previewPane) return false;
+  panel._pmMediaPromises = [];
   installProseMirrorContextMenuGuard();
   const schema = prosemirrorMarkdownSchema(api);
   const parser = prosemirrorMarkdownParser(api, schema);
   const serializer = prosemirrorMarkdownSerializer(api);
   const parseEnvironment = {};
+  const unsupportedHtml = prosemirrorUnsupportedHtmlSource(state.content || '');
+  if (unsupportedHtml) {
+    throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
+  }
   const doc = parser.parse(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
-  container.classList.toggle('vanilla-preview-body', vanilla);
-  container.classList.toggle('editor-preview-vanilla', vanilla);
-  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
-  container.style.setProperty('color', vanilla ? '#111827' : '');
-  if (vanilla) container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => node.style.setProperty('color', '#111827', 'important'));
+  applyProseMirrorPreviewDisplayMode(container);
   container.setAttribute('data-prosemirror-editor', 'true');
   const plugins = [
     api.keymap({
@@ -846,6 +1068,11 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     panel._pmContextMenuDispose?.();
     panel._pmView.destroy();
   }
+  const taskEntries = String(state.content || '').split('\n').map((line, index) => {
+    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
+    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
+  }).filter(Boolean);
+  let taskNodeViewIndex = 0;
   cleanupStandardPreviewStrategy(parts.previewPane);
   disposeMarkdownPreviewEditing(parts.previewPane);
   parts.previewPane._previewRendererId = null;
@@ -856,6 +1083,11 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     nodeViews: {
       details: prosemirrorDetailsNodeView,
       image: node => prosemirrorImageNodeView(node, panel, path),
+      list_item: () => {
+        const index = taskNodeViewIndex++;
+        const task = taskEntries[index] || null;
+        return prosemirrorTaskListItemNodeView(task);
+      },
     },
     dispatchTransaction(transaction) {
       const nextState = view.state.apply(transaction);
@@ -867,6 +1099,14 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       }
     },
   });
+  panel._pmView = view;
+  hydrateProseMirrorExternalImages(panel, path);
+  applyProseMirrorPreviewDisplayMode(view.dom);
+  bindMarkdownPreviewEditing(parts.previewPane, state.content || '', path);
+  parts.previewPane._previewAsync = Promise.all(panel._pmMediaPromises || []);
+  applyProseMirrorCodeBlockLanguages(view, state.content || '');
+  scheduleProseMirrorCodeBlockHighlight(view, state.content || '');
+  requestAnimationFrame(() => requestAnimationFrame(() => refreshMarkdownFenceHighlights(view.dom)));
   const attachSourceLines = () => Array.from(view.dom.children).forEach((element, index) => {
     const sourceLine = Number(parseEnvironment.yolomuxTopLevelSourceLines?.[index]);
     if (Number.isFinite(sourceLine) && sourceLine > 0) element.dataset.sourceLine = String(sourceLine);
@@ -892,10 +1132,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   attachHeadingSourceLines();
   setTimeout(attachHeadingSourceLines, 0);
   requestAnimationFrame(attachHeadingSourceLines);
-  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
-  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   container._prosemirrorView = view;
-  panel._pmView = view;
   panel._pmPreviewPane = parts.previewPane;
   panel._pmPath = path;
   panel._pmSchema = schema;
@@ -903,13 +1140,18 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
+  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
+  bindProseMirrorTaskCheckboxes(view.dom, state.content || '', path);
   attachSourceLines();
   attachHeadingSourceLines();
+  setTimeout(() => bindProseMirrorTaskCheckboxes(view.dom, panel._pmSource, path), 0);
   requestAnimationFrame(() => {
     attachSourceLines();
     attachHeadingSourceLines();
   });
   delete panel._pmError;
+  delete panel._pmFailureSource;
   parts.previewPane.dataset.prosemirrorState = 'ready';
   installProseMirrorInteractions(panel, path, view, schema, api);
   return true;
@@ -917,7 +1159,10 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
 
 async function ensureProseMirrorPanel(panel, item, path, state, parts) {
   if (!prosemirrorSupportedSource(path, state)) return false;
-  if (panel._pmView && panel._pmPath === path) return syncProseMirrorPanelSource(panel, path, state);
+  if (panel._pmView && panel._pmPath === path) {
+    restoreProseMirrorPanelDom(panel, parts);
+    return syncProseMirrorPanelSource(panel, path, state);
+  }
   if (panel._pmEnsurePromise) return panel._pmEnsurePromise;
   destroyProseMirrorPanel(panel);
   const promise = (async () => {
@@ -960,7 +1205,9 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
     renderProseMirrorFailure(panel, path, parts, panel._pmError);
     return true;
   }
-  void ensureProseMirrorPanel(panel, item, path, state, parts).then(ready => {
+  const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts);
+  parts.previewPane._previewAsync = ensurePromise;
+  void ensurePromise.then(ready => {
     if (ensureGeneration !== panel._pmEnsureGeneration) return;
     if (!ready && panel.dataset.filePath === path) {
       renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));

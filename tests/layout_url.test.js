@@ -25,6 +25,7 @@ const allSuiteFiles = [
   'tests/stats_current_panel.test.js',
   'tests/tabber.test.js',
   'tests/layout_async.test.js',
+  'tests/operation_receipt_repair.test.js',
   'tests/backend_health_indicator.test.js',
   'tests/system_health_panel.test.js',
   'tests/diagnostic_redaction.test.js',

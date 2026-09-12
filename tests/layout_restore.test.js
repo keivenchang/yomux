@@ -3362,7 +3362,11 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
     assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
     assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
-    assert.ok(/const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*clearDropPreview\(\)/.test(source), 'center drops clear custom overlays so Dockview owns the single center preview');
+    assert.ok(/function dockviewDropClassification\(event, options = \{\}\)[\s\S]*dockviewDragRegionForEvent\(pointerEvent\)[\s\S]*classification\.owner/.test(source), 'Dockview routes every coordinate through one semantic drop classifier');
+    assert.ok(/function dockviewCommitOwnedDrop\(event, intent, commit\)[\s\S]*event\?\.preventDefault\?\.\(\)[\s\S]*dockviewLayoutState\.tabDropHandledAt/.test(source), 'Dockview commits and claims app-owned drops through one owner');
+    assert.ok(/function dockviewPaneContentDropIntent\(event\)[\s\S]*return dockviewPaneContentSplitAllowed\(info\) \? info\.intent : null/.test(source), 'pane-content intent resolution does not claim rejected drops');
+    assert.ok(/if \(classification\.owner === 'content'\)[\s\S]*dockviewClearRootBoundaryPreview\(\)[\s\S]*dockviewClearTabInsertionPreview\(\)[\s\S]*return;/.test(source), 'native pane-content preview preserves Dockview ownership');
+    assert.ok(/function dockviewCommitPaneDrop\(event, intent\)[\s\S]*dockviewCommitOwnedDrop\(event, intent/.test(source), 'pane center and split commits share the Dockview commit owner');
     assert.ok(/const capacityRefusal = paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*showLayoutStatus\(capacityRefusal, 'danger'\)[\s\S]*return;[\s\S]*Dockview's default center-drop mutates/.test(source), 'Dockview release prevents capacity-refused drops and shows the shared danger status');
     const moveSlots = api.emptyLayoutSlots();
     moveSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
@@ -4516,8 +4520,8 @@ async function runLayoutRestoreSuite() {
       'editor toolbar keeps Reload with the trailing command buttons'
     );
     assert.equal(source.includes("cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'})"), false, 'editor theme button never falls back to two-state dark/light based on view mode');
-    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\)/.test(source), 'editor theme button cycles only Dark/Light');
-    assert.ok(/updateEditorThemeButton\(themeButton\)/.test(source), 'editor theme button renders two-state labels');
+    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: fileEditorPanelState\(panel\)\?\.kind === 'text'\}\)/.test(source), 'editor theme button selects vanilla only for text previews');
+    assert.ok(/function updateImageViewerThemeButton\(button\)[\s\S]*updateEditorThemeButton\(button, \{includeVanilla: false\}\)/.test(source), 'image editor theme button renders two-state labels');
     assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorFrameControlsEnd)), '#42: only frame controls remain before the shared toolbar slot');
     assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
     assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');

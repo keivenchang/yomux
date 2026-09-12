@@ -3627,7 +3627,7 @@ function updateTopbarActivityStatus() {
 function topbarOwnerStatusCombinedHtml(summaries = []) {
   const activeSummaries = summaries.filter(item => item && typeof item === 'object');
   if (!activeSummaries.length) return '';
-  const state = 'leader';
+  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
   const stateLabel = t(`backgroundOwner.role.${state}`);
   return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(stateLabel)}</span></span>`;
@@ -3646,7 +3646,7 @@ function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSum
   }));
   const roleStateLines = roleExplainers.map(item => {
     const state = item.summary?.mode;
-    const stateLabel = state;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
     return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
   });
   const lines = [
@@ -3713,7 +3713,21 @@ function showBackgroundOwnerContextMenu(event) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu background-owner-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, t('backgroundOwner.thisServer'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  const alreadyLeader = backgroundOwnerOwnsAllRoles();
+  if (alreadyLeader || readOnlyMode) {
+    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
+  } else {
+    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
+      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
+      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
+      if (backgroundOwnerCurrentOwnerLive(payload)) {
+        const label = backgroundServerLabel(owner, t('common.unknown'));
+        const message = t('backgroundOwner.takeoverConfirm', {server: label});
+        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+      }
+      claimBackgroundOwnerLeader();
+    }, () => backgroundOwnerContextMenu.close());
+  }
   backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
 }
 
@@ -7217,11 +7231,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
+  if (options.message) showLayoutStatus(options.message, options.messageKind || '');
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
-  } else if (options.message && activeSessions.length) {
-    showLayoutStatus(options.message, options.messageKind || '');
-  } else {
+  } else if (!options.message) {
     resetLayoutStatusSurface();
     updateStatus();
   }
@@ -7320,6 +7333,8 @@ function beginLayoutMutationCompletion(state = null) {
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
   const options = {...current.options, ...next.options};
+  if (next.options.message) options.message = next.options.message;
+  if (next.options.messageKind) options.messageKind = next.options.messageKind;
   const completionGeneration = layoutCompletionGeneration(
     current.options.completionGeneration,
     next.options.completionGeneration,

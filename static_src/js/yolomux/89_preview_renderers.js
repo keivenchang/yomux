@@ -92,6 +92,11 @@ function previewZoomStateForAction(actionId, currentScale) {
   return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
 }
 
+function previewZoomStateForRender(options = {}) {
+  const state = previewZoomReadState(options);
+  return state.mode === 'fit' ? {mode: 'fit', scale: 1} : state;
+}
+
 function clampPreviewZoomScale(scale) {
   const value = Number.parseFloat(String(scale || ''));
   if (!Number.isFinite(value)) return 1;
@@ -239,7 +244,7 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
   const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
   const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
   const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
-  const state = previewZoomReadState({...options, shell});
+  const state = previewZoomStateForRender({...options, shell});
   const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
   const size = previewZoomContentSize(content);
   const scaledWidth = Math.max(1, Math.round(size.width * scale));
@@ -1406,10 +1411,11 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  const vanilla = false;
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  refreshMarkdownFenceHighlights(container);
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {
     owner: 'preview-render-restore', previewSurface: renderer.id, renderContext: previewContext, renderGeneration,

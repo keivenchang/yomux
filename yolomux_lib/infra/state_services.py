@@ -274,6 +274,8 @@ class TranscriptsPayloadCacheRecord:
     generation: int = 0
     worker: object | None = None
     worker_started_at: float | None = None
+    worker_input_generation: int = -1
+    worker_lifecycle_owner: bool = False
     publish_requested: bool = False
     # One queued follow-up build for callers the in-flight build started too early to answer. It is
     # a single flag, not a queue: repeated forced refreshes during one build cost one extra build.
@@ -307,6 +309,8 @@ class TranscriptsPayloadCacheRecord:
 
         self.worker = None
         self.worker_started_at = None
+        self.worker_input_generation = -1
+        self.worker_lifecycle_owner = False
         self.publish_requested = False
 
 

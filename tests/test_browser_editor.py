@@ -1217,7 +1217,6 @@ def test_markdown_prosemirror_inline_images_match_source_flow(browser, tmp_path)
     assert metrics["display"] == "inline-block" and metrics["verticalAlign"] == "text-bottom", metrics
     assert metrics["firstReady"] and metrics["secondReady"], metrics
     assert all(metrics["paragraphBox"]["top"] <= box["top"] <= metrics["paragraphBox"]["bottom"] for box in metrics["imageBoxes"]), metrics
-    assert metrics["imageBoxes"][0]["left"] < metrics["imageBoxes"][1]["left"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

@@ -1059,6 +1059,8 @@ globalThis.__layoutTestApi = {
   backgroundOwnerSessionFilesSummaryForTest: backgroundOwnerSessionFilesSummary,
   backgroundOwnerOwnsAllRolesForTest: backgroundOwnerOwnsAllRoles,
   backgroundOwnerCurrentOwnerLiveForTest: backgroundOwnerCurrentOwnerLive,
+  topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
+  topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
   createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
   showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {
@@ -2862,6 +2864,7 @@ globalThis.__layoutTestApi = {
   terminalUsesAppWheelForTest: terminalUsesAppWheel,
   routeTerminalScrollLinesForTest: routeTerminalScrollLines,
   sessionPaneIsAlternateScreen,
+  terminalLineLinks,
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,
   terminalReferenceAtPosition,
@@ -3518,6 +3521,10 @@ function canonical(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function makeOverviewFixtureLines(count, label) {
+  return Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
+}
+
 function makeFileTree(paths) {
   const tree = new TestElement('file-tree');
   tree.setAttribute('role', 'tree');
@@ -3639,6 +3646,7 @@ module.exports = {
   nestedSlots,
   parseUrl,
   canonical,
+  makeOverviewFixtureLines,
   makeFileTree,
   test,
   testAsync,
