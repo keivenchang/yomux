@@ -2981,13 +2981,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'theme toggle moves dark preview to light preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
     api.cycleEditorThemeMode();
-    assert.equal(api.editorPreviewThemeStateForTest(), 'vanilla', 'theme toggle moves light preview to vanilla preview');
-    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla');
-    assert.equal(api.editorThemeLabel(), 'Vanilla preview');
-    api.cycleEditorThemeMode();
-    assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
+    assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves light preview back to dark preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
-    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'vanilla leaves by restoring a dark editor scheme');
+    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'the two-state toggle restores the dark editor scheme');
     api.setFileEditorThemeMode('dark');
     api.cycleEditorThemeMode({includeVanilla: false});
     assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'edit/diff theme toggle moves dark to light');
@@ -3006,7 +3002,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Popular IDE-style teal type declarations');
     assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Popular IDE-style brown field and parameter names');
     api.setFileEditorPreviewDisplayMode('vanilla');
-    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
+    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme', 'preview display mode remains coupled to the editor scheme');
     api.setFileEditorThemeMode('github-light');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme', 'choosing a concrete editor theme exits vanilla preview mode');
     api.setFileEditorCursorStyleForTest('block');
