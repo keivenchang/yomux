@@ -6709,15 +6709,16 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
         webapp.stop_client_event_watcher()
         replacement = webapp.client_watch_service.event_watcher_record
         assert replacement is not old_record
+        assert webapp.start_client_watch_snapshot_publish() is False
+
+        release_old.set()
+        old_worker.join(timeout=2)
         assert webapp.start_client_watch_snapshot_publish() is True
         assert replacement_started.wait(timeout=2)
         replacement_worker = replacement.snapshot_worker
         assert replacement_worker is not None
         release_replacement.set()
         replacement_worker.join(timeout=2)
-
-        release_old.set()
-        old_worker.join(timeout=2)
         with webapp.activity_transcript_service.transcripts_payload_cache_lock:
             cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
             cache_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker

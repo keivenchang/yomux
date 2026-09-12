@@ -4725,16 +4725,9 @@ class WatchBridge:
             snapshot_worker = record.snapshot_worker
             record.snapshot_worker = None
         app.stop_status_generation_watcher(record)
-        if snapshot_worker is not None:
-            with app.activity_transcript_service.transcripts_payload_cache_lock:
-                cache_record = app.activity_transcript_service.transcripts_payload_cache_record
-                snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
-            if snapshot_generation:
-                app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
-            # The snapshot build can be blocked in tmux or metadata work that has no cancellation
-            # boundary. Generation invalidation above fences its result; do not hold the SSE request
-            # open waiting for uncancellable work to return.
-        app.fence_transcripts_payload_work()
+        # Keep an in-flight metadata worker as the single-flight owner until its finally block
+        # releases the guard. A Git/filesystem operation may not have a cancellation boundary, and
+        # releasing ownership here would let an SSE reconnect start a duplicate full rebuild.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
