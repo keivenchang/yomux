@@ -454,12 +454,11 @@ class PersistentStatusService(LocalRpcServiceState):
             }
             for agent in getattr(info, "agents", [])
         ]
-        material = json.dumps({"panes": panes, "agents": agents}, sort_keys=True, separators=(",", ":"))
         return {
             "windows": len({pane["window"] for pane in panes}),
             "panes": panes,
             "agents": agents,
-            "source_signature": hashlib.sha1(material.encode("utf-8")).hexdigest()[:16],
+            "source_signature": hashlib.sha1(json.dumps({"panes": panes, "agents": agents}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16],
         }
 
     def _inventory(self, request: dict[str, Any]) -> tuple[dict[str, object], bytes]:
