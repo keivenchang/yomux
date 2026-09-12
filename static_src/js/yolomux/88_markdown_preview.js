@@ -459,10 +459,14 @@ function markdownPreviewSelectionContext(container, event = null) {
   const selectionNode = selection?.anchorNode;
   const selectionElement = selectionNode?.nodeType === 1 ? selectionNode : selectionNode?.parentElement;
   const eventElement = event?.target?.nodeType === 1 ? event.target : event?.target?.parentElement;
-  const block = selectionElement?.closest?.('[data-markdown-preview-editable="true"]')
+  const block = selectionElement?.closest?.('.markdown-body > *')
     || eventElement?.closest?.('[data-markdown-preview-editable="true"]')
     || container._markdownPreviewSelectionContext?.block;
-  if (!block || !container.contains(block) || !markdownPreviewInlineBlockIsEditable(block)) return null;
+  if (!block || !container.contains(block)) {
+    const image = eventElement?.closest?.('img');
+    if (image && container.contains(image)) return {block: image, selectedText: image.alt || image.dataset.originalSrc || image.src || '', image};
+    return null;
+  }
   const selectedText = selection && !selection.isCollapsed
     && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
     ? selection.toString()
@@ -527,9 +531,58 @@ function markdownPreviewBlockClass(block) {
 }
 
 function markdownPreviewCopySelection(selectedText) {
-  if (!selectedText || !navigator.clipboard?.writeText) return false;
-  void navigator.clipboard.writeText(selectedText);
-  return true;
+  if (!selectedText) return false;
+  return copyTextWithFeedback(selectedText, {statusText: t('status.copiedText')});
+}
+
+function markdownPreviewCopySelectionWithStyle(context) {
+  const selection = document.getSelection?.();
+  if (!selection || selection.isCollapsed) return false;
+  const container = context?.container || context?.block?.closest?.('.markdown-body');
+  if (!container || !container.contains(selection.anchorNode) || !container.contains(selection.focusNode)) return false;
+  const range = context?.range || selection.getRangeAt(0);
+  const wrapper = document.createElement('div');
+  wrapper.append(range.cloneContents());
+  const images = [...wrapper.querySelectorAll('img[src]')];
+  // Let the browser serialize ordinary selections. Image selections need explicit data URLs:
+  // Google Docs cannot fetch this app's authenticated raw-file URLs from clipboard HTML.
+  if (!images.length && document.execCommand?.('copy') === true) {
+    showCopyFeedback({statusText: t('status.copiedStyledText')});
+    return true;
+  }
+  const text = selection.toString() || wrapper.textContent || '';
+  if (!wrapper.innerHTML || (!text && !images.length)) return false;
+  const clipboard = globalThis.navigator?.clipboard;
+  if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
+    const imageData = images.map(image => fetch(image.currentSrc || image.src, {credentials: 'same-origin'})
+      .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
+      .then(blob => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({blob, dataUrl: String(reader.result)});
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      })));
+    const html = Promise.all(imageData).then(results => {
+      results.forEach((result, index) => images[index].setAttribute('src', result.dataUrl));
+      return new Blob([wrapper.innerHTML], {type: 'text/html'});
+    });
+    const firstImage = imageData[0]?.then(result => result.blob);
+    const item = new ClipboardItem({
+      'text/plain': new Blob([text], {type: 'text/plain'}),
+      'text/html': html,
+      ...(firstImage ? {'image/png': firstImage} : {}),
+    });
+    // Pass promises to ClipboardItem immediately so the user activation is retained while images fetch.
+    void clipboard.write([item]).then(() => showCopyFeedback({statusText: t('status.copiedStyledText')}));
+    return true;
+  }
+  return copyTextWithFeedback(text, {statusText: t('status.copiedStyledText')});
+}
+
+function markdownPreviewImageContextMenu(image, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  showImageContextMenu(image, event.clientX, event.clientY);
 }
 
 function markdownPreviewPasteSelection(container, context) {
@@ -1294,7 +1347,9 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, t('contextmenu.copyText'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
+  appendContextMenuButton(menu, t('contextmenu.copyWithStyle'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -1323,6 +1378,8 @@ function markdownFormattingContextMenu(event, context, options = {}) {
 
 function markdownPreviewContextMenu(container, event, context) {
   markdownFormattingContextMenu(event, context, {
+    ...context,
+    container,
     applyCommand: command => markdownPreviewSelectionTransform(container, command, context),
     paste: () => markdownPreviewPasteSelection(container, context),
     isActive: command => markdownPreviewFormatActive(container, context, command),
@@ -1400,6 +1457,11 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (block) updateMarkdownFormatFromPreview(container, block, button.dataset.markdownPreviewCommand);
     });
     scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const image = event.target?.closest?.('img');
+      if (image && container.contains(image)) {
+        markdownPreviewImageContextMenu(image, event);
+        return;
+      }
       const context = container._markdownPreviewSelectionContext || markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
       if (!context || !context.block) return;
       event.preventDefault();

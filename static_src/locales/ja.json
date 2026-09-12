@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "コピーされた相対パス",
   "status.copiedTerminalChars.one": "{count} 文字をコピーしました",
   "status.copiedTerminalChars.other": "{count} 文字をコピーしました",
-  "status.copiedText": "コピーされたテキスト",
+  "status.copiedText": "テキストをコピーしました",
   "status.copiedTmuxSelection.one": "{count} 文字を tmux からコピーしました",
   "status.copiedTmuxSelection.other": "{count} 文字を tmux からコピーしました",
   "status.copiedTranscriptPath": "トランスクリプトのパスをコピーしました",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "すべてのフォントサイズを同期",
   "pref.appearance.sync_font_sizes.help": "有効にすると、UI、ターミナル、エディター、プレビュー、Finder がグローバルサイズを使います。",
   "pref.section.appearance": "外観",
-  "pref.section.sizes": "サイズ"
+  "pref.section.sizes": "サイズ",
+  "contextmenu.copyText": "テキストをコピー",
+  "contextmenu.copyWithStyle": "スタイル付きでコピー",
+  "status.copiedStyledText": "スタイル付きでコピーしました"
 }

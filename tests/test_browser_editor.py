@@ -1980,7 +1980,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert "failure" not in metrics, metrics
     assert metrics["prevented"] is True, metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
-    assert metrics["labels"][4:6] == ["Copy", "Paste"], metrics
+    assert metrics["labels"][4:7] == ["Copy text", "Copy with style", "Paste"], metrics
     assert "https://example.com/updated" in metrics["modified"], metrics
     assert metrics["removed"] == "YOLOmux", metrics
     assert metrics["dialogWidth"] >= 700, metrics
@@ -2113,6 +2113,75 @@ def test_markdown_viewedit_url_actions_do_not_show_i18n_keys(browser, tmp_path):
     assert "failure" not in metrics, metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
     assert not any(label.startswith("contextmenu.") for label in metrics["labels"]), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/IMAGE_COPY.md';
+            const source = '![table](table.png)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item); addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
+            const image = panel._pmView.dom.querySelector('img');
+            const writes = [];
+            const originalWrite = navigator.clipboard.write;
+            navigator.clipboard.write = async items => { writes.push(items[0].types.slice()); };
+            image.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            const labels = [...document.querySelectorAll('.markdown-preview-context-menu button')].map(node => node.textContent.trim());
+            const button = [...document.querySelectorAll('.markdown-preview-context-menu button')].find(node => node.textContent.trim() === 'Copy image');
+            button?.click();
+            await new Promise(resolve => setTimeout(resolve, 100));
+            navigator.clipboard.write = originalWrite;
+            done({labels, writes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert "Copy image" in metrics["labels"], metrics
+    assert metrics["writes"] and {"image/png", "text/html", "text/plain"} <= set(metrics["writes"][0]), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_copy_mixed_text_and_image_uses_rich_clipboard(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/MIXED_COPY.md';
+            const source = 'Before ![table](table.png) after';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item); addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
+            const view = panel._pmView; const paragraph = view.dom.querySelector('p');
+            const range = document.createRange(); range.selectNodeContents(paragraph);
+            const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            const writes = []; const originalWrite = navigator.clipboard.write;
+            navigator.clipboard.write = async items => { writes.push(items[0].types.slice()); };
+            const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
+            view.dom.dispatchEvent(event);
+            const button = [...document.querySelectorAll('.markdown-preview-context-menu button')].find(node => node.textContent.trim() === 'Copy with format');
+            button?.click(); await new Promise(resolve => setTimeout(resolve, 150)); navigator.clipboard.write = originalWrite;
+            done({writes, text: selection.toString(), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert "Before" in metrics["text"] and "after" in metrics["text"], metrics
+    assert metrics["writes"] and {"text/plain", "text/html", "image/png"} <= set(metrics["writes"][0]), metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

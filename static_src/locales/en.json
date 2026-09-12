@@ -212,6 +212,8 @@
   "contextmenu.copyRelativePath": "Copy relative path",
   "contextmenu.copyRelativePaths": "Copy relative paths",
   "contextmenu.copySelectedText": "Copy selected text",
+  "contextmenu.copyText": "Copy text",
+  "contextmenu.copyWithStyle": "Copy with format",
   "contextmenu.copyUrl": "Copy URL",
   "contextmenu.delete": "Delete",
   "contextmenu.deleteSelected": "Delete selected",
@@ -2558,5 +2560,6 @@
   "debug.system.roster.detail.eventsChat": "Events & chat",
   "debug.system.roster.detail.searchCaches": "Search & caches",
   "debug.system.roster.detail.sampler": "YO!stats sampler",
-  "pref.section.editor_options": "Editor options"
+  "pref.section.editor_options": "Editor options",
+  "status.copiedStyledText": "Copied with style"
 }

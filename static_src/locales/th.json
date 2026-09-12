@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "คัดลอกเส้นทางสัมพัทธ์",
   "status.copiedTerminalChars.one": "คัดลอกอักขระ {count}",
   "status.copiedTerminalChars.other": "คัดลอกอักขระ {count}",
-  "status.copiedText": "ข้อความที่คัดลอก",
+  "status.copiedText": "คัดลอกข้อความแล้ว",
   "status.copiedTmuxSelection.one": "คัดลอก {count} char จาก tmux",
   "status.copiedTmuxSelection.other": "คัดลอก {count} chars จาก tmux",
   "status.copiedTranscriptPath": "คัดลอกพาธ transcript แล้ว",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "ซิงค์ขนาดแบบอักษรทั้งหมด",
   "pref.appearance.sync_font_sizes.help": "เมื่อเปิดใช้ UI เทอร์มินัล ตัวแก้ไข ตัวอย่าง และ Finder จะใช้ขนาดส่วนกลาง",
   "pref.section.appearance": "หน้าตา",
-  "pref.section.sizes": "ขนาด"
+  "pref.section.sizes": "ขนาด",
+  "contextmenu.copyText": "คัดลอกข้อความ",
+  "contextmenu.copyWithStyle": "คัดลอกพร้อมรูปแบบ",
+  "status.copiedStyledText": "คัดลอกพร้อมรูปแบบแล้ว"
 }

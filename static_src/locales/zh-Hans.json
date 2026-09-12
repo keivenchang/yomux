@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "已复制相对路径",
   "status.copiedTerminalChars.one": "已复制 {count} 个字符",
   "status.copiedTerminalChars.other": "已复制 {count} 个字符",
-  "status.copiedText": "复制文本",
+  "status.copiedText": "已复制文本",
   "status.copiedTmuxSelection.one": "已从 tmux 复制 {count} 个字符",
   "status.copiedTmuxSelection.other": "已从 tmux 复制 {count} 个字符",
   "status.copiedTranscriptPath": "已复制转录路径",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "同步所有字体大小",
   "pref.appearance.sync_font_sizes.help": "启用后，界面、终端、编辑器、预览和 Finder 都使用全局字体大小。",
   "pref.section.appearance": "外观",
-  "pref.section.sizes": "大小"
+  "pref.section.sizes": "大小",
+  "contextmenu.copyText": "复制文本",
+  "contextmenu.copyWithStyle": "复制样式",
+  "status.copiedStyledText": "已复制样式"
 }

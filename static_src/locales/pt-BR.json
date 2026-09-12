@@ -1656,7 +1656,7 @@
   "status.copiedTerminalChars.many": "caracteres {count} copiados",
   "status.copiedTerminalChars.one": "copiou o caractere {count}",
   "status.copiedTerminalChars.other": "caracteres {count} copiados",
-  "status.copiedText": "texto copiado",
+  "status.copiedText": "Texto copiado",
   "status.copiedTmuxSelection.many": "copiou caracteres {count} do tmux",
   "status.copiedTmuxSelection.one": "copiou o caractere {count} do tmux",
   "status.copiedTmuxSelection.other": "copiou caracteres {count} do tmux",
@@ -2604,5 +2604,8 @@
   "pref.appearance.sync_font_sizes.label": "Sincronizar todos os tamanhos de fonte",
   "pref.appearance.sync_font_sizes.help": "Quando ativado, a interface, o terminal, o editor, a visualização e o Finder usam o tamanho global.",
   "pref.section.appearance": "Aparência",
-  "pref.section.sizes": "Tamanhos"
+  "pref.section.sizes": "Tamanhos",
+  "contextmenu.copyText": "Copiar texto",
+  "contextmenu.copyWithStyle": "Copiar com estilo",
+  "status.copiedStyledText": "Copiado com estilo"
 }

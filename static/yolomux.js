@@ -9220,6 +9220,48 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   return true;
 }
 
+async function copyMarkdownPreviewImageToClipboard(image, button) {
+  const url = String(image?.currentSrc || image?.src || '');
+  if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+    return;
+  }
+  const imageBlob = fetch(url, {credentials: 'same-origin'}).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  });
+  const dataUrl = imageBlob.then(blob => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  }));
+  const htmlBlob = dataUrl.then(source => new Blob([`<img src="${esc(source)}" alt="${esc(image?.alt || '')}">`], {type: 'text/html'}));
+  try {
+    // Start write() in the click handler. ClipboardItem accepts promise-valued blobs, so the
+    // browser preserves transient user activation while the image fetch completes.
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/plain': new Blob([image?.alt || image?.dataset?.originalSrc || url], {type: 'text/plain'}),
+      'text/html': htmlBlob,
+      'image/png': imageBlob,
+    })]);
+    showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
+  } catch (error) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+  }
+}
+
+function showImageContextMenu(image, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu markdown-preview-context-menu';
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyMarkdownPreviewImageToClipboard(image, button), () => linkContextMenu.close());
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), button => copyTextWithFeedback(image?.dataset?.originalSrc || image?.currentSrc || image?.src || '', {button}), () => linkContextMenu.close());
+  linkContextMenu.open(menu, x, y);
+}
+
 // right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
@@ -9241,6 +9283,13 @@ function installLinkContextMenu(container) {
   return bindScopedOnce(container, 'link-context-menu', scope => {
     scope.ownEvent('contextmenu', container, 'contextmenu', event => {
       const anchor = event.target?.closest?.('a[href]');
+      const image = event.target?.closest?.('img');
+      if (image && container.contains(image)) {
+        event.preventDefault();
+        event.stopPropagation();
+        showImageContextMenu(image, event.clientX, event.clientY);
+        return;
+      }
       if (!anchor || !container.contains(anchor)) return;
       if (anchor.closest?.('[data-prosemirror-editor]')) return;
       event.preventDefault();
@@ -70116,10 +70165,14 @@ function markdownPreviewSelectionContext(container, event = null) {
   const selectionNode = selection?.anchorNode;
   const selectionElement = selectionNode?.nodeType === 1 ? selectionNode : selectionNode?.parentElement;
   const eventElement = event?.target?.nodeType === 1 ? event.target : event?.target?.parentElement;
-  const block = selectionElement?.closest?.('[data-markdown-preview-editable="true"]')
+  const block = selectionElement?.closest?.('.markdown-body > *')
     || eventElement?.closest?.('[data-markdown-preview-editable="true"]')
     || container._markdownPreviewSelectionContext?.block;
-  if (!block || !container.contains(block) || !markdownPreviewInlineBlockIsEditable(block)) return null;
+  if (!block || !container.contains(block)) {
+    const image = eventElement?.closest?.('img');
+    if (image && container.contains(image)) return {block: image, selectedText: image.alt || image.dataset.originalSrc || image.src || '', image};
+    return null;
+  }
   const selectedText = selection && !selection.isCollapsed
     && block.contains(selection.anchorNode) && block.contains(selection.focusNode)
     ? selection.toString()
@@ -70184,9 +70237,58 @@ function markdownPreviewBlockClass(block) {
 }
 
 function markdownPreviewCopySelection(selectedText) {
-  if (!selectedText || !navigator.clipboard?.writeText) return false;
-  void navigator.clipboard.writeText(selectedText);
-  return true;
+  if (!selectedText) return false;
+  return copyTextWithFeedback(selectedText, {statusText: t('status.copiedText')});
+}
+
+function markdownPreviewCopySelectionWithStyle(context) {
+  const selection = document.getSelection?.();
+  if (!selection || selection.isCollapsed) return false;
+  const container = context?.container || context?.block?.closest?.('.markdown-body');
+  if (!container || !container.contains(selection.anchorNode) || !container.contains(selection.focusNode)) return false;
+  const range = context?.range || selection.getRangeAt(0);
+  const wrapper = document.createElement('div');
+  wrapper.append(range.cloneContents());
+  const images = [...wrapper.querySelectorAll('img[src]')];
+  // Let the browser serialize ordinary selections. Image selections need explicit data URLs:
+  // Google Docs cannot fetch this app's authenticated raw-file URLs from clipboard HTML.
+  if (!images.length && document.execCommand?.('copy') === true) {
+    showCopyFeedback({statusText: t('status.copiedStyledText')});
+    return true;
+  }
+  const text = selection.toString() || wrapper.textContent || '';
+  if (!wrapper.innerHTML || (!text && !images.length)) return false;
+  const clipboard = globalThis.navigator?.clipboard;
+  if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
+    const imageData = images.map(image => fetch(image.currentSrc || image.src, {credentials: 'same-origin'})
+      .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
+      .then(blob => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({blob, dataUrl: String(reader.result)});
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      })));
+    const html = Promise.all(imageData).then(results => {
+      results.forEach((result, index) => images[index].setAttribute('src', result.dataUrl));
+      return new Blob([wrapper.innerHTML], {type: 'text/html'});
+    });
+    const firstImage = imageData[0]?.then(result => result.blob);
+    const item = new ClipboardItem({
+      'text/plain': new Blob([text], {type: 'text/plain'}),
+      'text/html': html,
+      ...(firstImage ? {'image/png': firstImage} : {}),
+    });
+    // Pass promises to ClipboardItem immediately so the user activation is retained while images fetch.
+    void clipboard.write([item]).then(() => showCopyFeedback({statusText: t('status.copiedStyledText')}));
+    return true;
+  }
+  return copyTextWithFeedback(text, {statusText: t('status.copiedStyledText')});
+}
+
+function markdownPreviewImageContextMenu(image, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  showImageContextMenu(image, event.clientX, event.clientY);
 }
 
 function markdownPreviewPasteSelection(container, context) {
@@ -70951,7 +71053,9 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  appendContextMenuButton(menu, 'Copy', () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, t('contextmenu.copyText'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
+  appendContextMenuButton(menu, t('contextmenu.copyWithStyle'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -70980,6 +71084,8 @@ function markdownFormattingContextMenu(event, context, options = {}) {
 
 function markdownPreviewContextMenu(container, event, context) {
   markdownFormattingContextMenu(event, context, {
+    ...context,
+    container,
     applyCommand: command => markdownPreviewSelectionTransform(container, command, context),
     paste: () => markdownPreviewPasteSelection(container, context),
     isActive: command => markdownPreviewFormatActive(container, context, command),
@@ -71057,6 +71163,11 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (block) updateMarkdownFormatFromPreview(container, block, button.dataset.markdownPreviewCommand);
     });
     scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const image = event.target?.closest?.('img');
+      if (image && container.contains(image)) {
+        markdownPreviewImageContextMenu(image, event);
+        return;
+      }
       const context = container._markdownPreviewSelectionContext || markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
       if (!context || !context.block) return;
       event.preventDefault();
@@ -78354,6 +78465,13 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
   const onContextMenu = event => {
+    const image = event.target?.closest?.('img');
+    if (image && view.dom.contains(image)) {
+      event.preventDefault();
+      event.stopPropagation();
+      showImageContextMenu(image, event.clientX, event.clientY);
+      return;
+    }
     const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;
@@ -82296,7 +82414,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
 
 function bindClipboardPaste() {
   if (readOnlyMode) return;
-  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', event => {
+  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', async event => {
     if (!dataTransferHasImagePayload(event.clipboardData)) return;
     const editorTarget = markdownEditorPasteTarget(event);
     // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
@@ -82309,7 +82427,7 @@ function bindClipboardPaste() {
         statusErr(esc(editorTarget.panel?._pmError || t('editor.prosemirrorDidNotInitialize')));
         return;
       }
-      const files = dataTransferImageFiles(event.clipboardData);
+      const files = await dataTransferImageFiles(event.clipboardData);
       if (!files.length) {
         statusErr(localizedHtml('status.selectPaneForImagePaste'));
         return;
@@ -82325,7 +82443,7 @@ function bindClipboardPaste() {
       statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
-    const files = dataTransferImageFiles(event.clipboardData);
+    const files = await dataTransferImageFiles(event.clipboardData);
     if (!files.length) {
       // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
       // data (e.g. a remote <img> URL with no File and no data: URL).
@@ -82388,7 +82506,7 @@ function dataTransferHasImagePayload(dt) {
 // Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
 // (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
 // plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
-function dataTransferImageFiles(dt) {
+async function dataTransferImageFiles(dt) {
   if (!dt) return [];
   const files = [];
   for (const item of Array.from(dt.items || [])) {
@@ -82412,6 +82530,21 @@ function dataTransferImageFiles(dt) {
     while ((match = re.exec(html))) {
       const file = dataUrlToImageFile(match[1]);
       if (file) files.push(file);
+    }
+  }
+  if (!files.length && typeof dt.getData === 'function') {
+    const html = dt.getData('text/html') || '';
+    const re = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const source = match[1];
+      if (!/^https?:\/\//i.test(source)) continue;
+      try {
+        const response = await fetch(source, {mode: 'cors'});
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        files.push(new File([blob], pastedImageFilename('', blob.type || 'image/png'), {type: blob.type || 'image/png'}));
+      } catch (_) {}
     }
   }
   return files;

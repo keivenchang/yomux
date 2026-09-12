@@ -1686,7 +1686,7 @@
   "status.copiedTerminalChars.many": "скопировано {count} символов",
   "status.copiedTerminalChars.one": "скопированный символ {count}",
   "status.copiedTerminalChars.other": "скопированы символы {count}",
-  "status.copiedText": "скопированный текст",
+  "status.copiedText": "Текст скопирован",
   "status.copiedTmuxSelection.few": "скопировано {count} символа из tmux",
   "status.copiedTmuxSelection.many": "скопировано {count} символов из tmux",
   "status.copiedTmuxSelection.one": "скопирован символ {count} из tmux",
@@ -2650,5 +2650,8 @@
   "pref.appearance.sync_font_sizes.label": "Синхронизировать все размеры шрифта",
   "pref.appearance.sync_font_sizes.help": "Если включено, интерфейс, терминал, редактор, предпросмотр и Finder используют глобальный размер.",
   "pref.section.appearance": "Внешний вид",
-  "pref.section.sizes": "Размеры"
+  "pref.section.sizes": "Размеры",
+  "contextmenu.copyText": "Копировать текст",
+  "contextmenu.copyWithStyle": "Копировать со стилем",
+  "status.copiedStyledText": "Скопировано со стилем"
 }

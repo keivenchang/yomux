@@ -1656,7 +1656,7 @@
   "status.copiedTerminalChars.many": "caractères {count} copiés",
   "status.copiedTerminalChars.one": "caractère {count} copié",
   "status.copiedTerminalChars.other": "caractères {count} copiés",
-  "status.copiedText": "texte copié",
+  "status.copiedText": "Texte copié",
   "status.copiedTmuxSelection.many": "caractères {count} copiés à partir de tmux",
   "status.copiedTmuxSelection.one": "copié le caractère {count} à partir de tmux",
   "status.copiedTmuxSelection.other": "caractères {count} copiés à partir de tmux",
@@ -2604,5 +2604,8 @@
   "pref.appearance.sync_font_sizes.label": "Synchroniser toutes les tailles de police",
   "pref.appearance.sync_font_sizes.help": "Lorsque cette option est activée, toutes les surfaces utilisent la taille de police globale.",
   "pref.section.appearance": "Apparence",
-  "pref.section.sizes": "Tailles"
+  "pref.section.sizes": "Tailles",
+  "contextmenu.copyText": "Copier le texte",
+  "contextmenu.copyWithStyle": "Copier avec le style",
+  "status.copiedStyledText": "Copié avec le style"
 }

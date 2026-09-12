@@ -6684,6 +6684,48 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   return true;
 }
 
+async function copyMarkdownPreviewImageToClipboard(image, button) {
+  const url = String(image?.currentSrc || image?.src || '');
+  if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+    return;
+  }
+  const imageBlob = fetch(url, {credentials: 'same-origin'}).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  });
+  const dataUrl = imageBlob.then(blob => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  }));
+  const htmlBlob = dataUrl.then(source => new Blob([`<img src="${esc(source)}" alt="${esc(image?.alt || '')}">`], {type: 'text/html'}));
+  try {
+    // Start write() in the click handler. ClipboardItem accepts promise-valued blobs, so the
+    // browser preserves transient user activation while the image fetch completes.
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/plain': new Blob([image?.alt || image?.dataset?.originalSrc || url], {type: 'text/plain'}),
+      'text/html': htmlBlob,
+      'image/png': imageBlob,
+    })]);
+    showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
+  } catch (error) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+  }
+}
+
+function showImageContextMenu(image, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu markdown-preview-context-menu';
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyMarkdownPreviewImageToClipboard(image, button), () => linkContextMenu.close());
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), button => copyTextWithFeedback(image?.dataset?.originalSrc || image?.currentSrc || image?.src || '', {button}), () => linkContextMenu.close());
+  linkContextMenu.open(menu, x, y);
+}
+
 // right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
 function showLinkContextMenu(anchor, x, y) {
@@ -6705,6 +6747,13 @@ function installLinkContextMenu(container) {
   return bindScopedOnce(container, 'link-context-menu', scope => {
     scope.ownEvent('contextmenu', container, 'contextmenu', event => {
       const anchor = event.target?.closest?.('a[href]');
+      const image = event.target?.closest?.('img');
+      if (image && container.contains(image)) {
+        event.preventDefault();
+        event.stopPropagation();
+        showImageContextMenu(image, event.clientX, event.clientY);
+        return;
+      }
       if (!anchor || !container.contains(anchor)) return;
       if (anchor.closest?.('[data-prosemirror-editor]')) return;
       event.preventDefault();

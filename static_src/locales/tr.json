@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "Kopyalanmış göreceli yol",
   "status.copiedTerminalChars.one": "{count} char kopyaladı",
   "status.copiedTerminalChars.other": "{count} karakterleri kopyaladı",
-  "status.copiedText": "metni kopyaladı",
+  "status.copiedText": "Metin kopyalandı",
   "status.copiedTmuxSelection.one": "{count} char'ı tmux'dan kopyaladı.",
   "status.copiedTmuxSelection.other": "tmux'dan {count} karakterleri kopyaladı",
   "status.copiedTranscriptPath": "transkript yolu kopyalandı",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "Tüm yazı tipi boyutlarını eşitle",
   "pref.appearance.sync_font_sizes.help": "Açıldığında arayüz, terminal, editör, önizleme ve Finder genel boyutu kullanır.",
   "pref.section.appearance": "Görünüm",
-  "pref.section.sizes": "Boyutlar"
+  "pref.section.sizes": "Boyutlar",
+  "contextmenu.copyText": "Metni kopyala",
+  "contextmenu.copyWithStyle": "Stille kopyala",
+  "status.copiedStyledText": "Stille kopyalandı"
 }

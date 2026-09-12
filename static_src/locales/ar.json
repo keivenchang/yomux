@@ -1746,7 +1746,7 @@
   "status.copiedTerminalChars.other": "تم نسخ أحرف {count}",
   "status.copiedTerminalChars.two": "تم نسخ {count} حرفين",
   "status.copiedTerminalChars.zero": "تم نسخ {count} أحرف",
-  "status.copiedText": "النص المنسوخ",
+  "status.copiedText": "تم نسخ النص",
   "status.copiedTmuxSelection.few": "تم نسخ {count} أحرف من tmux",
   "status.copiedTmuxSelection.many": "تم نسخ {count} حرفًا من tmux",
   "status.copiedTmuxSelection.one": "تم نسخ حرف {count} من tmux",
@@ -2742,5 +2742,8 @@
   "pref.appearance.sync_font_sizes.label": "مزامنة جميع أحجام الخطوط",
   "pref.appearance.sync_font_sizes.help": "عند التفعيل، تستخدم النصوص في الواجهة والطرفية والمحرر والمعاينة وFinder حجم الخط العام.",
   "pref.section.appearance": "المظهر",
-  "pref.section.sizes": "الأحجام"
+  "pref.section.sizes": "الأحجام",
+  "contextmenu.copyText": "نسخ النص",
+  "contextmenu.copyWithStyle": "نسخ مع التنسيق",
+  "status.copiedStyledText": "تم النسخ مع التنسيق"
 }

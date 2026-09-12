@@ -764,6 +764,13 @@ function installProseMirrorInteractions(panel, path, view, schema, api) {
   view.dom.addEventListener('focus', () => clearLinkedCodeMirrorSelection(panel, path));
   view.dom.addEventListener('blur', () => flushProseMirrorSource(panel, path));
   const onContextMenu = event => {
+    const image = event.target?.closest?.('img');
+    if (image && view.dom.contains(image)) {
+      event.preventDefault();
+      event.stopPropagation();
+      showImageContextMenu(image, event.clientX, event.clientY);
+      return;
+    }
     const link = event.target?.closest?.('a[href]');
     const context = prosemirrorSelectionAtClientPoint(view, event);
     if (!context.block) return;

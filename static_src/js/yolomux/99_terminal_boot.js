@@ -3566,7 +3566,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
 
 function bindClipboardPaste() {
   if (readOnlyMode) return;
-  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', event => {
+  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', async event => {
     if (!dataTransferHasImagePayload(event.clipboardData)) return;
     const editorTarget = markdownEditorPasteTarget(event);
     // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
@@ -3579,7 +3579,7 @@ function bindClipboardPaste() {
         statusErr(esc(editorTarget.panel?._pmError || t('editor.prosemirrorDidNotInitialize')));
         return;
       }
-      const files = dataTransferImageFiles(event.clipboardData);
+      const files = await dataTransferImageFiles(event.clipboardData);
       if (!files.length) {
         statusErr(localizedHtml('status.selectPaneForImagePaste'));
         return;
@@ -3595,7 +3595,7 @@ function bindClipboardPaste() {
       statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
-    const files = dataTransferImageFiles(event.clipboardData);
+    const files = await dataTransferImageFiles(event.clipboardData);
     if (!files.length) {
       // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
       // data (e.g. a remote <img> URL with no File and no data: URL).
@@ -3658,7 +3658,7 @@ function dataTransferHasImagePayload(dt) {
 // Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
 // (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
 // plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
-function dataTransferImageFiles(dt) {
+async function dataTransferImageFiles(dt) {
   if (!dt) return [];
   const files = [];
   for (const item of Array.from(dt.items || [])) {
@@ -3682,6 +3682,21 @@ function dataTransferImageFiles(dt) {
     while ((match = re.exec(html))) {
       const file = dataUrlToImageFile(match[1]);
       if (file) files.push(file);
+    }
+  }
+  if (!files.length && typeof dt.getData === 'function') {
+    const html = dt.getData('text/html') || '';
+    const re = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const source = match[1];
+      if (!/^https?:\/\//i.test(source)) continue;
+      try {
+        const response = await fetch(source, {mode: 'cors'});
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        files.push(new File([blob], pastedImageFilename('', blob.type || 'image/png'), {type: blob.type || 'image/png'}));
+      } catch (_) {}
     }
   }
   return files;
