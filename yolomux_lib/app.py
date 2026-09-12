@@ -7528,7 +7528,7 @@ class SystemStatusProjector:
         migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
         build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
         service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
-        transcript_usage = app.stats_current_transcript_usage.status()
+        transcript_usage = app.stats_current_client.agent_token_usage_status()
         token_family = current_runtime.get("families", {}).get("agent_tokens", {}) if isinstance(current_runtime.get("families"), dict) else {}
         token_cadence = float(token_family.get("cadence_seconds") or STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS) if isinstance(token_family, dict) else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
         usage = dict(service_usage)
@@ -8169,10 +8169,6 @@ class TmuxWebtermApp:
         self.stats_collection_state = StatsCollectionState()
         self.status_collector_lease_lock = threading.Lock()
         self.status_collector_lease_id = ""
-        self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
-        self.stats_opencode_cursors = stats_current_opencode.OpenCodeCursorStore(
-            stats_current_opencode.OpenCodeCursorStore.default_path()
-        )
         # M8: the live retained-health store, attached by whoever started this port's
         # observer. `None` until then, and the projection says `observer_unattached`
         # rather than publishing zeros. See `attach_backend_health_store`.
@@ -8282,7 +8278,6 @@ class TmuxWebtermApp:
                 "agent_status": self.collect_current_stats_agent_status,
                 "service_load": self.collect_current_stats_service_load,
                 "system_memory": self.collect_current_stats_system_memory,
-                "agent_tokens": self.collect_current_stats_agent_tokens,
             },
             owner_generation=self.stats_current_owner_generation,
             token_cadence_seconds=self.stats_current_token_cadence_seconds,
@@ -8901,7 +8896,11 @@ class TmuxWebtermApp:
             for key in list(self.stats_collection_state.agent_activity_state):
                 if key not in seen_keys:
                     self.stats_collection_state.agent_activity_state.pop(key, None)
-        process_id, _label, _port = self.stats_current_process_identity()
+        process_id, _label, _port = (
+            self.stats_current_process_identity()
+            if hasattr(self, "background_owner")
+            else ("web-test", "web-test", 0)
+        )
         return stats_current_collectors.agent_status_success(
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
@@ -8995,6 +8994,15 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
+        """Compatibility test adapter; production token collection is owned by statsd."""
+        compatibility_scanner = not hasattr(self, "stats_current_transcript_usage")
+        if compatibility_scanner:
+            self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+        if not hasattr(self, "stats_opencode_cursors"):
+            self.stats_opencode_cursors = stats_current_opencode.OpenCodeCursorStore(
+                None if "stats_current_client" not in self.__dict__ else
+                stats_current_opencode.OpenCodeCursorStore.default_path()
+            )
         row_provider = self.__dict__.get("stats_agent_window_rows")
         fixture_rows = callable(row_provider) and hasattr(self, "stats_agent_token_rows")
         if fixture_rows:
@@ -9015,7 +9023,7 @@ class TmuxWebtermApp:
                 "cwd": item.observation.directory or "",
                 "started_at": item.observation.started_at,
             } for item in inventory.sessions]
-        if not rows and not inventory.unavailable and not hasattr(self, "stats_current_transcript_usage"):
+        if not rows and not inventory.unavailable and compatibility_scanner:
             return stats_current_collectors.collector_unavailable(
                 family="agent_tokens",
                 source_id="statusd",
@@ -9395,7 +9403,11 @@ class TmuxWebtermApp:
                     vars(item.atom)
                 )
             )
-        process_id, _label, _port = self.stats_current_process_identity()
+        process_id, _label, _port = (
+            self.stats_current_process_identity()
+            if hasattr(self, "background_owner")
+            else ("web-test", "web-test", 0)
+        )
         cursor_changed = (
             proposed_cursor_values != cursor_values
             or proposed_cursor_epochs != cursor_epochs

@@ -386,6 +386,28 @@ def test_worker_publisher_open_failure_is_serialized_and_stops_the_listener(tmp_
     assert service.stop_event.is_set() is True and service._failed_builds == 1
 
 
+def test_statsd_owns_agent_token_collection_scheduler(tmp_path):
+    calls = []
+
+    class Collector:
+        def collect(self, attempt):
+            calls.append(attempt)
+            return collectors.CollectorFacts()
+
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    service.collector_context = {"pid": 1234, "port": 7111, "owner_generation": 7}
+    service._agent_token_collector = Collector()
+    service._next_agent_tokens_at = 0.0
+    service._collect_agent_tokens_if_due(FakeStore())
+
+    assert len(calls) == 1
+    assert calls[0].family == "agent_tokens"
+    assert calls[0].owner_generation == 7
+
+
 def test_worker_reader_skips_diagnostics_but_pruning_publisher_retains_them(tmp_path):
     store = FakeStore()
     diagnostic_options = []

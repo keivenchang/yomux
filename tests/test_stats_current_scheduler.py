@@ -16,7 +16,7 @@ def test_manifest_and_web_scheduler_ownership_are_explicit():
         "cpu", "agent_status", "gpu", "service_load", "system_memory", "agent_tokens",
     }
     assert runtime.WEB_COLLECTED_FAMILIES == {
-        "agent_status", "service_load", "system_memory", "agent_tokens",
+        "agent_status", "service_load", "system_memory",
     }
 
 

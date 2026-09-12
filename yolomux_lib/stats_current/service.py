@@ -30,8 +30,16 @@ from yolomux_lib.local_services.runtime import acquire_client_lease, claim_gated
 from yolomux_lib.local_services.runtime import request_is_self_connection
 from yolomux_lib.local_services.runtime import run_local_rpc_service
 from yolomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
-from yolomux_lib.settings import stats_prune_local_time
-from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
+from yolomux_lib.settings import settings_payload, stats_prune_local_time
+from yolomux_lib.stats_current import agent_tokens, collectors, families, host_collectors, identity, materializer, migration, observations, opencode, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
+from yolomux_lib.stats_current.opencode import DEFAULT_DATABASE_PATH as OPENCODE_DATABASE_PATH
+from yolomux_lib.stats_current.opencode import OpenCodeCursorStore
+from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yolomux_lib.tmux.sessions import machinewide_opencode_inventory
+from yolomux_lib.tmux.sessions import discover_sessions
+from yolomux_lib.tmux.tmux_utils import list_tmux_session_names
+from yolomux_lib.common import VISIBLE_AGENT_KINDS
+from yolomux_lib import session_files
 
 SERVICE_NAME = "statsd"
 SOCKET_FILENAME = storage.SOCKET_FILENAME
@@ -101,6 +109,7 @@ APPEND_FLUSH_TEST_MARKER_ENV = "YOLOMUX_CHECK_IN_CONTAINER"
 # facts on the first transient error. Two attempts is the bound: one to ride out a transient
 # failure, and no more, with the discard COUNTED rather than reported as a clean flush.
 APPEND_FLUSH_UNRESOLVED_LIMIT = 2
+AGENT_TOKEN_BUDGET_FOLLOW_UP_SECONDS = 4.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1347,6 +1356,12 @@ class StatsCurrentService:
         self._host_gpu_roster_owner_generation: int | None = None
         self._host_collector_failures = 0
         self._last_host_collector_error = ""
+        self._agent_token_scanner = StatsCurrentTranscriptUsageScanner()
+        self._agent_token_cursors = OpenCodeCursorStore(
+            OpenCodeCursorStore.default_path().with_name("statsd-opencode-cursors.json")
+        )
+        self._agent_token_collector: agent_tokens.AgentTokenCollector | None = None
+        self._next_agent_tokens_at = self.monotonic() + 1.0
         # The web process's CPU/memory sample is pushed from here on a 1.0s cadence and it is the
         # ONLY writer of that metric. Every skip used to be silent -- no counter, no reason, and
         # `failures` stayed 0 because a skipped push never raised -- so a web row that read
@@ -2581,6 +2596,7 @@ class StatsCurrentService:
                 self._prune_if_due(publisher)
                 self._vacuum_if_due_while_idle(publisher)
                 self._collect_host_facts_if_due(publisher)
+                self._collect_agent_tokens_if_due(publisher)
                 work = self._take_work(scheduled=True)
                 if work is not None:
                     # The worker's OWN writable handle. sqlite3 connections are thread-owned, and
@@ -2623,6 +2639,112 @@ class StatsCurrentService:
                 retention_prune=result.retention_prune,
             )
         self.work_event.set()
+
+    def _agent_token_source_id(self) -> str:
+        return f"pid:{os.getpid()}"
+
+    def _agent_token_collector_for_context(self) -> agent_tokens.AgentTokenCollector:
+        if self._agent_token_collector is None:
+            self._agent_token_collector = agent_tokens.AgentTokenCollector(
+                scanner=self._agent_token_scanner,
+                cursors=self._agent_token_cursors,
+                database=OPENCODE_DATABASE_PATH,
+                inventory_provider=machinewide_opencode_inventory,
+                rows_provider=self._agent_token_rows,
+                settings_provider=lambda: settings_payload().get("settings", {}),
+                source_identity_provider=self._agent_token_source_id,
+            )
+        return self._agent_token_collector
+
+    @staticmethod
+    def _agent_token_rows(
+        inventory: opencode.OpenCodeProcessInventory,
+    ) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        names, _error = list_tmux_session_names()
+        sessions, _errors = discover_sessions(list(names), enrich_paths=True)
+        for session, info in sessions.items():
+            for agent in info.agents:
+                kind = str(agent.kind or "").strip().lower()
+                if kind not in VISIBLE_AGENT_KINDS or kind == "opencode":
+                    continue
+                window, _pane = session_files.agent_window_for_info(info, agent)
+                rows.append({
+                    "key": f"{session}|{window}|{agent.pane_target}|{kind}",
+                    "session": session,
+                    "window": window,
+                    "pane_target": agent.pane_target,
+                    "kind": kind,
+                    "transcript": agent.transcript or "",
+                })
+        rows.extend(agent_tokens.rows_from_opencode_inventory(inventory))
+        return rows
+
+    def _collect_agent_tokens_if_due(self, publisher: storage.Store) -> None:
+        if self.collector_context is None:
+            return
+        now = self.monotonic()
+        cadence = 10.0 if self._stats_are_watched() else 60.0
+        if now < self._next_agent_tokens_at:
+            return
+        self._next_agent_tokens_at = now + cadence
+        scheduled_at = self.clock()
+        owner_generation = int(self.collector_context.get("owner_generation", 0))
+        attempt = type("AgentTokenAttempt", (), {
+            "family": "agent_tokens",
+            "epoch_id": f"statsd:agent_tokens:{self._agent_token_source_id()}",
+            "epoch_started_at": scheduled_at,
+            "scheduled_at": scheduled_at,
+            "cadence_seconds": cadence,
+            "owner_generation": owner_generation,
+        })()
+        facts: collectors.CollectorFacts | None = None
+        try:
+            facts = self._agent_token_collector_for_context().collect(attempt)
+            if facts.budget_exhausted_follow_up:
+                self._next_agent_tokens_at = min(
+                    self._next_agent_tokens_at,
+                    now + AGENT_TOKEN_BUDGET_FOLLOW_UP_SECONDS,
+                )
+            if not any((facts.observations, facts.usage_atoms, facts.usage_tombstones, facts.coverage_epochs, facts.unavailable_spans)):
+                return
+            with self.work_lock:
+                result = publisher.append_batch(
+                    observations=facts.observations,
+                    usage_atoms=facts.usage_atoms,
+                    usage_tombstones=facts.usage_tombstones,
+                    coverage_epochs=facts.coverage_epochs,
+                    unavailable_spans=facts.unavailable_spans,
+                )
+                accepted = sum((
+                    result.observations_accepted,
+                    result.usage_atoms_accepted,
+                    result.usage_tombstones_accepted,
+                    result.coverage_changed,
+                    result.unavailable_spans_accepted,
+                ))
+                dirty = self._append_dirty_cells(result)
+                self._latest_source_generation = max(self._latest_source_generation, result.source_generation)
+                self._last_source_commit_at = self.clock() if accepted else self._last_source_commit_at
+                self._pending_dirty.update(dirty)
+                self._stage_ring_cells_locked(dirty, result.source_generation)
+                self._update_cached_coverage_locked(
+                    facts.coverage_epochs,
+                    facts.unavailable_spans,
+                    accepted_change=bool(result.coverage_changed or result.unavailable_spans_accepted),
+                    retention_prune=result.retention_prune,
+                )
+            if facts.receipt is not None:
+                facts.receipt.commit()
+            if accepted:
+                self.work_event.set()
+        except (OSError, ValueError, storage.StatsCurrentError, storage.UsageAtomIdentityConflict) as error:
+            if facts is not None and facts.receipt is not None:
+                facts.receipt.rollback()
+            self._record_failure("agent_tokens", error)
+
+    def agent_token_usage_status(self) -> dict[str, object]:
+        return self._agent_token_scanner.status()
 
     def _web_push_target(self) -> tuple[dict[str, object] | None, str]:
         """Resolve where to push this process's CPU sample, and say WHY when there is nowhere.
@@ -5633,6 +5755,7 @@ class StatsStatusProjector:
                 "quarantined_conflict_count": len(usage_identity_conflicts),
                 "quarantined_conflict_attempts": usage_identity_conflict_attempts,
                 "quarantined": usage_identity_conflicts,
+                "transcripts": self._agent_token_scanner.status(),
             },
             "traffic": {
                 "snapshot": {

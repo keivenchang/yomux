@@ -2360,6 +2360,16 @@ def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", Owner)
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.control_server = SimpleNamespace(path=tmp_path / "control.sock")
+    webapp.event_log = SimpleNamespace(append=lambda *args, **kwargs: {})
+    webapp.client_events = SimpleNamespace(publish=lambda *args, **kwargs: {})
+    webapp.job_client = SimpleNamespace(start_for_scheduler=lambda: None)
+    webapp.pricing_refresh_coordinator = SimpleNamespace(start_periodic=lambda: None)
+    webapp.stats_current_runtime = SimpleNamespace(start=lambda: None)
+    webapp.warm_start_tabber_activity_cache = lambda: None
+    webapp.start_tabber_activity_cache_warmer = lambda: None
+    webapp.publish_background_client_event = lambda *args, **kwargs: None
+    webapp.search_indexer = SimpleNamespace(lease_configured_roots=lambda _roots: {"ok": True})
+    webapp.settings_payload = lambda: {"settings": {}}
 
     assert webapp.start_background_owner(port=7111, priority=0) is True
     assert captured["capabilities"] == {
