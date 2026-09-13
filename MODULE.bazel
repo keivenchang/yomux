@@ -1,0 +1,4 @@
+module(name = "yolomux")
+
+# Phase 0 keeps the initial graph dependency-free. External Go dependencies are
+# added only with a pinned Bazel module and integrity-checked archive.

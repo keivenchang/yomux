@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         help="terminate the verified existing YOLOmux instance for this product root before starting",
     )
     parser.add_argument(
+        "--backend",
+        choices=("python", "go", "auto"),
+        default=os.environ.get("YOLOMUX_BACKEND", "python"),
+        help="backend selected before startup; Go mode requires the Phase 2 binary",
+    )
+    parser.add_argument(
         "--sessions",
         nargs="*",
         default=None,
@@ -490,6 +496,10 @@ def report_worktree_writer_warning() -> bool:
 
 def main() -> int:
     args = parse_args()
+    if args.backend == "go":
+        return exec_go_backend(args)
+    if args.backend == "auto" and os.environ.get("YOLOMUX_PREFER_GO") == "1":
+        return exec_go_backend(args)
     try:
         assert_early_port(args.port)
     except RuntimeError as error:
@@ -615,3 +625,15 @@ def main() -> int:
                     # port and is finishing shutdown.
                     lease.release()
                     root_lease.release()
+
+
+def exec_go_backend(args: argparse.Namespace) -> int:
+    """Replace the launcher with the explicitly selected Go server."""
+    repo_root = Path(__file__).resolve().parents[1]
+    binary = os.environ.get("YOLOMUX_GO_BINARY", str(repo_root / "yolomux-go"))
+    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        print(f"ERROR: Go backend binary is unavailable: {binary}", file=sys.stderr)
+        return 2
+    command = [binary, "--host", args.host, "--port", str(args.port), "--root", str(repo_root)]
+    os.execv(binary, command)
+    return 127
