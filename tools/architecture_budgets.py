@@ -364,6 +364,11 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             if _is_core_dump_filename(filename):
                 continue
             path = Path(parent) / filename
+            if path.is_symlink():
+                # Bazel places output-tree symlinks at the repository root. They are generated
+                # artifacts, and a container may see their targets as dangling even though the
+                # host build can resolve them; neither view is source to ratchet.
+                continue
             relative = path.relative_to(root).as_posix()
             parts = Path(relative).parts
             if any(

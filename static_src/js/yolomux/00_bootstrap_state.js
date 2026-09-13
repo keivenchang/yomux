@@ -1,5 +1,56 @@
 const pageLoadBundleEvalStartedAt = Number(globalThis.performance?.now?.()) || 0;
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
+const capabilityDocument = (() => {
+  const value = bootstrap.capabilities;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const contract = value.contract && typeof value.contract === 'object' ? value.contract : {};
+  const entries = value.capabilities && typeof value.capabilities === 'object' && !Array.isArray(value.capabilities)
+    ? value.capabilities
+    : {};
+  return Object.freeze({
+    contract: Object.freeze({...contract}),
+    capabilities: Object.freeze({...entries}),
+  });
+})();
+function capabilityEntry(name) {
+  if (!capabilityDocument) return null;
+  const entry = capabilityDocument.capabilities[String(name || '')];
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : null;
+}
+function capabilityAvailable(name) {
+  const entry = capabilityEntry(name);
+  // A page without a negotiated document is the Python/full-feature path. A negotiated page is
+  // conservative: omission is unavailable, so a stale or incomplete catalog cannot probe routes.
+  return capabilityDocument ? entry?.available === true : true;
+}
+function capabilityReason(name) {
+  const entry = capabilityEntry(name);
+  return entry?.reason && typeof entry.reason === 'object' ? entry.reason : null;
+}
+function capabilityNameForRequest(url, options = {}) {
+  let pathname = '';
+  try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
+  if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
+  if (pathname === '/ws' || pathname === '/api/tmux' || pathname === '/api/tmux-session-exists') return 'terminal.websocket.v1';
+  if (pathname === '/api/ensure-session' || pathname === '/api/create-session-plan' || pathname === '/api/create-session') return 'session.create.v1';
+  if (pathname === '/api/kill-session') return 'session.kill.v1';
+  if (pathname === '/api/rename-session') return 'session.rename.v1';
+  if (pathname === '/api/transcripts' || pathname === '/api/session-metadata' || pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname.startsWith('/api/session-files')) return 'pane.tabber.v1';
+  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/context-items' || pathname === '/api/events') return 'terminal.status.v1';
+	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
+		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
+		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';
+		if (['/api/fs/search', '/api/fs/search-stream', '/api/fs/index-status', '/api/fs/unindex', '/api/batch/search'].includes(pathname)) return 'finder.search.v1';
+		if (['/api/watch/roots', '/api/fs/watch-diff'].includes(pathname)) return 'finder.watch.v1';
+    if (['/api/batch/zip', '/api/batch/html-preview'].includes(pathname)) return 'finder.preview.v1';
+    if (['/api/fs/batch', '/api/batch/count'].includes(pathname)) return 'finder.batch.v1';
+    return 'finder.read.v1';
+  }
+  if (pathname.startsWith('/api/stats') || pathname === '/api/pricing-catalog' || pathname === '/api/pricing-catalog/refresh') return 'pane.stats.v1';
+  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth') return 'pane.agent.v1';
+  if (pathname.startsWith('/api/chat/')) return 'pane.chat.v1';
+  return '';
+}
 const statsWriterFence = (() => {
   const value = bootstrap.statsWriterFence;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -892,6 +943,19 @@ function isFileExplorerItem(item) {
   return fileExplorerItemIds.includes(item);
 }
 const isFileSurfaceItem = isFileExplorerItem;
+function capabilityForPaneItem(item) {
+  if (item === finderItemId) return 'pane.finder.v1';
+  if (item === differItemId) return 'pane.differ.v1';
+  if (item === tabberItemId) return 'pane.tabber.v1';
+  if (item === chatItemId) return 'pane.chat.v1';
+  if (item === yoagentItemId) return 'pane.agent.v1';
+  if (item === debugPaneItemId) return 'core.diagnostics.v1';
+  return '';
+}
+function paneItemCapabilityAvailable(item) {
+  const capability = capabilityForPaneItem(item);
+  return !capability || capabilityAvailable(capability);
+}
 function fileExplorerItemLabel(item) {
   const view = fileExplorerViewForItem(item);
   if (view === 'differ') return t('brand.tab.changes');

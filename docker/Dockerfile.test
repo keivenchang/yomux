@@ -22,6 +22,12 @@ RUN apt-get update \
       ca-certificates \
       chromium \
       chromium-driver \
+      libc6-dev \
+      fontconfig \
+      fonts-dejavu-core \
+      fonts-liberation2 \
+      gcc \
+      golang-go \
  && rm -rf /var/lib/apt/lists/*
 
 # Match the Node major used by the source gate instead of Debian's older package.
@@ -66,11 +72,6 @@ RUN mkdir -p /home/runner/.local/bin /home/runner/.config /home/runner/.cache \
 RUN printf '#!/bin/sh\nexec node /opt/agent-pkg/codex/bin/codex.js "$@"\n' > /usr/local/bin/codex \
  && chmod +x /usr/local/bin/codex
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      fontconfig fonts-dejavu-core fonts-liberation2 \
- && rm -rf /var/lib/apt/lists/*
-
 USER runner
 ENV HOME=/home/runner
 # YOLOmux is a Pacific product: the client stamps generated upload names with pacificDateStamp(), and
@@ -96,6 +97,7 @@ RUN python3 -c "import pytest, pytest_timeout, selenium, yaml, watchfiles, zonei
  && readelf --version >/dev/null \
  && node --version | grep -q '^v22\.' \
  && chromium --version >/dev/null \
- && chromedriver --version >/dev/null
+ && chromedriver --version >/dev/null \
+ && go version >/dev/null
 
 CMD ["bash", "-lc", "tmux -V; node --version; python3 -V; chromium --version; echo 'pass a command, e.g. python3 -m pytest tests/... -q'"]

@@ -37,32 +37,43 @@ import (
 	"time"
 	"unicode"
 	"unsafe"
+
+	"github.com/keivenchang/yolomux/internal/capabilities"
+	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/work"
 )
 
-const version = "0.1.0-phase2"
+const version = "0.1.0-phase4"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 type server struct {
-	root              string
-	host              string
-	port              int
-	config            string
-	httpMode          bool
-	mu                sync.Mutex
-	children          map[*exec.Cmd]struct{}
-	events            *eventBroker
-	operationsMu      sync.Mutex
-	operations        map[string]*goOperation
-	operationsPath    string
-	operationsJournal string
-	eventLogPath      string
-	background        *goBackgroundOwner
-	logRing           *goLogRing
-	rootLease         *os.File
-	shutdownOnce      sync.Once
-	startedAt         time.Time
-	authMu            sync.Mutex
-	authFailures      map[string]authFailure
+	root               string
+	host               string
+	port               int
+	config             string
+	httpMode           bool
+	mu                 sync.Mutex
+	children           map[*exec.Cmd]struct{}
+	events             *eventBroker
+	operationsMu       sync.Mutex
+	operations         map[string]*goOperation
+	operationsPath     string
+	operationsJournal  string
+	eventLogPath       string
+	background         *goBackgroundOwner
+	finder             *finder.Service
+	finderJobs         *work.Scheduler
+	finderBulkJobs     *work.Scheduler
+	finderStreamJobs   *work.Scheduler
+	capabilities       *capabilities.Catalog
+	metadataMu         sync.Mutex
+	metadataGeneration uint64
+	logRing            *goLogRing
+	rootLease          *os.File
+	shutdownOnce       sync.Once
+	startedAt          time.Time
+	authMu             sync.Mutex
+	authFailures       map[string]authFailure
 }
 
 type authFailure struct {
@@ -2460,6 +2471,7 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 
 func main() {
 	port := flag.Int("port", 7221, "HTTP port")
+	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
 	host := flag.String("host", "127.0.0.1", "bind address")
 	root := flag.String("root", ".", "YOLOmux checkout root")
 	configDir := flag.String("config", os.Getenv("YOLOMUX_CONFIG_DIR"), "YOLOmux config directory")
@@ -2487,7 +2499,23 @@ func main() {
 		fatal("YOLOmux product root is already owned by another server or unavailable: " + err.Error())
 	}
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, httpMode: *httpMode, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease}
+	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, httpMode: *httpMode, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
+		_, err := s.events.publish(kind, payload)
+		return err
+	}, finder.UploadLimits{MaxBytes: s.fileTransferMaxBytes(), MaxFiles: s.fileTransferMaxFiles(), FilenameTemplate: s.fileTransferFilenameTemplate()})
+	if finderErr != nil {
+		if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
+			slog.Warn("finder job scheduler did not stop before shutdown timeout")
+		}
+		if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
+			slog.Warn("finder stream scheduler did not stop before shutdown timeout")
+		}
+		releaseInstanceRootLease(rootLease)
+		fatal("Finder initialization failed: " + finderErr.Error())
+	}
+	s.finder = finderService
+	s.syncFinderWatchCapability()
 	s.background = newGoBackgroundOwner(*configDir, rootPath, *port)
 	s.background.setEventPublisher(func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
@@ -2505,6 +2533,7 @@ func main() {
 	mux.HandleFunc("/logout", s.logout)
 	mux.HandleFunc("/api/auth-setup", s.authSetup)
 	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping), "readonly"))
+	mux.Handle("/api/capabilities", s.protected(http.HandlerFunc(s.capabilitySnapshot), "readonly"))
 	mux.Handle("/api/client-events", s.protected(http.HandlerFunc(s.clientEvents), "readonly"))
 	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck), "readonly"))
 	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
@@ -2515,7 +2544,28 @@ func main() {
 	mux.Handle("/api/system-status", s.protected(http.HandlerFunc(s.systemStatus), "readonly"))
 	mux.Handle("/api/system-status/advanced", s.protected(http.HandlerFunc(s.systemStatus), "readonly"))
 	mux.Handle("/api/logs", s.protected(http.HandlerFunc(s.logs), "readonly"))
-	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsList), "readonly"))
+	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots), "admin"))
+	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
+	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
+	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead), "readonly"))
+	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo), "readonly"))
+	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw), "readonly"))
+	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus), "readonly"))
+	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff), "readonly"))
+	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates), "readonly"))
+	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite), "admin"))
+	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete), "admin"))
+	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex), "admin"))
+	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename), "admin"))
+	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir), "admin"))
+	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch), "admin"))
+	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload), "admin"))
+	mux.Handle("/api/batch/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip), "admin"))
+	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount), "admin"))
+	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
 	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost), "readonly"))
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
@@ -2524,16 +2574,38 @@ func main() {
 	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession), "admin"))
 	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession), "admin"))
 	mux.Handle("/api/operations/", s.protected(http.HandlerFunc(s.operation), "readonly"))
+	// Keep stale clients on a typed capability error instead of an unexplained 404. More specific
+	// handlers above win under ServeMux's longest-pattern rule.
+	mux.Handle("/api/", s.protected(http.HandlerFunc(s.unsupported), "readonly"))
 	mux.Handle("/", s.protected(http.HandlerFunc(s.index), "readonly"))
 	mux.HandleFunc("/ws", s.websocket)
 	mux.HandleFunc("/static/", s.static)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	httpServer := &http.Server{Addr: addr, Handler: logging(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
 	go s.reaper()
-	listener, err := net.Listen("tcp", addr)
+	var listener net.Listener
+	if *listenFD >= 0 {
+		listenerFile := os.NewFile(uintptr(*listenFD), "yolomux-listener")
+		if listenerFile == nil {
+			s.shutdown()
+			fatal("invalid listener file descriptor")
+		}
+		listener, err = net.FileListener(listenerFile)
+		_ = listenerFile.Close()
+	} else {
+		listener, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		s.shutdown()
 		fatal(err.Error())
+	}
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok && tcpAddr.Port != *port {
+		// An inherited listener is authoritative for the port, while the normal path keeps the
+		// command-line value. The test harness uses this to reserve the port through bind/listen.
+		*port = tcpAddr.Port
+		s.port = tcpAddr.Port
+		addr = fmt.Sprintf("%s:%d", *host, *port)
+		httpServer.Addr = addr
 	}
 	if !*httpMode {
 		certFile, keyFile, err := tlsFiles(*certPath, *keyPath, *host, *port)
@@ -2619,6 +2691,24 @@ func (s *server) repairMissingTerminalEvents() {
 
 func (s *server) shutdown() {
 	s.shutdownOnce.Do(func() {
+		if s.finderJobs != nil {
+			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
+				slog.Warn("finder job scheduler did not stop before shutdown timeout")
+			}
+		}
+		if s.finderBulkJobs != nil {
+			if !s.finderBulkJobs.CloseWithTimeout(5 * time.Second) {
+				slog.Warn("finder bulk job scheduler did not stop before shutdown timeout")
+			}
+		}
+		if s.finderStreamJobs != nil {
+			if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
+				slog.Warn("finder stream scheduler did not stop before shutdown timeout")
+			}
+		}
+		if s.finder != nil {
+			s.finder.Close()
+		}
 		if s.background != nil {
 			s.background.close()
 		}
@@ -2671,7 +2761,7 @@ func (s *server) users() []authUser {
 
 func yamlValue(value string) string {
 	value = strings.TrimSpace(value)
-	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+	if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 		value = value[1 : len(value)-1]
 	}
 	return strings.ReplaceAll(value, `\"`, `"`)
@@ -2832,9 +2922,23 @@ func (s *server) protected(next http.Handler, role string) http.Handler {
 			s.rejectUnauthorized(w, r)
 			return
 		}
+		if filesystemRouteRequiresAdmin(r) && user.role == "readonly" {
+			s.rejectForbidden(w, user, "admin")
+			return
+		}
 		if !roleAllows(user, role) {
 			s.rejectForbidden(w, user, role)
 			return
+		}
+		if s.capabilities != nil {
+			capability := capabilities.RouteCapability(r.Method, r.URL.RequestURI())
+			if capability != "" && !s.capabilities.Available(capability) {
+				entry := s.capabilities.Entry(capability)
+				jsonResponse(w, http.StatusNotImplemented, map[string]any{
+					"error": "feature_unavailable", "reason": entry.Reason, "capability": capability,
+				})
+				return
+			}
 		}
 		// Basic auth is a compatibility path. Mint the port-scoped cookie before the
 		// downstream handler writes headers so polling can move to cookie auth without
@@ -2850,6 +2954,16 @@ func (s *server) protected(next http.Handler, role string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func filesystemRouteRequiresAdmin(r *http.Request) bool {
+	if r.URL.Path == "/api/watch/roots" || r.URL.Path == "/api/fs/batch" {
+		return true
+	}
+	if r.URL.Path == "/api/fs/write" || r.URL.Path == "/api/fs/delete" || r.URL.Path == "/api/fs/unindex" || r.URL.Path == "/api/fs/rename" || r.URL.Path == "/api/fs/mkdir" || r.URL.Path == "/api/upload" {
+		return true
+	}
+	return r.URL.Path == "/api/batch/zip" || r.URL.Path == "/api/batch/count" || r.URL.Path == "/api/batch/html-preview"
 }
 
 func requestWantsHTML(r *http.Request) bool {
@@ -3117,8 +3231,1056 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) ping(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "capabilities": map[string]any{"terminal.websocket.v1": true, "session.roster.v1": true, "session.create.v1": false, "session.kill.v1": false}})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "backend": "go", "capabilities": s.capabilityEntries()})
 }
+
+func (s *server) capabilityEntries() map[string]any {
+	if s.capabilities == nil {
+		return map[string]any{}
+	}
+	document := s.capabilities.Snapshot()
+	entries, _ := document["capabilities"].(map[string]capabilities.Entry)
+	result := make(map[string]any, len(entries))
+	for name, entry := range entries {
+		result[name] = entry
+	}
+	return result
+}
+
+func (s *server) capabilitySnapshot(w http.ResponseWriter, _ *http.Request) {
+	if s.capabilities == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "capabilities unavailable"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, s.capabilities.Snapshot())
+}
+
+func (s *server) fsFastList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = s.root
+	}
+	// Keep the normal fast path synchronous, but move slow directory reads behind the bounded
+	// scheduler once the small HTTP budget expires. The browser already understands this pending
+	// operation shape through the shared operation transport.
+	s.enqueueFinderFastList(w, r.Context(), path)
+}
+
+func (s *server) fsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = s.root
+	}
+	s.enqueueFinderList(w, r.Context(), path, true, "list")
+}
+
+func (s *server) fsRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.Read(ctx, path, queryTrue(r.URL.Query().Get("include_git")))
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.Info(ctx, path, queryTrue(r.URL.Query().Get("include_git")))
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.Diff(ctx, path, r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsGitHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	limit := r.URL.Query().Get("limit")
+	cursor := r.URL.Query().Get("cursor")
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "git_history", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.GitHistory(ctx, path, limit, cursor)
+	})
+}
+
+func (s *server) fsGitCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	commit := r.URL.Query().Get("commit")
+	head := r.URL.Query().Get("head")
+	repositoryIdentity := r.URL.Query().Get("repository_identity")
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "git_commit", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.GitCommit(ctx, path, commit, head, repositoryIdentity)
+	})
+}
+
+func (s *server) fsRaw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
+	maxBytes := s.fileTransferMaxBytes()
+	rangeStart, rangeEnd, hasRange, rangeErr := parseByteRange(r.Header.Get("Range"))
+	if rangeErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusRequestedRangeNotSatisfiable, Code: "range_not_satisfiable", MessageKey: "fs.error.rangeNotSatisfiable", Path: path, Message: rangeErr.Error()})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		if hasRange {
+			data, contentType, filename, size, err := s.finder.RawRange(ctx, path, maxBytes, rangeStart, rangeEnd)
+			return finderProduct{body: data, contentType: contentType, filename: filename, size: size}, err
+		}
+		data, contentType, filename, err := s.finder.Raw(ctx, path, maxBytes)
+		return finderProduct{body: data, contentType: contentType, filename: filename, size: int64(len(data))}, err
+	})
+	if finderErr != nil {
+		if hasRange && finderErr.Code == "range_not_satisfiable" {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", product.size))
+		}
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	data := product.body
+	w.Header().Set("Content-Type", product.contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("ETag", `"`+fmt.Sprintf("%x", sha256.Sum256(data))+`"`)
+	status := http.StatusOK
+	if hasRange {
+		status = http.StatusPartialContent
+		if rangeEnd >= product.size {
+			rangeEnd = product.size - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rangeStart, rangeEnd, product.size))
+	}
+	if r.URL.Query().Get("download") == "1" || r.URL.Query().Get("download") == "true" {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(product.filename, `"`, "")+`"`)
+	} else {
+		w.Header().Set("Content-Disposition", "inline")
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
+func (s *server) fsWatchDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.WatchDiff(ctx, r.URL.Query().Get("since"), queryTrue(r.URL.Query().Get("full")))
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	root := r.URL.Query().Get("root")
+	if root == "" {
+		root = r.URL.Query().Get("path")
+	}
+	if root == "" {
+		root = s.root
+	}
+	limit := normalizeFinderSearchLimit(r.URL.Query().Get("limit"))
+	if r.URL.Path == "/api/fs/search-stream" {
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 {
+				finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.integer", Path: "limit", Message: "limit must be an integer"})
+				return
+			}
+			limit = parsed
+			if limit > finder.MaxSearchResults {
+				limit = finder.MaxSearchResults
+			}
+		}
+	}
+	recursive := queryTrue(r.URL.Query().Get("recursive")) || r.URL.Path == "/api/batch/search" || r.URL.Path == "/api/fs/search-stream"
+	directOnly := queryTrue(r.URL.Query().Get("direct_only"))
+	batchSearch := r.URL.Path == "/api/batch/search"
+	indexedOnly := batchSearch || queryTrue(r.URL.Query().Get("indexed_only"))
+	cursor := r.URL.Query().Get("cursor")
+	searchOptions := finder.SearchOptions{Cursor: cursor, IndexedOnly: indexedOnly}
+	if r.URL.Path == "/api/fs/search-stream" {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unavailable", "error_code": "streaming_unavailable"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		writeFinderSSE := func(event string, value any) error {
+			body, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			if _, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, body); err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+		if err := writeFinderSSE("start", map[string]any{"root": root, "query": r.URL.Query().Get("query"), "limit": limit}); err != nil {
+			return
+		}
+		product, finderErr := s.runFinderStreamProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+			payload, err := s.finder.SearchStream(ctx, root, r.URL.Query().Get("query"), limit, recursive, queryTrue(r.URL.Query().Get("direct_only")), queryTrue(r.URL.Query().Get("minimal")), func(files []map[string]any, coverage map[string]any) error {
+				return writeFinderSSE("chunk", map[string]any{"files": files, "coverage": coverage})
+			})
+			return finderProduct{data: payload}, err
+		})
+		if finderErr != nil {
+			_ = writeFinderSSE("error", finderErr.Payload())
+			return
+		}
+		_ = writeFinderSSE("done", map[string]any{"files": product.data["count"], "coverage": product.data["progressive_coverage"]})
+		return
+	}
+	if recursive && !directOnly && cursor == "" && !indexedOnly {
+		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
+			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, false, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+		})
+		return
+	}
+	if batchSearch {
+		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
+			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, true, false, queryTrue(r.URL.Query().Get("minimal")), finder.SearchOptions{Cursor: cursor})
+		})
+		return
+	}
+	if cursor != "" {
+		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
+			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+		})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsIndexStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	root := r.URL.Query().Get("root")
+	if root == "" {
+		root = r.URL.Query().Get("path")
+	}
+	if root == "" {
+		root = s.root
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.IndexStatus(ctx, root)
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsResolveCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Paths []string `json:"paths"`
+	}
+	if err := decodeJSONBody(r.Body, 32*1024, &body); err != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.list", Message: "paths must contain 1 to 8 strings"})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.ResolveCandidates(ctx, body.Paths)
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fsWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path          string `json:"path"`
+		Content       string `json:"content"`
+		ExpectedMtime *int64 `json:"expected_mtime"`
+	}
+	if err := decodeJSONBody(r.Body, finder.MaxWriteBytes+4096, &body); err != nil || body.Path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid write request"})
+		return
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "write", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Write(ctx, body.Path, body.Content, body.ExpectedMtime)
+	})
+}
+
+func (s *server) fsDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	if err := decodeJSONBody(r.Body, 8*1024, &body); err != nil || body.Path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid delete request"})
+		return
+	}
+	s.enqueueFinderDelete(w, r.Context(), body.Path, body.Recursive)
+}
+
+func (s *server) fsUnindex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+		Root string `json:"root"`
+	}
+	if err := decodeJSONBody(r.Body, 8*1024, &body); err != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid unindex request"})
+		return
+	}
+	path := body.Path
+	if path == "" {
+		path = body.Root
+	}
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid unindex request"})
+		return
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "unindex", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Unindex(ctx, path)
+	})
+}
+
+func (s *server) fsRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path    string `json:"path"`
+		NewName string `json:"new_name"`
+	}
+	if err := decodeJSONBody(r.Body, 8*1024, &body); err != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid rename request"})
+		return
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "rename", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Rename(ctx, body.Path, body.NewName)
+	})
+}
+
+func (s *server) fsMkdir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := decodeJSONBody(r.Body, 8*1024, &body); err != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid mkdir request"})
+		return
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "mkdir", body.Path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Mkdir(ctx, body.Path)
+	})
+}
+
+func (s *server) fsCount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = s.root
+	}
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "count", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Count(ctx, path)
+	})
+}
+
+func (s *server) fsBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body map[string]any
+	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || body == nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid filesystem batch"})
+		return
+	}
+	requestsValue, present := body["requests"]
+	if !present {
+		requestsValue = []any{}
+	}
+	requests, ok := requestsValue.([]any)
+	if !ok || len(requests) > finder.MaxBatchRequests {
+		message := "requests must be a list"
+		messageKey := "request.error.list"
+		messageParams := map[string]any{"field": "requests"}
+		details := map[string]any{"requests_type": fmt.Sprintf("%T", requestsValue)}
+		if values, isList := requestsValue.([]any); isList {
+			message = fmt.Sprintf("requests must contain at most %d items", finder.MaxBatchRequests)
+			messageKey = "request.error.tooManyItems"
+			messageParams["max"] = finder.MaxBatchRequests
+			details = map[string]any{"requests": len(values), "maximum": finder.MaxBatchRequests}
+		}
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{
+			Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: messageKey, Message: message,
+			MessageParams: messageParams, Details: details, Origin: "server.http",
+			Stack: []map[string]any{{"component": "server.http", "operation": "POST /api/fs/batch", "code": "invalid_request"}},
+		})
+		return
+	}
+	if s.finderJobs != nil && s.events != nil {
+		s.enqueueFinderJSONWithBudget(w, r.Context(), r.URL.Path, "batch", s.root, finderFastListBudget, func(ctx context.Context) (map[string]any, *finder.Error) {
+			return s.buildFsBatch(ctx, body, requests)
+		})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, batchErr := s.buildFsBatch(ctx, body, requests)
+		return finderProduct{data: payload}, batchErr
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) buildFsBatch(ctx context.Context, body map[string]any, requests []any) (map[string]any, *finder.Error) {
+	started := time.Now()
+	responses := make([]map[string]any, 0, len(requests))
+	listMilliseconds := 0.0
+	infoMilliseconds := 0.0
+	for index, rawRequest := range requests {
+		if err := ctx.Err(); err != nil {
+			return nil, &finder.Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Retryable: true, Message: err.Error()}
+		}
+		requestID := any(index)
+		request, isObject := rawRequest.(map[string]any)
+		if isObject && request["id"] != nil {
+			requestID = request["id"]
+		}
+		response := map[string]any{"id": requestID, "ok": false, "status": http.StatusBadRequest}
+		if !isObject {
+			for key, value := range batchItemError("request must be an object", "request.error.object", map[string]any{"field": "request"}) {
+				if key != "error_code" && key != "retryable" {
+					response[key] = value
+				}
+			}
+			responses = append(responses, response)
+			continue
+		}
+		requestType := stringValue(request["type"])
+		if requestType == "" {
+			requestType = stringValue(request["op"])
+		}
+		requestPath := stringValue(request["path"])
+		validTriggers, _ := batchTriggerCounts(request)
+		if !validTriggers {
+			if requestPath != "" {
+				response["path"] = requestPath
+			}
+			for key, value := range batchItemError("invalid fs batch trigger", "request.error.unsupportedFsBatchOperation", map[string]any{"operation": "trigger"}) {
+				if key != "error_code" && key != "retryable" {
+					response[key] = value
+				}
+			}
+			responses = append(responses, response)
+			continue
+		}
+		if requestType != "list" && requestType != "info" {
+			if requestPath != "" {
+				response["path"] = requestPath
+			}
+			for key, value := range batchItemError("unsupported fs batch operation", "request.error.unsupportedFsBatchOperation", map[string]any{"operation": requestType}) {
+				if key != "error_code" && key != "retryable" {
+					response[key] = value
+				}
+			}
+			responses = append(responses, response)
+			continue
+		}
+		var payload map[string]any
+		var finderErr *finder.Error
+		itemStarted := time.Now()
+		switch requestType {
+		case "list":
+			includeRepoInfo := true
+			if value, exists := request["include_repo_info"]; exists {
+				includeRepoInfo = value != false
+			}
+			payload, finderErr = s.finder.ListWithOptions(ctx, requestPath, includeRepoInfo)
+		case "info":
+			payload, finderErr = s.finder.Info(ctx, requestPath, true)
+		}
+		elapsed := float64(time.Since(itemStarted).Microseconds()) / 1000
+		if requestType == "list" {
+			listMilliseconds += elapsed
+		} else {
+			infoMilliseconds += elapsed
+		}
+		if finderErr != nil {
+			response["status"] = finderErr.Status
+			response["error"] = finderErr.Message
+			params := map[string]any{}
+			if finderErr.Path != "" {
+				params["path"] = finderErr.Path
+				response["path"] = finderErr.Path
+			}
+			response["user_message"] = map[string]any{"key": finderErr.MessageKey, "params": params, "fallback": finderErr.Message}
+		} else {
+			response["ok"] = true
+			response["status"] = http.StatusOK
+			response["payload"] = payload
+			if request["include_watch_signature"] == true {
+				if signature, signatureErr := s.finder.WatchSignature(ctx, requestPath); signatureErr != nil {
+					response["ok"] = false
+					response["status"] = signatureErr.Status
+					response["error"] = signatureErr.Payload()
+					delete(response, "payload")
+				} else {
+					response["watch_signature"] = signature
+				}
+			}
+		}
+		responses = append(responses, response)
+	}
+	summary := filesystemBatchSummary(body, requests)
+	performance := map[string]any{}
+	for key, value := range summary {
+		performance[key] = value
+	}
+	performance["operation_ms"] = float64(time.Since(started).Microseconds()) / 1000
+	performance["list_ms"] = listMilliseconds
+	performance["info_ms"] = infoMilliseconds
+	performance["list_details"] = map[string]any{}
+	return map[string]any{"responses": responses, "performance": performance}, nil
+}
+
+var allowedFilesystemBatchTriggers = map[string]bool{
+	"legacy": true, "tree-render": true, "explicit-user": true, "fresh-repair": true,
+	"watch-diff": true, "watch-diff-fallback": true, "deferred-interaction": true,
+	"repo-enrichment": true, "sync-revalidation": true,
+}
+
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func batchTriggerCounts(item map[string]any) (bool, map[string]int) {
+	raw, present := item["trigger_counts"]
+	if !present || raw == nil {
+		trigger := stringValue(item["trigger"])
+		if trigger == "" {
+			trigger = "legacy"
+		}
+		if !allowedFilesystemBatchTriggers[trigger] {
+			return false, nil
+		}
+		return true, map[string]int{trigger: 1}
+	}
+	counts, ok := raw.(map[string]any)
+	if !ok || len(counts) == 0 {
+		return false, nil
+	}
+	result := make(map[string]int, len(counts))
+	for trigger, rawCount := range counts {
+		if !allowedFilesystemBatchTriggers[trigger] {
+			return false, nil
+		}
+		count, ok := rawCount.(float64)
+		if !ok || count < 1 || count > finder.MaxBatchRequests || count != float64(int(count)) {
+			return false, nil
+		}
+		result[trigger] = int(count)
+	}
+	return true, result
+}
+
+func batchItemError(message, messageKey string, params map[string]any) map[string]any {
+	return map[string]any{
+		"error":        message,
+		"error_code":   "invalid_request",
+		"message_key":  messageKey,
+		"user_message": map[string]any{"key": messageKey, "params": params, "fallback": message},
+		"retryable":    false,
+	}
+}
+
+func filesystemBatchSummary(body map[string]any, requests []any) map[string]any {
+	operations := map[string]int{}
+	triggers := map[string]int{}
+	paths := make([]string, 0, 8)
+	for _, raw := range requests {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			operations["invalid"]++
+			continue
+		}
+		operation := stringValue(item["type"])
+		if operation == "" {
+			operation = stringValue(item["op"])
+		}
+		if operation != "list" && operation != "info" {
+			operation = "invalid"
+		}
+		operations[operation]++
+		valid, itemTriggers := batchTriggerCounts(item)
+		if !valid {
+			triggers["invalid"]++
+		} else {
+			for trigger, count := range itemTriggers {
+				triggers[trigger] += count
+			}
+		}
+		path := stringValue(item["path"])
+		if path != "" && len(paths) < 8 {
+			digest := sha256.Sum256([]byte(path))
+			fingerprint := hex.EncodeToString(digest[:])[:16]
+			seen := false
+			for _, existing := range paths {
+				if existing == fingerprint {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				paths = append(paths, fingerprint)
+			}
+		}
+	}
+	clientRevision := stringValue(body["client_revision"])
+	if !validBatchClientRevision(clientRevision) {
+		clientRevision = "unknown"
+	}
+	clientScope := stringValue(body["client_scope"])
+	if clientScope != "browser" {
+		clientScope = "legacy"
+	}
+	return map[string]any{"batch_size": len(requests), "operations": operations, "path_fingerprints": paths, "triggers": triggers, "client_revision": clientRevision, "client_scope": clientScope}
+}
+
+func validBatchClientRevision(value string) bool {
+	if len(value) < 1 || len(value) > 80 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) fsZip(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		data, filename, finderErr := s.finder.Zip(ctx, path, s.fileTransferMaxBytes())
+		return finderProduct{body: data, contentType: "application/zip", filename: filename}, finderErr
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(product.filename, `"`, "")+`"`)
+	w.Header().Set("Content-Length", strconv.Itoa(len(product.body)))
+	_, _ = w.Write(product.body)
+}
+
+func (s *server) fsHTMLPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		data, finderErr := s.finder.HTMLPreview(ctx, path, r.Header.Get("Accept-Language"), s.fileTransferMaxBytes())
+		return finderProduct{body: data, contentType: "text/html; charset=utf-8"}, finderErr
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(product.body)))
+	_, _ = w.Write(product.body)
+}
+
+func (s *server) fsBlame(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	ref := r.URL.Query().Get("ref")
+	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "blame", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.Blame(ctx, path, ref)
+	})
+}
+
+func (s *server) upload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	maxUploadBytes := s.fileTransferMaxBytes()
+	if r.ContentLength < 0 {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusLengthRequired, Code: "length_required", MessageKey: "request.error.lengthRequired", Message: "missing Content-Length"})
+		return
+	}
+	if r.ContentLength > maxUploadBytes {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.tooLarge", Message: "upload is too large"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		if _, tooLarge := err.(*http.MaxBytesError); tooLarge {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.tooLarge", Message: "upload is too large"})
+		} else {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid upload data"})
+		}
+		return
+	}
+	formFiles := r.MultipartForm.File["files"]
+	if len(formFiles) == 0 {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "upload.error.filesRequired", Message: "no files supplied"})
+		return
+	}
+	if len(formFiles) > s.fileTransferMaxFiles() {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusRequestEntityTooLarge, Code: "too_many_files", MessageKey: "upload.error.tooManyFiles", Message: "too many files"})
+		return
+	}
+	files := make([]finder.UploadFile, 0, len(formFiles))
+	var totalBytes int64
+	for _, header := range formFiles {
+		file, err := header.Open()
+		if err != nil {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalid", Message: "invalid upload data"})
+			return
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
+		closeErr := file.Close()
+		totalBytes += int64(len(data))
+		if readErr != nil || closeErr != nil || int64(len(data)) > maxUploadBytes || totalBytes > maxUploadBytes {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.tooLarge", Message: "upload is too large"})
+			return
+		}
+		files = append(files, finder.UploadFile{Name: header.Filename, Data: data})
+	}
+	user, _ := s.identity(r)
+	session := r.URL.Query().Get("session")
+	editorPath := r.URL.Query().Get("editor_path")
+	baseDir := r.URL.Query().Get("base_dir")
+	if editorPath == "" && baseDir == "" {
+		if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusNotFound, Code: "session_not_found", MessageKey: "common.sessionNotFound", Path: session, Message: "unknown session"})
+			return
+		}
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.Upload(ctx, session, user.username, editorPath, baseDir, files)
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) fileTransferMaxBytes() int64 {
+	const defaultLimit = int64(300 * 1024 * 1024)
+	const legacyDefaultLimit = int64(20 * 1024 * 1024)
+	const minimumLimit = int64(1 * 1024 * 1024)
+	const maximumLimit = int64(512 * 1024 * 1024)
+	limit := defaultLimit
+	for _, name := range []string{"YOLOMUX_FILE_TRANSFER_MAX_BYTES", "YOLOMUX_UPLOAD_MAX_BYTES"} {
+		if value, present := os.LookupEnv(name); present {
+			if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64); parseErr == nil && parsed > 0 {
+				limit = parsed
+			}
+			break
+		}
+	}
+	defaultLimitForSettings := limit
+	data, err := os.ReadFile(filepath.Join(s.config, "settings.yaml"))
+	if err != nil {
+		if limit < minimumLimit {
+			return minimumLimit
+		}
+		if limit > maximumLimit {
+			return maximumLimit
+		}
+		return limit
+	}
+	inUploads := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if trimmed == "uploads:" {
+			inUploads = true
+			continue
+		}
+		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' {
+			inUploads = false
+		}
+		if !inUploads {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok || strings.TrimSpace(key) != "max_bytes" {
+			continue
+		}
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if parseErr == nil {
+			if parsed == legacyDefaultLimit {
+				limit = defaultLimitForSettings
+			} else {
+				limit = parsed
+			}
+		}
+		break
+	}
+	if limit < minimumLimit {
+		return minimumLimit
+	}
+	if limit > maximumLimit {
+		return maximumLimit
+	}
+	return limit
+}
+
+func (s *server) fileTransferMaxFiles() int {
+	const defaultLimit = 16
+	limit := defaultLimit
+	if value, present := os.LookupEnv("YOLOMUX_UPLOAD_MAX_FILES"); present {
+		if parsed, parseErr := strconv.Atoi(strings.TrimSpace(value)); parseErr == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	return limit
+}
+
+func (s *server) fileTransferFilenameTemplate() string {
+	if value, present := os.LookupEnv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE"); present {
+		return strings.TrimSpace(value)
+	}
+	data, err := os.ReadFile(filepath.Join(s.config, "settings.yaml"))
+	if err != nil {
+		return ""
+	}
+	inUploads := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if trimmed == "uploads:" {
+			inUploads = true
+			continue
+		}
+		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' {
+			inUploads = false
+		}
+		if !inUploads {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if ok && strings.TrimSpace(key) == "filename_template" {
+			return strings.TrimSpace(yamlValue(value))
+		}
+	}
+	return ""
+}
+
+func queryTrue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseByteRange(value string) (int64, int64, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, false, nil
+	}
+	if !strings.HasPrefix(value, "bytes=") {
+		return 0, 0, false, fmt.Errorf("unsupported range")
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "bytes="), "-")
+	if len(parts) != 2 || parts[0] == "" {
+		return 0, 0, false, fmt.Errorf("invalid byte range")
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false, fmt.Errorf("invalid byte range")
+	}
+	end := int64(^uint64(0) >> 1)
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			return 0, 0, false, fmt.Errorf("invalid byte range")
+		}
+	}
+	return start, end, true, nil
+}
+
+func (s *server) watchRoots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body map[string]any
+	if err := decodeJSONBody(r.Body, 64*1024, &body); err != nil || body == nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidJson", Message: "invalid JSON"})
+		return
+	}
+	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		payload, err := s.finder.WatchRoots(ctx, body)
+		return finderProduct{data: payload}, err
+	})
+	if finderErr != nil {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
+		return
+	}
+	s.syncFinderWatchCapability()
+	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) syncFinderWatchCapability() {
+	if s.capabilities == nil || s.finder == nil {
+		return
+	}
+	available, degraded, reason := s.finder.WatchStatus()
+	entry := capabilities.Entry{Available: true, Degraded: degraded}
+	if !available {
+		entry.Reason = &capabilities.Reason{
+			Code: "watch_fallback", MessageKey: "capability.finderWatchDegraded",
+			MessageParams: map[string]any{"reason": reason},
+		}
+	}
+	s.capabilities.Set("finder.watch.v1", entry)
+}
+
+func finderErrorPayload(errorValue finder.Error) map[string]any { return errorValue.Payload() }
 
 func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -3467,6 +4629,12 @@ func (s *server) operationCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		id = r.FormValue("id")
+	}
+	if s.finderJobs != nil {
+		s.finderJobs.Cancel(id)
+	}
+	if s.finderBulkJobs != nil {
+		s.finderBulkJobs.Cancel(id)
 	}
 	if err := s.cancelOperation(id); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
@@ -3859,6 +5027,52 @@ func (s *server) tmux(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"sessions": sessions, "backend": "go"})
 }
 
+func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessions := s.sessionNames()
+	s.metadataMu.Lock()
+	s.metadataGeneration++
+	generation := s.metadataGeneration
+	s.metadataMu.Unlock()
+	epoch := ""
+	if s.events != nil {
+		s.events.mu.Lock()
+		epoch = s.events.epoch
+		s.events.mu.Unlock()
+	}
+	metadataIdentity := map[string]any{"epoch": epoch, "generation": generation}
+	metadataSessions := make(map[string]any, len(sessions))
+	for _, session := range sessions {
+		metadataSessions[session] = map[string]any{
+			"session":    session,
+			"label":      session,
+			"agents":     []any{},
+			"panes":      []any{},
+			"work_graph": map[string]any{"generation": 0},
+		}
+	}
+	cache := map[string]any{
+		"hit":        true,
+		"stale":      false,
+		"generation": generation,
+	}
+	if r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true" {
+		cache["stale"] = true
+		cache["pending_identity"] = metadataIdentity
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"sessions":            metadataSessions,
+		"session_order":       sessions,
+		"metadata_generation": generation,
+		"metadata_identity":   metadataIdentity,
+		"topology_generation": uint64(1),
+		"cache":               cache,
+	})
+}
+
 func (s *server) sessionExists(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("session")
 	err := s.tmuxCommand("has-session", "-t", name).Run()
@@ -3916,8 +5130,19 @@ func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *server) unsupported(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusNotImplemented, map[string]any{"error": "feature_unavailable", "reason": map[string]string{"code": "not_implemented", "messageKey": "capabilityUnavailable"}})
+func (s *server) unsupported(w http.ResponseWriter, r *http.Request) {
+	capability := capabilities.RouteCapability(r.Method, r.URL.RequestURI())
+	if capability == "" {
+		capability = "core.bootstrap.v1"
+	}
+	jsonResponse(w, http.StatusNotImplemented, map[string]any{
+		"error": "feature_unavailable",
+		"reason": map[string]any{
+			"code": "not_implemented", "messageKey": "capabilityUnavailable",
+			"messageParams": map[string]any{"capability": capability},
+		},
+		"capability": capability,
+	})
 }
 
 func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
@@ -3945,9 +5170,11 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
 	script := `import json,sys
 from yolomux_lib.web import html_page
-print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=True), end="")`
+print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5])), end="")`
 	sessions, _ := json.Marshal(s.sessionNames())
+	capabilityData, _ := json.Marshal(s.capabilities.Snapshot())
 	command := exec.Command("python3", "-c", script, string(sessions), user.role, user.username, r.Header.Get("Accept-Language"))
+	command.Args = append(command.Args, string(capabilityData))
 	command.Dir = s.root
 	command.Env = append(os.Environ(), "PYTHONPATH="+s.root)
 	body, err := command.Output()

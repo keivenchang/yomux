@@ -114,6 +114,8 @@ fi
 FORWARDED_TEST_ENV=(
   YOLOMUX_TEST_MOCK_TRANSCRIPTS
   YOLOMUX_WORKTREE_WRITER_TOKEN
+  YOLOMUX_WORKTREE_WRITER_SLOT
+  YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT
   YOLOMUX_LATENCY_CERTIFICATION
   YOLOMUX_CHAT_LATENCY_CERTIFICATION
   YOLOMUX_MEASURE_SYSTEM_STATUS
@@ -125,6 +127,9 @@ for forwarded_name in "${FORWARDED_TEST_ENV[@]}"; do
     test_env+=(-e "$forwarded_name")
   fi
 done
+if [ -n "${YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT:-}" ]; then
+  test_env+=(-e "YOLOMUX_WORKTREE_WRITER_SLOT=$YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT")
+fi
 
 # Browser failure evidence must outlive the throwaway container. Mount one host /tmp
 # directory at the same absolute path so the failure message remains actionable.
@@ -159,9 +164,11 @@ fi
 
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
 # would hide image-owned ~/.local/bin. --init reaps tmux/chromium children; the enlarged
-# shared-memory segment prevents Chromium renderer crashes.
+# shared-memory segment prevents Chromium renderer crashes. Network access is disabled for
+# test execution; the explicit dead proxies prevent libraries from bypassing that boundary.
 set +e
 docker run --rm --init \
+  --network none \
   --shm-size=1g \
   "${owner_label[@]+"${owner_label[@]}"}" \
   "${run_user[@]+"${run_user[@]}"}" \
@@ -171,7 +178,19 @@ docker run --rm --init \
   "${agent_mounts[@]+"${agent_mounts[@]}"}" \
   -w "$workdir" \
   -e HOME=/home/runner \
-  -e YOLOMUX_CHECK_IN_CONTAINER=1 \
+  -e XDG_CONFIG_HOME=/home/runner/.config \
+  -e XDG_DATA_HOME=/home/runner/.local/share \
+  -e XDG_STATE_HOME=/home/runner/.local/state \
+  -e CODEX_HOME=/home/runner/.codex \
+  -e HTTP_PROXY=http://127.0.0.1:9 \
+  -e HTTPS_PROXY=http://127.0.0.1:9 \
+  -e ALL_PROXY=http://127.0.0.1:9 \
+  -e http_proxy=http://127.0.0.1:9 \
+  -e https_proxy=http://127.0.0.1:9 \
+  -e all_proxy=http://127.0.0.1:9 \
+  -e NO_PROXY=127.0.0.1,localhost \
+  -e no_proxy=127.0.0.1,localhost \
+  -e YOLOMUX_CHECK_IN_CONTAINER="${YOLOMUX_CHECK_IN_CONTAINER:-1}" \
   "${test_env[@]+"${test_env[@]}"}" \
   "$IMAGE" \
   "$@"

@@ -292,6 +292,15 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path in {"/api/fs/list", "/api/fs/fast/list"}:
+            requested_path = parse_qs(parsed.query).get("path", ["/home/test"])[-1]
+            body = json.dumps({"path": requested_path, "entries": []}, separators=(",", ":")).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/fs/raw":
             requested_path = parse_qs(parsed.query).get("path", [""])[-1]
             suffix = Path(requested_path).suffix.lower()
@@ -337,15 +346,33 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 - inherited HTTP handler API
         parsed = urlsplit(self.path)
-        if parsed.path == "/api/fs/batch":
-            body = json.dumps({"responses": []}).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        if parsed.path != "/api/fs/batch":
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
             return
-        self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
+        content_length = int(self.headers.get("Content-Length", "0"))
+        request_body = json.loads(self.rfile.read(content_length) or b"{}")
+        requests = request_body.get("requests", [])
+        responses = []
+        for index, request in enumerate(requests):
+            path = request.get("path", "/home/test")
+            responses.append(
+                {
+                    "id": request.get("id", index),
+                    "ok": True,
+                    "status": HTTPStatus.OK,
+                    "payload": {
+                        "path": path,
+                        "name": Path(path).name or "/",
+                        "kind": "file",
+                    },
+                }
+            )
+        body = json.dumps({"responses": responses}, separators=(",", ":")).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *args):  # keep the pytest output clean
         pass
@@ -2014,7 +2041,7 @@ def codemirror_wrap_toggle_fixture_html():
       <body class="theme-dark editor-theme-dark">
         <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="wrap-regression-mount"></div>
-        <script>try {{ localStorage.removeItem('yolomux.editorWrap'); }} catch (_) {{}}</script>
+        <script>try {{ localStorage.setItem('yolomux.editorWrap', '0'); }} catch (_) {{}}</script>
         <script>
           window.__wrapRegressionErrors = [];
           window.addEventListener('error', event => {{
@@ -2329,6 +2356,9 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "accessRole": scenario.access_role,
         "authUsername": scenario.auth_username,
         "dangerouslyYolo": scenario.dangerously_yolo,
+        "terminalOnly": False,
+        "capabilities": None,
+        "sessionMutationsAllowed": scenario.access_role == "admin",
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,

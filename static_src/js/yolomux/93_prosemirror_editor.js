@@ -783,7 +783,7 @@ function destroyProseMirrorPanel(panel, options = {}) {
   panel._pmContextMenuGeneration = Number(panel._pmContextMenuGeneration || 0) + 1;
   panel._pmContextMenuDispose?.();
   delete panel._pmContextMenuDispose;
-  flushProseMirrorSource(panel, panel._pmPath);
+  flushProseMirrorSource(panel, panel._pmPath, {preserveTerminalNewline: true});
   releaseRawFileMediaSources(view.dom);
   view.destroy();
   delete panel._pmView;
@@ -947,7 +947,7 @@ function syncCodeMirrorToCanonicalPanels(path, content, sourcePanel = null, sour
   for (const linked of fileEditorPanelsForPath(path)) {
     if (fileEditorPanelState(linked)?.historical === true) continue;
     if (linked._cmView && !(linked === sourcePanel && sourceSurface === 'text-editor')) {
-      syncCodeMirrorDocument(linked._cmView, content, {path});
+      syncCodeMirrorDocument(linked._cmView, content, {path, selection: 'end-before-final-newline'});
     }
     if (linked._pmView && !(linked === sourcePanel && sourceSurface === 'view-editor')) {
       syncProseMirrorPanelSource(linked, path, fileEditorPanelState(linked), {sourceSurface});
@@ -976,14 +976,14 @@ function scheduleProseMirrorAutosave(panel, path) {
   }, PROSEMIRROR_SERIALIZE_DELAY_MS);
 }
 
-function flushProseMirrorSource(panel, path) {
+function flushProseMirrorSource(panel, path, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path) return false;
   if (panel._pmSerializeTimer) clearTimeout(panel._pmSerializeTimer);
   panel._pmSerializeTimer = null;
   panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
   if (panel._pmAutosaveTimer) clearTimeout(panel._pmAutosaveTimer);
   panel._pmAutosaveTimer = null;
-  return commitProseMirrorSource(panel, path);
+  return commitProseMirrorSource(panel, path, options);
 }
 
 function insertProseMirrorHardBreak(api, schema) {

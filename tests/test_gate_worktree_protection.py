@@ -200,6 +200,25 @@ def test_in_container_caller_with_a_writable_caller_owned_slot_dir_succeeds(
     lease.release()
 
 
+def test_container_writer_slot_override_uses_the_caller_owned_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slot = tmp_path / "container-writer"
+    monkeypatch.setenv("YOLOMUX_WORKTREE_WRITER_SLOT", str(slot))
+    monkeypatch.setenv("YOLOMUX_CHECK_IN_CONTAINER", "1")
+
+    lease = worktree_writer.acquire_worktree_writer(
+        tmp_path / "worktree",
+        purpose="static-build",
+        heartbeat_interval_seconds=0.0,
+    )
+
+    assert lease.slot_dir == slot.resolve()
+    assert lease.borrowed is False
+    lease.release()
+    assert not slot.exists()
+
+
 def test_in_container_caller_with_inherited_token_still_borrows_normally(tmp_path: Path) -> None:
     local = _identity("host-a", "lin1")
     slot = tmp_path / "shared-git" / "writer"

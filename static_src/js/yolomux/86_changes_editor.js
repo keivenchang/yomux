@@ -1211,9 +1211,6 @@ async function fetchSessionFiles(options = {}) {
   const backgroundRefresh = options.background === true;
   const cacheOnly = options.cacheOnly === true;
   const cacheView = String(options.cacheView || '');
-  const completionIdentity = String(options.completionIdentity || '');
-  const completionStateKey = String(options.completionStateKey || '');
-  const applyCompletion = options.applyCompletion !== false;
   const visible = surface.visible;
   if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
@@ -1277,17 +1274,6 @@ async function fetchSessionFiles(options = {}) {
     const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
-    if (completionIdentity) {
-      const completion = sessionFilesCompletionRevalidations.get(completionStateKey);
-      if (completion?.identity !== completionIdentity) return false;
-      if (applyCompletion) {
-        if (completion.applicationClaimed) return true;
-        completion.applicationClaimed = true;
-      } else {
-        return true;
-      }
-      if (signature === sessionFilesSignatureForDestination(destination)) return true;
-    }
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     if (cacheOnly && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return true;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -1378,19 +1364,6 @@ function sessionFilesCompletionIdentity(completion = {}) {
   return cacheView && generation ? `${generation}\x1f${cacheView}` : '';
 }
 
-function claimSessionFilesCompletionApplication(destination, session, completionIdentity) {
-  if (!completionIdentity) return true;
-  const stateKey = `${destination}\x1f${session}`;
-  const existing = sessionFilesCompletionRevalidations.get(stateKey);
-  if (existing?.identity === completionIdentity) {
-    if (existing.applicationClaimed) return false;
-    existing.applicationClaimed = true;
-    return true;
-  }
-  sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, applicationClaimed: true, promise: null});
-  return true;
-}
-
 function sessionFilesCompletionCandidates(completion = {}) {
   const completedSession = String(completion.session || '');
   const requestDescriptor = String(completion.request_descriptor || '');
@@ -1416,14 +1389,10 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
   for (const candidate of sessionFilesCompletionCandidates(completion)) {
     const stateKey = `${candidate.destination}\x1f${candidate.request.session}`;
     const existing = sessionFilesCompletionRevalidations.get(stateKey);
-    if (existing?.identity === completionIdentity && existing.promise) {
-      attempts.push(existing.promise);
+    if (existing?.identity === completionIdentity) {
+      attempts.push(existing.promise || Promise.resolve(existing.acknowledged));
       continue;
     }
-    const state = existing?.identity === completionIdentity
-      ? existing
-      : {identity: completionIdentity, applicationClaimed: false, promise: null};
-    sessionFilesCompletionRevalidations.set(stateKey, state);
     const run = async () => {
       // A completion cannot be acknowledged while an ordinary request owns this destination:
       // that response may be older than the opaque view. Wait for it to settle, then read the
@@ -1436,9 +1405,6 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
         silent: true,
         cacheOnly: true,
         cacheView,
-        completionIdentity,
-        completionStateKey: stateKey,
-        applyCompletion: state.applicationClaimed !== true,
       });
       const current = sessionFilesCompletionRevalidations.get(stateKey);
       if (current?.identity !== completionIdentity) return false;
@@ -1451,20 +1417,18 @@ async function refreshSessionFilesCompletionSurfaces(completion = {}) {
     // A newer completion is serialized after the destination's finite older cache read. Starting
     // both would abort the old response and turn normal EventSource ordering into a timing race.
     const promise = (existing?.promise ? existing.promise.then(run, run) : run());
-    state.promise = promise;
+    sessionFilesCompletionRevalidations.set(stateKey, {identity: completionIdentity, acknowledged: false, promise});
     attempts.push(promise);
   }
   const outcomes = await Promise.all(attempts);
   return outcomes.some(Boolean);
 }
 
-function applySessionFilesPayloadToDestination(destination, payload, request, session, completionIdentity = '') {
+function applySessionFilesPayloadToDestination(destination, payload, request, session) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
   if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
-  if (completionIdentity && signature === sessionFilesSignatureForDestination(destination)) return false;
   const wasLoading = sessionFilesLoadingForDestination(destination);
-  if (!wasLoading && signature === sessionFilesSignatureForDestination(destination)) return false;
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   // The accepted payload owns the visible state, but aborting an already-dispatched finite
@@ -1490,16 +1454,14 @@ function applySessionFilesPeerPayloadToDestination(destination, payload, request
   return applySessionFilesPayloadToDestination(destination, payload, request, session);
 }
 
-function applySessionFilesPayloadFromPush(payload = {}, request = {}, options = {}) {
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const session = String(payload.session || request.session || '');
   if (!session) return false;
-  const completionIdentity = sessionFilesCompletionIdentity(options.completion || {});
   const destinations = sessionFilesDestinationsForRequest(request, session);
   if (!destinations.length) return false;
   let applied = false;
   for (const destination of destinations) {
-    if (!claimSessionFilesCompletionApplication(destination, session, completionIdentity)) continue;
-    applied = applySessionFilesPayloadToDestination(destination, payload, request, session, completionIdentity) || applied;
+    applied = applySessionFilesPayloadToDestination(destination, payload, request, session) || applied;
   }
   if (applied && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   return applied;
@@ -2255,8 +2217,6 @@ function syncFileExplorerDiffSessionControls() {
 
 function syncFileExplorerSessionControlVisibility(scope = document) {
   for (const control of scope.querySelectorAll('.file-explorer-diff-session-control[data-file-explorer-session-surface="finder"]')) {
-    // The selected session remains useful in fixed mode for session-files state and later Sync
-    // activation. Root movement is owned by scheduleFileExplorerActiveTabSync, which is Sync-only.
     control.hidden = false;
     control.setAttribute('aria-hidden', 'false');
   }
@@ -3144,7 +3104,7 @@ function createFileExplorerPanel(item = finderItemId) {
           </div>
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
-             ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
+            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row">
             <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
@@ -3396,13 +3356,10 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
   if (options.skipPreviewPanel !== panel?.querySelector?.('.file-editor-preview-pane-panel')) {
-    if (!panel?._pmView && options.sourceSurface !== 'view-editor') {
-      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-    }
+    if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
+    else if (options.sourceSurface !== 'view-editor') renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   }
-  if (panel?._pmView && options.sourceSurface !== 'view-editor') {
-    syncProseMirrorPanelSource(panel, path, state, {sourceSurface: options.sourceSurface});
-  }
+  if (panel?._pmView && options.sourceSurface !== 'view-editor') syncProseMirrorPanelSource(panel, path, state);
   if (options.sourceSurface === 'view-editor') syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'view-editor');
   else if (panel?._cmView && options.previewEdit !== true) syncCodeMirrorToCanonicalPanels(path, state.content, panel, 'text-editor');
   if (options.previewEdit === true) scheduleFileEditorPreviewPropagation(panel, path);
@@ -3429,6 +3386,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
 async function enterFileEditorDiffMode(path, panel, item) {
   const state = fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return;
+  if (panel?._pmView) flushProseMirrorSource(panel, path, {preserveTerminalNewline: true});
   if (!fileStateHasRepo(path, state)) {
     setFileEditorViewMode(path, 'edit', item);
     renderFileEditorPanel(panel, item);
@@ -3792,7 +3750,7 @@ function createFileEditorPanel(item) {
         renderFileEditorPanel(panel, item);
       }
     },
-    'editor-theme': () => cycleEditorThemeMode({includeVanilla: fileEditorPanelState(panel)?.kind === 'text'}),
+    'editor-theme': () => cycleEditorThemeMode(),
   }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {

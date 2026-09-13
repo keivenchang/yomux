@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 .venv/
 node_modules/
+bazel-*
 
 # Scratch worklists — never committed (kept local only)
 DOIT*.md

@@ -546,6 +546,7 @@ async function openFileExplorerPane() {
 // Existing tabs are activated in place.  Only a missing item is inserted into the left home column.
 async function openFileSurfacePane(item) {
   const resolved = resolveLayoutItem(item);
+  if (typeof paneItemCapabilityAvailable === 'function' && !paneItemCapabilityAvailable(resolved)) return false;
   if (!layoutIsFileSurfaceItem(resolved)) return false;
   const currentSlot = slotForItem(resolved);
   if (currentSlot) {

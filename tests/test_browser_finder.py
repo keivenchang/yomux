@@ -2931,6 +2931,18 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
             return;
           }
           scheduleFileExplorerActiveFileReveal('/home/test/dynamo/repo-a/src/a.js');
+          renderCachedFileExplorerSyncPlan(
+            {session: '1', root: '/home/test', expandPaths: [repoA + '/src']},
+            [repoA + '/src'],
+            new Map([
+              ['/home/test', [{name: 'dynamo', kind: 'dir'}]],
+              ['/home/test/dynamo', [{name: 'repo-a', kind: 'dir'}, {name: 'repo-b', kind: 'dir'}]],
+              [repoA, [{name: 'src', kind: 'dir'}]],
+              [repoA + '/src', [{name: 'a.js', kind: 'file'}]],
+            ]),
+            {preserveState: true},
+          );
+          const cachedExpanded = tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded') || '';
           const revealDeadline = performance.now() + 500;
           let revealExpanded = false;
           const observeReveal = () => {
@@ -2943,6 +2955,7 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
             done({
               collapsedAfterClick,
               manualHasA,
+              cachedExpanded,
               repoAExpanded: revealExpanded ? 'true' : expanded,
               manualHasA_after: fileExplorerSyncManualCollapsedPaths.has(repoA),
             });
@@ -2955,6 +2968,7 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
     # Preconditions: the click collapsed repo-a and recorded the manual collapse.
     assert result["collapsedAfterClick"] == "false", result
     assert result["manualHasA"] is True, result
+    assert result["cachedExpanded"] == "false", result
     # The fix: the active-file reveal must not resurrect the manually-collapsed ancestor...
     assert result["repoAExpanded"] == "false", result
     # ...and the manual-collapse record is left intact (matching the original flake's signature).

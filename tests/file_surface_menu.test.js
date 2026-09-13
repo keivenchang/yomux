@@ -81,10 +81,9 @@ test('Dockview keeps the group tab strip for singleton file surfaces', () => {
 });
 
 test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
-  assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event, classification\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewCommitPaneDrop\(event, paneInfo\.intent\)/);
+  assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewPaneContentDropAllowed\(paneInfo\)[\s\S]*moveSessionToSlot\(paneInfo\.item, paneInfo\.intent\.targetSlot/);
   assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
-  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewPointerContentDropIntent\(releaseEvent, state\)[\s\S]*contentTargetSlot = contentIntent\?\.targetSlot/);
-  assert.match(dockview, /function dockviewCommitPaneDrop\(event, intent\)[\s\S]*dockviewPaneContentDropAllowed\(\{item: intent\.item, intent\}\)[\s\S]*moveSessionToSlot\(intent\.item, intent\.targetSlot/);
+  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewContentDropRegionForEvent\(releaseEvent\)[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
@@ -100,10 +99,10 @@ test('Finder and Differ render shared selectors with independent selected-sessio
   assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
 
-test('Finder keeps its Session control available outside Sync mode without moving the root', () => {
-  assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*control\.hidden = false/);
+test('Finder keeps its Session control visible outside Sync mode', () => {
+  assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*control\.hidden = false[\s\S]*control\.setAttribute\('aria-hidden', 'false'\)/);
   assert.match(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
-  assert.doesNotMatch(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed/);
+  assert.doesNotMatch(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed \.file-explorer-mode-files-diff-only/);
   assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
 });
 

@@ -20,6 +20,7 @@ function newGitDiffTabState(item, defaults = {}) {
     item,
     path,
     repo: '',
+    repositoryIdentity: '',
     relativePath: '',
     hostedRemote: null,
     branch: '',
@@ -118,8 +119,9 @@ function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageS
   return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}`;
 }
 
-function gitDiffCommitUrl(path, sha, head) {
-  return `/api/fs/git-commit?path=${encodeURIComponent(path)}&commit=${encodeURIComponent(sha)}&head=${encodeURIComponent(head)}`;
+function gitDiffCommitUrl(path, sha, head, repositoryIdentity = '') {
+  const suffix = repositoryIdentity ? `&repository_identity=${encodeURIComponent(repositoryIdentity)}` : '';
+  return `/api/fs/git-commit?path=${encodeURIComponent(path)}&commit=${encodeURIComponent(sha)}&head=${encodeURIComponent(head)}${suffix}`;
 }
 
 function gitDiffErrorSnapshot(error) {
@@ -227,6 +229,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     }
     state.path = normalizeDirectoryPath(payload.path) || state.path;
     state.repo = normalizeDirectoryPath(payload.repo);
+    state.repositoryIdentity = String(payload.repository_identity || '');
     state.relativePath = payload.relative_path;
     state.hostedRemote = payload.hosted_remote || null;
     state.branch = typeof payload.branch === 'string' ? payload.branch : '';
@@ -344,7 +347,7 @@ async function loadGitDiffCommitDetail(item, sha, options = {}) {
   state.detailErrors.delete(sha);
   const request = (async () => {
     try {
-      const payload = await apiFetchJson(gitDiffCommitUrl(state.path, sha, requestedHead), {
+      const payload = await apiFetchJson(gitDiffCommitUrl(state.path, sha, requestedHead, state.repositoryIdentity), {
         cache: 'no-store',
         ...(controller ? {signal: controller.signal} : {}),
       });

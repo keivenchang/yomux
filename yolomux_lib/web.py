@@ -304,6 +304,7 @@ def html_page(
     auth_username: str = "",
     recent_sessions: list[str] | None = None,
     terminal_only: bool = False,
+    capability_snapshot: dict | None = None,
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
@@ -317,6 +318,9 @@ def html_page(
         # explicitly opted in with --dangerously-yolo.
         "dangerouslyYolo": dangerously_yolo,
         "terminalOnly": terminal_only,
+        # Optional backend-owned negotiation document. Python leaves this absent for compatibility;
+        # an opt-in backend can use the same page renderer without teaching the UI its language.
+        "capabilities": capability_snapshot,
         "sessionMutationsAllowed": access_role == "admin",
         "availableAgents": ["term"] if terminal_only else available_agent_commands(),
         "terminalCommands": ["bash"] if terminal_only else available_terminal_commands(),

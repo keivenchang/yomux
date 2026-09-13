@@ -237,7 +237,8 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
   if (options.cleanOnly && (options.state || fileState.get(options.path))?.dirty) return;
-  const selection = view.state.selection;
+  const selection = options.preserveSelection === false ? null : view.state.selection;
+  const cursorAtEndBeforeFinalNewline = options.selection === 'end-before-final-newline';
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
@@ -250,7 +251,11 @@ function syncCodeMirrorDocument(view, text, options = {}) {
         ...(preservedSelection ? {selection: preservedSelection} : {}),
         ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
       });
-    }, {preserveSelection: selectionFits});
+    }, {preserveSelection: cursorAtEndBeforeFinalNewline ? false : selectionFits});
+    if (cursorAtEndBeforeFinalNewline) {
+      const position = next.endsWith('\n') ? Math.max(0, next.length - 1) : next.length;
+      view.dispatch({selection: {anchor: position, head: position}});
+    }
   } finally {
     if (panel) panel._cmSyncing = false;
   }

@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +20,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yolomux/internal/capabilities"
+	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/work"
 )
 
 func TestWriteAndReadMaskedFrame(t *testing.T) {
@@ -114,6 +122,19 @@ func TestPhase3ProtectedRoutes(t *testing.T) {
 	}
 }
 
+func TestFinderJobContextEnforcesDeadline(t *testing.T) {
+	ctx, cancel := newFinderJobContext(context.Background(), time.Millisecond)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("finder job context error = %v, want deadline exceeded", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finder job context did not enforce its deadline")
+	}
+}
+
 func TestUnknownOperationUsesCanonicalPythonError(t *testing.T) {
 	s := &server{operations: map[string]*goOperation{}}
 	record := httptest.NewRecorder()
@@ -207,6 +228,1003 @@ func TestProtectedRoutesUsePythonAuthenticationShapes(t *testing.T) {
 	forbiddenMessage, _ := forbiddenBody["user_message"].(map[string]any)
 	if forbiddenMessage["key"] != "auth.error.accessRequired" || forbiddenMessage["fallback"] != "admin access required" {
 		t.Fatalf("forbidden message = %+v", forbiddenMessage)
+	}
+}
+
+func TestProtectedFinderReadRoutesAllowReadonlyAndMutationsRemainAdminOnly(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: guest\n    password: guest\n    role: readonly\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "auth-cookie-secret"), []byte(strings.Repeat("11", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{config: config, port: 7221, events: newEventBroker(), children: make(map[*exec.Cmd]struct{})}
+	readonly := http.HandlerFunc(s.ping)
+	readRequest := httptest.NewRequest(http.MethodGet, "/api/fs/list?path=/tmp", nil)
+	readRequest.SetBasicAuth("guest", "guest")
+	readResponse := httptest.NewRecorder()
+	s.protected(readonly, "readonly").ServeHTTP(readResponse, readRequest)
+	if readResponse.Code != http.StatusOK {
+		t.Fatalf("readonly Finder read status = %d %s", readResponse.Code, readResponse.Body.String())
+	}
+
+	writeRequest := httptest.NewRequest(http.MethodPost, "/api/fs/write", strings.NewReader(`{"path":"/tmp/new.txt","content":"new"}`))
+	writeRequest.SetBasicAuth("guest", "guest")
+	writeResponse := httptest.NewRecorder()
+	s.protected(readonly, "admin").ServeHTTP(writeResponse, writeRequest)
+	if writeResponse.Code != http.StatusForbidden {
+		t.Fatalf("readonly Finder write status = %d %s", writeResponse.Code, writeResponse.Body.String())
+	}
+}
+
+func TestPhase45FinderHTTPRoutesUseReadAndMutationContracts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service, finderJobs: newFinderJobScheduler()}
+	defer s.finderJobs.Close()
+
+	listing := httptest.NewRecorder()
+	s.fsList(listing, httptest.NewRequest(http.MethodGet, "/api/fs/list?path="+url.QueryEscape(root), nil))
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte(`"entries"`)) || bytes.Contains(listing.Body.Bytes(), []byte(`"operation"`)) {
+		t.Fatalf("normal list route = %d %s", listing.Code, listing.Body.String())
+	}
+
+	fast := httptest.NewRecorder()
+	s.fsFastList(fast, httptest.NewRequest(http.MethodGet, "/api/fs/fast/list?path="+url.QueryEscape(root), nil))
+	if fast.Code != http.StatusOK || !bytes.Contains(fast.Body.Bytes(), []byte(`"entries"`)) {
+		t.Fatalf("fast list route = %d %s", fast.Code, fast.Body.String())
+	}
+
+	read := httptest.NewRecorder()
+	s.fsRead(read, httptest.NewRequest(http.MethodGet, "/api/fs/read?path="+url.QueryEscape(filepath.Join(root, "note.md")), nil))
+	if read.Code != http.StatusOK || !bytes.Contains(read.Body.Bytes(), []byte(`"content":"hello\n"`)) {
+		t.Fatalf("read route = %d %s", read.Code, read.Body.String())
+	}
+
+	raw := httptest.NewRecorder()
+	rawRequest := httptest.NewRequest(http.MethodGet, "/api/fs/raw?path="+url.QueryEscape(filepath.Join(root, "note.md")), nil)
+	rawRequest.Header.Set("Range", "bytes=1-3")
+	s.fsRaw(raw, rawRequest)
+	if raw.Code != http.StatusPartialContent || raw.Body.String() != "ell" || raw.Header().Get("Content-Range") != "bytes 1-3/6" || raw.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("raw range route = %d headers=%v body=%q", raw.Code, raw.Header(), raw.Body.String())
+	}
+	invalidRange := httptest.NewRecorder()
+	invalidRangeRequest := httptest.NewRequest(http.MethodGet, "/api/fs/raw?path="+url.QueryEscape(filepath.Join(root, "note.md")), nil)
+	invalidRangeRequest.Header.Set("Range", "bytes=99-100")
+	s.fsRaw(invalidRange, invalidRangeRequest)
+	if invalidRange.Code != http.StatusRequestedRangeNotSatisfiable || invalidRange.Header().Get("Content-Range") != "bytes */6" {
+		t.Fatalf("invalid raw range = %d headers=%v body=%s", invalidRange.Code, invalidRange.Header(), invalidRange.Body.String())
+	}
+	emptyPath := filepath.Join(root, "empty.txt")
+	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := httptest.NewRecorder()
+	emptyRequest := httptest.NewRequest(http.MethodGet, "/api/fs/raw?path="+url.QueryEscape(emptyPath), nil)
+	emptyRequest.Header.Set("Range", "bytes=0-0")
+	s.fsRaw(empty, emptyRequest)
+	if empty.Code != http.StatusRequestedRangeNotSatisfiable || empty.Header().Get("Content-Range") != "bytes */0" {
+		t.Fatalf("empty raw range = %d headers=%v body=%s", empty.Code, empty.Header(), empty.Body.String())
+	}
+
+	write := httptest.NewRecorder()
+	s.fsWrite(write, httptest.NewRequest(http.MethodPost, "/api/fs/write", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "new.txt")+`","content":"new"}`)))
+	if write.Code != http.StatusOK {
+		t.Fatalf("write route = %d %s", write.Code, write.Body.String())
+	}
+	mkdir := httptest.NewRecorder()
+	s.fsMkdir(mkdir, httptest.NewRequest(http.MethodPost, "/api/fs/mkdir", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "folder")+`"}`)))
+	if mkdir.Code != http.StatusOK {
+		t.Fatalf("mkdir route = %d %s", mkdir.Code, mkdir.Body.String())
+	}
+	rename := httptest.NewRecorder()
+	s.fsRename(rename, httptest.NewRequest(http.MethodPost, "/api/fs/rename", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "new.txt")+`","new_name":"renamed.txt"}`)))
+	if rename.Code != http.StatusOK {
+		t.Fatalf("rename route = %d %s", rename.Code, rename.Body.String())
+	}
+	delete := httptest.NewRecorder()
+	deleteRequest := httptest.NewRequest(http.MethodPost, "/api/fs/delete", bytes.NewBufferString(`{"path":"`+filepath.Join(root, "renamed.txt")+`"}`))
+	s.fsDelete(delete, deleteRequest)
+	if delete.Code != http.StatusOK {
+		t.Fatalf("delete route = %d %s", delete.Code, delete.Body.String())
+	}
+}
+
+func TestPhase45MalformedWatchRootsUsesFinderEnvelope(t *testing.T) {
+	s := &server{}
+	response := httptest.NewRecorder()
+	s.watchRoots(response, httptest.NewRequest(http.MethodPost, "/api/watch/roots", strings.NewReader("not-json")))
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte(`"state":"failed"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"error"`)) {
+		t.Fatalf("malformed watch roots response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProtectedRejectsUnavailableCapabilityBeforeRouteFallback(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{config: config, port: 7221, capabilities: capabilities.New("go-test")}
+	request := httptest.NewRequest(http.MethodGet, "/api/session-files?session=1", nil)
+	request.SetBasicAuth("admin", "secret")
+	record := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(record, request)
+	if record.Code != http.StatusNotImplemented || !bytes.Contains(record.Body.Bytes(), []byte(`"error":"feature_unavailable"`)) || !bytes.Contains(record.Body.Bytes(), []byte(`"capability":"pane.tabber.v1"`)) {
+		t.Fatalf("unavailable capability response = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestUploadUsesConfiguredLimitAndRejectsChunkedBodies(t *testing.T) {
+	config := t.TempDir()
+	previousFileLimit, fileLimitPresent := os.LookupEnv("YOLOMUX_FILE_TRANSFER_MAX_BYTES")
+	previousUploadLimit, uploadLimitPresent := os.LookupEnv("YOLOMUX_UPLOAD_MAX_BYTES")
+	previousTemplate, templatePresent := os.LookupEnv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE")
+	_ = os.Unsetenv("YOLOMUX_FILE_TRANSFER_MAX_BYTES")
+	_ = os.Unsetenv("YOLOMUX_UPLOAD_MAX_BYTES")
+	_ = os.Unsetenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE")
+	t.Cleanup(func() {
+		if fileLimitPresent {
+			_ = os.Setenv("YOLOMUX_FILE_TRANSFER_MAX_BYTES", previousFileLimit)
+		} else {
+			_ = os.Unsetenv("YOLOMUX_FILE_TRANSFER_MAX_BYTES")
+		}
+		if uploadLimitPresent {
+			_ = os.Setenv("YOLOMUX_UPLOAD_MAX_BYTES", previousUploadLimit)
+		} else {
+			_ = os.Unsetenv("YOLOMUX_UPLOAD_MAX_BYTES")
+		}
+		if templatePresent {
+			_ = os.Setenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE", previousTemplate)
+		} else {
+			_ = os.Unsetenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE")
+		}
+	})
+	if got := (&server{config: t.TempDir()}).fileTransferMaxBytes(); got != 300*1024*1024 {
+		t.Fatalf("default transfer limit = %d, want %d", got, 300*1024*1024)
+	}
+	if err := os.WriteFile(filepath.Join(config, "settings.yaml"), []byte("uploads:\n  max_bytes: 1048576\n  filename_template: '{name}-{seq:03d}{ext}'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{config: config}
+	if got := s.fileTransferMaxBytes(); got != 1048576 {
+		t.Fatalf("configured transfer limit = %d", got)
+	}
+	if got := s.fileTransferFilenameTemplate(); got != "{name}-{seq:03d}{ext}" {
+		t.Fatalf("configured filename template = %q", got)
+	}
+	legacyConfig := t.TempDir()
+	if err := os.WriteFile(filepath.Join(legacyConfig, "settings.yaml"), []byte("uploads:\n  max_bytes: 20971520\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := (&server{config: legacyConfig}).fileTransferMaxBytes(); got != 300*1024*1024 {
+		t.Fatalf("legacy transfer limit = %d, want %d", got, 300*1024*1024)
+	}
+	t.Setenv("YOLOMUX_UPLOAD_MAX_BYTES", "4194304")
+	if got := (&server{config: t.TempDir()}).fileTransferMaxBytes(); got != 4194304 {
+		t.Fatalf("fallback environment transfer limit = %d, want %d", got, 4194304)
+	}
+	t.Setenv("YOLOMUX_FILE_TRANSFER_MAX_BYTES", "8388608")
+	if got := (&server{config: t.TempDir()}).fileTransferMaxBytes(); got != 8388608 {
+		t.Fatalf("primary environment transfer limit = %d, want %d", got, 8388608)
+	}
+	envLegacyConfig := t.TempDir()
+	if err := os.WriteFile(filepath.Join(envLegacyConfig, "settings.yaml"), []byte("uploads:\n  max_bytes: 20971520\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := (&server{config: envLegacyConfig}).fileTransferMaxBytes(); got != 8388608 {
+		t.Fatalf("legacy environment transfer limit = %d, want %d", got, 8388608)
+	}
+	for _, test := range []struct {
+		value int64
+		want  int64
+	}{
+		{value: 0, want: 1 * 1024 * 1024},
+		{value: 1024 * 1024, want: 1 * 1024 * 1024},
+		{value: 600 * 1024 * 1024, want: 512 * 1024 * 1024},
+	} {
+		boundedConfig := t.TempDir()
+		settings := fmt.Sprintf("uploads:\n  max_bytes: %d\n", test.value)
+		if err := os.WriteFile(filepath.Join(boundedConfig, "settings.yaml"), []byte(settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := (&server{config: boundedConfig}).fileTransferMaxBytes(); got != test.want {
+			t.Fatalf("bounded transfer limit for %d = %d, want %d", test.value, got, test.want)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/upload", strings.NewReader("chunked"))
+	request.ContentLength = -1
+	response := httptest.NewRecorder()
+	s.upload(response, request)
+	if response.Code != http.StatusLengthRequired || !bytes.Contains(response.Body.Bytes(), []byte(`"error_code":"length_required"`)) {
+		t.Fatalf("chunked upload = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUploadRejectsUnknownSessionBeforeFinderMutation(t *testing.T) {
+	root := t.TempDir()
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "note.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/upload?session=missing", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	record := httptest.NewRecorder()
+	s.upload(record, request)
+	if record.Code != http.StatusNotFound || !bytes.Contains(record.Body.Bytes(), []byte(`"error_code":"session_not_found"`)) {
+		t.Fatalf("unknown upload session = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestUploadReturnsSynchronousCanonicalResultThroughFinderScheduler(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scheduler := newFinderJobScheduler()
+	defer scheduler.Close()
+	s := &server{root: root, finder: service, finderJobs: scheduler}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "asset.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("uploaded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/upload?editor_path="+url.QueryEscape(filepath.Join(root, "note.md")), &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	record := httptest.NewRecorder()
+	s.upload(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("synchronous upload = %d %s", record.Code, record.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["state"] != "ready" {
+		t.Fatalf("upload envelope = %#v", envelope)
+	}
+	data, ok := envelope["data"].(map[string]any)
+	if !ok || data["target_source"] != "editor_file_directory" {
+		t.Fatalf("upload data = %#v", envelope["data"])
+	}
+}
+
+func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q", root}, {"-C", root, "config", "user.email", "test@example.invalid"}, {"-C", root, "config", "user.name", "Finder Test"}, {"-C", root, "add", "note.txt"}, {"-C", root, "commit", "-qm", "initial"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(path, []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service}
+
+	diff := httptest.NewRecorder()
+	s.fsDiff(diff, httptest.NewRequest(http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path)+"&from=HEAD&to=current", nil))
+	if diff.Code != http.StatusOK || !bytes.Contains(diff.Body.Bytes(), []byte(`"relative_path":"note.txt"`)) || !bytes.Contains(diff.Body.Bytes(), []byte(`+two`)) {
+		t.Fatalf("diff route = %d %s", diff.Code, diff.Body.String())
+	}
+
+	history := httptest.NewRecorder()
+	s.fsGitHistory(history, httptest.NewRequest(http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1", nil))
+	if history.Code != http.StatusOK || !bytes.Contains(history.Body.Bytes(), []byte(`"commits"`)) || !bytes.Contains(history.Body.Bytes(), []byte(`"subject":"initial"`)) {
+		t.Fatalf("history route = %d %s", history.Code, history.Body.String())
+	}
+	headOutput, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := string(bytes.TrimSpace(headOutput))
+	commit := httptest.NewRecorder()
+	s.fsGitCommit(commit, httptest.NewRequest(http.MethodGet, "/api/fs/git-commit?path="+url.QueryEscape(root)+"&commit="+url.QueryEscape(sha)+"&head="+url.QueryEscape(sha), nil))
+	if commit.Code != http.StatusOK || !bytes.Contains(commit.Body.Bytes(), []byte(`"sha"`)) || !bytes.Contains(commit.Body.Bytes(), []byte(`"files"`)) {
+		t.Fatalf("commit route = %d %s", commit.Code, commit.Body.String())
+	}
+
+	blame := httptest.NewRecorder()
+	s.fsBlame(blame, httptest.NewRequest(http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path), nil))
+	if blame.Code != http.StatusOK || !bytes.Contains(blame.Body.Bytes(), []byte(`"in_repo":true`)) || !bytes.Contains(blame.Body.Bytes(), []byte(`"1":`)) {
+		t.Fatalf("blame route = %d %s", blame.Code, blame.Body.String())
+	}
+}
+
+func TestPhase45SynchronousFinderRoutesUseBoundedScheduler(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	routes := []struct {
+		name   string
+		method string
+		url    string
+		body   string
+		call   func(*server, http.ResponseWriter, *http.Request)
+	}{
+		{name: "diff", method: http.MethodGet, url: "/api/fs/diff?path=" + url.QueryEscape(path), call: (*server).fsDiff},
+		{name: "direct search", method: http.MethodGet, url: "/api/fs/search?root=" + url.QueryEscape(root) + "&query=needle", call: (*server).fsSearch},
+		{name: "index status", method: http.MethodGet, url: "/api/fs/index-status?root=" + url.QueryEscape(root), call: (*server).fsIndexStatus},
+		{name: "resolve candidates", method: http.MethodPost, url: "/api/fs/resolve-candidates", body: `{"paths":["` + path + `"]}`, call: (*server).fsResolveCandidates},
+	}
+	for _, route := range routes {
+		route := route
+		t.Run(route.name, func(t *testing.T) {
+			scheduler := work.New(1, 1)
+			defer scheduler.Close()
+			release := make(chan struct{})
+			defer close(release)
+			started := make(chan struct{})
+			if _, err := scheduler.Submit(context.Background(), "held", func(context.Context) (any, error) {
+				close(started)
+				<-release
+				return nil, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			<-started
+			if _, err := scheduler.Submit(context.Background(), "queued", func(context.Context) (any, error) { return nil, nil }); err != nil {
+				t.Fatal(err)
+			}
+
+			s := &server{root: root, finder: service, finderJobs: scheduler}
+			request := httptest.NewRequest(route.method, route.url, strings.NewReader(route.body))
+			response := httptest.NewRecorder()
+			route.call(s, response, request)
+			if response.Code != http.StatusServiceUnavailable || !bytes.Contains(response.Body.Bytes(), []byte(`"error_code":"service_busy"`)) {
+				t.Fatalf("saturated route = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSessionMetadataRouteProvidesBootIdentity(t *testing.T) {
+	s := &server{events: newEventBroker()}
+	request := httptest.NewRequest(http.MethodGet, "/api/session-metadata?force=1", nil)
+	record := httptest.NewRecorder()
+	s.sessionMetadata(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := payload["metadata_identity"].(map[string]any)
+	if !ok || identity["epoch"] == "" || identity["generation"] != float64(1) {
+		t.Fatalf("metadata identity = %#v", payload["metadata_identity"])
+	}
+	cache, ok := payload["cache"].(map[string]any)
+	if !ok || cache["pending_identity"] == nil || cache["stale"] != true {
+		t.Fatalf("forced metadata cache = %#v", payload["cache"])
+	}
+}
+
+func TestPhase45FinderBatchSearchStreamAndWatchDiffHTTPRoutes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "search-me.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "search-me-deep.go"), []byte("package deep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service}
+
+	batch := httptest.NewRecorder()
+	s.fsBatch(batch, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"one","type":"list","path":"`+root+`"},{"id":"two","type":"info","path":"`+filepath.Join(root, "search-me.go")+`"}]}`)))
+	if batch.Code != http.StatusOK || !bytes.Contains(batch.Body.Bytes(), []byte(`"id":"one"`)) || !bytes.Contains(batch.Body.Bytes(), []byte(`"id":"two"`)) {
+		t.Fatalf("batch route = %d %s", batch.Code, batch.Body.String())
+	}
+
+	stream := httptest.NewRecorder()
+	s.fsSearch(stream, httptest.NewRequest(http.MethodGet, "/api/fs/search-stream?root="+url.QueryEscape(root)+"&query=search&limit=10", nil))
+	if stream.Code != http.StatusOK || stream.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" || bytes.Count(stream.Body.Bytes(), []byte("event: chunk")) != 2 || !bytes.Contains(stream.Body.Bytes(), []byte("search-me-deep.go")) {
+		t.Fatalf("search stream route = %d headers=%v body=%s", stream.Code, stream.Header(), stream.Body.String())
+	}
+
+	batchSearch := httptest.NewRecorder()
+	s.fsSearch(batchSearch, httptest.NewRequest(http.MethodGet, "/api/batch/search?root="+url.QueryEscape(root)+"&query=search&limit=10", nil))
+	if batchSearch.Code != http.StatusOK || !bytes.Contains(batchSearch.Body.Bytes(), []byte("search-me-deep.go")) || bytes.Contains(batchSearch.Body.Bytes(), []byte(`"index_state":"warming"`)) {
+		t.Fatalf("batch search route = %d %s", batchSearch.Code, batchSearch.Body.String())
+	}
+
+	watch := httptest.NewRecorder()
+	watchRequest := httptest.NewRequest(http.MethodPost, "/api/watch/roots", bytes.NewBufferString(`{"client_id":"http","roots":["`+root+`"]}`))
+	s.watchRoots(watch, watchRequest)
+	if watch.Code != http.StatusOK || !bytes.Contains(watch.Body.Bytes(), []byte(`"watch_token"`)) {
+		t.Fatalf("watch registration = %d %s", watch.Code, watch.Body.String())
+	}
+	var registration map[string]any
+	if err := json.Unmarshal(watch.Body.Bytes(), &registration); err != nil {
+		t.Fatal(err)
+	}
+	diff := httptest.NewRecorder()
+	s.fsWatchDiff(diff, httptest.NewRequest(http.MethodGet, "/api/fs/watch-diff?full=1", nil))
+	if diff.Code != http.StatusOK || !bytes.Contains(diff.Body.Bytes(), []byte(`"mode":"full"`)) || !bytes.Contains(diff.Body.Bytes(), []byte(`search-me.go`)) {
+		t.Fatalf("watch diff = %d %s", diff.Code, diff.Body.String())
+	}
+}
+
+func TestPhase45FinderBatchMatchesPythonValidationAndPerformanceEnvelope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service}
+
+	record := httptest.NewRecorder()
+	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"client_revision":"r1","client_scope":"browser","requests":[{"id":"one","type":"info","path":"`+filepath.Join(root, "note.txt")+`","trigger_counts":{"explicit-user":2}},{"id":"bad","type":"bogus","path":"`+root+`"},{"id":"trigger","type":"list","path":"`+root+`","trigger":"not-allowed"}]}`)))
+	if record.Code != http.StatusOK {
+		t.Fatalf("batch status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	performance, ok := payload["performance"].(map[string]any)
+	if !ok || performance["batch_size"] != float64(3) || performance["client_revision"] != "r1" || performance["client_scope"] != "browser" {
+		t.Fatalf("batch performance = %#v", payload["performance"])
+	}
+	responses := payload["responses"].([]any)
+	if responses[0].(map[string]any)["ok"] != true || responses[1].(map[string]any)["ok"] != false || responses[2].(map[string]any)["ok"] != false {
+		t.Fatalf("batch response validation = %#v", responses)
+	}
+
+	tooMany := make([]string, finder.MaxBatchRequests+1)
+	for index := range tooMany {
+		tooMany[index] = `{"type":"info","path":"` + root + `"}`
+	}
+	tooManyBody := `{"requests":[` + strings.Join(tooMany, ",") + `]}`
+	tooManyRecord := httptest.NewRecorder()
+	s.fsBatch(tooManyRecord, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(tooManyBody)))
+	if tooManyRecord.Code != http.StatusBadRequest || !bytes.Contains(tooManyRecord.Body.Bytes(), []byte(`request.error.tooManyItems`)) || !bytes.Contains(tooManyRecord.Body.Bytes(), []byte(`"ok":false`)) || !bytes.Contains(tooManyRecord.Body.Bytes(), []byte(`"terminal":true`)) || !bytes.Contains(tooManyRecord.Body.Bytes(), []byte(`"origin":"server.http"`)) || !bytes.Contains(tooManyRecord.Body.Bytes(), []byte(`"maximum":64`)) {
+		t.Fatalf("too many batch = %d %s", tooManyRecord.Code, tooManyRecord.Body.String())
+	}
+
+	malformedRecord := httptest.NewRecorder()
+	s.fsBatch(malformedRecord, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":"not-a-list"}`)))
+	if malformedRecord.Code != http.StatusBadRequest || !bytes.Contains(malformedRecord.Body.Bytes(), []byte(`"state":"failed"`)) || !bytes.Contains(malformedRecord.Body.Bytes(), []byte(`"user_message"`)) || !bytes.Contains(malformedRecord.Body.Bytes(), []byte(`"stack"`)) || !bytes.Contains(malformedRecord.Body.Bytes(), []byte(`request.error.list`)) || !bytes.Contains(malformedRecord.Body.Bytes(), []byte(`"requests_type":"string"`)) {
+		t.Fatalf("malformed batch = %d %s", malformedRecord.Code, malformedRecord.Body.String())
+	}
+}
+
+func TestPhase45FinderBatchReturnsDurableReceiptWhenWorkerIsBusy(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scheduler := work.New(1, 1)
+	defer scheduler.Close()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	if _, err := scheduler.Submit(context.Background(), "held", func(context.Context) (any, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: scheduler}
+	record := httptest.NewRecorder()
+	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"info","type":"info","path":"`+filepath.Join(root, "note.txt")+`"}]}`)))
+	close(release)
+	if record.Code != http.StatusAccepted {
+		t.Fatalf("busy batch status = %d %s", record.Code, record.Body.String())
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	operation, ok := receipt["operation"].(map[string]any)
+	if !ok || operation["id"] == "" {
+		t.Fatalf("busy batch receipt = %#v", receipt)
+	}
+	operationID := operation["id"].(string)
+	deadline := time.After(2 * time.Second)
+	for {
+		current := s.operationRecord(operationID)
+		if current != nil && current.TerminalEvent != nil {
+			if current.Result["state"] != "ready" {
+				t.Fatalf("busy batch terminal result = %#v", current.Result)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("busy batch operation did not terminalize")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestPhase45FinderBatchReturnsReadyProductWithinFastBudget(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scheduler := newFinderJobScheduler()
+	defer scheduler.Close()
+	s := &server{
+		root:              root,
+		finder:            service,
+		events:            newEventBroker(),
+		operations:        map[string]*goOperation{},
+		operationsPath:    filepath.Join(root, "operations.json"),
+		operationsJournal: filepath.Join(root, "operations.jsonl"),
+		finderJobs:        scheduler,
+	}
+	record := httptest.NewRecorder()
+	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"info","type":"info","path":"`+filepath.Join(root, "note.txt")+`"}]}`)))
+	if record.Code != http.StatusOK {
+		t.Fatalf("ready batch status = %d %s", record.Code, record.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["state"] != "ready" || envelope["terminal"] != true {
+		t.Fatalf("ready batch envelope = %#v", envelope)
+	}
+}
+
+func TestPhase45FinderUnindexAndHTMLPreviewRoutes(t *testing.T) {
+	root := t.TempDir()
+	htmlPath := filepath.Join(root, "index.html")
+	if err := os.WriteFile(htmlPath, []byte(`<script>document.body.textContent = "safe"</script>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service}
+
+	indexStatus := httptest.NewRecorder()
+	s.fsIndexStatus(indexStatus, httptest.NewRequest(http.MethodGet, "/api/fs/index-status?root="+url.QueryEscape(root), nil))
+	if indexStatus.Code != http.StatusOK || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"indexed":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"ready":false`)) {
+		t.Fatalf("index status = %d %s", indexStatus.Code, indexStatus.Body.String())
+	}
+
+	unindex := httptest.NewRecorder()
+	s.fsUnindex(unindex, httptest.NewRequest(http.MethodPost, "/api/fs/unindex", bytes.NewBufferString(`{"root":"`+root+`"}`)))
+	if unindex.Code != http.StatusOK || !bytes.Contains(unindex.Body.Bytes(), []byte(`"ok":true`)) || !bytes.Contains(unindex.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) {
+		t.Fatalf("unindex route = %d %s", unindex.Code, unindex.Body.String())
+	}
+
+	preview := httptest.NewRecorder()
+	s.fsHTMLPreview(preview, httptest.NewRequest(http.MethodGet, "/api/batch/html-preview?path="+url.QueryEscape(htmlPath), nil))
+	if preview.Code != http.StatusOK || preview.Header().Get("Content-Type") != "text/html; charset=utf-8" || !bytes.Contains(preview.Body.Bytes(), []byte(`sandbox="allow-scripts allow-forms allow-popups"`)) || !bytes.Contains(preview.Body.Bytes(), []byte(`&lt;script&gt;`)) {
+		t.Fatalf("html preview route = %d headers=%v body=%s", preview.Code, preview.Header(), preview.Body.String())
+	}
+
+	nonHTML := httptest.NewRecorder()
+	s.fsHTMLPreview(nonHTML, httptest.NewRequest(http.MethodGet, "/api/batch/html-preview?path="+url.QueryEscape(filepath.Join(root, "plain.txt")), nil))
+	if nonHTML.Code != http.StatusBadRequest || !bytes.Contains(nonHTML.Body.Bytes(), []byte(`fs.error.htmlFileRequired`)) {
+		t.Fatalf("non-html preview = %d %s", nonHTML.Code, nonHTML.Body.String())
+	}
+}
+
+func TestPhase45ExpensiveFinderRoutesUseBoundedOperations(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "needle.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: newFinderJobScheduler()}
+	defer s.finderJobs.Close()
+
+	count := httptest.NewRecorder()
+	s.fsCount(count, httptest.NewRequest(http.MethodGet, "/api/batch/count?path="+url.QueryEscape(root), nil))
+	if count.Code != http.StatusAccepted {
+		t.Fatalf("count status = %d %s", count.Code, count.Body.String())
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(count.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	operation, ok := receipt["operation"].(map[string]any)
+	if !ok || operation["id"] == "" {
+		t.Fatalf("count receipt = %#v", receipt)
+	}
+	countID := operation["id"].(string)
+	countDeadline := time.After(2 * time.Second)
+	countTicker := time.NewTicker(5 * time.Millisecond)
+	defer countTicker.Stop()
+	for {
+		record := s.operationRecord(countID)
+		if record != nil && record.TerminalEvent != nil {
+			result := record.Result
+			if result["state"] != "ready" || result["data"].(map[string]any)["files"] != float64(1) {
+				t.Fatalf("count terminal result = %#v", result)
+			}
+			break
+		}
+		select {
+		case <-countDeadline:
+			t.Fatal("count operation did not terminalize")
+		case <-countTicker.C:
+		}
+	}
+
+	search := httptest.NewRecorder()
+	s.fsSearch(search, httptest.NewRequest(http.MethodGet, "/api/fs/search?root="+url.QueryEscape(root)+"&query=needle&recursive=1", nil))
+	if search.Code != http.StatusAccepted {
+		t.Fatalf("recursive search status = %d %s", search.Code, search.Body.String())
+	}
+}
+
+func TestRecursiveDeleteEscalatesToBulkLaneWhenBulkIsSaturated(t *testing.T) {
+	root := t.TempDir()
+	subtree := filepath.Join(root, "subtree")
+	if err := os.Mkdir(subtree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subtree, "child.txt"), []byte("child"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	point := work.New(1, 2)
+	bulk := work.New(1, 1)
+	defer point.Close()
+	defer bulk.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := bulk.Submit(context.Background(), "bulk-running", func(context.Context) (any, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if _, err := bulk.Submit(context.Background(), "bulk-queued", func(context.Context) (any, error) { return nil, nil }); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: point, finderBulkJobs: bulk}
+	record := httptest.NewRecorder()
+	s.fsDelete(record, httptest.NewRequest(http.MethodPost, "/api/fs/delete", bytes.NewBufferString(`{"path":"`+subtree+`"}`)))
+	if record.Code != http.StatusAccepted {
+		t.Fatalf("recursive delete admission = %d %s", record.Code, record.Body.String())
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	operation := receipt["operation"].(map[string]any)
+	id := operation["id"].(string)
+	deadline := time.After(2 * time.Second)
+	for {
+		current := s.operationRecord(id)
+		if current != nil && current.TerminalEvent != nil {
+			if current.Result["state"] != "failed" || current.Result["error_code"] != "service_busy" {
+				t.Fatalf("saturated bulk result = %#v", current.Result)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("recursive delete did not terminalize after bulk saturation")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(release)
+	if _, err := os.Stat(subtree); err != nil {
+		t.Fatalf("bulk saturation unexpectedly removed subtree: %v", err)
+	}
+}
+
+func TestFinderProductDeadlineIsEnforcedByItsWorkerContext(t *testing.T) {
+	s := &server{finderJobs: newFinderJobScheduler()}
+	defer s.finderJobs.Close()
+	started := make(chan struct{})
+	startedOnce := sync.Once{}
+	startedAt := time.Now()
+	_, finderErr := s.runFinderProductWithDeadline(context.Background(), 20*time.Millisecond, func(ctx context.Context) (finderProduct, *finder.Error) {
+		startedOnce.Do(func() { close(started) })
+		<-ctx.Done()
+		return finderProduct{}, finderJobContextError(ctx.Err())
+	})
+	select {
+	case <-started:
+	default:
+		t.Fatal("finder worker did not start")
+	}
+	if finderErr == nil || finderErr.Code != "deadline_exceeded" || finderErr.Status != http.StatusGatewayTimeout {
+		t.Fatalf("deadline error = %#v", finderErr)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("deadline returned too slowly: %s", elapsed)
+	}
+}
+
+func TestFinderSlowStreamsDoNotOccupyFinderWorkers(t *testing.T) {
+	finderJobs := work.New(1, 1)
+	defer finderJobs.Close()
+	streamJobs := work.New(2, 2)
+	defer streamJobs.Close()
+	s := &server{finderJobs: finderJobs, finderStreamJobs: streamJobs}
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	streamTask := func(ctx context.Context) (finderProduct, *finder.Error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			return finderProduct{}, nil
+		case <-ctx.Done():
+			return finderProduct{}, finderJobContextError(ctx.Err())
+		}
+	}
+	streamDone := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, finderErr := s.runFinderStreamProduct(context.Background(), streamTask)
+			streamDone <- func() error {
+				if finderErr != nil {
+					return finderErr
+				}
+				return nil
+			}()
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("slow stream did not start")
+		}
+	}
+	normalDone := make(chan error, 1)
+	go func() {
+		_, finderErr := s.runFinderProduct(context.Background(), func(context.Context) (finderProduct, *finder.Error) {
+			return finderProduct{}, nil
+		})
+		normalDone <- func() error {
+			if finderErr != nil {
+				return finderErr
+			}
+			return nil
+		}()
+	}()
+	select {
+	case err := <-normalDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("normal Finder work waited behind slow streams")
+	}
+	close(release)
+	for range 2 {
+		select {
+		case err := <-streamDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("slow stream did not finish")
+		}
+	}
+}
+
+type blockingFinderSSEWriter struct {
+	header  http.Header
+	blocked chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	writes  int
+	status  int
+}
+
+func newBlockingFinderSSEWriter() *blockingFinderSSEWriter {
+	return &blockingFinderSSEWriter{header: make(http.Header), blocked: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *blockingFinderSSEWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *blockingFinderSSEWriter) WriteHeader(status int) {
+	w.mu.Lock()
+	w.status = status
+	w.mu.Unlock()
+}
+
+func (w *blockingFinderSSEWriter) Status() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *blockingFinderSSEWriter) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	shouldBlock := w.writes == 2
+	w.mu.Unlock()
+	if shouldBlock {
+		close(w.blocked)
+		<-w.release
+	}
+	return len(value), nil
+}
+
+func (w *blockingFinderSSEWriter) Flush() {}
+
+func TestFinderHTTPSlowStreamsDoNotOccupyFinderWorkers(t *testing.T) {
+	root := t.TempDir()
+	for index := range 40 {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("needle-%02d.txt", index)), []byte("needle"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	finderJobs := work.New(1, 1)
+	defer finderJobs.Close()
+	streamJobs := work.New(2, 2)
+	defer streamJobs.Close()
+	s := &server{root: root, finder: service, finderJobs: finderJobs, finderStreamJobs: streamJobs}
+	writers := []*blockingFinderSSEWriter{newBlockingFinderSSEWriter(), newBlockingFinderSSEWriter()}
+	streamDone := make(chan int, len(writers))
+	for _, writer := range writers {
+		go func(writer *blockingFinderSSEWriter) {
+			s.fsSearch(writer, httptest.NewRequest(http.MethodGet, "/api/fs/search-stream?root="+url.QueryEscape(root)+"&query=needle&limit=40", nil))
+			streamDone <- writer.Status()
+		}(writer)
+	}
+	for _, writer := range writers {
+		select {
+		case <-writer.blocked:
+		case <-time.After(time.Second):
+			t.Fatal("slow HTTP stream did not reach response backpressure")
+		}
+	}
+	normalDone := make(chan int, 1)
+	go func() {
+		record := httptest.NewRecorder()
+		s.fsInfo(record, httptest.NewRequest(http.MethodGet, "/api/fs/info?path="+url.QueryEscape(filepath.Join(root, "needle-00.txt")), nil))
+		normalDone <- record.Code
+	}()
+	select {
+	case status := <-normalDone:
+		if status != http.StatusOK {
+			t.Fatalf("normal Finder request status = %d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("normal Finder request waited behind slow HTTP streams")
+	}
+	for _, writer := range writers {
+		close(writer.release)
+	}
+	for range writers {
+		select {
+		case status := <-streamDone:
+			if status != http.StatusOK {
+				t.Fatalf("slow stream status = %d", status)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("slow HTTP stream did not finish")
+		}
+	}
+}
+
+func TestFinderPointReadsDoNotBlockOnSpecialFiles(t *testing.T) {
+	root := t.TempDir()
+	fifo := filepath.Join(root, "blocked.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: newFinderJobScheduler()}
+	defer s.finderJobs.Close()
+	handlers := []func(http.ResponseWriter, *http.Request){s.fsRead, s.fsInfo, s.fsRaw}
+	for _, handler := range handlers {
+		done := make(chan struct{})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/fs/read?path="+url.QueryEscape(fifo), nil)
+		go func() {
+			handler(recorder, request)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("Finder handler blocked on special file, status=%d", recorder.Code)
+		}
 	}
 }
 
