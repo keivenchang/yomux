@@ -303,6 +303,7 @@ def html_page(
     accept_language: str = "",
     auth_username: str = "",
     recent_sessions: list[str] | None = None,
+    terminal_only: bool = False,
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
@@ -315,8 +316,10 @@ def html_page(
         # Full-access agent launch controls are deliberately available only when the server operator
         # explicitly opted in with --dangerously-yolo.
         "dangerouslyYolo": dangerously_yolo,
-        "availableAgents": available_agent_commands(),
-        "terminalCommands": available_terminal_commands(),
+        "terminalOnly": terminal_only,
+        "sessionMutationsAllowed": access_role == "admin",
+        "availableAgents": ["term"] if terminal_only else available_agent_commands(),
+        "terminalCommands": ["bash"] if terminal_only else available_terminal_commands(),
         # The new-session menu exposes both explicit launch modes. Keep the command source server-owned
         # so the UI describes the exact flags the selected Claude/Codex session will receive.
         "agentLaunchCommands": {
@@ -324,11 +327,11 @@ def html_page(
                 "normal": agent_command(agent, False),
                 "full_access": agent_command(agent, True),
             }
-            for agent in ("claude", "codex", "term")
+            for agent in (("term",) if terminal_only else ("claude", "codex", "term"))
         },
         # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
-        "agentAuth": bootstrap_agent_auth_status(),
+        "agentAuth": {} if terminal_only else bootstrap_agent_auth_status(),
         "accessRole": access_role,
         "authUsername": auth_username,
         "homePath": str(Path.home()),

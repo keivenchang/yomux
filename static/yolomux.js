@@ -18677,6 +18677,9 @@ function appMenuTree() {
       targetItem: prefsItemId,
     }),
   ]);
+  if (bootstrap.terminalOnly === true) {
+    fileDestinationCommands.forEach(command => { command.disabled = true; });
+  }
   return [
     {
       id: 'file',
@@ -33351,7 +33354,7 @@ function badConnectionTerminalCursorColor() {
 }
 
 function terminalCursorBlinkEnabled() {
-  return !badConnectionCursorStateActive();
+  return true;
 }
 
 function terminalThemeWithBadConnectionCursor(theme) {

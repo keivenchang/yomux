@@ -1000,7 +1000,7 @@ function badConnectionTerminalCursorColor() {
 }
 
 function terminalCursorBlinkEnabled() {
-  return !badConnectionCursorStateActive();
+  return true;
 }
 
 function terminalThemeWithBadConnectionCursor(theme) {

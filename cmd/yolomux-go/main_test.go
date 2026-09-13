@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -33,5 +35,26 @@ func TestHealthAndCapabilities(t *testing.T) {
 	s.health(record, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if record.Code != http.StatusOK || !bytes.Contains(record.Body.Bytes(), []byte(`"backend":"go"`)) {
 		t.Fatalf("health response = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestTLSFilesAndConfig(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	certFile, keyFile, err := tlsFiles("", "", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(certFile); err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Ext(certFile) != ".crt" || filepath.Ext(keyFile) != ".key" {
+		t.Fatalf("unexpected generated paths: %s %s", certFile, keyFile)
+	}
+	config, err := tlsConfig(certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MinVersion != 0x0303 {
+		t.Fatalf("TLS minimum version = %#x", config.MinVersion)
 	}
 }

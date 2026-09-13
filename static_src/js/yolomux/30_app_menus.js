@@ -856,6 +856,9 @@ function appMenuTree() {
       targetItem: prefsItemId,
     }),
   ]);
+  if (bootstrap.terminalOnly === true) {
+    fileDestinationCommands.forEach(command => { command.disabled = true; });
+  }
   return [
     {
       id: 'file',
