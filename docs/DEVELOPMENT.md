@@ -335,6 +335,16 @@ Use `boot.sh` from the checkout you want to serve. `boot.sh` and `yolo-dev-start
 ./boot.sh <port>
 ```
 
+The same launcher can start the Go backend with the shared lifecycle and port checks:
+
+```bash
+./boot.sh --golang <port>
+# equivalent:
+./boot.sh --backend go <port>
+```
+
+Both launcher modes bind to `0.0.0.0` by default. The Go binary is selected from `YOLOMUX_GO_BINARY`, `bazel-bin/yolomux-go`, or `yolomux-go` in that order; use `--print-command` to inspect the resolved command without starting a server.
+
 The script accepts any valid TCP port and still passes the compatible `--self-signed` spelling plus `--dang`; direct `yolomux.py` launches default to HTTPS on port `9998`. `boot.sh` requires an explicit positional port, `YOLOMUX_PORT`, or host-provided `YOLOMUX_DEFAULT_PORT`; it does not define a machine-wide default. `YOLOMUX_PORT` selects the primary port and keeps the normal non-dev launch behavior. `yolo-dev-start` owns the host-specific session/worktree/port table and exports the primary-port preference for each managed row. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
 
 ```bash

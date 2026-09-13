@@ -9,6 +9,7 @@ host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
+backend="python"
 print_command=0
 check_assets=0
 ignore_load=0
@@ -20,7 +21,7 @@ server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--golang|--backend BACKEND] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
 Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
@@ -29,6 +30,7 @@ Examples:
   ./boot.sh <dev-port>
   ./boot.sh --force <port>
   ./boot.sh --ignore-load <dev-port>
+  ./boot.sh --golang <port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
 }
@@ -67,6 +69,18 @@ while [[ "$#" -gt 0 ]]; do
     --force)
       force_start=1
       shift
+      ;;
+    --golang)
+      backend="go"
+      shift
+      ;;
+    --backend)
+      [[ "$#" -ge 2 ]] || die "--backend requires a value"
+      case "$2" in
+        python|go) backend="$2" ;;
+        *) die "invalid backend: $2 (expected python or go)" ;;
+      esac
+      shift 2
       ;;
     --host)
       [[ "$#" -ge 2 ]] || die "--host requires a value"
@@ -154,6 +168,15 @@ fi
 
 extra_env=()
 extra_env+=("$(yolomux_default_server_optin)")
+if [[ "$backend" == "go" ]]; then
+  go_binary="${YOLOMUX_GO_BINARY:-}"
+  if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
+    go_binary="$repo_root/bazel-bin/yolomux-go"
+  elif [[ -z "$go_binary" && -x "$repo_root/yolomux-go" ]]; then
+    go_binary="$repo_root/yolomux-go"
+  fi
+  [[ -n "$go_binary" ]] && extra_env+=("YOLOMUX_GO_BINARY=$go_binary")
+fi
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
 fi
@@ -174,6 +197,9 @@ build_server_args() {
   server_args=(--host "$host" --port "$port" --dang --self-signed)
   if [[ "$force_start" -eq 1 ]]; then
     server_args+=(--force)
+  fi
+  if [[ "$backend" == "go" ]]; then
+    server_args+=(--backend go)
   fi
   if use_dev_mode "$port"; then
     server_args+=(--dev)

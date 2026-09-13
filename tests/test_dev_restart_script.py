@@ -98,6 +98,44 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert command.count("--dang --self-signed") >= 3
 
 
+def test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces():
+    env = dict(os.environ)
+    env.pop("YOLOMUX_HOST", None)
+    env.pop("YOLOMUX_PORT", None)
+    env["YOLOMUX_GO_BINARY"] = "/tmp/yolomux-go-test"
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--golang", "7221"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    command = printable_command_text(result.stdout)
+    assert "yolomux.py" in command
+    assert "--backend go" in command
+    assert "--host 0.0.0.0" in command
+    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
+
+
+def test_boot_print_command_accepts_backend_go_alias():
+    env = dict(os.environ)
+    env.pop("YOLOMUX_HOST", None)
+    env.pop("YOLOMUX_PORT", None)
+    env["YOLOMUX_GO_BINARY"] = "/tmp/yolomux-go-test"
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--backend", "go", "7221"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "--backend go" in printable_command_text(result.stdout)
+
+
 def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command", "--log-dir", "relative-logs", "17775"],

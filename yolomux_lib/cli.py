@@ -630,10 +630,13 @@ def main() -> int:
 def exec_go_backend(args: argparse.Namespace) -> int:
     """Replace the launcher with the explicitly selected Go server."""
     repo_root = Path(__file__).resolve().parents[1]
-    binary = os.environ.get("YOLOMUX_GO_BINARY", str(repo_root / "yolomux-go"))
-    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
-        print(f"ERROR: Go backend binary is unavailable: {binary}", file=sys.stderr)
+    configured_binary = os.environ.get("YOLOMUX_GO_BINARY")
+    candidates = [Path(configured_binary)] if configured_binary else [repo_root / "yolomux-go", repo_root / "bazel-bin" / "yolomux-go"]
+    binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
+    if binary is None:
+        searched = ", ".join(str(candidate) for candidate in candidates)
+        print(f"ERROR: Go backend binary is unavailable; searched: {searched}", file=sys.stderr)
         return 2
-    command = [binary, "--host", args.host, "--port", str(args.port), "--root", str(repo_root)]
-    os.execv(binary, command)
+    command = [str(binary), "--host", args.host, "--port", str(args.port), "--root", str(repo_root)]
+    os.execv(str(binary), command)
     return 127

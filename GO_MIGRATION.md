@@ -8,6 +8,20 @@ The Go implementation should be a modular monolith: one executable, one HTTP lis
 
 Bazel is the build, test, dependency, and release entry point from Phase 0 onward. The migration must not begin with an ad hoc `go build` workflow and retrofit Bazel later. Go module metadata may remain where required by the Go toolchain and dependency ecosystem, but checked-in Bazel targets and toolchains are authoritative for supported builds and tests.
 
+### Porting And Parallelization Rules
+
+- Treat the existing Python implementation as the specification, not as inspiration. Before implementing a Go phase, inventory every browser URL/API/WebSocket message, HTTP route, auth/readonly gate, PTY lifecycle, tmux command/option/target, timer, reconnect path, and owning test.
+- Port the Python owner and its tests before introducing a Go-specific abstraction or fallback. A local xterm `cols`/`rows` change is not terminal parity.
+- Split phases into independently testable workstreams only at explicit contract boundaries. Parallel work may share frozen fixtures and read-only manifests, but must not create competing owners for one route, state projection, capability, or generated asset.
+- Each parallel workstream must declare its inputs, owned files/routes, dependency gate, test target, and integration owner. Integration is a separate task that runs the shared browser journey after all workstreams land.
+- UI workstreams may proceed in parallel with backend work only against checked-in contract fixtures or a fixture server. They cannot claim feature completion until the real backend path, restarted server, and real Chromium journey pass.
+- Never parallelize two implementations of the same behavior. One named parent owns each route, wire message, tmux operation, capability, and shared UI builder; adapters pass data into that owner.
+- For xterm/tmux changes, prove the full chain in real Chromium against an owned server and tmux socket: JS emits the expected message, the backend receives it, PTY dimensions change, `SIGWINCH` reaches the attach process, tmux client/window dimensions change, redraw bytes return as binary WebSocket frames, and xterm renders them.
+- Treat TLS trust, wrong tmux sockets, stale binaries, missing routes, and attach-process exits as product failures until classified. E2E fixtures must own TLS trust, config/auth, tmux socket/session, server process, browser, logs, and tmux client-row evidence.
+- When a live regression follows a passing test, stop speculative patching. Reproduce the exact live URL/session/role/client path, compare the live message sequence with Python, preserve the red case, and add that scenario to the owning E2E test before changing code.
+- Backend parity includes exact tmux targets (`=<session>:`), configured sockets, `ignore-size` probing, attach flags, resize authority by client/PTTY, foreground filtering, refresh acknowledgements, copy-mode scroll, query-response input filtering, and attach re-entry.
+- Reuse Python `login_html()`/`html_page()` and checked-in static assets instead of duplicating HTML/JS/CSS. Keep JS unchanged when the browser contract already matches; use Bazel plus real Chromium for the integration gate.
+
 The migration order is:
 
 1. Freeze the browser contract and inventory every startup request, stream, timer, and warm-up.
@@ -385,16 +399,18 @@ The current Python registry contains 128 routes: 78 GET and 50 POST. The invento
 | Phase 2: terminal MVP | 6 | First useful Go product. |
 | Phase 3: shared events and operations | 9 | Required before stateful panes. |
 | Phase 4: Finder read | 6 | First repository-adjacent pane. |
-| Phase 5: Finder write, search, and editing | 16 | Completes Finder and editors. |
-| Phase 6: Differ | 6 | Adds Git-backed file change workflows. |
-| Phase 7: Tabber | 9 | Reuses terminal, Finder, and Differ products. |
-| Phase 8: infrastructure hardening | 0 new routes | Hardens routes delivered in Phase 3 under combined demand. |
-| Phase 9: remaining terminal and operations | 28 | Completes the primary non-stats workflow. |
-| Phase 10: YO!stats design | 0 | Resolves persistence and materialization before route cutover. |
-| Phase 11: YO!stats read | 7 | Enables charts and operational readiness from committed data. |
-| Phase 12: YO!stats write | 2 | Moves telemetry and pricing writes after ownership fencing. |
-| Phase 13: YO!chat | 9 | Deferred, but required for parity. |
-| Phase 14: YO!agent | 19 | Last scheduled surface, but required for parity. |
+| Phase 5: Finder write and search | 16 | Completes Finder mutations/search. |
+| Phase 6: TextEdit | 0 new routes | Ports source-file editing as a parallel editor workstream. |
+| Phase 7: ViewEdit | 0 new routes | Ports Markdown ViewEdit/ProseMirror as a parallel editor workstream. |
+| Phase 8: Differ | 6 | Adds Git-backed file change workflows. |
+| Phase 9: Tabber | 9 | Reuses terminal, Finder, editors, and Differ products. |
+| Phase 10: infrastructure hardening | 0 new routes | Hardens routes delivered in Phase 3 under combined demand. |
+| Phase 11: remaining terminal and operations | 28 | Completes the primary non-stats workflow. |
+| Phase 12: YO!stats design | 0 | Resolves persistence and materialization before route cutover. |
+| Phase 13: YO!stats read | 7 | Enables charts and operational readiness from committed data. |
+| Phase 14: YO!stats write | 2 | Moves telemetry and pricing writes after ownership fencing. |
+| Phase 15: YO!chat | 9 | Deferred, but required for parity. |
+| Phase 16: YO!agent | 19 | Last scheduled surface, but required for parity. |
 | **Total** | **128** | **Every current registered route has one owner.** |
 
 Registry cross-check:
@@ -450,6 +466,34 @@ Registry cross-check:
 | GET | `/api/system-status/advanced` | JSON | readonly |
 | GET | `/api/logs` | JSON | readonly |
 
+#### Shared Browser-Boot API Ownership
+
+The existing shared JavaScript starts more than the Phase 2 terminal WebSocket. These requests are
+not all Phase 3 work, and a Go server must not claim feature parity by returning synthetic success
+payloads for a later phase. Each route has one owning phase, while Phase 3 owns the event/operation
+transport used by the owner:
+
+| API family | Owning phase | Consumer or purpose |
+| --- | --- | --- |
+| `/api/client-events`, `/api/operations/*`, `/api/operations/ack`, `/api/background/status`, `/api/background/claim`, `/api/event`, `/api/system-status`, `/api/system-status/advanced`, `/api/logs` | Phase 3 | Shared event stream, operation delivery, background ownership, and core diagnostics. |
+| `/api/fs/index-status`, `/api/fs/search`, `/api/fs/search-stream`, `/api/fs/watch-diff`, `/api/fs/batch`, `/api/fs/resolve-file-candidates`, `/api/fs/write`, `/api/fs/delete`, `/api/fs/unindex`, `/api/fs/rename`, `/api/fs/mkdir`, `/api/batch/*`, `/api/upload` | Phase 5 | Finder search, writes, uploads, batch work, and index status. |
+| `/api/session-files`, `/api/session-files-batch`, `/api/fs/diff`, `/api/fs/git-history`, `/api/fs/git-commit`, `/api/batch/blame` | Phase 8 | Differ and Git-backed session-file projections. |
+| `/api/session-metadata`, `/api/transcripts`, `/api/activity-summary`, `/api/events`, `/api/search`, `/api/run-history`, `/api/activity`, `/api/summary`, `/api/tmux-signals` | Phase 9 | Tabber activity, transcript, attention, and session projections. |
+| `/api/update-status`, `/api/auto-approve`, `/api/notify`, `/api/settings`, `/api/watched-prs`, `/api/yolo-rules`, `/api/tmux-status`, `/api/transcript`, `/api/context*`, `/api/tmux-next`, `/api/tmux-window`, `/api/tmux-copy-selection`, `/api/drop-action/run`, `/api/attention-ack` | Phase 11 | Remaining terminal operations, settings, context, drop actions, and cross-surface state. |
+| `/readyz`, `/api/stats-capabilities`, `/api/stats-delta`, `/api/stats-snapshot`, `/api/stats-stream`, `/api/stats-retry`, `/api/pricing-catalog` | Phase 13 | YO!stats read/materialization and readiness. |
+| `/api/stats-observations`, `/api/pricing-catalog/refresh` | Phase 14 | YO!stats writes and pricing refresh. |
+| `/api/chat/*` | Phase 15 | YO!chat persistence, paging, send, typing, and read state. |
+
+Phase 2 may expose only the terminal capability and should explicitly report unavailable later
+capabilities. Phase 3 may provide the shared event/operation substrate and core diagnostics, but it
+must not silently implement Finder, Tabber, settings, stats, or chat behavior merely because the
+shared JS probes those routes during boot. Until an owning phase lands, the capability catalog must
+mark the surface unavailable and the route must return the Python-shaped unavailable response.
+
+This split allows parallel work after the Phase 3 contract is frozen: Phase 4/5 Finder, Phase 8
+Differ, Phase 9 Tabber, Phase 11 terminal operations, and Phase 13-15 product surfaces each own
+their route family and publish changes through the one Phase 3 event broker and operation ledger.
+
 #### Phase 4 Routes: Finder Read
 
 | Method | Path | Protocol | Role |
@@ -463,7 +507,7 @@ Registry cross-check:
 
 `/api/watch/roots` mutates watch demand, but Phase 4 owns it because Finder reads require a bounded invalidation and reconciliation lifecycle.
 
-#### Phase 5 Routes: Finder Write, Search, and Editing
+#### Phase 5 Routes: Finder Write and Search
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -486,7 +530,7 @@ Registry cross-check:
 
 `/api/upload` serves both editor and terminal uploads. Phase 5 implements one shared upload owner for Finder editing; Phase 9 adds terminal-specific parity through that owner without creating a second route implementation.
 
-#### Phase 6 Routes: Differ
+#### Phase 8 Routes: Differ
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -497,9 +541,17 @@ Registry cross-check:
 | GET | `/api/fs/git-commit` | JSON | readonly |
 | GET | `/api/batch/blame` | JSON | admin |
 
-The session-file routes are shared products. Differ owns their repository and file computation; Tabber consumes the resulting projections in Phase 7.
+The session-file routes are shared products. Differ owns their repository and file computation; Tabber consumes the resulting projections in Phase 9.
 
-#### Phase 7 Routes: Tabber
+#### Phase 6 Routes: TextEdit
+
+TextEdit is a browser/editor workstream with no new backend routes. It consumes the Phase 5 file read/write, conflict, upload, and watch contracts and owns the source-file editor journey and CodeMirror configuration.
+
+#### Phase 7 Routes: ViewEdit
+
+ViewEdit is a browser/editor workstream with no new backend routes. It consumes the Phase 5 Markdown/file contracts and owns the ProseMirror parse/edit/serialize round trip, preview fallback behavior, and Markdown-specific browser tests. It is independently mergeable from TextEdit.
+
+#### Phase 9 Routes: Tabber
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -515,7 +567,7 @@ The session-file routes are shared products. Differ owns their repository and fi
 
 These names overlap other surfaces: `/api/transcripts` is a flattened session-metadata compatibility view, `/api/search` searches event and session history rather than Finder paths or Chat messages, and `/api/tmux-signals` supplies status and attention classification rather than terminal bytes.
 
-#### Phase 9 Routes: Remaining Terminal and Operations
+#### Phase 11 Routes: Remaining Terminal and Operations
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -550,7 +602,7 @@ These names overlap other surfaces: `/api/transcripts` is a flattened session-me
 
 This phase completes cross-surface settings and operations. `/api/settings` affects all existing and future panes, `/api/drop-action/run` joins files to terminals, `/api/attention-ack` changes Tabber and terminal state, and the context/transcript routes depend on terminal and agent-client interpretation even though YO!agent itself remains deferred. Phase 2 already owns `/api/create-session-plan` because the current browser requires a plan and generation before it posts `/api/create-session`.
 
-#### Phase 11 Routes: YO!stats Read
+#### Phase 13 Routes: YO!stats Read
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -564,7 +616,7 @@ This phase completes cross-surface settings and operations. `/api/settings` affe
 
 `/readyz` remains in this late phase because the current route reports YO!stats storage and materialization readiness rather than only HTTP-listener readiness. `/healthz` and `/livez` already provide early shell health. `/api/stats-retry` is a POST, but it retries read/materialization availability and does not ingest observations.
 
-#### Phase 12 Routes: YO!stats Write
+#### Phase 14 Routes: YO!stats Write
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -573,7 +625,7 @@ This phase completes cross-surface settings and operations. `/api/settings` affe
 
 The readonly role on `/api/stats-observations` is intentional: authenticated read-only browsers may submit bounded telemetry even though Go's stats owner performs a storage mutation. Capability, authorization, and storage mutability remain separate decisions.
 
-#### Phase 13 Routes: YO!chat
+#### Phase 15 Routes: YO!chat
 
 | Method | Path | Protocol | Role |
 | --- | --- | --- | --- |
@@ -764,7 +816,7 @@ Exit criteria:
 - Inotify exhaustion, macOS descriptor pressure, queue overflow, NFS fallback, directory replacement, multiple browsers, and layout close/reopen have explicit test coverage.
 - The browser performs no unavailable Finder calls.
 
-### Phase 5: Finder Mutations, Search, and Editing
+### Phase 5: Finder Mutations and Search
 
 Deliverables:
 
@@ -778,13 +830,44 @@ Deliverables:
 
 Exit criteria:
 
-- Current TextEditor, Markdown Preview/ViewEditor, CodeMirror, and ProseMirror browser journeys work without backend-specific branches.
+- Finder mutation and search journeys work without backend-specific branches.
 - Autosave followed immediately by another edit survives delayed filesystem events.
 - Search work is cancellable when the query changes.
 - Search CPU scales with bounded candidates rather than every indexed path.
 - Mutations remain unavailable to read-only users.
 
-### Phase 6: Differ
+### Phase 6: TextEdit
+
+TextEdit is a parallel frontend/editor workstream after the Phase 5 file contracts are frozen. It has no new backend routes.
+
+Deliverables:
+
+- Port source-file TextEditor/CodeMirror journeys, settings, search, diff actions, and save/conflict states using the shared Phase 5 file owners.
+- Keep editor capability checks separate from Markdown ViewEdit and do not add a second filesystem write path.
+
+Exit criteria:
+
+- Source files open, edit, save, conflict, and reopen identically to Python.
+- CodeMirror toggles exercise the real UI path and preserve visible content.
+- TextEdit can merge independently from ViewEdit and Differ.
+
+### Phase 7: ViewEdit
+
+ViewEdit is a parallel Markdown frontend/editor workstream after the Phase 5 file contracts are frozen. It has no new backend routes.
+
+Deliverables:
+
+- Port Markdown ViewEdit/ProseMirror parse, edit, serialize, preview fallback, upload, and split-scroll journeys.
+- Preserve comments, whitespace, supported GFM constructs, images, and actionable parser diagnostics.
+- Keep ProseMirror failure read-only and visible rather than silently activating legacy editing.
+
+Exit criteria:
+
+- Source -> ViewEdit -> serialize -> save -> reopen round trips match Python.
+- Supported and neighboring unsupported Markdown constructs have browser coverage.
+- TextEdit and ViewEdit share capability and file-state owners without duplicated writes.
+
+### Phase 8: Differ
 
 Deliverables:
 
@@ -804,7 +887,7 @@ Exit criteria:
 - A hung Git command cannot block terminal, health, or unrelated repository work.
 - The process count and Git invocation rate are measured under an active browser.
 
-### Phase 7: Tabber
+### Phase 9: Tabber
 
 Tabber depends on reliable session topology, activity, process classification, and session-file products. It follows Finder and Differ so it can reuse those owners instead of creating another metadata graph.
 
@@ -826,7 +909,7 @@ Exit criteria:
 - One browser request cannot trigger a full Git/process/tmux rebuild.
 - Snapshot construction, serialization, and event publication have independent timing and allocation metrics.
 
-### Phase 8: Complete Shared Event and Work Infrastructure
+### Phase 10: Complete Shared Event and Work Infrastructure
 
 Phase 3 provides the complete correctness substrate before Finder. This phase adds mature operational projection and only the job classes justified by Finder, Differ, and Tabber measurements.
 
@@ -847,7 +930,7 @@ Exit criteria:
 - Independent work remains concurrent; conflicting mutable resources have one named owner.
 - There are no periodic wakeups without a deadline, event, or measured reconciliation need.
 
-### Phase 9: Remaining Terminal and Session Features
+### Phase 11: Remaining Terminal and Session Features
 
 Deliverables:
 
@@ -863,7 +946,7 @@ Exit criteria:
 - Every enabled command has permission, idempotency, timeout, cancellation, and reconciliation behavior.
 - Python remains available for features intentionally deferred.
 
-### Phase 10: YO!stats Storage Design
+### Phase 12: YO!stats Storage Design
 
 Do not port the current implementation line by line. Resolve the known write amplification and whole-history materialization problems in the data model before Go becomes a writer.
 
@@ -884,7 +967,7 @@ Exit criteria:
 - Shadow output has no unexplained parity mismatches.
 - Total Go CPU, memory, I/O, and encoded-byte cost clears predetermined gates.
 
-### Phase 11: YO!stats Read Path
+### Phase 13: YO!stats Read Path
 
 Deliverables:
 
@@ -900,7 +983,7 @@ Exit criteria:
 - Reconnect, stale generation, partial stream, restart, and upgrade-required behavior match Python.
 - Visible YO!stats traffic does not delay terminal, Finder, Differ, or Tabber.
 
-### Phase 12: YO!stats Writer and Cutover
+### Phase 14: YO!stats Writer and Cutover
 
 Deliverables:
 
@@ -918,7 +1001,7 @@ Exit criteria:
 - Production-size cold start, steady append, visible stream, repair, prune, and restart gates pass.
 - Go process-tree resource use materially improves over the measured Python baseline.
 
-### Phase 13: YO!chat
+### Phase 15: YO!chat
 
 YO!chat can remain Python-only until the primary terminal and repository workflow is stable in Go.
 
@@ -929,7 +1012,7 @@ When scheduled:
 - Adopt the existing SQLite schema before considering changes.
 - Enable the pane only after bootstrap, pagination, delta, send, retry, reconnect, rate-limit, and multi-browser tests pass.
 
-### Phase 14: YO!agent
+### Phase 16: YO!agent
 
 YO!agent should be last because its Python SDK integrations change independently and do not justify blocking the core migration.
 
