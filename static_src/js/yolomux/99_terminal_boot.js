@@ -7055,6 +7055,11 @@ async function boot() {
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
   // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
   // resolved client-side against navigator.language (the server can't see the browser locale).
+  if (typeof initializeJsDebugStatsBeforeStreams === 'function') {
+    void initializeJsDebugStatsBeforeStreams().catch(error => {
+      console.warn('initial YO!stats stream startup failed', error);
+    });
+  }
   await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
@@ -7076,9 +7081,6 @@ async function boot() {
   updatePanelInactiveOverlays();
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (typeof initializeJsDebugStatsBeforeStreams === 'function') {
-    await initializeJsDebugStatsBeforeStreams();
-  }
   installClientEventStream();
   initialAutoStatusesPromise.then(() => {
     renderAutoApproveButtons();

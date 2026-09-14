@@ -18,17 +18,17 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 	if !catalog.Available("finder.read.v1") || !catalog.Available("pane.finder.v1") {
 		t.Fatal("Finder read capability is not enabled")
 	}
-	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("terminal.status.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") || catalog.Available("pane.stats.v1") {
-		t.Fatal("capability availability does not match the implemented Finder surface")
+	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("terminal.status.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
+		t.Fatal("capability availability does not match the implemented Finder and stats surfaces")
 	}
 }
 
 func TestSetAdvancesRevisionOnlyWhenStateChanges(t *testing.T) {
 	catalog := New("go-test")
-	if catalog.Set("pane.stats.v1", Entry{Available: true}) != true || catalog.Revision() != 2 {
+	if catalog.Set("pane.tabber.v1", Entry{Available: true}) != true || catalog.Revision() != 2 {
 		t.Fatalf("first transition revision = %d", catalog.Revision())
 	}
-	if catalog.Set("pane.stats.v1", Entry{Available: true}) {
+	if catalog.Set("pane.tabber.v1", Entry{Available: true}) {
 		t.Fatal("identical transition changed the revision")
 	}
 }
@@ -56,9 +56,10 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 		}
 	}
 	catalog := New("go-test")
-	for _, capability := range []string{"finder.git.v1", "pane.tabber.v1"} {
-		if catalog.Available(capability) {
-			t.Errorf("later capability %q is unexpectedly available", capability)
-		}
+	if !catalog.Available("finder.git.v1") {
+		t.Fatal("Git Finder capability is not enabled")
+	}
+	if catalog.Available("pane.tabber.v1") {
+		t.Fatal("later capability pane.tabber.v1 is unexpectedly available")
 	}
 }

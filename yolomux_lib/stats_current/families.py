@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,7 +12,11 @@ from typing import TypeAlias
 
 from ..polling_policy import quiet_poll_interval
 from . import browser_family
-from .process_memory import MAX_PROCESS_BINARY_LENGTH, MAX_PROCESS_CPU_SERIES, MAX_PROCESS_MEMORY_PAYLOAD_SERIES, normalize_process_binary
+from .family_values import validate_value
+from .families_constants import (
+    AGENT_COUNTS, AGENT_ROSTER, AGENT_ROSTER_STATE_VALUES, AGENT_STATE_VALUES, AGENT_STATES,
+    BOOLEAN, NULLABLE_NUMBER, NUMBER, PROCESS_CPU_PERCENT, PROCESS_MEMORY_BYTES, STRING,
+)
 
 
 class FamilyValidationError(ValueError):
@@ -35,10 +38,6 @@ NUMBER: ValueKind = "number"
 NULLABLE_NUMBER: ValueKind = "nullable_number"
 STRING: ValueKind = "string"
 BOOLEAN: ValueKind = "boolean"
-AGENT_STATES: ValueKind = "agent_states"
-PROCESS_MEMORY_BYTES, PROCESS_CPU_PERCENT = "process_memory_bytes", "process_cpu_percent"
-
-AGENT_STATE_VALUES = frozenset({"ask", "run", "transition", "idle"})
 @dataclass(frozen=True, slots=True)
 class PayloadField:
     """One bounded top-level fact in a collector payload."""
@@ -95,7 +94,7 @@ class FamilySpec:
                 f"{self.name} payload is missing fields: {', '.join(sorted(missing))}"
             )
         for name, value in payload.items():
-            _validate_value(value, fields[name].kind, f"{self.name}.{name}")
+            validate_value(value, fields[name].kind, f"{self.name}.{name}", error_type=FamilyValidationError)
         if self.name == "browser":
             try:
                 browser_family.validate_payload(payload)
@@ -108,55 +107,6 @@ def _field(name: str, kind: ValueKind, *, required: bool = True) -> PayloadField
     return PayloadField(name, kind, required)
 
 
-def _validate_value(value: object, kind: ValueKind, path: str) -> None:
-    if kind in {NUMBER, NULLABLE_NUMBER}:
-        if value is None and kind == NULLABLE_NUMBER:
-            return
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise FamilyValidationError(f"{path} must be a non-negative finite number")
-        if not math.isfinite(value) or value < 0:
-            raise FamilyValidationError(f"{path} must be a non-negative finite number")
-        return
-    if kind == STRING:
-        if not isinstance(value, str) or not value.strip():
-            raise FamilyValidationError(f"{path} must be a non-empty string")
-        return
-    if kind == BOOLEAN:
-        if not isinstance(value, bool):
-            raise FamilyValidationError(f"{path} must be a boolean")
-        return
-    if kind == AGENT_STATES:
-        if not isinstance(value, Mapping):
-            raise FamilyValidationError(f"{path} must be an object")
-        for source_id, state in value.items():
-            if not isinstance(source_id, str) or not source_id.strip():
-                raise FamilyValidationError(f"{path} agent ids must be non-empty strings")
-            if state not in AGENT_STATE_VALUES:
-                raise FamilyValidationError(
-                    f"{path}.{source_id} must be one of: {', '.join(sorted(AGENT_STATE_VALUES))}"
-                )
-        return
-    if kind in {PROCESS_MEMORY_BYTES, PROCESS_CPU_PERCENT}:
-        if not isinstance(value, Mapping):
-            raise FamilyValidationError(f"{path} must be an object")
-        maximum = MAX_PROCESS_CPU_SERIES if kind == PROCESS_CPU_PERCENT else MAX_PROCESS_MEMORY_PAYLOAD_SERIES
-        if len(value) > maximum:
-            raise FamilyValidationError(
-                f"{path} must contain at most {maximum} binaries"
-            )
-        for binary, metric_value in value.items():
-            if (
-                not isinstance(binary, str)
-                or not binary
-                or len(binary) > MAX_PROCESS_BINARY_LENGTH
-                or normalize_process_binary(binary) != binary
-            ):
-                raise FamilyValidationError(f"{path} binary keys must be normalized")
-            _validate_value(metric_value, NUMBER, f"{path}.{binary}")
-            if kind == PROCESS_CPU_PERCENT and float(metric_value) > 100:
-                raise FamilyValidationError(f"{path}.{binary} must be at most 100")
-        return
-    raise RuntimeError(f"unknown payload value kind {kind!r}")
 
 
 CURRENT_FAMILIES = (
@@ -171,7 +121,7 @@ CURRENT_FAMILIES = (
     ),
     FamilySpec(
         "agent_status", "agent_status", 10, 60, FoldKind.STATUS,
-        (_field("states", AGENT_STATES), _field("session_states", AGENT_STATES, required=False), _field("snapshot_revision", NUMBER, required=False)),
+        (_field("states", AGENT_STATES), _field("session_states", AGENT_STATES, required=False), _field("snapshot_revision", NUMBER, required=False), _field("counts", AGENT_COUNTS, required=False), _field("agents", AGENT_ROSTER, required=False)),
         ("ask_agents", "run_agents", "transition_agents", "idle_agents", "ask_sessions", "run_sessions", "transition_sessions", "idle_sessions", "agent_window_snapshot_revision"), True,
     ),
     FamilySpec(

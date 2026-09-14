@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import time
 import zlib
@@ -2255,6 +2256,8 @@ class Store:
         writer_build: int = MIN_WRITER_BUILD,
         include_browser_diagnostics: bool = True,
     ) -> Store:
+        if os.environ.get("YOLOMUX_STATS_GO_WRITER") == "1":
+            raise StatsCurrentError("Python YO!stats writer is disabled while the Go writer owns cutover")
         database_path = Path(path)
         protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")
         build = _validate_nonnegative_integer(writer_build, "writer_build")

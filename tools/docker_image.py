@@ -19,6 +19,8 @@ IMAGE_INPUT_FILES = (
     Path("docker") / "Dockerfile.test",
     Path("docker") / "run-tests.sh",
     Path("package.json"),
+    Path("tests") / "test_agent_status_docker.py",
+    Path("tools") / "fake_llm_server.py",
 )
 CONTAINER_MARKER_PATH = Path("/.dockerenv")
 

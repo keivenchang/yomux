@@ -3,17 +3,28 @@
 """Retained YO!stats range-transition regressions."""
 
 import json
+import os
+from pathlib import Path
+import subprocess
+import ssl
+import shutil
+import sqlite3
 import time
+import urllib.request
 from http import HTTPStatus
 from typing import Any
 
 import pytest
+from selenium.webdriver.common.by import By
 
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.gate_harness import wait_for_fixture_api_quiescence
+from tests.gate_harness import HttpPortLease
 from yolomux_lib.stats_current import http as stats_current_http
 from yolomux_lib.stats_current import storage
+from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.tmux_runtime import start_isolated_tmux_runtime
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
@@ -21,6 +32,149 @@ pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
 
 CPU_GRAPH_SAMPLE_COUNT = 8
 CPU_GRAPH_PERCENT = 37.0
+GO_STATS_SERIES = {
+    "activity": [
+        ("ask_agents", "askAgents"),
+        ("run_agents", "workingAgents"),
+        ("transition_agents", "transitionAgents"),
+        ("idle_agents", "idleAgents"),
+    ],
+    "agentTokens": [("agent_tokens_per_minute:go-agent", "agentToken:go-agent")],
+    "memory": [
+        ("system_memory_used_bytes", "systemMemory"),
+        ("process_memory_bytes:python", "memory:python"),
+    ],
+}
+GO_STATS_SNAPSHOT_SERIES = tuple(
+    snapshot_name
+    for names in GO_STATS_SERIES.values()
+    for snapshot_name, _dom_name in names
+) + ("system_memory_capacity_bytes",)
+
+
+def _seed_go_stats_fixture(database: Path) -> None:
+    """Seed non-browser facts through the Go writer's supported SQLite schema."""
+    now = int(time.time())
+    database.parent.mkdir(parents=True, exist_ok=True)
+    observations = []
+    for index in range(3):
+        observed_at = now - 120 + index * 60
+        observations.extend(
+            (
+                (
+                    f"go-cpu-{index}",
+                    "cpu",
+                    "host",
+                    observed_at,
+                    "go-cpu-epoch",
+                    1,
+                    json.dumps({"process_percent": 18 + index, "system_percent": 37}, separators=(",", ":")),
+                ),
+                (
+                    f"go-status-{index}",
+                    "agent_status",
+                    "host",
+                    observed_at,
+                    "go-agent-epoch",
+                    1,
+                    json.dumps(
+                        {
+                            "states": {
+                                "go-ask": "ask",
+                                "go-run": "run",
+                                "go-transition": "transition",
+                                "go-idle": "idle",
+                            },
+                            "session_states": {"go-session": "run"},
+                            "snapshot_revision": index + 1,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                (
+                    f"go-memory-{index}",
+                    "system_memory",
+                    "host",
+                    observed_at,
+                    "go-memory-epoch",
+                    1,
+                    json.dumps(
+                        {
+                            "used_bytes": 4_000_000_000 + index * 100_000_000,
+                            "capacity_bytes": 8_000_000_000,
+                            "process_memory_bytes": {"python": 700_000_000 + index * 10_000_000},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        )
+    atoms = [
+        (
+            f"go-input-{index}",
+            "input",
+            "text",
+            "none",
+            "tokens",
+            now - 120 + index * 60,
+            json.dumps(
+                {"quantity": 600 + index, "agent_id": "go-agent", "model": "go-model", "provider": "openai"},
+                separators=(",", ":"),
+            ),
+        )
+        for index in range(3)
+    ] + [
+        (
+            f"go-output-{index}",
+            "output",
+            "text",
+            "none",
+            "tokens",
+            now - 120 + index * 60,
+            json.dumps(
+                {"quantity": 300 + index, "agent_id": "go-agent", "model": "go-model", "provider": "openai"},
+                separators=(",", ":"),
+            ),
+        )
+        for index in range(3)
+    ]
+    coverage = [
+        ("cpu", "host", "go-cpu-epoch", now - 180, None, 1, 1),
+        ("agent_status", "host", "go-agent-epoch", now - 180, None, 60, 1),
+        ("system_memory", "host", "go-memory-epoch", now - 180, None, 60, 1),
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            PRAGMA application_id = 0x594F5354;
+            PRAGMA user_version = 9;
+            CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), minimum_writer_protocol INTEGER NOT NULL, minimum_writer_build INTEGER NOT NULL, source_generation INTEGER NOT NULL, last_vacuumed_at REAL NOT NULL DEFAULT 0);
+            INSERT INTO schema_meta VALUES (1, 25, 8, 0, 0);
+            CREATE TABLE observations(event_id TEXT NOT NULL,family TEXT NOT NULL,source_id TEXT NOT NULL,observed_at REAL NOT NULL,epoch_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(family,source_id,event_id)) WITHOUT ROWID;
+            CREATE TABLE coverage_epochs(family TEXT NOT NULL,source_id TEXT NOT NULL,epoch_id TEXT NOT NULL,started_at REAL NOT NULL,ended_at REAL,native_cadence_seconds REAL NOT NULL,owner_generation INTEGER NOT NULL,PRIMARY KEY(family,source_id,epoch_id)) WITHOUT ROWID;
+            CREATE TABLE unavailable_spans(family TEXT NOT NULL,source_id TEXT NOT NULL,epoch_id TEXT NOT NULL,started_at REAL NOT NULL,ended_at REAL NOT NULL,native_cadence_seconds REAL NOT NULL,reason TEXT NOT NULL,owner_generation INTEGER NOT NULL,PRIMARY KEY(family,source_id,epoch_id,started_at,ended_at)) WITHOUT ROWID;
+            CREATE TABLE usage_atoms(event_id TEXT NOT NULL,direction TEXT NOT NULL,modality TEXT NOT NULL,cache_role TEXT NOT NULL,unit TEXT NOT NULL,observed_at REAL NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(event_id,direction,modality,cache_role,unit)) WITHOUT ROWID;
+            CREATE TABLE migration_reconciliation(migration_id TEXT PRIMARY KEY,completed_at REAL NOT NULL,source_digest TEXT NOT NULL,details_json TEXT NOT NULL) WITHOUT ROWID;
+            CREATE TABLE aggregate_publication(singleton INTEGER PRIMARY KEY CHECK(singleton=1),ring_generation INTEGER NOT NULL,source_generation INTEGER NOT NULL,published_at REAL NOT NULL);
+            CREATE TABLE aggregate_rings(resolution_seconds INTEGER PRIMARY KEY,slot_count INTEGER NOT NULL CHECK(slot_count>0),newest_bucket_start INTEGER,CHECK(resolution_seconds>0),CHECK(newest_bucket_start IS NULL OR newest_bucket_start>=0),CHECK(newest_bucket_start IS NULL OR newest_bucket_start % resolution_seconds=0)) WITHOUT ROWID;
+            CREATE TABLE aggregate_ring_slots(resolution_seconds INTEGER NOT NULL,slot_index INTEGER NOT NULL CHECK(slot_index>=0),bucket_start INTEGER,bucket_json BLOB,complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1)),source_generation INTEGER NOT NULL DEFAULT 0 CHECK(source_generation>=0),ring_generation INTEGER NOT NULL DEFAULT 0 CHECK(ring_generation>=0),published_at REAL NOT NULL DEFAULT 0 CHECK(published_at>=0),payload_version INTEGER NOT NULL DEFAULT 0 CHECK(payload_version>=0),PRIMARY KEY(resolution_seconds,slot_index),FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds),CHECK(bucket_start IS NULL OR bucket_start>=0),CHECK(bucket_start IS NULL OR bucket_start % resolution_seconds=0),CHECK((bucket_start IS NULL AND bucket_json IS NULL AND complete=0 AND source_generation=0 AND ring_generation=0 AND published_at=0 AND payload_version=0) OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL AND payload_version>0))) WITHOUT ROWID;
+            CREATE TABLE ring_replay_cursor(resolution_seconds INTEGER PRIMARY KEY,folded_through_observed_at REAL NOT NULL DEFAULT 0 CHECK(folded_through_observed_at>=0),folded_source_generation INTEGER NOT NULL DEFAULT 0 CHECK(folded_source_generation>=0),updated_at REAL NOT NULL DEFAULT 0 CHECK(updated_at>=0),FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds)) WITHOUT ROWID;
+            CREATE TABLE ring_invalidations(resolution_seconds INTEGER NOT NULL,bucket_start INTEGER NOT NULL CHECK(bucket_start>=0),source_generation INTEGER NOT NULL CHECK(source_generation>=0),reason TEXT NOT NULL,created_at REAL NOT NULL CHECK(created_at>=0),applied_at REAL,PRIMARY KEY(resolution_seconds,bucket_start,source_generation),FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds),CHECK(bucket_start % resolution_seconds=0),CHECK(applied_at IS NULL OR applied_at>=0)) WITHOUT ROWID;
+            INSERT INTO aggregate_publication VALUES (1, 0, 0, 0);
+            """
+        )
+        for resolution, capacity in ((1, 300), (10, 180), (60, 480), (300, 288)):
+            connection.execute("INSERT INTO aggregate_rings VALUES (?, ?, NULL)", (resolution, capacity))
+            connection.execute("INSERT INTO ring_replay_cursor VALUES (?, 0, 0, 0)", (resolution,))
+            connection.executemany(
+                "INSERT INTO aggregate_ring_slots(resolution_seconds, slot_index) VALUES (?, ?)",
+                ((resolution, slot) for slot in range(capacity)),
+            )
+        connection.executemany("INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?, ?)", observations)
+        connection.executemany("INSERT INTO usage_atoms VALUES (?, ?, ?, ?, ?, ?, ?)", atoms)
+        connection.executemany("INSERT INTO coverage_epochs VALUES (?, ?, ?, ?, ?, ?, ?)", coverage)
+        connection.execute("UPDATE schema_meta SET source_generation = 1 WHERE singleton = 1")
+        connection.commit()
 
 _STATS_ROUTE_INSTRUMENTATION = r"""
 (() => {
@@ -91,6 +245,412 @@ def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
         "lineHeight": 4,
         "lineStrokeWidth": 1.5,
     }, result
+
+
+def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser, tmp_path, monkeypatch, request):
+    """Exercise the shipped JS validator against the live Go stats endpoint."""
+    source_root = Path(__file__).resolve().parents[1]
+    private_source_root = tmp_path / "source-root"
+    shutil.copytree(
+        source_root,
+        private_source_root,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".git", ".yolomux-*", "bazel-*"),
+    )
+    configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
+    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
+    if not configured_binary:
+        go_binary = shutil.which("go")
+        if not go_binary:
+            pytest.skip("Go browser regression requires the Go toolchain")
+        subprocess.run(
+            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yolomux-go"],
+            cwd=source_root,
+            check=True,
+            env={**os.environ, "GOTOOLCHAIN": "local"},
+        )
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "auth.yaml").write_text(
+        "users:\n  - username: e2e-admin\n    password: fixture-only-password\n    role: admin\n",
+        encoding="utf-8",
+    )
+    (config_dir / "auth-cookie-secret").write_text("11" * 32, encoding="ascii")
+    tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1)
+    port_lease = HttpPortLease.reserve()
+    process = None
+    try:
+        _seed_go_stats_fixture(tmp_path / "stats.sqlite3")
+        process = subprocess.Popen(
+            [
+                str(binary),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port_lease.port),
+                "--root",
+                str(private_source_root),
+                "--config",
+                str(config_dir),
+                "--stats",
+                str(tmp_path / "stats.sqlite3"),
+            ],
+            cwd=private_source_root,
+            env={
+                **os.environ,
+                "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
+                "PYTHONPATH": str(private_source_root),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        port_lease.release()
+        WebDriverWait(browser, 30, poll_frequency=0.05).until(
+            lambda _driver: _go_server_is_ready(port_lease.port)
+        )
+        base_url = f"https://127.0.0.1:{port_lease.port}"
+        browser.get(f"{base_url}/login")
+        login_form = WebDriverWait(browser, 15, poll_frequency=0.05).until(
+            lambda driver: driver.find_elements(By.CSS_SELECTOR, 'form[action="/login"]')
+            or driver.find_elements(By.CSS_SELECTOR, 'input[name="username"]')
+            or (_raise_login_page_diagnostic(driver))
+        )[0]
+        login_form.find_element(By.NAME, "username").send_keys("e2e-admin")
+        login_form.find_element(By.NAME, "password").send_keys("fixture-only-password")
+        login_form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+        browser.get(
+            f"{base_url}/?sessions={tmux_runtime.sessions[0]},debug"
+            f"&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1"
+        )
+        WebDriverWait(browser, 15, poll_frequency=0.05).until(
+            lambda driver: driver.execute_script(
+                "return document.readyState === 'complete' && document.querySelector('#grid') !== null"
+            )
+        )
+        request.node._yolomux_skip_reused_browser_diagnostic = True
+        WebDriverWait(browser, 15, poll_frequency=0.05).until(
+            lambda driver: driver.execute_script(
+                "return typeof setDebugGraphRange === 'function' "
+                "&& document.querySelector('#grid') !== null"
+            )
+        )
+        WebDriverWait(browser, 20, poll_frequency=0.05).until(
+            lambda driver: driver.execute_script(
+                "return typeof jsDebugHistoryReadiness !== 'undefined' "
+                "&& jsDebugHistoryReadiness.phase === 'ready' "
+                "&& jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.() !== null"
+            )
+        )
+        no_data_start = int(time.time()) - 20
+        with sqlite3.connect(tmp_path / "stats.sqlite3") as connection:
+            connection.executemany(
+                "INSERT INTO unavailable_spans VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("gpu", "gpu:0", "go-gpu-later", no_data_start, no_data_start + 10, 10, "later reason", 1),
+                    ("gpu", "gpu:0", "go-gpu-earlier", no_data_start - 1, no_data_start + 1, 10, "earlier reason", 1),
+                ],
+            )
+            connection.execute("UPDATE schema_meta SET source_generation = 2 WHERE singleton = 1")
+            connection.commit()
+        browser.execute_script("window.__goNoDataTestStart = arguments[0]", no_data_start)
+        result = browser.execute_async_script(
+            r"""
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const response = await fetch('/api/stats-capabilities', {cache: 'no-store'});
+              const capabilities = await response.json();
+              const exact = capabilities.ranges.map(row => ({
+                range: row.range_seconds,
+                resolutions: row.explicit_resolution_seconds,
+                buckets: row.buckets,
+                expected: Object.fromEntries(row.explicit_resolution_seconds.map(resolution => [
+                  String(resolution), row.range_seconds / resolution,
+                ])),
+              }));
+              const now = Math.floor(Date.now() / 1000);
+              const syntheticObservations = [120, 60, 0].map((age, index) => ({
+                event_id: `go-e2e-${now}-${index}`,
+                family: 'browser',
+                source_id: 'browser-go-e2e',
+                observed_at: now - age,
+                epoch_id: 'go-e2e-epoch',
+                payload: {
+                  kind: 'api', latency_ms: 37 + index, bytes: 512 + index,
+                  endpoint: '/api/stats-snapshot', method: 'GET', status: 200,
+                },
+              }));
+              const observationResponse = await fetch('/api/stats-observations', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  protocol_version: 25,
+                  schema_generation: 9,
+                  client_id: 'browser-go-e2e',
+                  observations: syntheticObservations,
+                }),
+              });
+              const observation = await observationResponse.json();
+              if (observationResponse.status !== 200 || observation.accepted !== syntheticObservations.length) {
+                throw new Error(`synthetic observation rejected: ${observationResponse.status} ${JSON.stringify(observation)}`);
+              }
+              const streamEvents = [];
+              const stream = new EventSource('/api/stats-stream?range_seconds=900&resolution=AUTO&client_id=browser-go-e2e');
+              for (const eventName of ['ack', 'snapshot', 'ready']) {
+                stream.addEventListener(eventName, event => streamEvents.push({event: eventName, data: JSON.parse(event.data)}));
+              }
+              await window.__yolomuxTestWaitFor(
+                () => streamEvents.length === 3 ? streamEvents : null,
+                {timeoutMs: 15000, description: 'Go stats stream ack/snapshot/ready'},
+              );
+              stream.close();
+              const ack = streamEvents.find(item => item.event === 'ack')?.data;
+               const snapshot = streamEvents.find(item => item.event === 'snapshot')?.data;
+               const ready = streamEvents.find(item => item.event === 'ready')?.data;
+              if (ack?.requested_resolution !== 'AUTO' || ack?.range_seconds !== 900
+                || !Number.isInteger(ack?.resolution_seconds)) {
+                throw new Error(`invalid stats stream ack: ${JSON.stringify(ack)}`);
+              }
+               if (!Array.isArray(snapshot?.buckets) || ready?.cache_generation === undefined) {
+                 throw new Error(`invalid stats stream snapshot/ready: ${JSON.stringify({snapshot, ready})}`);
+               }
+               const rawResponse = await fetch('/api/stats-snapshot?range_seconds=900&resolution=AUTO&client_id=browser-go-e2e', {cache: 'no-store'});
+               const rawSnapshot = await rawResponse.json();
+                   const rawNoData = rawSnapshot.no_data;
+               const normalizedNoData = rawNoData
+                 .filter(span => span.family === 'gpu' && span.source_id === 'gpu:0')
+                 .map(span => [span.family, span.source_id, span.start, span.end, span.reason]);
+               const testT = Number(window.__goNoDataTestStart);
+               const expectedNoData = [
+                 ['gpu', 'gpu:0', testT - 1, testT + 1, 'earlier reason'],
+                 ['gpu', 'gpu:0', testT + 1, testT + 10, 'later reason'],
+               ];
+               if (rawResponse.status !== 200 || !Array.isArray(rawNoData)
+                 || JSON.stringify(normalizedNoData) !== JSON.stringify(expectedNoData)
+                     ) {
+                     throw new Error(`raw stats snapshot no-data normalization failed: ${JSON.stringify({status: rawResponse.status, normalizedNoData})}`);
+                   }
+                   const validator = YOLOmuxStatsCurrent.createController({
+                     capabilities: capabilities,
+                     savedRange: 900,
+                     savedResolution: 'AUTO',
+                     clientId: 'raw-no-data-validator',
+                   });
+                   if (validator.acceptSnapshot(rawSnapshot) !== true) {
+                     throw new Error('raw stats snapshot validator did not accept a fresh generation');
+                   }
+               const agentSeries = new Set(['ask_agents', 'run_agents', 'transition_agents', 'idle_agents']);
+               const publishedAgentSeries = new Set(snapshot.buckets.flatMap(bucket => Object.keys(bucket.series || {})).filter(name => agentSeries.has(name)));
+               if (publishedAgentSeries.size !== agentSeries.size) {
+                 throw new Error(`Agents chart data missing: ${JSON.stringify({published: [...publishedAgentSeries], snapshot})}`);
+               }
+               const defaultChartKeys = [...document.querySelectorAll('.js-debug-panel [data-js-debug-chart]')]
+                 .map(chart => chart.dataset.jsDebugChart);
+               const defaultDaemonsToggle = document.querySelector('[data-js-debug-chart-toggle="serversLoad"]');
+               const defaultGraphs = Object.fromEntries(['activity', 'agentTokens', 'memory'].map(chart => {
+                 const node = document.querySelector(`.js-debug-panel [data-js-debug-chart="${chart}"]`);
+                 const plotted = [...(node?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])];
+                 return [chart, {
+                   present: Boolean(node),
+                   visible: Boolean(node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0),
+                   geometry: plotted.filter(item => {
+                     const path = item.getAttribute('d') || item.getAttribute('points') || '';
+                     return path.length > 0 || Number(item.getAttribute('height') || 0) > 0;
+                   }).length,
+                   positiveData: plotted.filter(item => (
+                     Number(item.dataset.jsDebugBarTotal || 0) > 0
+                     || Number(item.getAttribute('height') || 0) > 0
+                     || Boolean(item.getAttribute('d') || item.getAttribute('points'))
+                   )).length,
+                   waiting: node?.textContent?.includes('Waiting for server stats') || false,
+                 }];
+               }));
+               if (jsDebugHistoryReadiness.phase !== 'ready'
+                 || Object.values(defaultGraphs).some(chart => !chart.present || !chart.visible || chart.geometry <= 0 || chart.positiveData <= 0 || chart.waiting)
+                 || !defaultChartKeys.includes('activity')
+                 || !defaultChartKeys.includes('agentTokens')
+                 || !defaultChartKeys.includes('memory')
+                 || defaultChartKeys.includes('serversLoad')
+                 || defaultDaemonsToggle?.checked !== false) {
+                 throw new Error(`default Graphs state did not paint the required charts: ${JSON.stringify({readiness: jsDebugHistoryReadinessSnapshot?.(), defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, defaultGraphs})}`);
+               }
+               const warningsBeforeProbe = jsDebugEvents.filter(event => event?.type === 'stats_history'
+                 && event?.level === 'warning').map(event => String(event.message || ''));
+              if (typeof debugGraphSvgHtml !== 'function' || typeof debugGraphSeriesData !== 'function'
+                || typeof debugGraphDisplayBuckets !== 'function') {
+                throw new Error('missing graph render functions');
+              }
+                  if (typeof clearJsDebugGraphData !== 'function'
+                    || typeof jsDebugCurrentBucketRecord !== 'function'
+                    || typeof debugGraphApplyServerRecord !== 'function'
+                    || typeof updateJsDebugCurrentSnapshotState !== 'function'
+                    || typeof refreshDebugGraphSurfaces !== 'function') {
+                    throw new Error('missing graph snapshot render functions');
+                  }
+                  clearJsDebugGraphData();
+                  const currentClientId = jsDebugStatsClientIdForRequest();
+                  snapshot.buckets.forEach(bucket => {
+                    const record = jsDebugCurrentBucketRecord(bucket);
+                    record.clients = {[currentClientId]: {
+                      api_count: record.api_count || 0,
+                      sse_count: record.sse_count || 0,
+                      latency_total_ms: record.latency_total_ms || 0,
+                      latency_count: record.latency_count || 0,
+                      bandwidth_bytes: record.bandwidth_bytes || 0,
+                      heartbeat_count: record.heartbeat_count || 0,
+                      disconnected_ms: record.disconnected_ms || 0,
+                    }};
+                    debugGraphApplyServerRecord(record);
+                  });
+              updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh: true});
+              const buckets = debugGraphDisplayBuckets(Date.now(), {rangeSeconds: 900});
+              const seriesItems = debugGraphSeriesData(buckets);
+              const requiredGroups = jsDebugGraphChartGroups.filter(group => ['activity', 'agentTokens', 'memory'].includes(group.key));
+              const render = document.createElement('div');
+              render.innerHTML = debugGraphSvgHtml(
+                buckets,
+                seriesItems,
+                requiredGroups,
+                Date.now(),
+              );
+              document.body.append(render);
+              const generation = snapshot;
+                  const warnings = jsDebugEvents.filter(event => event?.type === 'stats_history'
+                    && event?.level === 'warning').map(event => String(event.message || ''));
+              const charts = [...render.querySelectorAll('.js-debug-line-chart')].map(svg => ({
+                    viewBox: svg.getAttribute('viewBox'),
+                    width: svg.getBoundingClientRect().width,
+                    height: svg.getBoundingClientRect().height,
+                    paths: [...svg.querySelectorAll('path')].map(path => path.getAttribute('d') || '').filter(Boolean),
+                    polylines: [...svg.querySelectorAll('polyline')].map(line => line.getAttribute('points') || '').filter(Boolean),
+                  }));
+              const requiredSeries = Object.fromEntries(Object.entries(__GO_STATS_SERIES__).map(([chart, names]) => [
+                chart,
+                names.map(([snapshotName, domName]) => ({snapshotName, domName, count: 0, geometry: 0})),
+              ]));
+              for (const [chartName, names] of Object.entries(requiredSeries)) {
+                const chart = render.querySelector(`[data-js-debug-chart="${chartName}"]`);
+                for (const item of names) {
+                  const nodes = [...(chart?.querySelectorAll(`[data-js-debug-series="${item.domName}"], [data-js-debug-bar-series="${item.domName}"], [data-js-debug-area-series="${item.domName}"]`) || [])];
+                  item.count = nodes.reduce((total, node) => total + Math.max(
+                    Number(node.dataset.pointCount || node.getAttribute('data-point-count') || 0),
+                    node.getAttribute('points')?.trim().split(/\s+/).filter(Boolean).length || 0,
+                    node.getAttribute('d') ? 1 : 0,
+                    Number(node.getAttribute('height') || 0) > 0 ? 1 : 0,
+                  ), 0);
+                  item.geometry = nodes.reduce((total, node) => total
+                    + (node.getAttribute('points') || node.getAttribute('d') || '').length
+                    + (Number(node.getAttribute('height') || 0) > 0 ? 1 : 0), 0);
+                }
+              }
+              const nonEmptyGeometry = charts.some(chart => {
+                const values = String(chart.viewBox || '').trim().split(/\s+/).map(Number);
+                return values.length === 4 && values[2] > 0 && values[3] > 0
+                  && chart.width > 0 && chart.height > 0
+                      && (chart.paths.some(path => /[ML]\s*[-+\d.]+\s+[-+\d.]+/.test(path))
+                        || chart.polylines.some(points => /[-+\d.]+\s*,?\s*[-+\d.]+/.test(points)));
+              });
+              const missingSeries = Object.entries(requiredSeries).flatMap(([chart, names]) => names
+                .filter(item => item.count <= 0 || item.geometry <= 0)
+                .map(item => `${chart}/${item.domName} snapshot=${item.snapshotName} count=${item.count} geometry=${item.geometry}`));
+                  const snapshotSeries = snapshot.buckets.flatMap(bucket => Object.keys(bucket.series || {})).reduce((counts, name) => { counts[name] = (counts[name] || 0) + 1; return counts; }, {});
+              const snapshotSeriesValues = Object.fromEntries(__GO_STATS_SNAPSHOT_SERIES__.map(name => [
+                name,
+                snapshot.buckets.flatMap(bucket => {
+                  const value = bucket.series?.[name]?.value;
+                  return Number(value) > 0 ? [Number(value)] : [];
+                }),
+              ]));
+              const missingSnapshotSeries = Object.entries(snapshotSeriesValues)
+                .filter(([_name, values]) => values.length <= 0)
+                .map(([name, values]) => `${name} count=${values.length}`);
+              const tokenRates = snapshot.buckets.flatMap(bucket => Object.entries(bucket.series || {})
+                .filter(([name, item]) => name.startsWith('agent_tokens_per_minute:') && Number(item?.value) > 0)
+                .map(([name, item]) => ({name, value: Number(item.value)})));
+               if (!nonEmptyGeometry || missingSeries.length || missingSnapshotSeries.length || tokenRates.length <= 0) {
+                 throw new Error(`15m graph stats gate failed: missingRendered=${JSON.stringify(missingSeries)} missingSnapshot=${JSON.stringify(missingSnapshotSeries)} tokenRates=${JSON.stringify(tokenRates)} charts=${JSON.stringify(charts)} snapshotSeries=${JSON.stringify(snapshotSeries)}`);
+               }
+               setDebugGraphRange(300);
+               await window.__yolomuxTestWaitFor(
+                 () => jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.()?.range_seconds === 300
+                   && jsDebugHistoryReadiness.phase === 'ready',
+                 {timeoutMs: 15000, description: 'Go stats 5m generation'},
+               );
+               const fiveMinuteSnapshotResponse = await fetch('/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=browser-go-e2e', {cache: 'no-store'});
+               const fiveMinuteSnapshot = await fiveMinuteSnapshotResponse.json();
+               const fiveMinuteMemoryValues = fiveMinuteSnapshot.buckets.flatMap(bucket => [
+                 bucket.series?.system_memory_used_bytes?.value,
+                 bucket.series?.['process_memory_bytes:python']?.value,
+               ]).filter(value => Number(value) > 0);
+               const fiveMinuteMemoryChart = document.querySelector('[data-js-debug-chart="memory"]');
+               const fiveMinuteMemoryGeometry = [...(fiveMinuteMemoryChart?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series]') || [])]
+                 .filter(node => Boolean(node.getAttribute('d') || node.getAttribute('points'))).length;
+               if (fiveMinuteSnapshotResponse.status !== 200 || fiveMinuteSnapshot.resolution_seconds !== 1
+                 || fiveMinuteMemoryValues.length < 2 || !fiveMinuteMemoryChart
+                 || fiveMinuteMemoryChart.getBoundingClientRect().width <= 0
+                 || fiveMinuteMemoryChart.getBoundingClientRect().height <= 0
+                 || fiveMinuteMemoryGeometry <= 0) {
+                 throw new Error(`5m memory graph stats gate failed: ${JSON.stringify({status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, values: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry, chart: Boolean(fiveMinuteMemoryChart)})}`);
+               }
+                   done({status: response.status, readiness: jsDebugHistoryReadinessSnapshot?.(), defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, defaultGraphs, exact, generation: {
+                range: generation.range_seconds,
+                resolution: generation.resolution_seconds,
+                buckets: generation.buckets.length,
+                }, stream: {events: streamEvents, ack, snapshotBuckets: snapshot.buckets.length, ready}, charts, requiredSeries, snapshotSeriesValues, tokenRates, warnings, warningsBeforeProbe, fiveMinute: {status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, memoryValues: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry}});
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """.replace("__GO_STATS_SERIES__", json.dumps(GO_STATS_SERIES)).replace(
+                "__GO_STATS_SNAPSHOT_SERIES__", json.dumps(GO_STATS_SNAPSHOT_SERIES)
+            )
+        )
+        assert result.get("error") is None, result
+        assert result["status"] == 200, result
+        assert result["warnings"] == result["warningsBeforeProbe"], result
+        for row in result["exact"]:
+            assert row["buckets"] == row["expected"], row
+        assert result["generation"]["range"] == 900, result
+        assert result["generation"]["buckets"] > 0, result
+        assert result["defaultDaemonsChecked"] is False, result
+        assert set(("activity", "agentTokens", "memory")).issubset(result["defaultChartKeys"]), result
+        assert "serversLoad" not in result["defaultChartKeys"], result
+        for chart in ("activity", "agentTokens", "memory"):
+            assert result["defaultGraphs"][chart]["visible"] is True, result
+            assert result["defaultGraphs"][chart]["geometry"] > 0, result
+            assert result["defaultGraphs"][chart]["positiveData"] > 0, result
+        assert all(values and all(value > 0 for value in values) for values in result["snapshotSeriesValues"].values()), result
+        assert result["tokenRates"] and all(rate["value"] > 0 for rate in result["tokenRates"]), result
+        for names in result["requiredSeries"].values():
+            for series in names:
+                assert series["count"] > 0 and series["geometry"] > 0, result
+        assert result["fiveMinute"]["resolution"] == 1, result
+        assert len(result["fiveMinute"]["memoryValues"]) >= 2, result
+        assert result["fiveMinute"]["geometry"] > 0, result
+    finally:
+        port_lease.close()
+        if process is not None:
+            process.terminate()
+            process.wait(timeout=10)
+        stop_isolated_tmux_runtime(tmux_runtime)
+
+
+def _go_server_is_ready(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"https://127.0.0.1:{port}/healthz",
+            context=ssl._create_unverified_context(),
+            timeout=0.5,
+        ) as response:
+            return response.status == 200
+    except OSError:
+        return False
+
+
+def _raise_login_page_diagnostic(driver):
+    raise AssertionError(
+        "Go login page missing form: "
+        f"url={driver.current_url!r} title={driver.title!r} "
+        f"source={driver.page_source[:1200]!r}"
+    )
 
 
 def _register_stats_route_instrumentation(harness: Any) -> None:

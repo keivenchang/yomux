@@ -167,6 +167,8 @@ def build_environment(
             "YOLOMUX_CA_DIR": str(paths.ca_dir),
             "YOLOMUX_LOG_DIR": str(paths.log_dir),
             "YOLOMUX_WORKSPACE_BASE": str(paths.workspace_dir),
+            # The Go launcher receives this same explicit value through execve;
+            # it must never infer the operator's default tmux server.
             "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
             "YOLOMUX_TEST_AUTH_BYPASS": "1" if auth_bypass else "0",
             "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "0.2",

@@ -756,6 +756,16 @@ function debugGraphAnyGpuDeviceSamplesCached() {
   return false;
 }
 
+function debugGraphAnyMemorySamplesCached() {
+  for (const bucket of jsDebugGraphBuckets.values()) {
+    if (Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0) return true;
+    for (const item of bucket?.hostMetrics?.memoryProcesses?.values?.() || []) {
+      if (Number(item?.samples || 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
   const count = Math.max(1, Math.floor(Number(sampleCount) || 1));
   const window = [];
@@ -3010,8 +3020,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ? debugGraphCostText('debug.graph.gpuNoWindowSamples', 'No GPU samples in this time window')
       : debugGraphCostText('debug.graph.gpuUnavailableHost', 'GPU telemetry is not available on this host'))
     : '';
-  const chartUnavailable = gpuUnavailable;
-  const chartUnavailableText = gpuUnavailableText;
+  const memoryUnavailable = group.hostMetric === 'memory'
+    && !groupSeries.some(series => Number(series?.samples || 0) > 0);
+  const memoryUnavailableText = memoryUnavailable
+    ? (debugGraphAnyMemorySamplesCached()
+      ? 'No memory samples in this time window'
+      : 'Memory telemetry is not available on this host')
+    : '';
+  const chartUnavailable = gpuUnavailable || memoryUnavailable;
+  const chartUnavailableText = gpuUnavailableText || memoryUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">

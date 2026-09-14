@@ -737,20 +737,57 @@ def main(binary: str) -> None:
                     raise SystemExit(f"Go Phase 4/5 Finder UI Chromium E2E failed: {finder_ui}")
                 git_views = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
-                    const json = async url => {
-                      const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin'});
+                    const path = arguments[0];
+                    const repo = arguments[1];
+                    const head = arguments[2];
+                    const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + timeoutMs;
+                      const poll = () => {
+                        try {
+                          const value = predicate();
+                          if (value) { resolve(value); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
+                        setTimeout(poll, 40);
+                      };
+                      poll();
+                    });
+                    const json = async (url, options = {}) => {
+                      const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin', ...options});
                       return {status: response.status, body: await response.json()};
                     };
+                    const operationPayload = async (url, label) => {
+                      const accepted = await json(url);
+                      if (accepted.status === 200) return accepted.body?.state === 'ready' ? accepted.body.data : accepted.body;
+                      if (accepted.status !== 202 || !accepted.body.operation?.id) throw new Error(`${label} was not accepted: ${JSON.stringify(accepted)}`);
+                      for (let attempt = 0; attempt < 160; attempt += 1) {
+                        const terminal = await json('/api/operations/' + encodeURIComponent(accepted.body.operation.id));
+                        if (terminal.status === 202) {
+                          await new Promise(resolve => setTimeout(resolve, 25));
+                          continue;
+                        }
+                        if (terminal.status !== 200 || terminal.body.state !== 'ready') throw new Error(`${label} terminal: ${JSON.stringify(terminal)}`);
+                        return terminal.body.data;
+                      }
+                      throw new Error(`${label} timed out`);
+                    };
                     (async () => {
-                      const routes = await Promise.all([
-                        json('/api/fs/diff?path=' + encodeURIComponent(arguments[0])),
-                        json('/api/fs/git-history?path=' + encodeURIComponent(arguments[1])),
-                        json('/api/batch/blame?path=' + encodeURIComponent(arguments[0])),
-                        json('/api/events?session=phase3-later-route'),
-                      ]);
-                      if (!routes.every(result => result.status === 501 && result.body.error === 'feature_unavailable')) throw new Error('later Git routes were not unavailable: ' + JSON.stringify(routes));
-                      done({unavailable: routes.length});
-                    })().catch(error => done({error: String(error)}));
+                      const item = await openFileInEditor(path, {name: 'note.txt'}, {userInitiated: true, viewMode: 'edit', includeGit: true});
+                      await waitFor(() => fileEditorPanelsForPath(path)[0]?._cmView?.state?.doc?.toString?.() === 'working\\n', 'TextEdit Git fixture open');
+                      const state = fileEditorStateForItem(path, item);
+                      if (!state) throw new Error('TextEdit Git state is unavailable');
+                      const refreshed = await refreshOpenFileDiff(path, {item, state, fromRef: 'HEAD', toRef: 'current', silent: true, renderOnComplete: false});
+                      if (!refreshed || state.diffLoaded !== true || state.diffUnavailable === true || state.diffFromRef !== 'HEAD' || state.diffToRef !== 'current' || state.diffOriginal !== 'changed\\n' || state.diffWorking !== 'working\\n' || !String(state.diff).includes('-changed') || !String(state.diff).includes('+working')) {
+                        throw new Error('TextEdit Git diff contract mismatch: ' + JSON.stringify({refreshed, diffLoaded: state.diffLoaded, diffUnavailable: state.diffUnavailable, from: state.diffFromRef, to: state.diffToRef, original: state.diffOriginal, working: state.diffWorking, diff: state.diff}));
+                      }
+                      const history = await operationPayload('/api/fs/git-history?path=' + encodeURIComponent(repo) + '&limit=10', 'Git history');
+                      if (history.repo !== repo || history.head !== head || !Array.isArray(history.commits) || history.commits.length < 2) throw new Error('Git history contract mismatch: ' + JSON.stringify(history));
+                      const commit = await operationPayload('/api/fs/git-commit?path=' + encodeURIComponent(repo) + '&commit=' + encodeURIComponent(head) + '&head=' + encodeURIComponent(head), 'Git commit');
+                      if (commit.to_ref !== head || !Array.isArray(commit.files) || !commit.files.some(file => file.path === 'note.txt')) throw new Error('Git commit contract mismatch: ' + JSON.stringify(commit));
+                      const blame = await operationPayload('/api/batch/blame?path=' + encodeURIComponent(path), 'Git blame');
+                      if (blame.in_repo !== true || !blame.lines?.['1']) throw new Error('Git blame contract mismatch: ' + JSON.stringify(blame));
+                      done({diff: {from: state.diffFromRef, to: state.diffToRef, original: state.diffOriginal, working: state.diffWorking, changed: String(state.diff).includes('-changed'), workingChange: String(state.diff).includes('+working')}, history: {head: history.head, commits: history.commits.length}, commit: {to: commit.to_ref, files: commit.files.length}, blame: {inRepo: blame.in_repo, lines: Object.keys(blame.lines).length}});
+                    })().catch(error => done({error: String(error?.stack || error)}));
                 """, str(git_note), str(git_root), git_head)
                 if git_views.get('error'):
                     raise SystemExit(f"Go later-route Chromium E2E failed: {git_views}")

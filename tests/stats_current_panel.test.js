@@ -11,6 +11,10 @@ const source = [
   'static_src/js/yolomux/84_debug_observation.js',
   'static_src/js/yolomux/85_debug_panel.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+const graphDefaultsSource = source.slice(
+  source.indexOf('const jsDebugGraphDefaultHiddenChartKeys ='),
+  source.indexOf('\nconst jsDebugGraphMovingAverageSamples', source.indexOf('const jsDebugGraphDefaultHiddenChartKeys =')),
+);
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
@@ -740,6 +744,88 @@ test('model output chart is fixed to generated output without a dimension picker
   assert.doesNotMatch(source, /jsDebugGraphModelTokenDimension/);
   assert.doesNotMatch(source, /debugGraphAgentTokenBucketDimensionValue/);
   assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
+});
+
+test('fresh Graphs defaults show Agents, Session tokens/min, and system/process memory without Daemons', () => {
+  assert.match(source, /\{key: 'activity',[^\n]+series: jsDebugAgentStatusSeriesKeys/);
+  assert.match(source, /\{key: 'agentTokens',[^\n]+displayedSummary: 'agentTokens'/);
+  assert.match(source, /\{key: 'memory',[^\n]+hostMetric: 'memory'/);
+  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['serversLoad', 'gpuUtil', 'gpuMemory'\]\)/);
+  const context = {
+    result: null,
+    Date,
+    Object,
+    Set,
+    String,
+    Number,
+    Math,
+    window: {localStorage: {getItem: () => null}},
+    jsDebugGraphChartGroups: [
+      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'}, {key: 'serversLoad'},
+    ],
+    jsDebugStatsUiPreferencesStorageKey: 'stats',
+    legacyYoCostMigrationRequested: false,
+    jsDebugLogLevels: ['warning', 'error'],
+    jsDebugLogDefaultLevels: ['warning', 'error'],
+    jsDebugLogsState: {levels: new Set()},
+    safeJsonParse: value => JSON.parse(value),
+    normalizedJsDebugSubTab: value => value || 'graph',
+    normalizedJsDebugGraphRange: value => value || 900,
+    normalizedDebugGraphServiceLoadPreference: value => value || 'auto',
+    syncDebugGraphResolutionOverride: () => {},
+    saveJsDebugStatsUiPreferences: () => {},
+  };
+  const runtimeSource = debugRuntimeSource.slice(
+    debugRuntimeSource.indexOf('const debugRuntimeState ='),
+    debugRuntimeSource.indexOf('\nfunction jsDebugGraphRangeOptionIndex('),
+  );
+  vm.runInNewContext(`
+    ${graphDefaultsSource}
+    ${runtimeSource}
+    const jsDebugGraphDefaultRangeSeconds = 900;
+    function debugGraphAvailableRangeOptions() { return [{seconds: 900}]; }
+    loadJsDebugStatsUiPreferences();
+    result = jsDebugGraphChartGroups.filter(group => debugGraphChartVisible(group.key)).map(group => group.key);
+  `, context);
+  assert.deepEqual([...context.result], ['activity', 'agentTokens', 'memory']);
+  assert.equal(context.result.includes('serversLoad'), false, 'Daemons is not required by the default Graphs view');
+});
+
+test('saved Graphs visibility preferences override defaults instead of being backfilled', () => {
+  const context = {
+    result: null,
+    Date,
+    Object,
+    Set,
+    String,
+    Number,
+    Math,
+    window: {localStorage: {getItem: () => JSON.stringify({hiddenCharts: ['activity'], visibleCharts: ['serversLoad']})}},
+    jsDebugStatsUiPreferencesStorageKey: 'stats',
+    legacyYoCostMigrationRequested: false,
+    jsDebugLogLevels: ['warning', 'error'],
+    jsDebugLogDefaultLevels: ['warning', 'error'],
+    jsDebugLogsState: {levels: new Set()},
+    safeJsonParse: value => JSON.parse(value),
+    normalizedJsDebugSubTab: value => value || 'graph',
+    normalizedJsDebugGraphRange: value => value || 900,
+    normalizedDebugGraphServiceLoadPreference: value => value || 'auto',
+    syncDebugGraphResolutionOverride: () => {},
+    saveJsDebugStatsUiPreferences: () => {},
+  };
+  const runtimeSource = debugRuntimeSource.slice(
+    debugRuntimeSource.indexOf('const debugRuntimeState ='),
+    debugRuntimeSource.indexOf('\nfunction jsDebugGraphRangeOptionIndex('),
+  );
+  vm.runInNewContext(`
+    ${graphDefaultsSource}
+    ${runtimeSource}
+    const jsDebugGraphDefaultRangeSeconds = 900;
+    function debugGraphAvailableRangeOptions() { return [{seconds: 900}]; }
+    loadJsDebugStatsUiPreferences();
+    result = ['activity', 'agentTokens', 'modelTokens', 'memory', 'serversLoad'].filter(debugGraphChartVisible);
+  `, context);
+  assert.deepEqual([...context.result], ['agentTokens', 'memory', 'serversLoad']);
 });
 
 test('AUTO resolution label reports the coarsest resolution actually rendered by token charts', () => {
@@ -2322,6 +2408,13 @@ test('the established renderer consumes the protocol-v2 exact stream', () => {
   const initializeSource = sourceFunction('initializeJsDebugStatsBeforeStreams', 'jsDebugTextForClipboard');
   assert.match(initializeSource, /syncJsDebugCurrentStatsClient\(\)/);
   assert.doesNotMatch(initializeSource, /await jsDebugCurrentStatsClientState\.startPromise/, 'hidden stats startup cannot delay normal page boot');
+});
+
+test('YO!stats startup begins before locale boot can delay the app shell', () => {
+  const boot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const statsStart = boot.indexOf('initializeJsDebugStatsBeforeStreams');
+  const localeWait = boot.indexOf('await applyLocale(resolveLocalePref');
+  assert.ok(statsStart >= 0 && localeWait >= 0 && statsStart < localeWait);
 });
 
 test('a complete snapshot replaces graph data once and resolves readiness', () => {

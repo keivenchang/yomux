@@ -77,8 +77,14 @@ RUN groupadd -o -g "${RUNNER_GID}" runner \
  && useradd -o -m -u "${RUNNER_UID}" -g "${RUNNER_GID}" -s /bin/bash runner
 
 # Do not mask /home/runner with tmpfs at runtime. Tests require this baked-in local bin.
-RUN mkdir -p /home/runner/.local/bin /home/runner/.config /home/runner/.cache \
- && chown -R runner:runner /home/runner
+RUN mkdir -p /home/runner/.local/bin /home/runner/.local/share /home/runner/.local/state \
+       /home/runner/.config /home/runner/.cache /home/runner/.codex \
+  && chown -R runner:runner /home/runner
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      fontconfig fonts-dejavu-core fonts-liberation2 \
+ && rm -rf /var/lib/apt/lists/*
 
 USER runner
 ENV HOME=/home/runner

@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/keivenchang/yolomux/internal/capabilities"
 	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/stats"
 	"github.com/keivenchang/yolomux/internal/work"
 )
 
@@ -66,6 +68,10 @@ type server struct {
 	finderBulkJobs     *work.Scheduler
 	finderStreamJobs   *work.Scheduler
 	capabilities       *capabilities.Catalog
+	statsPath          string
+	statsWriter        *stats.Writer
+	tokenCollector     *stats.AgentTokenCollector
+	pricing            *stats.PricingCatalog
 	metadataMu         sync.Mutex
 	metadataGeneration uint64
 	logRing            *goLogRing
@@ -2406,6 +2412,7 @@ type wsConn struct {
 }
 
 type authUser struct{ username, password, role string }
+type authContextKey struct{}
 
 type winsize struct{ rows, cols, x, y uint16 }
 
@@ -2469,12 +2476,41 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 	return writeFrame(c.Conn, opcode, payload)
 }
 
+func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
+	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
+	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
+	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead), "readonly"))
+	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo), "readonly"))
+	mux.Handle("/api/fs/diff", s.protected(http.HandlerFunc(s.fsDiff), "readonly"))
+	mux.Handle("/api/fs/git-history", s.protected(http.HandlerFunc(s.fsGitHistory), "readonly"))
+	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit), "readonly"))
+	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw), "readonly"))
+	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus), "readonly"))
+	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff), "readonly"))
+	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates), "readonly"))
+	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite), "admin"))
+	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete), "admin"))
+	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex), "admin"))
+	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename), "admin"))
+	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir), "admin"))
+	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch), "admin"))
+	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload), "admin"))
+	mux.Handle("/api/batch/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
+	mux.Handle("/api/batch/blame", s.protected(http.HandlerFunc(s.fsBlame), "admin"))
+	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip), "admin"))
+	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount), "admin"))
+	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
+}
+
 func main() {
 	port := flag.Int("port", 7221, "HTTP port")
 	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
 	host := flag.String("host", "127.0.0.1", "bind address")
 	root := flag.String("root", ".", "YOLOmux checkout root")
 	configDir := flag.String("config", os.Getenv("YOLOMUX_CONFIG_DIR"), "YOLOmux config directory")
+	statsPath := flag.String("stats", os.Getenv("YOLOMUX_STATS_DATABASE"), "YO!stats database path")
 	httpMode := flag.Bool("http", false, "serve plain HTTP instead of the default HTTPS")
 	certPath := flag.String("cert", "", "TLS certificate PEM path")
 	keyPath := flag.String("key", "", "TLS private key PEM path")
@@ -2490,16 +2526,23 @@ func main() {
 	if *configDir == "" {
 		*configDir = defaultConfigDir()
 	}
+	if *statsPath == "" {
+		*statsPath = filepath.Join(*configDir, "stats-v9.sqlite3")
+	}
 	rootPath, err := filepath.Abs(*root)
 	if err != nil {
 		fatal("invalid root: " + err.Error())
+	}
+	pricing, pricingErr := stats.LoadRepositoryPricingCatalog(rootPath, os.Getenv("YOLOMUX_PRICING_CATALOG"))
+	if pricingErr != nil {
+		fatal("pricing catalog setup failed: " + pricingErr.Error())
 	}
 	rootLease, err := acquireInstanceRootLease(rootPath)
 	if err != nil {
 		fatal("YOLOmux product root is already owned by another server or unavailable: " + err.Error())
 	}
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, httpMode: *httpMode, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
 		return err
@@ -2535,6 +2578,14 @@ func main() {
 	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping), "readonly"))
 	mux.Handle("/api/capabilities", s.protected(http.HandlerFunc(s.capabilitySnapshot), "readonly"))
 	mux.Handle("/api/client-events", s.protected(http.HandlerFunc(s.clientEvents), "readonly"))
+	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus), "readonly"))
+	mux.Handle("/api/stats-capabilities", s.protected(http.HandlerFunc(s.statsCapabilities), "readonly"))
+	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations), "readonly"))
+	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot), "readonly"))
+	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta), "readonly"))
+	mux.Handle("/api/stats-stream", s.protected(http.HandlerFunc(s.statsStream), "readonly"))
+	mux.Handle("/api/pricing-catalog", s.protected(http.HandlerFunc(s.pricingCatalog), "readonly"))
+	mux.Handle("/readyz", s.protected(http.HandlerFunc(s.ready), "readonly"))
 	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck), "readonly"))
 	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
 	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus), "readonly"))
@@ -2545,27 +2596,7 @@ func main() {
 	mux.Handle("/api/system-status/advanced", s.protected(http.HandlerFunc(s.systemStatus), "readonly"))
 	mux.Handle("/api/logs", s.protected(http.HandlerFunc(s.logs), "readonly"))
 	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots), "admin"))
-	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
-	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
-	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead), "readonly"))
-	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo), "readonly"))
-	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw), "readonly"))
-	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus), "readonly"))
-	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff), "readonly"))
-	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates), "readonly"))
-	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite), "admin"))
-	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete), "admin"))
-	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex), "admin"))
-	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename), "admin"))
-	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir), "admin"))
-	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch), "admin"))
-	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload), "admin"))
-	mux.Handle("/api/batch/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip), "admin"))
-	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount), "admin"))
-	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
+	s.registerFilesystemRoutes(mux)
 	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost), "readonly"))
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
@@ -2622,6 +2653,94 @@ func main() {
 		}
 		listener = tls.NewListener(listener, config)
 	}
+	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	if err := os.MkdirAll(*configDir, 0o700); err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("stats config setup failed: " + err.Error())
+	}
+	statsWriter, err := stats.OpenWriter(shutdownContext, s.statsPath)
+	if err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("stats setup failed: " + err.Error())
+	}
+	defer statsWriter.Close()
+	s.statsWriter = statsWriter
+	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second})
+	statsWriter.AttachLifecycle(statsLifecycle)
+	if err := statsLifecycle.Start(shutdownContext); err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("stats lifecycle setup failed: " + err.Error())
+	}
+	defer statsLifecycle.Stop()
+	home := os.Getenv("HOME")
+	claudeTranscriptRoot := os.Getenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT")
+	if claudeTranscriptRoot == "" {
+		claudeTranscriptRoot = filepath.Join(home, ".claude", "projects")
+	}
+	codexTranscriptRoot := os.Getenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT")
+	if codexTranscriptRoot == "" {
+		codexHome := os.Getenv("CODEX_HOME")
+		if codexHome == "" {
+			codexHome = filepath.Join(home, ".codex")
+		}
+		codexTranscriptRoot = filepath.Join(codexHome, "sessions")
+	}
+	opencodeDatabase := os.Getenv("YOLOMUX_OPENCODE_DATABASE")
+	if opencodeDatabase == "" {
+		dataHome := os.Getenv("XDG_DATA_HOME")
+		if dataHome == "" {
+			dataHome = filepath.Join(home, ".local", "share")
+		}
+		opencodeDatabase = filepath.Join(dataHome, "opencode", "opencode.db")
+	}
+	agentInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
+		return stats.BuildAgentInventory(ctx, stats.LinuxAgentInventorySources())
+	}
+	openCodeInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
+		return stats.BuildOpenCodeInventory(ctx, stats.LinuxOpenCodeInventorySources())
+	}
+	statusCollector := stats.NewAgentStatusCollector(agentInventory, func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+		return stats.ClassifyAgentStatus(ctx, request, stats.LinuxAgentStatusSources(opencodeDatabase))
+	}, statsWriter, nil, stats.AgentStatusCollectorConfig{
+		ActiveCadence: 10 * time.Second, IdleCadence: time.Minute,
+		EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+		OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
+	})
+	if err := statusCollector.Start(shutdownContext); err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("agent status collector setup failed: " + err.Error())
+	}
+	defer statusCollector.Stop()
+	tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
+		Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
+		ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
+		OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),
+		EpochID: fmt.Sprintf("agent-tokens-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+		OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
+	})
+	s.tokenCollector = tokenCollector
+	if err := tokenCollector.Start(shutdownContext); err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("agent token collector setup failed: " + err.Error())
+	}
+	defer tokenCollector.Stop()
+	hostCollector := stats.NewHostCollector(stats.NewHostSources(), statsWriter, nil, stats.HostCollectorConfig{
+		ActiveCadence: time.Second, IdleCadence: time.Minute, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
+		EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+		OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(),
+	})
+	if err := hostCollector.Start(shutdownContext); err != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("stats host collector setup failed: " + err.Error())
+	}
+	defer hostCollector.Stop()
 	scheme := "https"
 	if *httpMode {
 		scheme = "http"
@@ -2629,8 +2748,6 @@ func main() {
 	slog.Info("YOLOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
-	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 	select {
 	case <-shutdownContext.Done():
 		s.shutdown()
@@ -2649,6 +2766,13 @@ func main() {
 }
 
 func fatal(message string) { slog.Error(message); os.Exit(1) }
+
+func processKeyForRuntime() string {
+	if runtime.GOOS == "linux" {
+		return filepath.Base(os.Args[0])
+	}
+	return "yolomux-go"
+}
 
 func defaultConfigDir() string {
 	if configured := os.Getenv("YOLOMUX_CONFIG_DIR"); configured != "" {
@@ -2952,7 +3076,7 @@ func (s *server) protected(next http.Handler, role string) http.Handler {
 				}
 			}
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
 	})
 }
 
