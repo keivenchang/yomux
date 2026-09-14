@@ -53,6 +53,8 @@ class BrowserBootScenario:
     file_explorer_open_intent: str | None = None
     auto_approve_payload: Mapping | None = None
     access_role: str = "admin"
+    session_mutations_allowed: bool = True
+    terminal_only: bool = False
     auth_username: str = "alice"
     wrap_app_root: bool = False
     yoagent_chat_mode: str | None = None
@@ -71,7 +73,7 @@ class BrowserBootScenario:
 
 BROWSER_BOOT_PRESETS = MappingProxyType({
     "default": BrowserBootScenario(),
-    "readonly": BrowserBootScenario(access_role="readonly"),
+    "readonly": BrowserBootScenario(access_role="readonly", session_mutations_allowed=False),
 })
 
 PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE = frozenset({"activitySummary", "agentLaunchCommands", "clientRevision", "dev", "devBundleRevision", "linearIssueBaseUrl", "recentSessions", "serverStartedAt", "serverStartedAtMs", "terminalCommands", "versionCommit", "versionCommitCount"})

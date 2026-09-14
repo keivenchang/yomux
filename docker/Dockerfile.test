@@ -35,6 +35,19 @@ COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-trixie-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
+# Pin the agent clients into the test image. Any future agent or stats E2E can use synthetic
+# credentials and a local fake provider without mounting host client binaries or credentials.
+ARG CLAUDE_CODE_VERSION=2.1.240
+ARG CODEX_VERSION=0.150.0
+ARG OPENCODE_VERSION=1.18.30
+RUN npm install --global --no-audit --no-fund --omit=dev \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@openai/codex@${CODEX_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}" \
+ && command -v claude \
+ && command -v codex \
+ && command -v opencode
+
 RUN pip install --no-cache-dir \
       pytest \
       pytest-timeout \
@@ -66,11 +79,6 @@ RUN groupadd -o -g "${RUNNER_GID}" runner \
 # Do not mask /home/runner with tmpfs at runtime. Tests require this baked-in local bin.
 RUN mkdir -p /home/runner/.local/bin /home/runner/.config /home/runner/.cache \
  && chown -R runner:runner /home/runner
-
-# The host Codex package is mounted read-only at runtime. Its launcher needs the whole
-# package, so keep the stable wrapper in the image rather than mounting only codex.js.
-RUN printf '#!/bin/sh\nexec node /opt/agent-pkg/codex/bin/codex.js "$@"\n' > /usr/local/bin/codex \
- && chmod +x /usr/local/bin/codex
 
 USER runner
 ENV HOME=/home/runner

@@ -15618,6 +15618,28 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-pan
   grid-column: 2;
   min-width: 0;
 }
+.markdown-body ul:has(> .prosemirror-task-list-item) {
+  margin-inline-start: 0;
+  padding-inline-start: 0;
+}
+.markdown-body li.prosemirror-task-list-item {
+  display: grid;
+  grid-template-columns: 1.1em minmax(0, 1fr);
+  column-gap: 0.45em;
+  align-items: start;
+  list-style: none;
+}
+.markdown-body li.prosemirror-task-list-item > .prosemirror-task-checkbox {
+  justify-self: center;
+  width: 0.95em;
+  height: 0.95em;
+  margin: 0.2em 0 0;
+  accent-color: var(--active-control-bg);
+}
+.markdown-body li.prosemirror-task-list-item > .prosemirror-task-label {
+  grid-column: 2;
+  min-width: 0;
+}
 /* a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }

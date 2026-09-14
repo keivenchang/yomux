@@ -154,23 +154,15 @@ function codeMirrorContextMenuSelectionExtension(api) {
     let pending = null;
     let clearTimer = null;
     const handlers = api.EditorView.domEventHandlers({
-      mousedown(event, view) {
-        if (event.button !== 2) return false;
-        pending = {selection: view.state.selection};
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => { pending = null; }, 250);
-        return false;
-      },
       contextmenu(event, view) {
         // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
         // CodeMirror then observes that DOM change and replaces its own selection, which is especially
         // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = pending?.selection || view.state.selection;
+        const selection = view.state.selection;
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const panel = view.dom.closest('.file-editor-panel');
-        const isDiff = panel?._cmMode === 'diff';
-        const clickedSelection = isDiff || selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
+        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
         if (!clickedSelection) return false;
+        const panel = view.dom.closest('.file-editor-panel');
         const path = panel?.dataset?.filePath || '';
         if (previewKindForPath(path) === 'markdown') {
           const range = selection.main;
@@ -192,15 +184,6 @@ function codeMirrorContextMenuSelectionExtension(api) {
         clearTimer = setTimeout(() => {
           if (pending === captured) pending = null;
         }, 250);
-        requestAnimationFrame(() => {
-          if (pending !== captured || !view.dom?.isConnected) return;
-          if (!view.state.selection.eq(captured.selection)) {
-            view.dispatch({selection: captured.selection});
-            updateCodeMirrorCursorStatus(view.dom.closest('.file-editor-panel'));
-          }
-          pending = null;
-          clearTimeout(clearTimer);
-        });
         return false;
       },
     });
@@ -435,11 +418,7 @@ function reconfigureCodeMirrorPanelEditorOptions(panel) {
   const compartment = panel?._cmEditorOptionCompartment;
   const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
-  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, {
-    ...(panel._cmEditorOptionConfig || {}),
-    path: panel._cmPath,
-    state: fileState.get(panel._cmPath),
-  }));
+  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
@@ -1436,8 +1415,12 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-    else renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state, force: true});
+    if (prosemirrorSupportedSource(path, state)) {
+      renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    } else {
+      destroyProseMirrorPanel(panel);
+      renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state});
+    }
   }
 }
 
@@ -1452,8 +1435,12 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
     if (mode === 'split') {
-      if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-      else renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: mode, state, force: true});
+      if (prosemirrorSupportedSource(path, state)) {
+        renderProseMirrorPreviewMode(panel, item, path, state, parts);
+      } else {
+        destroyProseMirrorPanel(panel);
+        renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split', state});
+      }
     }
   }
   panel.classList.remove('syntax-highlighted');
@@ -1488,14 +1475,10 @@ function renderFileEditorPanel(panel, item, options = {}) {
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
+    const previousActiveFile = activeFile;
     activeFile = path;
-    if (fileExplorerRootModeValue?.() === 'sync') {
-      requestAnimationFrame(() => {
-        syncFileExplorerRootToActiveFile(path, {force: true}).catch(error => {
-          console.warn('Finder active file sync failed', error);
-        });
-      });
-    } else scheduleFileExplorerActiveFileReveal(path);
+    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+    else updateFileExplorerCurrentFileHighlight();
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }

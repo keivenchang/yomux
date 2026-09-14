@@ -17,6 +17,7 @@ IMAGE_SCHEMA_VERSION = 2
 IMAGE_REPOSITORY = "yolomux-test"
 IMAGE_INPUT_FILES = (
     Path("docker") / "Dockerfile.test",
+    Path("docker") / "run-tests.sh",
     Path("package.json"),
 )
 CONTAINER_MARKER_PATH = Path("/.dockerenv")

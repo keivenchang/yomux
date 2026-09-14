@@ -17,6 +17,9 @@ import urllib.request
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
 
 
 def resolve_source_root() -> Path:
@@ -52,6 +55,12 @@ def main(binary: str) -> None:
         (finder_root / "ui-remove-me.txt").write_text("delete through Finder\n", encoding="utf-8")
         (finder_root / "index.html").write_text("<script>document.body.textContent = 'preview'</script>\n", encoding="utf-8")
         (finder_root / "nested" / "needle.txt").write_text("nested search hit\n", encoding="utf-8")
+        source_file = finder_root / "editor.go"
+        source_original = "package main\n\nfunc main() {}\n"
+        source_file.write_text(source_original, encoding="utf-8")
+        markdown_file = finder_root / "editor.md"
+        markdown_original = "# Editor\n\n<!-- hidden metadata -->\n\nA paragraph before the upload.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<u>under</u> and <mark>marked</mark>.\n<span>literal HTML</span>\n"
+        markdown_file.write_text(markdown_original, encoding="utf-8")
         git_root = finder_root / "git-fixture"
         git_root.mkdir()
         git_note = git_root / "note.txt"
@@ -204,6 +213,383 @@ def main(binary: str) -> None:
                 """)
                 if not isinstance(phase3, list) or 'ready' not in phase3 or 'published' not in phase3:
                     raise SystemExit(f"Go Phase 3 Chromium E2E failed: {phase3}")
+                editor = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const sourcePath = arguments[0];
+                    const markdownPath = arguments[1];
+                    const sourceOriginal = arguments[2];
+                    const markdownOriginal = arguments[3];
+                    const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + timeoutMs;
+                      const poll = () => {
+                        try {
+                          const value = predicate();
+                          if (value) { resolve(value); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
+                        setTimeout(poll, 40);
+                      };
+                      poll();
+                    });
+                    const json = async (url, options = {}) => {
+                      const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin', ...options});
+                      const body = await response.json();
+                      return {status: response.status, body};
+                    };
+                    const operationPayload = async (url, label, options = {}) => {
+                      const accepted = await json(url, options);
+                      if (accepted.status === 200) return accepted.body?.state === 'ready' ? accepted.body.data : accepted.body;
+                      if (accepted.status !== 202 || !accepted.body.operation?.id) throw new Error(`${label} was not accepted: ${JSON.stringify(accepted)}`);
+                      for (let attempt = 0; attempt < 160; attempt += 1) {
+                        const terminal = await json('/api/operations/' + encodeURIComponent(accepted.body.operation.id));
+                        if (terminal.status === 202) {
+                          await new Promise(resolve => setTimeout(resolve, 25));
+                          continue;
+                        }
+                        if (terminal.status !== 200 || terminal.body.state !== 'ready') throw new Error(`${label} terminal: ${JSON.stringify(terminal)}`);
+                        return terminal.body.data;
+                      }
+                      throw new Error(`${label} timed out`);
+                    };
+                    const panelFor = path => fileEditorPanelsForPath(path)[0];
+                    const editorText = path => panelFor(path)?._cmView?.state?.doc?.toString?.() || '';
+                    (async () => {
+                      try {
+                        const sourceItem = await openFileInEditor(sourcePath, {name: 'editor.go'}, {userInitiated: true, viewMode: 'edit'});
+                        await waitFor(() => panelFor(sourcePath)?._cmView && editorText(sourcePath) === sourceOriginal, 'TextEdit open');
+                        const sourcePanel = panelFor(sourcePath);
+                        if (!sourcePanel?.querySelector('.cm-content')) throw new Error('TextEdit CodeMirror content is missing');
+                        const sourceInfo = await json('/api/fs/info?path=' + encodeURIComponent(sourcePath));
+                        if (sourceInfo.status !== 200 || sourceInfo.body.data?.kind !== 'file') throw new Error(`TextEdit info mismatch: ${JSON.stringify(sourceInfo)}`);
+                        done({
+                          sourceItem,
+                          sourceText: editorText(sourcePath),
+                          sourceMtime: sourceInfo.body.data.mtime_ns,
+                          sourcePanel: true,
+                          markdownOriginal,
+                        });
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                """, str(source_file), str(markdown_file), source_original, markdown_original)
+                if editor.get('error') or editor.get('sourceText') != source_original or editor.get('sourcePanel') is not True:
+                    raise SystemExit(f"Go Phase 6 TextEdit open failed: {editor}")
+                source_element = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{source_file}"] .cm-content')
+                source_element.click()
+                driver.execute_script("fileEditorAutosaveEnabled = false;")
+                native_suffix = "// native TextEdit input"
+                for character in native_suffix:
+                    source_element.send_keys(character)
+                try:
+                    WebDriverWait(driver, 12).until(
+                        lambda current: current.execute_script(
+                            """
+                            const path = arguments[0];
+                            const suffix = arguments[1];
+                            const panel = fileEditorPanelsForPath(path)[0];
+                            const text = panel?._cmView?.state?.doc?.toString?.() || '';
+                            const state = fileState.get(path);
+                            return text.includes(suffix) && state?.content === text && state?.dirty === true;
+                            """,
+                            str(source_file),
+                            native_suffix,
+                        )
+                    )
+                except TimeoutException as error:
+                    diagnostics = driver.execute_script(
+                        """
+                        const path = arguments[0];
+                        const panel = fileEditorPanelsForPath(path)[0];
+                        const text = panel?._cmView?.state?.doc?.toString?.() || '';
+                        const state = fileState.get(path);
+                        return {text, stateContent: state?.content || '', dirty: state?.dirty === true, activeTag: document.activeElement?.tagName || '', activeClass: document.activeElement?.className || ''};
+                        """,
+                        str(source_file),
+                    )
+                    raise SystemExit(f"Go Phase 6 native TextEdit state propagation failed: {diagnostics}") from error
+                text_after_input = driver.execute_script("return fileEditorPanelsForPath(arguments[0])[0]?._cmView?.state?.doc?.toString?.() || '';", str(source_file))
+                save_button = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{source_file}"] .file-editor-save-panel')
+                for close_button in driver.find_elements("css selector", "[data-toast-close]"):
+                    if close_button.is_displayed():
+                        close_button.click()
+                save_selector = f'.file-editor-panel[data-file-path="{source_file}"] .file-editor-save-panel'
+                try:
+                    WebDriverWait(driver, 12).until(
+                        lambda current: current.execute_script(
+                            """
+                            const button = document.querySelector(arguments[1]);
+                            if (fileState.get(arguments[0])?.dirty !== true || button?.disabled) return false;
+                            const rect = button?.getBoundingClientRect();
+                            if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+                            const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                            return top === button || button.contains(top);
+                            """,
+                            str(source_file),
+                            save_selector,
+                        )
+                    )
+                except TimeoutException as error:
+                    diagnostics = driver.execute_script(
+                        """
+                        const button = document.querySelector(arguments[1]);
+                        const rect = button?.getBoundingClientRect();
+                        return {
+                          dirty: fileState.get(arguments[0])?.dirty === true,
+                          disabled: button?.disabled,
+                          rect: rect?.toJSON?.() || null,
+                          top: rect ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.outerHTML?.slice(0, 240) || '' : '',
+                          toasts: [...document.querySelectorAll('.toast-header')].map(node => node.textContent?.trim() || ''),
+                        };
+                        """,
+                        str(source_file),
+                        save_selector,
+                    )
+                    raise SystemExit(f"Go Phase 6 save control never became interactable: {diagnostics}") from error
+                save_button.click()
+                save_result = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    const expected = arguments[1];
+                    const waitFor = () => {
+                      const state = fileState.get(path);
+                      const panel = fileEditorPanelsForPath(path)[0];
+                      return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
+                    };
+                    const poll = () => waitFor() ? done({saved: true, text: fileEditorPanelsForPath(path)[0]._cmView.state.doc.toString()}) : setTimeout(poll, 40);
+                    poll();
+                    setTimeout(() => done({error: 'TextEdit save timeout'}), 12000);
+                """, str(source_file), text_after_input)
+                if save_result.get('error'):
+                    raise SystemExit(f"Go Phase 6 TextEdit save failed: {save_result}")
+                if source_file.read_text(encoding="utf-8") != text_after_input:
+                    raise SystemExit("Go Phase 6 TextEdit disk content did not match the native editor input")
+                local_conflict_suffix = "\n// local unsaved conflict"
+                for character in local_conflict_suffix:
+                    source_element.send_keys(character)
+                try:
+                    WebDriverWait(driver, 12).until(
+                        lambda current: current.execute_script(
+                            """
+                            const path = arguments[0];
+                            const expected = arguments[1];
+                            const panel = fileEditorPanelsForPath(path)[0];
+                            const text = panel?._cmView?.state?.doc?.toString?.() || '';
+                            const state = fileState.get(path);
+                            return text.endsWith(expected) && state?.content === text && state?.dirty === true;
+                            """,
+                            str(source_file),
+                            local_conflict_suffix,
+                        )
+                    )
+                except TimeoutException as error:
+                    raise SystemExit("Go Phase 6 local unsaved conflict input did not reach file state") from error
+                source_file.write_text("external replacement\n", encoding="utf-8")
+                conflict = driver.execute_async_script(
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    const panel = fileEditorPanelsForPath(path)[0];
+                    let finished = false;
+                    const finish = value => {
+                      if (finished) return;
+                      finished = true;
+                      done(value);
+                    };
+                    const deadline = performance.now() + 12000;
+                    const observe = () => {
+                      const dialog = document.querySelector('.file-editor-conflict-dialog');
+                      if (dialog) {
+                        const buttons = [...dialog.querySelectorAll('button')];
+                        const cancel = buttons.find(button => /^cancel$/i.test(button.textContent?.trim() || ''));
+                        if (!cancel) {
+                          finish({error: 'conflict dialog has no Cancel action', text: dialog.textContent || ''});
+                          return;
+                        }
+                        const dialogText = dialog.textContent || '';
+                        cancel.click();
+                        savePromise.then(result => finish({dialog: true, cancelled: result === false, result, text: dialogText, editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true}), error => finish({error: String(error?.stack || error)}));
+                        return;
+                      }
+                      if (performance.now() >= deadline) {
+                        finish({error: 'TextEdit conflict dialog timeout', editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true});
+                        return;
+                      }
+                      setTimeout(observe, 40);
+                    };
+                    const savePromise = saveFileEditor(path, panel);
+                    observe();
+                    """,
+                    str(source_file),
+                )
+                if conflict.get('error') or conflict.get('dialog') is not True or conflict.get('cancelled') is not True or conflict.get('dirty') is not True or local_conflict_suffix not in conflict.get('editor', ''):
+                    raise SystemExit(f"Go Phase 6 expected-mtime conflict failed: {conflict}")
+                markdown = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    const expected = arguments[1];
+                    (async () => {
+                      try {
+                        const item = await openFileInEditor(path, {name: 'editor.md'}, {userInitiated: true, viewMode: 'split'});
+                        const panel = () => fileEditorPanelsForPath(path)[0];
+                        const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                          const deadline = performance.now() + timeoutMs;
+                          const poll = () => {
+                            try {
+                              const value = predicate();
+                              if (value) { resolve(value); return; }
+                            } catch (error) { reject(error); return; }
+                            if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
+                            setTimeout(poll, 40);
+                          };
+                          poll();
+                        });
+                        await waitFor(() => panel()?._cmView && panel()?._pmView && panel()._cmView.state.doc.toString() === expected, 'ViewEdit open');
+                        const view = panel()._pmView;
+                        let paragraphStart = 1;
+                        let paragraph = null;
+                        view.state.doc.forEach((node, offset) => {
+                          if (!paragraph && node.type.name === 'paragraph' && node.textContent.includes('A paragraph before')) {
+                            paragraph = node;
+                            paragraphStart = offset + 1;
+                          }
+                        });
+                        if (!paragraph) throw new Error('ViewEdit paragraph selection target is missing');
+                        view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + paragraph.content.size)));
+                        view.focus();
+                        const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), byte => byte.charCodeAt(0));
+                        const transfer = new DataTransfer();
+                        transfer.items.add(new File([png], 'screen.png', {type: 'image/png'}));
+                        const event = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData: transfer});
+                        document.dispatchEvent(event);
+                        const imageFor = () => panel()._pmView?.dom?.querySelector('img.markdown-preview-image');
+                        await waitFor(() => imageFor(), 'ViewEdit upload image');
+                        try {
+                          await waitFor(() => imageFor()?.naturalWidth > 0, 'ViewEdit uploaded image decode');
+                        } catch (error) {
+                          const rawRequests = [...performance.getEntriesByType('resource')]
+                            .map(entry => entry.name)
+                            .filter(name => name.includes('/api/fs/raw'));
+                          const images = [...panel()._pmView.dom.querySelectorAll('img')].map(node => ({outerHTML: node.outerHTML, src: node.src, resolvedPath: node.dataset.resolvedPath || '', naturalWidth: node.naturalWidth, naturalHeight: node.naturalHeight, complete: node.complete}));
+                          const image = imageFor();
+                          throw new Error(`${error.message}; image=${JSON.stringify({src: image?.src || '', resolvedPath: image?.dataset.resolvedPath || '', naturalWidth: image?.naturalWidth || 0, naturalHeight: image?.naturalHeight || 0, complete: image?.complete === true})}; images=${JSON.stringify(images)}; rawRequests=${JSON.stringify(rawRequests)}; source=${JSON.stringify(fileEditorPanelState(panel()).content)}`);
+                        }
+                        const image = imageFor();
+                        const imageReferenceFor = value => String(value || '').split(String.fromCharCode(10)).find(line => line.includes('![') && line.includes('](editor/')) || '';
+                        try {
+                          await waitFor(() => imageReferenceFor(fileEditorPanelState(panel()).content), 'ViewEdit source upload synchronization');
+                        } catch (error) {
+                          const currentPanel = panel();
+                          const currentState = fileEditorPanelState(currentPanel);
+                          done({
+                            error: String(error?.stack || error),
+                            afterImage: {
+                              source: currentState?.content || '',
+                              dirty: currentState?.dirty === true,
+                              pmText: currentPanel?._pmView?.state?.doc?.textContent || '',
+                              pmJson: currentPanel?._pmView?.state?.doc?.toJSON?.() || null,
+                              serialized: serializeProseMirrorSource(currentPanel),
+                              pmSource: currentPanel?._pmSource || null,
+                              pmSerializeTimer: Boolean(currentPanel?._pmSerializeTimer),
+                              selection: currentPanel?._pmView?.state?.selection ? {
+                                from: currentPanel._pmView.state.selection.from,
+                                to: currentPanel._pmView.state.selection.to,
+                              } : null,
+                              cm: currentPanel?._cmView?.state?.doc?.toString?.() || '',
+                            },
+                          });
+                          return;
+                        }
+                        const source = fileEditorPanelState(panel()).content;
+                        const sourceImageReference = imageReferenceFor(source);
+                        await waitFor(() => panel()._cmView.state.doc.toString() === source, 'ViewEdit source synchronization');
+                        done({item, prevented: event.defaultPrevented, source, sourceImageReference, serialized: serializeProseMirrorSource(panel()), imageSource: image.dataset.resolvedPath || '', imageReady: image.naturalWidth > 0, cm: panel()._cmView.state.doc.toString()});
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                """, str(markdown_file), markdown_original)
+                if markdown.get('error') or markdown.get('prevented') is not True or markdown.get('imageReady') is not True or not markdown.get('sourceImageReference') or not markdown.get('imageSource') or markdown.get('cm') != markdown.get('source') or markdown.get('serialized') != markdown.get('source'):
+                    raise SystemExit(f"Go Phase 7 ViewEdit upload/round-trip failed: {markdown}")
+                markdown_save = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{markdown_file}"] .file-editor-save-panel')
+                try:
+                    WebDriverWait(driver, 12).until(
+                        lambda current: current.execute_script(
+                            """
+                            const button = document.querySelector(arguments[0]);
+                            const path = arguments[1];
+                            return button && !button.disabled && fileState.get(path)?.dirty === true;
+                            """,
+                            f'.file-editor-panel[data-file-path="{markdown_file}"] .file-editor-save-panel',
+                            str(markdown_file),
+                        )
+                    )
+                except TimeoutException as error:
+                    raise SystemExit("Go Phase 7 save control never became enabled") from error
+                markdown_save.click()
+                markdown_save_result = driver.execute_async_script(
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    const expected = arguments[1];
+                    const deadline = performance.now() + 12000;
+                    const poll = () => {
+                      const panel = fileEditorPanelsForPath(path)[0];
+                      const state = fileState.get(path);
+                      const text = panel?._cmView?.state?.doc?.toString?.() || '';
+                      if (state?.dirty === false && text === expected) {
+                        done({saved: true, text});
+                        return;
+                      }
+                      if (performance.now() >= deadline) {
+                        done({error: 'ViewEdit save timeout', text, dirty: state?.dirty === true});
+                        return;
+                      }
+                      setTimeout(poll, 40);
+                    };
+                    poll();
+                    """,
+                    str(markdown_file),
+                    markdown['source'],
+                )
+                if markdown_save_result.get('error') or markdown_save_result.get('saved') is not True:
+                    raise SystemExit(f"Go Phase 7 Markdown save failed: {markdown_save_result}")
+                if markdown_file.read_text(encoding="utf-8") != markdown['source']:
+                    raise SystemExit("Go Phase 7 Markdown disk content did not match serialized ViewEdit source")
+                markdown_reopened = driver.execute_async_script(
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    const expected = arguments[1];
+                    (async () => {
+                      try {
+                        await reloadOpenFileFromDisk(path, {force: true});
+                        const deadline = performance.now() + 12000;
+                        const poll = () => {
+                          const panel = fileEditorPanelsForPath(path)[0];
+                          const cm = panel?._cmView?.state?.doc?.toString?.() || '';
+                          const pm = panel?._pmView;
+                          if (cm === expected && pm?.dom?.isConnected && serializeProseMirrorSource(panel) === expected) {
+                            done({reopened: true, cm, serialized: serializeProseMirrorSource(panel), pmReady: true});
+                            return;
+                          }
+                          if (performance.now() >= deadline) {
+                            done({error: 'ViewEdit reopen timeout', cm, serialized: pm ? serializeProseMirrorSource(panel) : '', pmReady: Boolean(pm?.dom?.isConnected)});
+                            return;
+                          }
+                          setTimeout(poll, 40);
+                        };
+                        poll();
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                    """,
+                    str(markdown_file),
+                    markdown['source'],
+                )
+                if markdown_reopened.get('error') or markdown_reopened.get('reopened') is not True or markdown_reopened.get('serialized') != markdown['source']:
+                    raise SystemExit(f"Go Phase 7 Markdown reopen failed: {markdown_reopened}")
                 finder = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const root = arguments[0];
@@ -462,7 +848,7 @@ def main(binary: str) -> None:
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
                 if not any(line.get("type") == "snapshot" and any(item.get("id") == "op-chrome-replay" and item.get("delivery_acknowledged") is True for item in line.get("operations", [])) for line in journal_lines):
                     raise SystemExit(f"Go Phase 3 journal ack state missing: {journal_lines}")
-                print({'terminal': result, 'finder': finder, 'finder_ui': finder_ui, 'git_views': git_views, 'finder_watch': watch, 'event_repair': repair, 'operation_replay': replay, 'after_ack_restart': no_replay, 'pids': [first_pid, second_pid, proc.pid if proc else None], 'journal_records': len(journal_lines)})
+                print({'terminal': result, 'editor': editor, 'textedit_conflict': conflict, 'viewedit': markdown, 'viewedit_reopen': markdown_reopened, 'finder': finder, 'finder_ui': finder_ui, 'git_views': git_views, 'finder_watch': watch, 'event_repair': repair, 'operation_replay': replay, 'after_ack_restart': no_replay, 'pids': [first_pid, second_pid, proc.pid if proc else None], 'journal_records': len(journal_lines)})
             finally:
                 if driver is not None:
                     driver.quit()

@@ -2350,6 +2350,11 @@ function t(key, params) {
   return i18nInterpolate(value == null ? i18nMissingKey(key) : value, params);
 }
 
+function localizedLabel(key, fallback, params) {
+  const translated = t(key, params);
+  return translated === key ? fallback : translated;
+}
+
 // Plural form via Intl.PluralRules. Catalog keys are `${key}.${category}` (e.g. files.changed.one /
 // files.changed.other); `count` is always available as a {count} token.
 function tPlural(key, count, params) {
@@ -6413,7 +6418,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return 'theme';
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {
@@ -9305,17 +9310,13 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
-	appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
-	appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
   }
   if (typeof options.removeUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
   }
   if (options.includeSelectedText && selectedText && selectedText !== url) {
     appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', button => copyTextWithFeedback(selectedText, {button})), closeMenu);
@@ -32451,7 +32452,8 @@ function editorViewModeFor(path, item = null) {
 }
 
 function fileEditorWrapForPath(path, state = null) {
-  return fileEditorWrapEnabled;
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -32533,7 +32535,7 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (mode === fileEditorThemeMode && fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
+  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
@@ -32652,7 +32654,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button, {includeVanilla: false});
+  updateEditorThemeButton(button);
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));
@@ -32684,11 +32686,7 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
-  document.querySelectorAll('.file-editor-theme-panel').forEach(button => {
-    const panel = button.closest('.file-editor-panel');
-    const state = panel ? fileEditorPanelState(panel) : null;
-    updateEditorThemeButton(button, {includeVanilla: !panel || state?.kind === 'text'});
-  });
+  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
@@ -32710,8 +32708,8 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const previewState = editorPreviewThemeState();
   const includeVanilla = options.includeVanilla !== false;
+  const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
     return;
@@ -33082,7 +33080,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
-  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state, force: true});
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -71134,9 +71132,8 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser cannot start a relative request before authentication.
+    // request after attachment so the browser does not discard a load from a detached image.
     img.dataset.markdownRawPath = target.path;
-    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -71235,17 +71232,12 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
     appendContextMenuSeparator(menu);
   } else if (context.selectedText && typeof options.addUrl === 'function') {
-    const label = t('contextmenu.addUrl');
-    appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.addUrl', 'Add URL'), options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
-  appendContextMenuButton(menu, label('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
-  appendContextMenuButton(menu, label('contextmenu.copyWithStyle', 'Copy with style'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyWithStyle', 'Copy with format'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -71372,7 +71364,7 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (path && panel) void saveFileEditor(path, panel);
     });
     scope.ownEvent('input', container, 'input', event => {
-      if (event.target?.closest?.('.ProseMirror') && !event.target?.closest?.('[data-markdown-preview-editable="true"]')) return;
+      if (event.target?.closest?.('.ProseMirror')) return;
       const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
         || container._markdownPreviewActiveBlock
         || markdownPreviewSelectionContext(container)?.block;
@@ -71824,23 +71816,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
-  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    if (img.isConnected) {
-      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
-        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
-        onFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
-        },
-        onDecodeFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
-        },
-      }));
-    }
+    img.src = rawFileUrl(rawPath);
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -71849,7 +71828,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
+  container._previewAsync = Promise.all([mermaid, ...localImages]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -71861,9 +71840,14 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  container.querySelectorAll('pre code').forEach(block => {
-    applyMarkdownFenceHighlight(block);
-  });
+  if (true) {
+    container.querySelectorAll('pre code').forEach(block => {
+      if (typeof window.hljs !== 'undefined') {
+        try { window.hljs.highlightElement(block); } catch (_) {}
+      }
+      applyMarkdownFenceFallbackHighlight(block);
+    });
+  }
 }
 
 function markdownFenceLanguage(block) {
@@ -75529,23 +75513,15 @@ function codeMirrorContextMenuSelectionExtension(api) {
     let pending = null;
     let clearTimer = null;
     const handlers = api.EditorView.domEventHandlers({
-      mousedown(event, view) {
-        if (event.button !== 2) return false;
-        pending = {selection: view.state.selection};
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => { pending = null; }, 250);
-        return false;
-      },
       contextmenu(event, view) {
         // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
         // CodeMirror then observes that DOM change and replaces its own selection, which is especially
         // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = pending?.selection || view.state.selection;
+        const selection = view.state.selection;
         const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const panel = view.dom.closest('.file-editor-panel');
-        const isDiff = panel?._cmMode === 'diff';
-        const clickedSelection = isDiff || selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
+        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
         if (!clickedSelection) return false;
+        const panel = view.dom.closest('.file-editor-panel');
         const path = panel?.dataset?.filePath || '';
         if (previewKindForPath(path) === 'markdown') {
           const range = selection.main;
@@ -75567,15 +75543,6 @@ function codeMirrorContextMenuSelectionExtension(api) {
         clearTimer = setTimeout(() => {
           if (pending === captured) pending = null;
         }, 250);
-        requestAnimationFrame(() => {
-          if (pending !== captured || !view.dom?.isConnected) return;
-          if (!view.state.selection.eq(captured.selection)) {
-            view.dispatch({selection: captured.selection});
-            updateCodeMirrorCursorStatus(view.dom.closest('.file-editor-panel'));
-          }
-          pending = null;
-          clearTimeout(clearTimer);
-        });
         return false;
       },
     });
@@ -75810,11 +75777,7 @@ function reconfigureCodeMirrorPanelEditorOptions(panel) {
   const compartment = panel?._cmEditorOptionCompartment;
   const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
-  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, {
-    ...(panel._cmEditorOptionConfig || {}),
-    path: panel._cmPath,
-    state: fileState.get(panel._cmPath),
-  }));
+  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
@@ -76811,8 +76774,12 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-    else renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state, force: true});
+    if (prosemirrorSupportedSource(path, state)) {
+      renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    } else {
+      destroyProseMirrorPanel(panel);
+      renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state});
+    }
   }
 }
 
@@ -76827,8 +76794,12 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
     if (mode === 'split') {
-      if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-      else renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: mode, state, force: true});
+      if (prosemirrorSupportedSource(path, state)) {
+        renderProseMirrorPreviewMode(panel, item, path, state, parts);
+      } else {
+        destroyProseMirrorPanel(panel);
+        renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split', state});
+      }
     }
   }
   panel.classList.remove('syntax-highlighted');
@@ -76863,14 +76834,10 @@ function renderFileEditorPanel(panel, item, options = {}) {
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
+    const previousActiveFile = activeFile;
     activeFile = path;
-    if (fileExplorerRootModeValue?.() === 'sync') {
-      requestAnimationFrame(() => {
-        syncFileExplorerRootToActiveFile(path, {force: true}).catch(error => {
-          console.warn('Finder active file sync failed', error);
-        });
-      });
-    } else scheduleFileExplorerActiveFileReveal(path);
+    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+    else updateFileExplorerCurrentFileHighlight();
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }

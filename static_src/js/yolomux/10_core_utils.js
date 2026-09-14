@@ -3800,7 +3800,7 @@ function normalizeEditorThemeMode(value) {
 }
 
 function normalizeEditorPreviewDisplayMode(value) {
-  return 'theme';
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
 }
 
 function normalizeEditorSchemeForMode(value, dark) {
@@ -6692,17 +6692,13 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
-	appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
-	appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
   }
   if (typeof options.removeUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
   }
   if (options.includeSelectedText && selectedText && selectedText !== url) {
     appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', button => copyTextWithFeedback(selectedText, {button})), closeMenu);

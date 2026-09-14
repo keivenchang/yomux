@@ -91,19 +91,22 @@ if [ -f "$REPO_ROOT/.git" ]; then
 fi
 
 agent_mounts=()
-claude_bin="$(command -v claude 2>/dev/null || true)"
-if [ -n "$claude_bin" ]; then
-  agent_mounts+=(-v "$(realpath "$claude_bin"):/usr/local/bin/claude:ro")
+test_env=()
+go_binary_mount=()
+if [ -n "${YOLOMUX_GO_BINARY:-}" ]; then
+  go_binary_host="${YOLOMUX_GO_BINARY}"
+  case "$go_binary_host" in
+    /w|/w/*) go_binary_host="$REPO_ROOT/${go_binary_host#/w/}" ;;
+  esac
+  if [ ! -x "$go_binary_host" ]; then
+    echo "YOLOMUX_GO_BINARY is not an executable host path: $go_binary_host" >&2
+    exit 2
+  fi
+  go_binary_mount=(-v "$go_binary_host:/tmp/yolomux-go-binary:ro")
+  test_env+=(-e YOLOMUX_GO_BINARY=/tmp/yolomux-go-binary)
 fi
 if [ -d /usr/share/fonts ]; then
   agent_mounts+=(-v "/usr/share/fonts:/usr/share/fonts:ro")
-fi
-
-codex_bin="$(command -v codex 2>/dev/null || true)"
-if [ -n "$codex_bin" ]; then
-  codex_pkg="$(realpath "$codex_bin")"
-  codex_pkg="${codex_pkg%/bin/*}"
-  agent_mounts+=(-v "$codex_pkg:/opt/agent-pkg/codex:ro")
 fi
 
 # The complete forwarded-environment allowlist, in one place. pytest re-executes itself inside
@@ -120,8 +123,13 @@ FORWARDED_TEST_ENV=(
   YOLOMUX_CHAT_LATENCY_CERTIFICATION
   YOLOMUX_MEASURE_SYSTEM_STATUS
   YOLOMUX_STATS_APPEND_FLUSH_SECONDS
+  YOLOMUX_AGENT_DOCKER_E2E
+  YOLOMUX_CHECK_IN_CONTAINER
 )
-test_env=()
+REAL_AGENT_ENV=(
+  OPENAI_BASE_URL
+  ANTHROPIC_BASE_URL
+)
 for forwarded_name in "${FORWARDED_TEST_ENV[@]}"; do
   if [ -n "${!forwarded_name:-}" ]; then
     test_env+=(-e "$forwarded_name")
@@ -129,6 +137,15 @@ for forwarded_name in "${FORWARDED_TEST_ENV[@]}"; do
 done
 if [ -n "${YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT:-}" ]; then
   test_env+=(-e "YOLOMUX_WORKTREE_WRITER_SLOT=$YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT")
+elif [ -z "${YOLOMUX_WORKTREE_WRITER_SLOT:-}" ]; then
+  test_env+=(-e "YOLOMUX_WORKTREE_WRITER_SLOT=/tmp/yolomux-writer-${BASHPID}")
+fi
+if [ "${YOLOMUX_AGENT_DOCKER_E2E:-0}" = 1 ]; then
+  for forwarded_name in "${REAL_AGENT_ENV[@]}"; do
+    if [ -n "${!forwarded_name:-}" ]; then
+      test_env+=(-e "$forwarded_name")
+    fi
+  done
 fi
 
 # Browser failure evidence must outlive the throwaway container. Mount one host /tmp
@@ -172,10 +189,11 @@ docker run --rm --init \
   --shm-size=1g \
   "${owner_label[@]+"${owner_label[@]}"}" \
   "${run_user[@]+"${run_user[@]}"}" \
-  -v "$REPO_ROOT:/w" \
+  -v "$REPO_ROOT:/w:ro" \
   "${git_mount[@]+"${git_mount[@]}"}" \
   "${worktree_mount[@]+"${worktree_mount[@]}"}" \
   "${agent_mounts[@]+"${agent_mounts[@]}"}" \
+  "${go_binary_mount[@]+"${go_binary_mount[@]}"}" \
   -w "$workdir" \
   -e HOME=/home/runner \
   -e XDG_CONFIG_HOME=/home/runner/.config \

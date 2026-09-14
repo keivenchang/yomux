@@ -451,6 +451,8 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.set_capability("acceptInsecureCerts", True)
     requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
     window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
     options.add_argument(f"--window-size={window_size_arg}")
@@ -1101,6 +1103,9 @@ def reset_reused_browser_after_test(request):
 
     lease = request.node.funcargs.get("browser")
     if lease is None:
+        return
+    if getattr(request.node, "_yolomux_skip_reused_browser_diagnostic", False):
+        _reset_reused_browser_state(lease, retired_origin=lease.execute_script("return location.origin;"))
         return
     try:
         retired_origin = lease.execute_script("return location.origin;")
@@ -2356,9 +2361,9 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "accessRole": scenario.access_role,
         "authUsername": scenario.auth_username,
         "dangerouslyYolo": scenario.dangerously_yolo,
-        "terminalOnly": False,
+        "terminalOnly": scenario.terminal_only,
         "capabilities": None,
-        "sessionMutationsAllowed": scenario.access_role == "admin",
+        "sessionMutationsAllowed": scenario.session_mutations_allowed,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
@@ -3225,7 +3230,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     """)
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", session_mutations_allowed=None, terminal_only=False, auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
 
     return render_browser_boot_scenario(BrowserBootScenario(
@@ -3243,6 +3248,8 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         file_explorer_open_intent=file_explorer_open_intent,
         auto_approve_payload=auto_approve_payload,
         access_role=access_role,
+        session_mutations_allowed=access_role == "admin" if session_mutations_allowed is None else session_mutations_allowed,
+        terminal_only=terminal_only,
         auth_username=auth_username,
         wrap_app_root=wrap_app_root,
         yoagent_chat_mode=yoagent_chat_mode,

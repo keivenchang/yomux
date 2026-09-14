@@ -4,6 +4,22 @@
 
 Build a new Go backend beside the Python backend and migrate product surfaces in vertical slices. The existing JavaScript, generated bundles, CSS, xterm.js, Dockview layouts, URL formats, HTTP paths, response envelopes, Server-Sent Events, and WebSocket messages remain the compatibility contract. Users select Python for the complete product or Go for the currently implemented subset at startup.
 
+## Current Progress — 2026-09-14
+
+The `go_phase5` branch contains the Phase 1 secure Go foundation, Phase 2 terminal completion, Phase 3 event and operation parity, Phase 4/5 Finder filesystem parity, Docker/Bazel validation alignment, and Phase 6/7 editor coverage after the 0.8.7 release commit. The Phase 4/5 work adds one Go capability catalog and Finder owner for bounded path authorization, listings, reads, raw responses, file metadata, watches, mutations, uploads, candidate resolution, batch work, and search; the frontend and generated bundle route these operations through the shared capability and event paths rather than a Go-specific UI fork.
+
+The completed Phase 4/5 batch was validated inside Docker with Go race tests, `go vet`, the static-bundle check, all 21 Node layout shards, 71 focused Python tests, and Go Chromium coverage. The Chromium journey exercised real Finder listing, expansion, collapse and re-expansion, temporary-file deletion through the context menu, and the resulting API 404. Automated checks use isolated Docker state and test ports; `0.0.0.0:7221` is reserved for final human inspection, and production port 7220 is outside this migration workflow.
+
+Phase 6 TextEdit and Phase 7 ViewEdit are complete at the shared file-contract boundary. The Go Chromium journey passed through Bazel and Docker with native source editing, save, expected-mtime conflict preservation, Markdown comments, GFM tables, safe and literal HTML, image paste/upload, serialized save, disk verification, and reopen round trips; the full Dockerized `python3 -m pytest tests/test_browser_editor.py` gate passed 62 tests, skipped 2, and xfailed 1, the uncached Bazel Go contract/race suite passed, the Bazel Chromium E2E passed, and the Dockerized Node launcher passed all 21 layout shards, including 58/58 cross-surface checks. The browser assertions were aligned with the current shared contracts for the Bright/Vanilla/Dark preview cycle, authenticated raw image URLs, ProseMirror ViewEdit serialization, and the shared terminal URL-menu cleanup owner; no Phase 6/7 editor gate failures remain.
+
+### Next Steps
+
+- Keep `go_phase5` as the review point; do not push or change the Python production deployment as part of this preview.
+- Use `0.0.0.0:7221` only for the final human inspection after the automated gates above pass; do not connect to production port 7220.
+- Retain the Docker/Bazel outputs with the review and restart the Go server from the reviewed branch on `0.0.0.0:7221` only for the final human check.
+- Treat YO!stats work on `yo7222` as a separate later integration stream; it does not change the Phase 6/7 file-editor contracts or authorize using port 7220.
+- After the editor contracts are stable, proceed to Phase 8 Differ against the shared Finder and Git boundaries, with a fresh independent audit and exact Chromium journeys before claiming completion.
+
 The Go implementation should be a modular monolith: one executable, one HTTP listener, direct Go calls between modules, and one in-process event broker. Separate processes remain available for work that can wedge, consume unbounded memory, or outlive a request, but process boundaries must be justified by measured failure isolation rather than copied from the Python daemon layout.
 
 Bazel is the build, test, dependency, and release entry point from Phase 0 onward. The migration must not begin with an ad hoc `go build` workflow and retrofit Bazel later. Go module metadata may remain where required by the Go toolchain and dependency ecosystem, but checked-in Bazel targets and toolchains are authoritative for supported builds and tests.

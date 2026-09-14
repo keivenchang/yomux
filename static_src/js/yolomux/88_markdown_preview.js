@@ -1267,9 +1267,8 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser cannot start a relative request before authentication.
+    // request after attachment so the browser does not discard a load from a detached image.
     img.dataset.markdownRawPath = target.path;
-    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -1368,17 +1367,12 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
     appendContextMenuSeparator(menu);
   } else if (context.selectedText && typeof options.addUrl === 'function') {
-    const label = t('contextmenu.addUrl');
-    appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.addUrl', 'Add URL'), options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
-  appendContextMenuButton(menu, label('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
-  appendContextMenuButton(menu, label('contextmenu.copyWithStyle', 'Copy with style'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyWithStyle', 'Copy with format'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -1505,7 +1499,7 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (path && panel) void saveFileEditor(path, panel);
     });
     scope.ownEvent('input', container, 'input', event => {
-      if (event.target?.closest?.('.ProseMirror') && !event.target?.closest?.('[data-markdown-preview-editable="true"]')) return;
+      if (event.target?.closest?.('.ProseMirror')) return;
       const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
         || container._markdownPreviewActiveBlock
         || markdownPreviewSelectionContext(container)?.block;
@@ -1957,23 +1951,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
-  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    if (img.isConnected) {
-      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
-        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
-        onFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
-        },
-        onDecodeFailure: error => {
-          img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
-        },
-      }));
-    }
+    img.src = rawFileUrl(rawPath);
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -1982,7 +1963,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
+  container._previewAsync = Promise.all([mermaid, ...localImages]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -1994,9 +1975,14 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  container.querySelectorAll('pre code').forEach(block => {
-    applyMarkdownFenceHighlight(block);
-  });
+  if (true) {
+    container.querySelectorAll('pre code').forEach(block => {
+      if (typeof window.hljs !== 'undefined') {
+        try { window.hljs.highlightElement(block); } catch (_) {}
+      }
+      applyMarkdownFenceFallbackHighlight(block);
+    });
+  }
 }
 
 function markdownFenceLanguage(block) {

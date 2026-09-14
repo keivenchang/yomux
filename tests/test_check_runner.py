@@ -2889,6 +2889,19 @@ def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
     assert '"${owner_label[@]+"${owner_label[@]}"}"' in text, text
 
 
+def test_run_tests_sh_keeps_go_and_writer_state_inside_each_container():
+    """Docker tests must not write the linked checkout or require host Go clients."""
+
+    text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    assert '-v "$REPO_ROOT:/w:ro"' in text, text
+    assert "--network none" in text, text
+    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-binary" in text, text
+    assert "YOLOMUX_WORKTREE_WRITER_SLOT=/tmp/yolomux-writer-${BASHPID}" in text, text
+    assert "YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT" in text, text
+    assert "command -v claude" not in text, text
+    assert "command -v codex" not in text, text
+
+
 def test_run_tests_sh_uses_root_for_rootless_worktree_mounts():
     """Rootless Docker cannot map the directory-service UID into its subordinate range."""
 

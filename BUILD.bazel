@@ -1,24 +1,26 @@
 genrule(
     name = "yolomux_go",
-    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]),
+    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]) + ["go.mod"],
     outs = ["yolomux-go"],
-    cmd = "mkdir -p $(@D)/go-cache && GOWORK=off GO111MODULE=on GOCACHE=$$(pwd)/$(@D)/go-cache go build -buildvcs=false -trimpath -o $@ ./cmd/yolomux-go",
+    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go build -buildvcs=false -trimpath -o $@ ./cmd/yolomux-go",
     local = True,
     tags = ["manual"],
 )
 
 genrule(
     name = "yolomux_go_race",
-    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]),
-    outs = ["yolomux-go-race"],
-    cmd = "mkdir -p $(@D)/go-cache && GOWORK=off GO111MODULE=on GOCACHE=$$(pwd)/$(@D)/go-cache go test -race -c -o $@ ./cmd/yolomux-go",
+    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]) + ["go.mod"],
+    outs = ["yolomux-go-race.ok"],
+    # Bazel exposes declared source directories as symlinks in its execution root. Go's ./...
+    # walker skips those symlinked directories, so keep the complete package set explicit here.
+    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go test -race -count=1 ./cmd/yolomux-go ./internal/capabilities ./internal/finder ./internal/work && touch $@",
     local = True,
     tags = ["manual"],
 )
 
 test_suite(
     name = "go_tests",
-    tests = [":yolomux_go_contract_test"],
+    tests = [":yolomux_go_contract_test", ":yolomux_go_race_test"],
 )
 
 sh_test(
@@ -31,9 +33,14 @@ sh_test(
 sh_test(
     name = "yolomux_go_browser_e2e",
     srcs = ["tools/run_go_browser_e2e.sh"],
-    data = [":yolomux_go", "tools/bazel_go_browser_e2e.py"] + glob(["static/**", "tools/**", "yolomux_lib/**"]),
+    data = [
+        ":yolomux_go",
+        "docker/Dockerfile.test",
+        "docker/run-tests.sh",
+        "package.json",
+    ] + glob(["static/**", "tools/**", "yolomux_lib/**"]),
     args = ["$(location :yolomux_go)", "$(location tools/bazel_go_browser_e2e.py)"],
-    tags = ["manual", "local"],
+    tags = ["manual", "local", "no-sandbox"],
 )
 
 sh_test(

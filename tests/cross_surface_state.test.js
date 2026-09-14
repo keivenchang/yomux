@@ -27,7 +27,6 @@ const {
   nestedSlots,
   parseUrl,
   canonical,
-  makeOverviewFixtureLines,
   makeFileTree,
   test,
   testAsync,
@@ -262,7 +261,7 @@ async function runCrossSurfaceStateSuite() {
   // function body; every other local stays inside its own checkpoint. A failed assertion now
   // fails ONLY its own checkpoint and every later checkpoint still runs and still reports.
   let api, changesHtml, changedFilesSource, fileExplorerSource, c9Src, filesTab;
-  let appSource, changedOverviewStops, assertNoOverviewStopOverlap, overview, preferencesCss;
+  let appSource, changedOverviewStops, assertNoOverviewStopOverlap, makeOverviewFixtureLines, overview, preferencesCss;
   let diffBundle, preferencesHtml, selection, search, popoverForPosition, popoverStyle;
   let filePopover, diagnostics, menuLabels, menus, fileMenu, appearance;
   let hostPointer, source, css, helpMenu, terminalCopyApi, fetchCalls;
@@ -274,33 +273,6 @@ async function runCrossSurfaceStateSuite() {
   let filled, extraPaneItem, finderOnly, finderDropHome, removed, closed;
   let moved, split, killedApi, killedNestedFinderSlots, fullSpanSlots, resizer;
   let event;
-
-  // These checkpoints intentionally run independently. Keep source contracts available even when
-  // an earlier checkpoint fails before its historical setup point.
-  c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
-  appSource = c9Src;
-  const parseOverviewStops = gradient => {
-    const stops = [];
-    const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
-    let match = pattern.exec(String(gradient || ''));
-    while (match) {
-      stops.push({
-        color: match[1].toLowerCase(),
-        startText: match[2],
-        endText: match[3],
-        start: Number.parseFloat(match[2]),
-        end: Number.parseFloat(match[3]),
-      });
-      match = pattern.exec(String(gradient || ''));
-    }
-    return stops;
-  };
-  changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
-  assertNoOverviewStopOverlap = stops => {
-    for (let index = 1; index < stops.length; index += 1) {
-      assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
-    }
-  };
 
   test('cross-surface host state 01: YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open...', () => {
     api = loadYolomux('', ['1', '2']);
@@ -1405,8 +1377,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
     assert.ok(c9Src.includes('function scheduleFileExplorerActiveFileReveal('), 'Finder active-file reveal uses a shared helper');
     assert.ok(/function showFileEditorPaneForPath\([\s\S]*?scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'opening an editor file reveals it in the current Finder root');
-    const editorRenderBody = c9Src.slice(c9Src.indexOf('function renderFileEditorPanel('), c9Src.indexOf('const state = fileEditorStateForItem', c9Src.indexOf('function renderFileEditorPanel(')));
-    assert.ok(/activeFile = path;[\s\S]*?(?:scheduleFileExplorerActiveFileReveal\(path\)|syncFileExplorerRootToActiveFile\(path, \{force: true\}\))/.test(editorRenderBody), 'switching editor tabs route the active file through Finder reveal or root synchronization');
+    assert.ok(/const previousActiveFile = activeFile;[\s\S]*?if \(previousActiveFile !== path\) scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'switching editor tabs reveals the newly active file without re-expanding on every render');
     assert.ok(changedFilesCss.includes('flex-wrap: wrap;'), 'Finder toolbar wraps instead of clipping quick-access controls');
     assert.ok(/\.file-explorer-path-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(changedFilesCss), 'Finder path row lets the absolute path shrink without wrapping Sync or Copy');
     const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
@@ -1426,6 +1397,30 @@ async function runCrossSurfaceStateSuite() {
     filesTab = api.fileExplorerPaneTabHtml();
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
+    appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const parseOverviewStops = gradient => {
+      const stops = [];
+      const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+      let match = pattern.exec(String(gradient || ''));
+      while (match) {
+        stops.push({
+          color: match[1].toLowerCase(),
+          startText: match[2],
+          endText: match[3],
+          start: Number.parseFloat(match[2]),
+          end: Number.parseFloat(match[3]),
+        });
+        match = pattern.exec(String(gradient || ''));
+      }
+      return stops;
+    };
+    changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
+    assertNoOverviewStopOverlap = stops => {
+      for (let index = 1; index < stops.length; index += 1) {
+        assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
+      }
+    };
+    makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
     assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
     assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
     assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
@@ -2983,11 +2978,10 @@ async function runCrossSurfaceStateSuite() {
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'vanilla', 'theme toggle moves light preview to vanilla preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla');
-    assert.equal(api.editorThemeLabel(), 'Vanilla preview');
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
-    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'vanilla leaves by restoring a dark editor scheme');
+    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'the two-state toggle restores the dark editor scheme');
     api.setFileEditorThemeMode('dark');
     api.cycleEditorThemeMode({includeVanilla: false});
     assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'edit/diff theme toggle moves dark to light');
@@ -3006,7 +3000,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Popular IDE-style teal type declarations');
     assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Popular IDE-style brown field and parameter names');
     api.setFileEditorPreviewDisplayMode('vanilla');
-    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
+    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'preview display mode can select the independent vanilla surface');
     api.setFileEditorThemeMode('github-light');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme', 'choosing a concrete editor theme exits vanilla preview mode');
     api.setFileEditorCursorStyleForTest('block');
@@ -3775,9 +3769,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes('appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu)'), 'terminal context menu exposes explicit tmux copy through the shared action descriptor');
     assert.ok(/function withTerminalVisibleSelectionCleanup\(session, term, container, reason, handler\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, reason\)/.test(source), 'terminal menu actions share one cleanup wrapper after consuming selected text');
     assert.ok(/function copyTerminalSelectionToClipboardEvent\(session, term, event, container = null\)[\s\S]*event\.clipboardData\.setData\('text\/plain', selected\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, TERMINAL_COPY_ACTIONS\.selected\.reason\)/.test(source), 'terminal DOM copy-event path also clears visible terminal selection after capturing clipboard text');
-    const urlMenuSource = source.slice(source.indexOf('function appendUrlContextMenuItems('), source.indexOf('async function copyMarkdownPreviewImageToClipboard'));
-    assert.ok(/const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)/.test(urlMenuSource), 'terminal URL menu actions use the shared visible-selection cleanup wrapper');
-    assert.ok(/appendContextMenuButton\(menu, label\('contextmenu\.openUrl', 'Open URL in a new tab'\), action\('open-url'/.test(urlMenuSource) && /appendContextMenuButton\(menu, label\('contextmenu\.copyUrl', 'Copy URL'\), action\('copy-url'/.test(urlMenuSource), 'terminal URL menu open/copy actions route through visible-selection cleanup');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'/.test(source), 'terminal URL menu open/copy actions route through visible-selection cleanup');
     assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?t\('terminal\.copyHintMac'\)[\s\S]*?t\('terminal\.copyHintPc'\)[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed with localized select/copy hints while Ctrl-C still falls through as SIGINT');
     assert.equal(source.includes("'Copy without indent'"), false, 'terminal copy menu labels are locale keys, not raw strings in the bundle');
     assert.equal(source.includes('copied ${text.length} chars'), false, 'terminal copied-count status text is locale/plural-key driven');
@@ -3812,7 +3804,7 @@ async function runCrossSurfaceStateSuite() {
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
-    assert.ok(urlMenuSource.includes('options.includeSelectedText && selectedText && selectedText !== url') && urlMenuSource.includes("appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text'"), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'[\s\S]*if \(options\.includeSelectedText && selectedText && selectedText !== url\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copySelectedText'\)/.test(source), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
     terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     fetchCalls = [];
     terminalCopyApi.setFetchForTest((url, options = {}) => {

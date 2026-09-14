@@ -16,7 +16,8 @@ function editorViewModeFor(path, item = null) {
 }
 
 function fileEditorWrapForPath(path, state = null) {
-  return fileEditorWrapEnabled;
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -98,7 +99,7 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (mode === fileEditorThemeMode && fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
+  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
@@ -217,7 +218,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button, {includeVanilla: false});
+  updateEditorThemeButton(button);
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));
@@ -249,11 +250,7 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
-  document.querySelectorAll('.file-editor-theme-panel').forEach(button => {
-    const panel = button.closest('.file-editor-panel');
-    const state = panel ? fileEditorPanelState(panel) : null;
-    updateEditorThemeButton(button, {includeVanilla: !panel || state?.kind === 'text'});
-  });
+  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
@@ -275,8 +272,8 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const previewState = editorPreviewThemeState();
   const includeVanilla = options.includeVanilla !== false;
+  const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
     return;
@@ -647,7 +644,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
-  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state, force: true});
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
