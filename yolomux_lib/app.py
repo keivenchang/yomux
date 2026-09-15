@@ -9120,6 +9120,11 @@ class TmuxWebtermApp:
             scanner=scanner,
             cursors=cursors,
             database=database,
+            coverage_database=(
+                stats_client.database_path
+                if isinstance(stats_client, StatsCurrentClient)
+                else None
+            ),
             inventory_provider=inventory_provider,
             rows_provider=rows_provider,
             settings_provider=lambda: self.settings_payload().get("settings", {}),
