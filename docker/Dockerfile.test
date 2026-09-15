@@ -2,7 +2,7 @@
 #
 # Each run owns its HOME and writable container layer. The host HOME is never mounted, so
 # tests cannot reach live YOLOmux, Claude, or Codex state through an overlooked call site.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -12,56 +12,76 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Chromium drives browser tests. procps and strace support process/namespace assertions;
 # binutils supplies readelf for tmux build-id and coredump diagnostics.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      git \
-      tmux \
-      procps \
-      strace \
-      binutils \
-      ca-certificates \
-      chromium \
-      chromium-driver \
-      libc6-dev \
-      fontconfig \
-      fonts-dejavu-core \
-      fonts-liberation2 \
-      gcc \
-      golang-go \
+ARG DEBIAN_SNAPSHOT=20260906T000439Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20260905T202337Z
+COPY docker/debian-packages.txt /opt/debian-packages.txt
+RUN sed -i \
+      -e "s#http://deb.debian.org/debian-security#http://snapshot.debian.org/archive/debian-security/${DEBIAN_SECURITY_SNAPSHOT}#g" \
+      -e "s#http://deb.debian.org/debian#http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}#g" \
+      /etc/apt/sources.list.d/debian.sources \
+ && printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99snapshot \
+ && apt-get update \
+ && xargs --no-run-if-empty apt-get install -y --no-install-recommends < /opt/debian-packages.txt \
  && rm -rf /var/lib/apt/lists/*
 
+# Keep the build/test toolchain and dependency inputs inside the disposable image. Runtime test
+# containers have no network, so a missing archive or module is a deterministic image-build error,
+# not a late test-time download or a host-environment leak.
+ARG BAZEL_VERSION=7.6.1
+ARG BAZEL_SHA256=ac6249d1192aea9feaf49dfee2ab50c38cee2454b00cf29bbec985a11795c025
+ARG BCR_COMMIT=7fe12e9bd4310220922969a5ef0f46474f6b3c33
+ARG BCR_SHA256=6cd7f681f9711ed56973f6dca3d94192cc401a4a942b30eb64e0ecbf4a8b3208
+ARG GO_VERSION=1.22.2
+ARG GO_SHA256=5901c52b7a78002aeff14a21f93e0f064f74ce1360fce51c6ee68cd471216a17
+RUN curl --fail --location --retry 3 --output /usr/local/bin/bazel \
+      "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64" \
+ && echo "${BAZEL_SHA256}  /usr/local/bin/bazel" | sha256sum --check --status \
+ && chmod 0755 /usr/local/bin/bazel
+
+RUN curl --fail --location --retry 3 --output /tmp/go.tar.gz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+ && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum --check --status \
+ && tar --extract --gzip --file /tmp/go.tar.gz --directory /usr/local \
+ && rm -f /tmp/go.tar.gz
+ENV PATH=/usr/local/go/bin:${PATH}
+
+RUN mkdir -p /opt/yolomux-bazel-registry \
+ && curl --fail --location --retry 3 --output /tmp/bazel-central-registry.tar.gz \
+      "https://github.com/bazelbuild/bazel-central-registry/archive/${BCR_COMMIT}.tar.gz" \
+ && echo "${BCR_SHA256}  /tmp/bazel-central-registry.tar.gz" | sha256sum --check --status \
+ && tar --extract --gzip --file /tmp/bazel-central-registry.tar.gz --strip-components=1 --directory /opt/yolomux-bazel-registry \
+ && rm -f /tmp/bazel-central-registry.tar.gz
+
 # Match the Node major used by the source gate instead of Debian's older package.
-COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-trixie-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node:22-trixie-slim@sha256:7b8a0c89c54499bee567618f96578e1a12a800f062fbdbfd1fb6a443fa6f6284 /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-trixie-slim@sha256:7b8a0c89c54499bee567618f96578e1a12a800f062fbdbfd1fb6a443fa6f6284 /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
-# Pin the agent clients into the test image. Any future agent or stats E2E can use synthetic
-# credentials and a local fake provider without mounting host client binaries or credentials.
-ARG CLAUDE_CODE_VERSION=2.1.240
-ARG CODEX_VERSION=0.150.0
-ARG OPENCODE_VERSION=1.18.30
-RUN npm install --global --no-audit --no-fund --omit=dev \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      "@openai/codex@${CODEX_VERSION}" \
-      "opencode-ai@${OPENCODE_VERSION}" \
+# Pin the agent clients and their transitive graph in the test image. Any future agent or stats
+# E2E can use synthetic credentials and a local fake provider without mounting host client binaries
+# or credentials. Install scripts remain enabled because these CLIs select their platform binary
+# during installation; the lock fixes the package bytes and versions that those scripts consume.
+COPY docker/agent-clients/package.json docker/agent-clients/package-lock.json /opt/yolomux-agent-clients/
+ENV PATH=/opt/yolomux-agent-clients/node_modules/.bin:${PATH}
+RUN cd /opt/yolomux-agent-clients \
+ && npm ci --no-audit --no-fund --omit=dev \
+ && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/claude /usr/local/bin/claude \
+ && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/codex /usr/local/bin/codex \
+ && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/opencode /usr/local/bin/opencode \
  && command -v claude \
  && command -v codex \
  && command -v opencode
 
+COPY docker/requirements-test.txt /opt/requirements-test.txt
 RUN pip install --no-cache-dir \
-      pytest \
-      pytest-timeout \
-      pytest-xdist \
-      selenium \
-      pyyaml \
-      "watchfiles>=1.2.0"
+      --requirement /opt/requirements-test.txt
 
 ENV CHROME_BIN=/usr/bin/chromium \
     CHROMEDRIVER_BIN=/usr/bin/chromedriver
 
 # Keep the pinned npm artifacts as a test-only provenance fixture for the tracked vendor bytes.
-COPY package.json /opt/xterm/package.json
-RUN cd /opt/xterm && npm install --no-audit --no-fund --omit=dev \
+COPY package.json package-lock.json /opt/xterm/
+RUN cd /opt/xterm && npm ci --ignore-scripts --no-audit --no-fund --omit=dev \
  && test -f /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
  && test -f /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
  && test -f /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
@@ -69,6 +89,53 @@ COPY static/vendor/xterm.js static/vendor/xterm.css static/vendor/xterm-addon-un
 RUN cmp /opt/yolomux-xterm-vendor/xterm.js /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
  && cmp /opt/yolomux-xterm-vendor/xterm.css /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
  && cmp /opt/yolomux-xterm-vendor/xterm-addon-unicode11.js /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+
+# Keep source copies after the cache-independent test dependencies above. Go/Bazel prefetching
+# still invalidates when this checkout's build graph changes, but client, Python, and xterm layers
+# remain reusable across ordinary Go source edits.
+COPY go.mod go.sum /opt/yolomux-bazel-seed/
+COPY .bazelversion MODULE.bazel BUILD.bazel WORKSPACE /opt/yolomux-bazel-seed/
+COPY cmd /opt/yolomux-bazel-seed/cmd
+COPY internal /opt/yolomux-bazel-seed/internal
+# The launcher supplies a temporary context containing only modules returned by `go mod download`
+# for this checkout. The builder may still use its normal network if a module is not locally cached;
+# no host module cache is mounted into the runtime test container.
+COPY --from=go-mod-cache . /opt/yolomux-go-mod-cache/
+RUN mkdir -p /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache \
+      /opt/yolomux-bazel-go-path /opt/yolomux-bazel-go-cache \
+ && cd /opt/yolomux-bazel-seed \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
+      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
+      GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod download \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
+      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
+      bazel --output_user_root=/opt/yolomux-bazel-output \
+        fetch \
+        --registry=file:///opt/yolomux-bazel-registry \
+        --repository_cache=/opt/yolomux-bazel-repository-cache \
+        --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1 \
+        --repo_env=GOMODCACHE=/opt/yolomux-go-mod-cache \
+        --repo_env=GOPATH=/opt/yolomux-bazel-go-path \
+        --repo_env=GOCACHE=/opt/yolomux-bazel-go-cache \
+        @rules_go//go:def \
+        @gazelle//:extensions.bzl \
+        @com_github_mattn_go_sqlite3//:go_default_library \
+        //cmd/yolomux-go:yolomux_go \
+        //cmd/fake-llm:fake_llm \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
+      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
+      bazel --output_user_root=/opt/yolomux-bazel-output \
+        build \
+        --registry=file:///opt/yolomux-bazel-registry \
+        --repository_cache=/opt/yolomux-bazel-repository-cache \
+        --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1 \
+        --repo_env=GOMODCACHE=/opt/yolomux-go-mod-cache \
+        --repo_env=GOPATH=/opt/yolomux-bazel-go-path \
+        --repo_env=GOCACHE=/opt/yolomux-bazel-go-cache \
+        //cmd/yolomux-go:yolomux_go \
+        //cmd/fake-llm:fake_llm \
+ && chmod -R a+rX /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache \
+ && rm -rf /opt/yolomux-bazel-seed /opt/yolomux-bazel-go-path /opt/yolomux-bazel-go-cache /opt/yolomux-bazel-output
 
 # Match host ownership for any explicit worktree writes made by tests.
 ARG RUNNER_UID=1000
@@ -81,10 +148,16 @@ RUN mkdir -p /home/runner/.local/bin /home/runner/.local/share /home/runner/.loc
        /home/runner/.config /home/runner/.cache /home/runner/.codex \
   && chown -R runner:runner /home/runner
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      fontconfig fonts-dejavu-core fonts-liberation2 \
- && rm -rf /var/lib/apt/lists/*
+# These are image-owned inputs, never per-test workspaces. Make their read-only contract hold even
+# for rootless Docker, where container UID 0 maps to the invoking host user and could otherwise
+# mutate an image-backed cache in its writable container layer.
+RUN chmod -R a-w /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache /opt/yolomux-bazel-registry
+
+# This marker is part of the dedicated test-image identity. Container detection requires it in
+# addition to the generic Docker marker and overlay root, so a developer container cannot silently
+# bypass the outer runner's network, HOME, and source-mount boundary by setting one environment var.
+RUN printf '%s\n' 'yolomux-test-image-v1' > /opt/yolomux-test-image.marker \
+ && chmod 0444 /opt/yolomux-test-image.marker
 
 USER runner
 ENV HOME=/home/runner
@@ -95,12 +168,14 @@ ENV HOME=/home/runner
 # Pinning here rather than passing -e TZ from docker/run-tests.sh puts the timezone inside the image
 # fingerprint owned by tools/docker_image.py, so the tag changes and no stale UTC image is reused.
 ENV TZ=America/Los_Angeles
+ENV YOLOMUX_TEST_CONTAINER=1
 WORKDIR /w
 
 # Fixture repositories need an identity; this config exists only in the throwaway HOME.
 RUN git config --global user.email "runner@yolomux.test" \
  && git config --global user.name "YOLOmux Test Runner" \
- && git config --global init.defaultBranch main
+ && git config --global init.defaultBranch main \
+ && git config --global --add safe.directory /w
 
 # Fail the image build early when any required runtime dependency is absent, and when the container
 # clock is not the Pacific clock the product and the tests assert against.

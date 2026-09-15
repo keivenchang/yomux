@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import socket
 import sqlite3
 from pathlib import Path
 import shutil
@@ -155,6 +156,69 @@ def _tmux(binary: str, socket_path: Path, *args: str) -> subprocess.CompletedPro
     return subprocess.run([binary, "-S", str(socket_path), *args], text=True, capture_output=True, check=False, timeout=8)
 
 
+def _cleanup_tmux_session(binary: str, socket_path: Path, session: str) -> None:
+    """Retire one fixture-owned session and prove it is gone."""
+    result = _tmux(binary, socket_path, "kill-session", "-t", session)
+    probe = _tmux(binary, socket_path, "has-session", "-t", session)
+    if probe.returncode == 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "kill-session did not retire the session"
+        raise AssertionError(f"tmux session {session} survived cleanup: {detail}")
+    if probe.returncode != 1:
+        detail = probe.stderr.strip() or probe.stdout.strip() or f"has-session exited {probe.returncode}"
+        raise AssertionError(f"could not prove tmux session {session} was retired: {detail}")
+
+
+def _cleanup_tmux_server(binary: str, socket_path: Path) -> None:
+    """Stop the fixture-owned server and prove the private socket has no server."""
+    result = _tmux(binary, socket_path, "kill-server")
+    probe = _tmux(binary, socket_path, "has-server")
+    if probe.returncode == 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "kill-server did not retire the server"
+        raise AssertionError(f"tmux server survived cleanup: {detail}")
+    if probe.returncode != 1:
+        detail = probe.stderr.strip() or probe.stdout.strip() or f"has-server exited {probe.returncode}"
+        raise AssertionError(f"could not prove tmux server was retired: {detail}")
+
+
+def _cleanup_all_tmux_sessions(binary: str, socket_path: Path) -> None:
+    """Retire every session on this private server, then prove the server is gone."""
+
+    listing = _tmux(binary, socket_path, "list-sessions", "-F", "#S")
+    if listing.returncode not in (0, 1):
+        detail = listing.stderr.strip() or listing.stdout.strip() or f"list-sessions exited {listing.returncode}"
+        raise AssertionError(f"could not enumerate private tmux sessions: {detail}")
+    for listed in listing.stdout.splitlines():
+        if listed:
+            _cleanup_tmux_session(binary, socket_path, listed)
+    _cleanup_tmux_server(binary, socket_path)
+
+
+def _stop_process(process: subprocess.Popen | None, label: str) -> None:
+    """Stop a fixture child and fail if its process remains alive."""
+    if process is None or process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.poll() is None:
+        raise AssertionError(f"{label} survived cleanup")
+
+
+def _remove_owned_directory(path: Path, label: str) -> None:
+    """Remove a fixture-owned directory and prove removal succeeded."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise AssertionError(f"{label} cleanup failed for {path}: {error}") from error
+    if path.exists():
+        raise AssertionError(f"{label} remained after cleanup: {path}")
+
+
 def _pid_is_alive(pid: str) -> bool:
     if not pid.isdigit():
         return False
@@ -173,8 +237,6 @@ def _wait_for_stream(stream) -> str:
 
 
 def _free_port() -> int:
-    import socket
-
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
@@ -301,13 +363,11 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
             evidence["tmux_lost"] = _tmux(tmux_binary, socket_path, "has-session", "-t", session).returncode != 0
 
         # Explicit client/session loss must not leave a surviving child or stale tmux session.
-        _tmux(tmux_binary, socket_path, "kill-session", "-t", session)
-        gone = _tmux(tmux_binary, socket_path, "has-session", "-t", session).returncode != 0
-        evidence["session_gone"] = gone
-        if fake.poll() is None:
-            fake.send_signal(signal.SIGTERM)
-            fake.wait(timeout=5)
+        _cleanup_tmux_session(tmux_binary, socket_path, session)
+        evidence["session_gone"] = True
+        _stop_process(fake, "fake LLM server")
         evidence["fake_server_stopped"] = fake.poll() is not None
+        restarted: subprocess.Popen | None = None
         restarted = _start_fake({**fake_env, "FAKE_LLM_SCENARIO": "normal"}, port)
         try:
             _wait_for_stream(restarted.stdout)
@@ -372,24 +432,23 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
             evidence["processes_after_recovery"] = subprocess.run(
                 ["ps", "-eo", "pid,ppid,stat,args"], text=True, capture_output=True, check=False
             ).stdout
-            _tmux(tmux_binary, socket_path, "kill-session", "-t", recovery_session)
+            _cleanup_tmux_session(tmux_binary, socket_path, recovery_session)
         finally:
-            if restarted.poll() is None:
-                restarted.send_signal(signal.SIGTERM)
-                restarted.wait(timeout=5)
+            _stop_process(restarted, "restarted fake LLM server")
         evidence_path = root / "evidence.json"
         evidence_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
         evidence["evidence_path"] = str(evidence_path)
         return evidence
     finally:
-        _tmux(tmux_binary, socket_path, "kill-session", "-t", session)
-        _tmux(tmux_binary, socket_path, "kill-server")
-        if fake.poll() is None:
-            fake.send_signal(signal.SIGTERM)
-            fake.wait(timeout=5)
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        _cleanup_tmux_session(tmux_binary, socket_path, session)
+        _cleanup_tmux_server(tmux_binary, socket_path)
+        _stop_process(fake, "fake LLM server")
+        _remove_owned_directory(socket_dir, "tmux socket directory")
         health.shutdown()
         health.server_close()
+        health_thread.join(timeout=5)
+        if health_thread.is_alive():
+            raise AssertionError("health server thread survived cleanup")
 
 
 def _write_client_config(client: str, config_root: Path, port: int, scenario: AgentScenario) -> Path:
@@ -475,12 +534,13 @@ def _mock_command(client: str) -> list[str]:
     return [sys.executable, str(REPO_ROOT / "tools" / "mockers" / f"{client}.py"), "--mock"]
 
 
-def _start_private_mock(tmux_binary: str, socket_path: Path, session: str, client: str, root: Path) -> None:
+def _start_private_mock(tmux_binary: str, socket_path: Path, session: str, client: str, root: Path, ready_file: Path) -> None:
     env = {
         "HOME": str(root / "home"),
         "PYTHONPATH": str(REPO_ROOT),
         "TERM": "xterm-256color",
         "PYTHONUNBUFFERED": "1",
+        "YOLOMUX_MOCK_INPUT_READY_FILE": str(ready_file),
     }
     (root / "home").mkdir(parents=True, exist_ok=True)
     passed = [f"{key}={value}" for key, value in env.items()]
@@ -527,6 +587,19 @@ def _wait_for_mock_state(
     return pane, state
 
 
+def _wait_for_mock_input_ready(ready_file: Path, timeout: float = 5.0) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            marker = ready_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            marker = ""
+        if "input_surface=ready" in marker:
+            return marker
+        time.sleep(0.05)
+    raise AssertionError(f"mock input surface did not become ready: {ready_file}")
+
+
 @pytest.mark.parametrize("client", CLIENTS)
 def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, tmp_path: Path):
     """Exercise deterministic mock TUI states in a private tmux server.
@@ -543,9 +616,10 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
     try:
         for state_name, (command, fixture) in MOCK_STATE_CASES[client].items():
             session = f"yolo-state-{client}-{state_name}-{uuid.uuid4().hex[:8]}"
-            _start_private_mock(tmux_binary, socket_path, session, client, tmp_path)
+            ready_file = tmp_path / f"mock-ready-{client}-{state_name}-{uuid.uuid4().hex[:8]}"
+            _start_private_mock(tmux_binary, socket_path, session, client, tmp_path, ready_file)
+            _wait_for_mock_input_ready(ready_file)
             _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle", "working", "needs-input", "approval"})
-            time.sleep(0.5)
             input_value = fixture if command == "raw" else f"{command} {fixture}"
             _send_mock_input(tmux_binary, socket_path, session, input_value)
             expected = {"working"} if state_name == "active" else {"idle"} if state_name == "done" else {"needs-input", "approval"}
@@ -557,22 +631,21 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
                 state = prompt_detector.agent_screen_state(pane, pane_target=f"%{session}")
             evidence["states"][state_name] = {"key": state.get("key"), "pane": pane}
             assert state.get("key") in expected, evidence
-            _tmux(tmux_binary, socket_path, "kill-session", "-t", session)
+            _cleanup_tmux_session(tmux_binary, socket_path, session)
 
         session = f"yolo-state-{client}-query-{uuid.uuid4().hex[:8]}"
-        _start_private_mock(tmux_binary, socket_path, session, client, tmp_path)
+        ready_file = tmp_path / f"mock-ready-{client}-query-{uuid.uuid4().hex[:8]}"
+        _start_private_mock(tmux_binary, socket_path, session, client, tmp_path, ready_file)
+        _wait_for_mock_input_ready(ready_file)
         _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle"})
-        time.sleep(0.5)
         _send_mock_input(tmux_binary, socket_path, session, "What model are you using?")
         pane, state = _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle"})
         evidence["query"] = {"key": state.get("key"), "pane": pane}
         assert state.get("key") == "idle", evidence
         assert any(marker in pane.lower() for marker in ("model", "mock", "using")), evidence
     finally:
-        for listed in _tmux(tmux_binary, socket_path, "list-sessions", "-F", "#S").stdout.splitlines():
-            _tmux(tmux_binary, socket_path, "kill-session", "-t", listed)
-        _tmux(tmux_binary, socket_path, "kill-server")
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        _cleanup_all_tmux_sessions(tmux_binary, socket_path)
+        _remove_owned_directory(socket_dir, "tmux socket directory")
 
 
 def _wait_for_pane_text(tmux_binary: str, socket_path: Path, session: str, marker: str, timeout: float = 8.0) -> str:
@@ -928,12 +1001,10 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
             assert matched, f"{client}/{scenario.name}: expected evidence/state was not observed; evidence: {evidence_path}"
         return evidence
     finally:
-        _tmux(tmux_binary, socket_path, "kill-session", "-t", session)
-        _tmux(tmux_binary, socket_path, "kill-server")
-        if fake.poll() is None:
-            fake.send_signal(signal.SIGTERM)
-            fake.wait(timeout=5)
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        _cleanup_tmux_session(tmux_binary, socket_path, session)
+        _cleanup_tmux_server(tmux_binary, socket_path)
+        _stop_process(fake, "fake LLM server")
+        _remove_owned_directory(socket_dir, "tmux socket directory")
 
 
 @pytest.mark.e2e

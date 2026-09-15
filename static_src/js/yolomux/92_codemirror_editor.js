@@ -151,54 +151,83 @@ function codeMirrorSplitSyncExtension(api, panel, path) {
 
 function codeMirrorContextMenuSelectionExtension(api) {
   return safeCodeMirrorExtension('context menu selection', () => {
-    let pending = null;
-    let clearTimer = null;
-    const handlers = api.EditorView.domEventHandlers({
-      contextmenu(event, view) {
-        // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
-        // CodeMirror then observes that DOM change and replaces its own selection, which is especially
-        // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = view.state.selection;
-        const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
-        if (!clickedSelection) return false;
-        const panel = view.dom.closest('.file-editor-panel');
-        const path = panel?.dataset?.filePath || '';
-        if (previewKindForPath(path) === 'markdown') {
-          const range = selection.main;
-          const line = view.state.doc.lineAt(range.from);
-          const selectedText = view.state.sliceDoc(range.from, range.to);
-          if (selectedText.trim()) {
-            event.preventDefault();
-            event.stopPropagation();
-            markdownEditorContextMenu(view, panel, path, event, {
-              selectedText,
-              sourceLine: line.number,
-            });
-            return true;
+    if (!api.ViewPlugin) return [];
+    return api.ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.view = view;
+        this.pending = null;
+        this.clearTimer = 0;
+        this.captureSelectionAtRightMouseDown = event => {
+          if (event.button !== 2 || !this.view.dom.contains(event.target)) return;
+          const selection = this.view.state.selection;
+          const position = this.view.posAtCoords({x: event.clientX, y: event.clientY});
+          if (!Number.isFinite(position) || !selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to)) return;
+          // Capture the selection before CodeMirror/contenteditable processes the native right
+          // mousedown. The later contextmenu coordinates can map to the collapsed cursor, so the
+          // captured in-selection decision is the authoritative gesture state.
+          this.pending = {selection, position};
+          clearTimeout(this.clearTimer);
+          this.clearTimer = setTimeout(() => {
+            if (this.pending?.selection === selection) this.pending = null;
+          }, 250);
+        };
+        this.handleContextMenu = event => {
+          if (!this.view.dom.contains(event.target)) return;
+          // Capture-phase listeners run before CodeMirror's own contextmenu handling. Chrome can
+          // otherwise collapse contenteditable's selection before CodeMirror observes the event.
+          const captured = this.pending;
+          this.pending = null;
+          clearTimeout(this.clearTimer);
+          this.clearTimer = 0;
+          const selection = captured?.selection || this.view.state.selection;
+          const clickedSelection = captured !== null && captured !== undefined
+            || selection.ranges.some(range => !range.empty);
+          if (!clickedSelection) return;
+          const panel = this.view.dom.closest('.file-editor-panel');
+          const path = panel?.dataset?.filePath || '';
+          // Restore before opening any editor menu. The native right-click transaction may have
+          // collapsed the selection, and the Markdown menu reads the live CodeMirror selection
+          // when its formatting actions are invoked.
+          const restoreSelection = () => {
+            if (!this.view.dom?.isConnected || this.view.state.selection.eq(selection)) return;
+            this.view.dispatch({selection});
+            updateCodeMirrorCursorStatus(panel);
+          };
+          restoreSelection();
+          queueMicrotask(restoreSelection);
+          requestAnimationFrame(restoreSelection);
+          if (previewKindForPath(path) === 'markdown') {
+            const range = selection.main;
+            const line = this.view.state.doc.lineAt(range.from);
+            const selectedText = this.view.state.sliceDoc(range.from, range.to);
+            if (selectedText.trim()) {
+              event.preventDefault();
+              event.stopPropagation();
+              markdownEditorContextMenu(this.view, panel, path, event, {
+                selectedText,
+                sourceLine: line.number,
+              });
+              return;
+            }
           }
-        }
-        const captured = {selection};
-        pending = captured;
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => {
-          if (pending === captured) pending = null;
-        }, 250);
-        return false;
-      },
+          // Restore synchronously while handling contextmenu. Waiting for an update listener loses the
+          // race when the native right-mousedown does not produce a CodeMirror selection transaction.
+        };
+        // The W3C pointer path used by Chromium/Selenium can deliver pointerdown before the
+        // synthesized mousedown has a chance to run; both events must feed the same capture owner.
+        document.addEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('contextmenu', this.handleContextMenu, true);
+      }
+
+      destroy() {
+        document.removeEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('contextmenu', this.handleContextMenu, true);
+        clearTimeout(this.clearTimer);
+        this.pending = null;
+      }
     });
-    const restore = api.EditorView.updateListener.of(update => {
-      const captured = pending;
-      if (!captured || !update.selectionSet || update.state.selection.eq(captured.selection)) return;
-      pending = null;
-      clearTimeout(clearTimer);
-      queueMicrotask(() => {
-        if (!update.view.dom?.isConnected) return;
-        update.view.dispatch({selection: captured.selection});
-        updateCodeMirrorCursorStatus(update.view.dom.closest('.file-editor-panel'));
-      });
-    });
-    return [handlers, restore];
   });
 }
 
@@ -2555,7 +2584,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
-  flushProseMirrorSource(contentPanel, statePath);
+  flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
   syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});

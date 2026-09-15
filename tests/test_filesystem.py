@@ -3240,7 +3240,7 @@ def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_
 
     limited = filesystem.git_history(str(repo.root), limit=999)
     clamped = filesystem.git_history(str(repo.root), limit=0)
-    assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 100
+    assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 200
     assert len(clamped["commits"]) == 1
 
     monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1400)

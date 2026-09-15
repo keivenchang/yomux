@@ -33,6 +33,37 @@ def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch): 
 def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch): browser_harness_lifecycle.assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch)
 
 
+def test_new_chrome_driver_uses_explicit_container_binaries(monkeypatch, tmp_path):
+    chrome_path = tmp_path / "chromium"
+    driver_path = tmp_path / "chromedriver"
+    chrome_path.write_text("", encoding="utf-8")
+    driver_path.write_text("", encoding="utf-8")
+    chrome_path.chmod(0o755)
+    driver_path.chmod(0o755)
+    monkeypatch.setenv("CHROME_BIN", str(chrome_path))
+    monkeypatch.setenv("CHROMEDRIVER_BIN", str(driver_path))
+    captured = {}
+
+    class FakeDriver:
+        current_window_handle = "window"
+
+        def execute_script(self, _source):
+            return None
+
+    def fake_chrome(*, service, options):
+        captured["service"] = service
+        captured["binary"] = options.binary_location
+        return FakeDriver()
+
+    monkeypatch.setattr(browser_layout_module.webdriver, "Chrome", fake_chrome)
+    monkeypatch.setattr(browser_layout_module, "register_browser_new_document_script", lambda *_args, **_kwargs: None)
+    driver = browser_layout_module.new_chrome_driver()
+
+    assert driver.current_window_handle == "window"
+    assert captured["binary"] == str(chrome_path)
+    assert captured["service"].path == str(driver_path)
+
+
 def test_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch): browser_harness_lifecycle.assert_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch)
 def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path): browser_harness_lifecycle.assert_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path)
 
@@ -6430,7 +6461,7 @@ def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(brows
         });
         """
     )
-    assert all(item["actual"] == item["expected"] for item in inactive_backgrounds)
+    assert all(item["actual"] == item["expected"] for item in inactive_backgrounds), inactive_backgrounds
 
 
 def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp_path):
@@ -11437,7 +11468,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             media_url,
         )
     )
-    assert_only_expected_browser_network_error(browser, url=media_url, reason="404")
+    assert_only_expected_browser_network_error(browser, url=media_url, reason="ERR_PROXY_CONNECTION_FAILED", count=3)
     browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
     journey.enter("reload-paging-and-cleanup")
     reload_result = browser.execute_async_script(
@@ -14591,17 +14622,20 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
           const {frame} = window.__yolomuxTestHelpers;
-          for (let attempt = 0; attempt < 220; attempt += 1) {
+              for (let attempt = 0; attempt < 220; attempt += 1) {
             const panel = panelNodes.get(item);
             if (panel?._cmMode === 'diff' && panel._cmView?.contentDOM) {
-              const view = panel._cmView;
-              view.focus();
-              view.dispatch({selection: {anchor: 0, head: content.length}});
-              await frame();
-              await frame();
-              window.__editorContextMenuCount = 0;
-              view.contentDOM.addEventListener('contextmenu', () => { window.__editorContextMenuCount += 1; });
-              return {item, anchor: view.state.selection.main.anchor, head: view.state.selection.main.head};
+                  const view = panel._cmView;
+                  view.focus();
+                  view.dispatch({selection: {anchor: 0, head: content.length}});
+                  await frame();
+                  await frame();
+                  window.__editorContextMenuCount = 0;
+                  view.contentDOM.dataset.rightClickTarget = 'true';
+                  document.addEventListener('contextmenu', event => {
+                    if (view.dom.contains(event.target)) window.__editorContextMenuCount += 1;
+                  }, true);
+                  return {item, anchor: view.state.selection.main.anchor, head: view.state.selection.main.head};
             }
             await frame();
           }
@@ -14610,7 +14644,7 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
         """
     )
     assert "error" not in setup, setup
-    content = browser.find_element("css selector", ".file-editor-panel .cm-content")
+    content = browser.find_element("css selector", '.file-editor-panel [data-right-click-target="true"]')
     fast_pointer_actions(browser).context_click(content).perform()
     after = browser.execute_async_script(
         """
@@ -14621,9 +14655,9 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
           done({
             anchor: selection.anchor,
             head: selection.head,
-            selectedChars: Math.abs(selection.to - selection.from),
-            contextMenus: window.__editorContextMenuCount,
-            status: panel.querySelector('.file-editor-cursor-status')?.textContent || '',
+                selectedChars: Math.abs(selection.to - selection.from),
+                contextMenus: window.__editorContextMenuCount,
+                    status: panel.querySelector('.file-editor-cursor-status')?.textContent || '',
           });
         }));
         """

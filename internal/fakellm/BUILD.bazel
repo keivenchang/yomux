@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fakellm_lib",
+    srcs = ["server.go"],
+    importpath = "github.com/keivenchang/yolomux/internal/fakellm",
+)
+
+go_test(
+    name = "fakellm_test",
+    srcs = ["server_test.go"],
+    embed = [":fakellm_lib"],
+)
+
+go_test(
+    name = "fakellm_race_test",
+    srcs = ["server_test.go"],
+    embed = [":fakellm_lib"],
+    race = "on",
+)

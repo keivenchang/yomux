@@ -1,0 +1,15 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "fake_llm_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/keivenchang/yolomux/cmd/fake-llm",
+    deps = ["//internal/fakellm:fakellm_lib"],
+)
+
+go_binary(
+    name = "fake_llm",
+    embed = [":fake_llm_lib"],
+)

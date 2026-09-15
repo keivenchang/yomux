@@ -4387,7 +4387,7 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
           markdown: {
             heading: mdPreview.querySelector('h1')?.textContent || '',
             tableCells: Array.from(mdPreview.querySelectorAll('table th, table td')).map(node => node.textContent),
-            checkboxCount: mdPreview.querySelectorAll('input.prosemirror-task-checkbox').length,
+            checkboxCount: mdPreview.querySelectorAll('input.markdown-task-checkbox').length,
             imageSrc: image?.getAttribute('src') || '',
             imageNaturalWidth: image?.naturalWidth || 0,
             imageNaturalHeight: image?.naturalHeight || 0,
@@ -4469,12 +4469,13 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert metrics["markdown"]["heading"] == "Offline Preview", metrics
     assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
     assert metrics["markdown"]["checkboxCount"] == 1, metrics
-    assert metrics["markdown"]["imageSrc"].startswith("/api/fs/raw?path="), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["markdown"]["imageSrc"], metrics
+    assert metrics["markdown"]["imageSrc"].startswith("blob:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["rawRequests"], metrics
     assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
     assert metrics["markdown"]["imageTitle"] == "title", metrics
     assert metrics["markdown"]["scriptCount"] == 0 and metrics["markdown"]["svgCount"] == 0, metrics
-    assert metrics["markdown"]["codeHtml"] == "const value = 1;", metrics
+    assert metrics["markdown"]["codeHtml"] != "const value = 1;", metrics
+    assert "code-keyword" in metrics["markdown"]["codeHtml"] and "const" in metrics["markdown"]["codeHtml"], metrics
     assert metrics["validJson"]["kind"] == "structured", metrics
     assert "JSON preview" in metrics["validJson"]["header"], metrics
     assert '"a": 1' in metrics["validJson"]["text"], metrics
@@ -4704,18 +4705,18 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     )
     assert "error" not in metrics, metrics
     assert metrics["initialImages"]["local"]["exists"] is True, metrics
-    assert metrics["initialImages"]["local"]["src"].startswith("/api/fs/raw?path="), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["initialImages"]["local"]["src"], metrics
+    assert metrics["initialImages"]["local"]["src"].startswith("blob:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["rawRequests"], metrics
     assert metrics["initialImages"]["local"]["naturalWidth"] > 0 and metrics["initialImages"]["local"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
-    assert metrics["initialImages"]["bare"]["src"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["initialImages"]["bare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["bare"]["naturalWidth"] > 0 and metrics["initialImages"]["bare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
     assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
-    assert metrics["initialImages"]["htmlBare"]["src"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["initialImages"]["htmlBare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["htmlBare"]["naturalWidth"] > 0 and metrics["initialImages"]["htmlBare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
@@ -4731,7 +4732,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
     assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
     assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
-    assert metrics["initialImages"]["svg"]["src"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["initialImages"]["svg"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["svg"]["naturalWidth"] > 0 and metrics["initialImages"]["svg"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
     for expected in (
@@ -5702,6 +5703,8 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
+        let debugPanel = null;
+        let debugView = null;
         (async () => {
           try {
             const path = '/home/test/yolomux.dev/PREVIEW.md';
@@ -5715,6 +5718,7 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
             setFileEditorViewMode(path, 'split', item);
             addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item);
+            debugPanel = panel;
             panel.classList.add('active-pane');
             panel.style.width = '980px';
             panel.style.height = '560px';
@@ -5724,6 +5728,7 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
             const waitFor = window.__yolomuxTestWaitFor;
             await waitFor(() => panel._pmView);
             const view = panel._pmView;
+            debugView = view;
             const paragraph = view.state.doc.lastChild;
             const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
             const nextText = 'Changed wording';
@@ -5731,7 +5736,7 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
               .insertText(nextText, paragraphStart, paragraphStart + paragraph.content.size)
               .addMark(paragraphStart, paragraphStart + nextText.length, view.state.schema.marks.em.create());
             view.dispatch(transaction);
-            await waitFor(() => fileState.get(path)?.content === '# Title\\n\\n*Changed wording*');
+            await waitFor(() => fileState.get(path)?.content === '# Title\\n\\n*Changed wording*\\n');
             done({
               content: fileState.get(path)?.content || '',
               dirty: fileState.get(path)?.dirty === true,
@@ -5741,16 +5746,26 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
               rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            done({
+              error: String(error?.stack || error),
+              diagnostics: {
+                content: fileState.get('/home/test/yolomux.dev/PREVIEW.md')?.content || '',
+                serialized: debugPanel && typeof serializeProseMirrorSource === 'function' ? serializeProseMirrorSource(debugPanel) : '',
+                pmSource: debugPanel?._pmSource || '',
+                documentText: debugView?.state?.doc?.textContent || '',
+              },
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
           }
         })();
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "# Title\n\n*Changed wording*", metrics
+    assert metrics["content"] == "# Title\n\n*Changed wording*\n", metrics
     assert metrics["dirty"] is True, metrics
     assert metrics["editable"] is True, metrics
-    assert metrics["serialized"] == "# Title\n\n*Changed wording*", metrics
+    assert metrics["serialized"] == "# Title\n\n*Changed wording*\n", metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -6082,8 +6097,8 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
     assert metrics["light"]["callout"] == "rgb(255, 248, 204)", metrics
     assert metrics["light"]["calloutText"] == metrics["light"]["expectedLightCallout"]["color"], metrics
     assert metrics["light"]["calloutStrong"] == metrics["light"]["expectedLightCallout"]["color"], metrics
-    assert metrics["light"]["calloutCode"] == "rgb(17, 24, 39)", metrics
-    assert metrics["light"]["calloutCodeBg"] == "rgb(243, 244, 246)", metrics
+    assert metrics["light"]["calloutCode"] == metrics["light"]["expectedInlineCode"]["color"], metrics
+    assert metrics["light"]["calloutCodeBg"] == metrics["light"]["expectedInlineCode"]["background"], metrics
 
 
 def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
@@ -7095,7 +7110,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                   headingColor: heading.color,
                   headingBg: heading.backgroundColor,
                       linkColor: link.color,
-                      codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
+                          codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
                       codeText: preview.querySelector('pre code')?.textContent || '',
                   expectedVanilla: {{
                         preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', previewSurface),

@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "finder_lib",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    importpath = "github.com/keivenchang/yolomux/internal/finder",
+)
+
+go_test(
+    name = "finder_test",
+    srcs = glob(["*_test.go"]),
+    embed = [":finder_lib"],
+)
+
+go_test(
+    name = "finder_race_test",
+    srcs = glob(["*_test.go"]),
+    embed = [":finder_lib"],
+    race = "on",
+)

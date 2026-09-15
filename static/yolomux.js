@@ -797,6 +797,7 @@ let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
 const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
+  retired: false,
   inFlight: false,
   request: null,
   activeKey: '',
@@ -1884,6 +1885,17 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  retireBackgroundProducers() {
+    serverWatchRootsState.retired = true;
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
+    serverWatchRootsState.scheduledKey = '';
+    serverWatchRootsState.pendingOptions = {};
+    serverWatchRootsState.watchDiffTrailing = null;
+    return this.operationState();
+  },
   async awaitPendingOperationReceipts() {
     while (true) {
       const pending = Array.from(apiOperationState.pending.values());
@@ -1958,6 +1970,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
       watchRootsInFlight,
       watchRootsBaselinePending,
       finderVisible,
+      watchRootsRetired: serverWatchRootsState.retired === true,
       finderWatchReady: !finderVisible || Boolean(fileExplorerFilesystemWatchToken),
     };
   },
@@ -3681,6 +3694,9 @@ function startApiOperationTransport(record) {
   // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
   // cover a terminal published before the server subscribes it.
   if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
+  if (apiOperationState.repairs.has(record?.id) && typeof repairClientEventOperationTerminalResource === 'function') {
+    repairClientEventOperationTerminalResource(`operation_terminal:${record.id}`);
+  }
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -8755,6 +8771,22 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
+function clipboardImageBlobFor(image) {
+  const path = String(image?.dataset?.resolvedPath || '');
+  const url = String(image?.currentSrc || image?.src || '');
+  if (path && typeof fetchRawFileBlob === 'function') {
+    return fetchRawFileBlob(path).then(result => {
+      if (!result?.ok || !result.blob) throw result?.error || new Error(`Unable to read image: ${path}`);
+      return result.blob;
+    });
+  }
+  if (!url) return Promise.reject(new Error('Image source is unavailable'));
+  return fetch(url, {credentials: 'same-origin'}).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  });
+}
+
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
@@ -9334,14 +9366,12 @@ function clipboardImageSourceUrl(image) {
 
 async function copyMarkdownPreviewImageToClipboard(image, button) {
   const url = clipboardImageSourceUrl(image);
-  if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+  const path = String(image?.dataset?.resolvedPath || '');
+  if ((!url && !path) || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
     return;
   }
-  const imageBlob = fetch(url, {credentials: 'same-origin'}).then(response => {
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.blob();
-  });
+  const imageBlob = clipboardImageBlobFor(image);
   const dataUrl = imageBlob.then(blob => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -9359,7 +9389,7 @@ async function copyMarkdownPreviewImageToClipboard(image, button) {
     })]);
     showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
   } catch (error) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
   }
 }
 
@@ -22273,6 +22303,7 @@ async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) 
 }
 
 function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  if (serverWatchRootsState.retired) return Promise.resolve({retired: true});
   queueFileExplorerWatchDiffRefresh(payload, options);
   if (serverWatchRootsState.watchDiffPromise) return serverWatchRootsState.watchDiffPromise;
   const owned = (async () => {
@@ -30485,6 +30516,7 @@ function serverWatchRootsForceRequestCompleted(signature, options = {}) {
 }
 
 function syncServerWatchRootsNow(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -30560,6 +30592,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
 }
 
 function syncServerWatchRoots(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
   const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);
@@ -32654,7 +32687,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button);
+  updateEditorThemeButton(button, {includeVanilla: false});
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));
@@ -69464,7 +69497,7 @@ function createFileEditorPanel(item) {
         renderFileEditorPanel(panel, item);
       }
     },
-    'editor-theme': () => cycleEditorThemeMode(),
+    'editor-theme': () => cycleEditorThemeMode({includeVanilla: fileEditorPanelState(panel)?.kind === 'text'}),
   }, {skipDisabled: false});
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -70447,8 +70480,7 @@ function markdownPreviewCopySelectionWithStyle(context) {
   if (!wrapper.innerHTML || (!text && !images.length)) return false;
   const clipboard = globalThis.navigator?.clipboard;
   if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
-    const imageData = images.map(image => fetch(clipboardImageSourceUrl(image), {credentials: 'same-origin'})
-      .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
+    const imageData = images.map(image => clipboardImageBlobFor(image)
       .then(blob => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve({blob, dataUrl: String(reader.result)});
@@ -71106,6 +71138,10 @@ function prosemirrorPreviewImageSource(image, path, options = {}) {
       image.classList.add('prosemirror-image-error');
       image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
     },
+    onDecodeFailure: error => {
+      image.classList.add('prosemirror-image-error');
+      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+    },
   }).then(result => result.ok === true);
 }
 
@@ -71149,8 +71185,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser does not discard a load from a detached image.
+    // request after attachment so the browser cannot start a relative request before authentication.
     img.dataset.markdownRawPath = target.path;
+    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -71833,10 +71870,28 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    img.src = rawFileUrl(rawPath);
+    if (options.snapshot === true) {
+      // A snapshot is copied into another document. Blob URLs belong to the source document's
+      // origin/URL store and become unusable there, so retain the authenticated same-origin URL
+      // for the destination document to request with its own cookie context.
+      img.src = rawFileUrl(rawPath);
+    } else if (img.isConnected) {
+      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
+        onFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+        onDecodeFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+      }));
+    }
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -71845,7 +71900,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages]);
+  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -71857,14 +71912,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (true) {
-    container.querySelectorAll('pre code').forEach(block => {
-      if (typeof window.hljs !== 'undefined') {
-        try { window.hljs.highlightElement(block); } catch (_) {}
-      }
-      applyMarkdownFenceFallbackHighlight(block);
-    });
-  }
+  refreshMarkdownFenceHighlights(container);
 }
 
 function markdownFenceLanguage(block) {
@@ -71879,6 +71927,7 @@ function markdownFenceLanguage(block) {
 
 function applyMarkdownFenceHighlight(block) {
   if (!block) return;
+  if (block.classList?.contains('editor-highlight-code')) return;
   const language = markdownFenceLanguage(block);
   if (language && !Array.from(block.classList).some(className => /^(?:language|lang)-/.test(className))) {
     block.classList.add(`language-${language}`);
@@ -73603,14 +73652,14 @@ function mermaidPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
 }
 
-function renderMarkdownPreviewStrategy({container, path, text, state, context, signature}) {
+function renderMarkdownPreviewStrategy({container, path, text, state, context, signature, snapshot}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
   if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true, snapshot});
   return true;
 }
 
@@ -73765,7 +73814,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
-  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext, snapshot: options.snapshot === true});
   refreshMarkdownFenceHighlights(container);
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {
@@ -74657,7 +74706,7 @@ function previewSnapshotScratch(path, text, options = {}) {
     });
     document.body.appendChild(scratch);
   }
-  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
+  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout', snapshot: true});
   scratch.hidden = false;
   return scratch;
 }
@@ -75527,54 +75576,83 @@ function codeMirrorSplitSyncExtension(api, panel, path) {
 
 function codeMirrorContextMenuSelectionExtension(api) {
   return safeCodeMirrorExtension('context menu selection', () => {
-    let pending = null;
-    let clearTimer = null;
-    const handlers = api.EditorView.domEventHandlers({
-      contextmenu(event, view) {
-        // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
-        // CodeMirror then observes that DOM change and replaces its own selection, which is especially
-        // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = view.state.selection;
-        const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const clickedSelection = selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
-        if (!clickedSelection) return false;
-        const panel = view.dom.closest('.file-editor-panel');
-        const path = panel?.dataset?.filePath || '';
-        if (previewKindForPath(path) === 'markdown') {
-          const range = selection.main;
-          const line = view.state.doc.lineAt(range.from);
-          const selectedText = view.state.sliceDoc(range.from, range.to);
-          if (selectedText.trim()) {
-            event.preventDefault();
-            event.stopPropagation();
-            markdownEditorContextMenu(view, panel, path, event, {
-              selectedText,
-              sourceLine: line.number,
-            });
-            return true;
+    if (!api.ViewPlugin) return [];
+    return api.ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.view = view;
+        this.pending = null;
+        this.clearTimer = 0;
+        this.captureSelectionAtRightMouseDown = event => {
+          if (event.button !== 2 || !this.view.dom.contains(event.target)) return;
+          const selection = this.view.state.selection;
+          const position = this.view.posAtCoords({x: event.clientX, y: event.clientY});
+          if (!Number.isFinite(position) || !selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to)) return;
+          // Capture the selection before CodeMirror/contenteditable processes the native right
+          // mousedown. The later contextmenu coordinates can map to the collapsed cursor, so the
+          // captured in-selection decision is the authoritative gesture state.
+          this.pending = {selection, position};
+          clearTimeout(this.clearTimer);
+          this.clearTimer = setTimeout(() => {
+            if (this.pending?.selection === selection) this.pending = null;
+          }, 250);
+        };
+        this.handleContextMenu = event => {
+          if (!this.view.dom.contains(event.target)) return;
+          // Capture-phase listeners run before CodeMirror's own contextmenu handling. Chrome can
+          // otherwise collapse contenteditable's selection before CodeMirror observes the event.
+          const captured = this.pending;
+          this.pending = null;
+          clearTimeout(this.clearTimer);
+          this.clearTimer = 0;
+          const selection = captured?.selection || this.view.state.selection;
+          const clickedSelection = captured !== null && captured !== undefined
+            || selection.ranges.some(range => !range.empty);
+          if (!clickedSelection) return;
+          const panel = this.view.dom.closest('.file-editor-panel');
+          const path = panel?.dataset?.filePath || '';
+          // Restore before opening any editor menu. The native right-click transaction may have
+          // collapsed the selection, and the Markdown menu reads the live CodeMirror selection
+          // when its formatting actions are invoked.
+          const restoreSelection = () => {
+            if (!this.view.dom?.isConnected || this.view.state.selection.eq(selection)) return;
+            this.view.dispatch({selection});
+            updateCodeMirrorCursorStatus(panel);
+          };
+          restoreSelection();
+          queueMicrotask(restoreSelection);
+          requestAnimationFrame(restoreSelection);
+          if (previewKindForPath(path) === 'markdown') {
+            const range = selection.main;
+            const line = this.view.state.doc.lineAt(range.from);
+            const selectedText = this.view.state.sliceDoc(range.from, range.to);
+            if (selectedText.trim()) {
+              event.preventDefault();
+              event.stopPropagation();
+              markdownEditorContextMenu(this.view, panel, path, event, {
+                selectedText,
+                sourceLine: line.number,
+              });
+              return;
+            }
           }
-        }
-        const captured = {selection};
-        pending = captured;
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => {
-          if (pending === captured) pending = null;
-        }, 250);
-        return false;
-      },
+          // Restore synchronously while handling contextmenu. Waiting for an update listener loses the
+          // race when the native right-mousedown does not produce a CodeMirror selection transaction.
+        };
+        // The W3C pointer path used by Chromium/Selenium can deliver pointerdown before the
+        // synthesized mousedown has a chance to run; both events must feed the same capture owner.
+        document.addEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('contextmenu', this.handleContextMenu, true);
+      }
+
+      destroy() {
+        document.removeEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('contextmenu', this.handleContextMenu, true);
+        clearTimeout(this.clearTimer);
+        this.pending = null;
+      }
     });
-    const restore = api.EditorView.updateListener.of(update => {
-      const captured = pending;
-      if (!captured || !update.selectionSet || update.state.selection.eq(captured.selection)) return;
-      pending = null;
-      clearTimeout(clearTimer);
-      queueMicrotask(() => {
-        if (!update.view.dom?.isConnected) return;
-        update.view.dispatch({selection: captured.selection});
-        updateCodeMirrorCursorStatus(update.view.dom.closest('.file-editor-panel'));
-      });
-    });
-    return [handlers, restore];
   });
 }
 
@@ -77931,7 +78009,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
-  flushProseMirrorSource(contentPanel, statePath);
+  flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
   syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
@@ -87839,7 +87917,10 @@ function applyClientEventDemand(timer = clientEventTransportState.demandTimer, s
   const signature = clientEventDemandSignature(descriptor);
   const sameDemand = signature === clientEventTransportState.demandSignature;
   clientEventTransportState.demand = descriptor;
-  if (sameDemand && clientEventTransportState.source) return false;
+  if (sameDemand && clientEventTransportState.source) {
+    retryPendingOperationTerminalRepairs();
+    return false;
+  }
   clientEventTransportState.demandSignature = signature;
   if (!descriptor.channels.length) {
     if (!sameDemand) closeClientEventStream();

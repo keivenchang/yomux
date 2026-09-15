@@ -1348,14 +1348,14 @@ function mermaidPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
 }
 
-function renderMarkdownPreviewStrategy({container, path, text, state, context, signature}) {
+function renderMarkdownPreviewStrategy({container, path, text, state, context, signature, snapshot}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
   if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true, snapshot});
   return true;
 }
 
@@ -1510,7 +1510,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
   container.classList.toggle('vanilla-preview-body', vanilla);
   container.classList.toggle('editor-preview-vanilla', vanilla);
-  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext, snapshot: options.snapshot === true});
   refreshMarkdownFenceHighlights(container);
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {

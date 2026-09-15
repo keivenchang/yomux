@@ -3863,10 +3863,12 @@ class StatsCurrentService:
                 entries[key] = ring_read.entry
 
         expected_cursor = (candidate.source_generation, candidate.cache_generation)
+        demanded_resolutions = {key[1] for key in keys}
         with self.cache_lock:
             self._ring_published_cursors.update({
                 resolution_seconds: expected_cursor
                 for resolution_seconds in resolutions
+                if resolution_seconds in demanded_resolutions
             })
             for key, entry in entries.items():
                 if self._entry_cursor(entry) != expected_cursor:

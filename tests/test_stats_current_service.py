@@ -5167,17 +5167,17 @@ def test_the_startup_ring_cursor_floor_alone_refuses_an_otherwise_servable_snaps
 
     Both arms below are byte-identical in every way that the readiness item blamed -- same
     store, same cold build, and `_pending_ring_dirty` holding the WHOLE ring in both. The only
-    difference is one entry in `_ring_published_cursors`, which on a real restart is written by
-    `_repair_startup_owed_slots` -> `_publish_ring_views`.
+    difference is one manually injected entry in `_ring_published_cursors`. A real restart must
+    not create that entry for a view that was never demanded; `_publish_ring_views` now only
+    installs a freshness floor for active public views.
 
-    `_publish_ring_views` sets that cursor for every PUBLISHED RESOLUTION (`service.py:3510`,
-    unconditional), but populates `_ring_views` only for DEMANDED views, because
-    `_ring_view_keys` filters on `_view_demanded`. At startup nothing has been demanded yet, so
-    the floor is installed for a view that was never built, and `_published_snapshot_owner`
-    hands back `shared_entry` -- None -- instead of the perfectly current warm entry.
+    `_ring_view_keys` filters on `_view_demanded`, so an injected floor still models the invalid
+    state this test guards: the floor is present for a view with no ring owner and
+    `_published_snapshot_owner` hands back `shared_entry` -- None -- instead of the perfectly
+    current warm entry.
 
-    So draining the ring before readiness cannot fix this and would publish MORE resolutions,
-    installing MORE floors against views that still do not exist.
+    Draining the ring before readiness is therefore safe only when it does not install floors for
+    undemanded views.
     """
     clock = 100_000.0
 
@@ -5223,3 +5223,22 @@ def test_the_startup_ring_cursor_floor_alone_refuses_an_otherwise_servable_snaps
     assert refused_metadata["status"] == "pending"
     assert refused_metadata["retry_after_seconds"] == 1
     assert refused_binary == b""
+
+
+def test_ring_publication_does_not_install_a_floor_for_undemanded_views(tmp_path):
+    """A restart repair must not strand retained warm entries behind a nonexistent ring owner."""
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    candidate = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), ()),
+        source_generation=7,
+        cache_generation=8,
+        generated_at=100_000.0,
+        observed_until=100_000.0,
+    )
+
+    service._publish_ring_views(object(), candidate, frozenset({60}))
+
+    assert service._ring_published_cursors == {}
+    assert service._ring_views == {}

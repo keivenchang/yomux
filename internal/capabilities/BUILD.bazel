@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "capabilities_lib",
+    srcs = ["catalog.go"],
+    importpath = "github.com/keivenchang/yolomux/internal/capabilities",
+)
+
+go_test(
+    name = "capabilities_test",
+    srcs = ["catalog_test.go"],
+    embed = [":capabilities_lib"],
+)
+
+go_test(
+    name = "capabilities_race_test",
+    srcs = ["catalog_test.go"],
+    embed = [":capabilities_lib"],
+    race = "on",
+)

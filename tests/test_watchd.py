@@ -923,7 +923,7 @@ def test_watchd_slow_generation_bump_does_not_block_an_unrelated_status_request(
     nested_repo.mkdir(parents=True)
     settings_path = root / "settings.json"
     settings_path.write_text("{}", encoding="utf-8")
-    lease = _lease(service, 303)
+    lease = _lease(service, os.getpid() + 1000)
     descriptor = _descriptor(root)
     # A repo root is never scanned, so every changed path is matched against it
     # one by one. That match loop is the generation bump this test holds open.

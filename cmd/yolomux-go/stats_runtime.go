@@ -942,6 +942,7 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		deltaRequest := r.Clone(r.Context())
 		values := deltaRequest.URL.Query()
 		values.Del("resolution")
+		values.Del("since_generation")
 		values.Set("resolution_seconds", strconv.Itoa(query.resolution))
 		values.Set("after_cache_generation", strconv.FormatInt(cacheGeneration, 10))
 		values.Set("after_revision", strconv.FormatInt(revision, 10))

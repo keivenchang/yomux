@@ -90,6 +90,7 @@ pytest.importorskip("selenium")
 webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
+ChromeService = pytest.importorskip("selenium.webdriver.chrome.service").Service
 TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
 WebDriverException = pytest.importorskip("selenium.common.exceptions").WebDriverException
 SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
@@ -292,9 +293,29 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if parsed.path in {"/api/fs/list", "/api/fs/fast/list"}:
+        if parsed.path == "/api/fs/list":
             requested_path = parse_qs(parsed.query).get("path", ["/home/test"])[-1]
             body = json.dumps({"path": requested_path, "entries": []}, separators=(",", ":")).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/fast/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
+            if requested_path == "/missing":
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                body = b"File not found\n"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            payload = {"path": requested_path, "entries": []}
+            if requested_path == "/":
+                payload["parent"] = None
+            body = json.dumps(payload).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -321,23 +342,6 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
                 content_type = "image/gif"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if parsed.path == "/api/fs/fast/list":
-            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
-            if requested_path != "/":
-                self.send_response(HTTPStatus.NOT_FOUND)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                body = b"File not found\n"
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            body = json.dumps({"path": "/", "parent": None, "entries": []}).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -432,18 +436,25 @@ def remove_browser_test_new_document_scripts(driver):
 
 
 def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profile_dir: Path | None = None):
-    # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
-    # the Linux lookup first, then use the canonical executable inside either
-    # common macOS bundle so browser regressions do not silently skip there.
-    chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or next((str(path) for path in (
-            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ) if path.is_file()), None)
-    )
+    configured_chrome = os.environ.get("CHROME_BIN", "").strip()
+    if configured_chrome:
+        chrome_path = Path(configured_chrome)
+        if not chrome_path.is_file() or not os.access(chrome_path, os.X_OK):
+            raise RuntimeError(f"CHROME_BIN is not an executable file: {configured_chrome}")
+        chrome = str(chrome_path)
+    else:
+        # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
+        # the Linux lookup first, then use the canonical executable inside either
+        # common macOS bundle so browser regressions do not silently skip there.
+        chrome = (
+            shutil.which("google-chrome")
+            or shutil.which("chromium")
+            or shutil.which("chromium-browser")
+            or next((str(path) for path in (
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+            ) if path.is_file()), None)
+        )
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
     options = Options()
@@ -459,7 +470,14 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     if profile_dir is not None:
         profile_dir.mkdir(parents=True, exist_ok=True)
         options.add_argument(f"--user-data-dir={profile_dir}")
-    driver = webdriver.Chrome(options=options)
+    configured_driver = os.environ.get("CHROMEDRIVER_BIN", "").strip()
+    if configured_driver:
+        driver_path = Path(configured_driver)
+        if not driver_path.is_file() or not os.access(driver_path, os.X_OK):
+            raise RuntimeError(f"CHROMEDRIVER_BIN is not an executable file: {configured_driver}")
+        driver = webdriver.Chrome(service=ChromeService(executable_path=str(driver_path)), options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
     driver._yolomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)

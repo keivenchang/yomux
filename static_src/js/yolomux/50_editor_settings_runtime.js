@@ -218,7 +218,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button);
+  updateEditorThemeButton(button, {includeVanilla: false});
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));

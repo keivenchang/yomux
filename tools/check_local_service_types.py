@@ -8,6 +8,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -33,11 +34,15 @@ def main() -> int:
     if mypy is None:
         print("local-service type gate requires mypy", file=sys.stderr)
         return 2
-    completed = subprocess.run(
-        [mypy, "--follow-imports=skip", "--ignore-missing-imports", *static_slice()],
-        cwd=REPO_ROOT,
-        check=False,
-    )
+    # The Docker test mount is deliberately read-only. Keep mypy's SQLite cache in a unique
+    # disposable directory so parallel worktrees cannot share stale entries or mutate the source
+    # checkout. TemporaryDirectory also removes the cache after this one bounded invocation.
+    with tempfile.TemporaryDirectory(prefix="yolomux-mypy-") as cache_dir:
+        completed = subprocess.run(
+            [mypy, "--cache-dir", cache_dir, "--follow-imports=skip", "--ignore-missing-imports", *static_slice()],
+            cwd=REPO_ROOT,
+            check=False,
+        )
     return completed.returncode
 
 

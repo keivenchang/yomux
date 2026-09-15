@@ -509,7 +509,7 @@ function previewSnapshotScratch(path, text, options = {}) {
     });
     document.body.appendChild(scratch);
   }
-  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
+  renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout', snapshot: true});
   scratch.hidden = false;
   return scratch;
 }

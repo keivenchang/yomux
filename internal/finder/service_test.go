@@ -1178,6 +1178,18 @@ func TestGitHistoryAndCommitContracts(t *testing.T) {
 	}
 }
 
+func TestGitHistoryDefaultAndMaximumLimitsMatchPythonContract(t *testing.T) {
+	if got, err := gitHistoryLimit(""); err != nil || got != 200 {
+		t.Fatalf("default Git history limit = %d, error = %v; want 200", got, err)
+	}
+	if got, err := gitHistoryLimit("999"); err != nil || got != 200 {
+		t.Fatalf("clamped Git history limit = %d, error = %v; want 200", got, err)
+	}
+	if got, err := gitHistoryLimit("200"); err != nil || got != 200 {
+		t.Fatalf("maximum Git history limit = %d, error = %v; want 200", got, err)
+	}
+}
+
 func TestGitCommitRowsAreCappedWithoutOffByOne(t *testing.T) {
 	statusRows := make([]map[string]string, gitCommitMaxFiles+1)
 	for index := range statusRows {
@@ -1454,36 +1466,16 @@ func TestFinderWriteRejectsInPlaceEditAfterInitialConflictCheck(t *testing.T) {
 	}
 	content := strings.Repeat("replacement\n", 100000)
 	targetChanged := make(chan struct{})
-	stop := make(chan struct{})
-	go func() {
-		defer close(stop)
-		deadline := time.NewTimer(5 * time.Second)
-		defer deadline.Stop()
-		ticker := time.NewTicker(time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-deadline.C:
-				return
-			case <-ticker.C:
-			}
-			entries, readErr := os.ReadDir(root)
-			if readErr == nil {
-				for _, entry := range entries {
-					if strings.HasPrefix(entry.Name(), ".yolomux-write-") {
-						if writeErr := os.WriteFile(path, []byte("external edit\n"), 0o600); writeErr == nil {
-							_ = os.Chtimes(path, time.Now().Add(time.Second), time.Now().Add(time.Second))
-							close(targetChanged)
-						}
-						return
-					}
-				}
-			}
+	service.beforeWriteConflictRecheck = func() {
+		if writeErr := os.WriteFile(path, []byte("external edit\n"), 0o600); writeErr != nil {
+			t.Errorf("external edit: %v", writeErr)
+			return
 		}
-	}()
+		_ = os.Chtimes(path, time.Now().Add(time.Second), time.Now().Add(time.Second))
+		close(targetChanged)
+	}
 	expectedMtime := before.ModTime().UnixNano()
 	_, finderErr := service.Write(context.Background(), path, content, &expectedMtime)
-	<-stop
 	select {
 	case <-targetChanged:
 	default:

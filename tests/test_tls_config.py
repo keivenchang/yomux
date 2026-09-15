@@ -259,6 +259,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     args = argparse.Namespace(
         host="0.0.0.0",
         port=19001,
+        backend="python",
         sessions=["1,2", "ant"],
         dangerously_yolo=True,
         self_signed=False,
@@ -376,6 +377,7 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
     args = argparse.Namespace(
         host="127.0.0.1",
         port=19004,
+        backend="python",
         sessions=[],
         dangerously_yolo=False,
         self_signed=False,
@@ -460,6 +462,7 @@ def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, ca
     args = argparse.Namespace(
         host="0.0.0.0",
         port=19002,
+        backend="python",
         sessions=None,
         dangerously_yolo=False,
         self_signed=False,

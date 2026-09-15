@@ -105,25 +105,26 @@ func changed(path string) *Error {
 }
 
 type Service struct {
-	root             string
-	roots            []string
-	uploadLimits     UploadLimits
-	publish          EventPublisher
-	mu               sync.Mutex
-	nativeMu         sync.Mutex
-	watches          map[string]watchRecord
-	watchGeneration  uint64
-	epoch            string
-	revision         uint64
-	changes          []watchChange
-	native           nativeWatchController
-	nativeStatus     nativeWatchStatus
-	publishGitRename func(context.Context, *gitRenamePlan, string) error
-	stop             chan struct{}
-	done             chan struct{}
-	stopOnce         sync.Once
-	lastChangeAt     time.Time
-	lastChangePaths  []string
+	root                       string
+	roots                      []string
+	uploadLimits               UploadLimits
+	publish                    EventPublisher
+	mu                         sync.Mutex
+	nativeMu                   sync.Mutex
+	watches                    map[string]watchRecord
+	watchGeneration            uint64
+	epoch                      string
+	revision                   uint64
+	changes                    []watchChange
+	native                     nativeWatchController
+	nativeStatus               nativeWatchStatus
+	publishGitRename           func(context.Context, *gitRenamePlan, string) error
+	beforeWriteConflictRecheck func()
+	stop                       chan struct{}
+	done                       chan struct{}
+	stopOnce                   sync.Once
+	lastChangeAt               time.Time
+	lastChangePaths            []string
 }
 
 type watchRecord struct {

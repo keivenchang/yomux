@@ -386,6 +386,40 @@ def test_quiescence_waits_out_the_in_flight_watch_diff_baseline_receipt():
     assert settled["watchRootsBaselinePending"] is False
 
 
+def test_quiescence_accepts_a_retired_finder_without_a_watch_token():
+    class RetiredFinderDriver:
+        def execute_script(self, _script):
+            state = _quiescent_state()
+            state["finderWatchReady"] = False
+            state["watchRootsRetired"] = True
+            return state
+
+        def execute_async_script(self, script, *_args):
+            if "awaitPendingOperationReceipts" in script:
+                raise AssertionError("retired Finder with no pending work must not await operations")
+            return clean_browser_receipt_barrier(accepted=0)
+
+    settled = wait_for_fixture_api_quiescence(RetiredFinderDriver(), timeout=0.05)
+
+    assert settled["finderWatchReady"] is False
+    assert settled["watchRootsRetired"] is True
+
+
+def test_quiescence_still_fails_closed_on_an_unready_live_finder():
+    class UnreadyFinderDriver:
+        def execute_script(self, _script):
+            state = _quiescent_state()
+            state["finderWatchReady"] = False
+            state["watchRootsRetired"] = False
+            return state
+
+        def execute_async_script(self, *_args):  # pragma: no cover - no receipt should be needed
+            raise AssertionError("an unready live Finder must not bypass the readiness check")
+
+    with pytest.raises(AssertionError, match="did not quiesce before the owned boundary"):
+        wait_for_fixture_api_quiescence(UnreadyFinderDriver(), timeout=0.01)
+
+
 def test_quiescence_waits_for_a_pending_filesystem_write_receipt_after_the_write_acknowledgement():
     class FilesystemWriteReceiptDriver:
         def __init__(self):
@@ -428,6 +462,52 @@ def test_quiescence_waits_for_a_pending_filesystem_write_receipt_after_the_write
 
     assert driver.receipt_awaited == 1
     assert settled["filesystemOperationReceiptBarrier"]["settled"] is True
+    assert settled["pending"] == []
+
+
+def test_quiescence_waits_for_concurrent_write_and_watch_baseline_receipts():
+    class MixedReceiptDriver:
+        def __init__(self):
+            self.receipt_awaited = 0
+
+        def execute_script(self, _script):
+            if self.receipt_awaited:
+                state = _quiescent_state()
+                state["pendingDetails"] = []
+                state["pendingDetailsTruncated"] = False
+                return state
+            state = _blocked_by_baseline_state()
+            state["pending"] = [_BASELINE_OP_ID, "op-write-after-ack"]
+            state["watchDiffPendingOperationIds"] = [_BASELINE_OP_ID]
+            state["pendingDetails"] = [
+                {
+                    "id": _BASELINE_OP_ID,
+                    "kind": "fs_watch_diff",
+                    "terminalOwner": "filesystem-watch-diff-refresh",
+                    "waiterCount": 1,
+                },
+                {
+                    "id": "op-write-after-ack",
+                    "kind": "filesystem_operation",
+                    "contextOperation": "write",
+                    "waiterCount": 1,
+                },
+            ]
+            state["pendingDetailsTruncated"] = False
+            return state
+
+        def execute_async_script(self, script, *args):
+            if "awaitPendingOperationReceipts" in script:
+                self.receipt_awaited += 1
+                assert args and int(args[0]) > 0
+                return {"available": True, "settled": True, "state": _quiescent_state()}
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = MixedReceiptDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.receipt_awaited == 1
+    assert settled["combinedOperationReceiptBarrier"]["settled"] is True
     assert settled["pending"] == []
 
 
@@ -548,7 +628,8 @@ def test_quiescence_fails_immediately_when_baseline_pending_has_no_in_flight_pro
             return _blocked_by_baseline_state()
 
         def execute_async_script(self, script, *_args):
-            assert "watchDiffPromise" in script
+            if "watchDiffPromise" not in script:
+                return clean_browser_receipt_barrier(accepted=1)
             self.baseline_awaited += 1
             return {"hadPromise": False, "settled": True}
 
@@ -588,6 +669,37 @@ def test_quiescence_accepts_a_baseline_that_settles_between_state_read_and_recei
     assert driver.state_reads >= 2
     assert settled["watchDiffBaselineReceipt"] == {"hadPromise": False, "settled": True}
     assert settled["browserReceiptBarrier"] == clean_browser_receipt_barrier(accepted=1)
+    assert settled["watchRootsBaselinePending"] is False
+
+
+def test_quiescence_replaces_a_baseline_receipt_that_changes_owner_while_settling():
+    class ReplacedBaselineDriver:
+        def __init__(self):
+            self.baseline_awaited = 0
+
+        def execute_script(self, _script):
+            if self.baseline_awaited >= 2:
+                return _quiescent_state()
+            state = _blocked_by_baseline_state()
+            state["watchRootsTimerPending"] = True
+            return state
+
+        def execute_async_script(self, script, *_args):
+            if "watchDiffPromise" not in script:
+                return clean_browser_receipt_barrier(accepted=1)
+            self.baseline_awaited += 1
+            return {
+                "hadPromise": True,
+                "settled": True,
+                "rejected": False,
+                "samePromise": self.baseline_awaited >= 2,
+            }
+
+    driver = ReplacedBaselineDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.baseline_awaited == 2
+    assert settled["watchDiffBaselineReceipt"]["samePromise"] is True
     assert settled["watchRootsBaselinePending"] is False
 
 

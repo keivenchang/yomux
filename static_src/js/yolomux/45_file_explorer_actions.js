@@ -3053,6 +3053,7 @@ function serverWatchRootsForceRequestCompleted(signature, options = {}) {
 }
 
 function syncServerWatchRootsNow(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -3128,6 +3129,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
 }
 
 function syncServerWatchRoots(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
   const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);

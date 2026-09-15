@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	gitHistoryDefaultLimit = 100
-	gitHistoryMaxLimit     = 100
+	gitHistoryDefaultLimit = 200
+	gitHistoryMaxLimit     = 200
 	gitHistoryMaxOutput    = 4 * 1024 * 1024
 	gitHistoryMaxPayload   = 384 * 1024
 	gitCommitMaxFiles      = 1000

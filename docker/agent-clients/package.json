@@ -1,0 +1,10 @@
+{
+  "name": "yolomux-agent-clients",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.240",
+    "@openai/codex": "0.150.0",
+    "opencode-ai": "1.18.30"
+  }
+}

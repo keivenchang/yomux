@@ -9468,6 +9468,15 @@ body.layout-resizing {
   min-width: 0;
   max-width: none;
 }
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
+.tmux-pane-tab-token.active,
+.panel.active-pane .pane-tab.active:not(.file-missing),
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
+  color: var(--pane-tab-active-text) !important;
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail,
@@ -9528,17 +9537,23 @@ body.layout-resizing {
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
    when the pane is unfocused). The bars themselves (strip, Info Bar, editor toolbar, find) already read
    --pane-bar-bg, so only the tabs need this; the active tab stays green. */
-.panel .pane-tab:not(.active) {
+.panel .pane-tab:not(.active),
+.panel .tmux-pane-tab-token:not(.active) {
   background: var(--pane-bar-bg);
 }
-body.theme-light .panel .pane-tab:not(.active) {
+body.theme-light .panel .pane-tab:not(.active),
+body.theme-light .panel .tmux-pane-tab-token:not(.active) {
   color: var(--light-readable-text) !important;
   border-color: var(--light-readable-line);
 }
 body.theme-light .panel .pane-tab:not(.active) .session-button-name,
 body.theme-light .panel .pane-tab:not(.active) .session-button-dir,
 body.theme-light .panel .pane-tab:not(.active) .session-button-detail,
-body.theme-light .panel .pane-tab:not(.active) .pane-tab-close {
+body.theme-light .panel .pane-tab:not(.active) .pane-tab-close,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-name,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-dir,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-detail,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .pane-tab-close {
   color: var(--light-readable-text) !important;
 }
 body.theme-light .panel :is(.pane-tab, .tmux-pane-tab-token-action):not(.active):is(:hover, :focus-visible) {
@@ -9549,6 +9564,12 @@ body.theme-light .panel :is(.pane-tab, .tmux-pane-tab-token-action):not(.active)
 .pane-tab:not(.active):focus-visible,
 .tmux-pane-tab-token-action:not(.active):hover,
 .tmux-pane-tab-token-action:not(.active):focus-visible {
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
+}
+body.theme-light .panel .pane-tab:not(.active):is(:hover, :focus-visible),
+body.theme-light .panel .tmux-pane-tab-token:not(.active):is(:hover, :focus-visible) {
+  color: var(--light-readable-text) !important;
   background: var(--pane-inactive-tab-bg-hover);
   border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
 }
@@ -15430,6 +15451,10 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.mar
 body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-panel.markdown-body {
   background: var(--markdown-preview-bg);
 }
+body.editor-theme-light .file-editor-content .file-editor-preview-pane.markdown-body,
+body.editor-theme-light .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+  background: var(--light-readable-bg);
+}
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   margin: var(--space-10) 0 var(--space-5);
   font-weight: 600;
@@ -15764,6 +15789,7 @@ body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
 .prosemirror-editor.vanilla-preview-body :is(strong, em) { color: inherit; }
 .file-editor-preview-pane.vanilla-preview-body :is(code, pre),
 .file-editor-preview-pane-panel.vanilla-preview-body :is(code, pre),
+.file-editor-content .markdown-body.vanilla-preview-body :is(code, pre),
 .prosemirror-editor.vanilla-preview-body :is(code, pre) {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
@@ -16982,7 +17008,7 @@ body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-pre
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
 body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body a {
-  color: var(--light-readable-link) !important;
+  color: var(--vanilla-preview-link) !important;
 }
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body th,
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body td,
@@ -17019,6 +17045,13 @@ body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-pre
   color: var(--markdown-html-light-text) !important;
   background: var(--lt-panel) !important;
   border-color: var(--lt-line) !important;
+}
+body.theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body > code {
+  color: var(--markdown-html-light-text) !important;
+  background: var(--lt-panel);
+  border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);

@@ -4,11 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/keivenchang/yolomux/internal/testsupport"
 )
 
 func TestPricingCatalogLoadsPythonFixtureAndResolvesCacheDimensions(t *testing.T) {
-	root := filepath.Join("..", "..")
-	catalog, err := LoadRepositoryPricingCatalog(root, "")
+	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}

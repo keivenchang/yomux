@@ -791,6 +791,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         shutil.rmtree(fixture_root)
 
 
+@pytest.mark.browser
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
 def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(monkeypatch, tmp_path, gate_http_port):
     """A real Differ browser applies a completion with no repeated cache-read loop."""

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yolomux/internal/testsupport"
 )
 
 // This test deliberately keeps a private tmux server and live-like client panes
@@ -19,18 +22,22 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux /proc and tmux integration test")
 	}
+	// tmux's control-format delimiters are locale-sensitive. Pin the adapter's process environment
+	// so this fixture exercises the same UTF-8 contract in a Bazel action and a direct Go run.
+	t.Setenv("LANG", "C.UTF-8")
+	t.Setenv("LC_ALL", "C.UTF-8")
 	python, err := exec.LookPath("python3")
 	if err != nil {
-		t.Skip("python3 is unavailable")
+		t.Fatalf("python3 is unavailable: %v", err)
 	}
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
-		t.Skip("tmux is unavailable")
+		t.Fatalf("tmux is unavailable: %v", err)
 	}
-	repoRoot := integrationRepoRoot(t)
-	mock := filepath.Join(repoRoot, "tools", "mockers", "claude.py")
+	repoRoot := testsupport.RepoRoot(t)
+	mock := testsupport.RepoPath(t, "tools/mockers/claude.py")
 	if _, err := os.Stat(mock); err != nil {
-		t.Skipf("mock client is unavailable: %v", err)
+		t.Fatalf("mock client is unavailable: %v", err)
 	}
 
 	root := t.TempDir()
@@ -46,25 +53,45 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	sessionPrefix := "yolo-go-status-" + strings.ToLower(strings.ReplaceAll(filepath.Base(root), "_", "-"))
 	claudeSession := sessionPrefix + "-claude"
 	codexSession := sessionPrefix + "-codex"
-	env := append(os.Environ(), "PYTHONPATH="+repoRoot, "HOME="+root, "TERM=xterm-256color", "PYTHONUNBUFFERED=1")
+	t.Cleanup(func() {
+		if err := cleanupTmuxSession(tmux, socket, claudeSession); err != nil {
+			t.Errorf("cleanup Claude tmux session: %v", err)
+		}
+		if err := cleanupTmuxSession(tmux, socket, codexSession); err != nil {
+			t.Errorf("cleanup Codex tmux session: %v", err)
+		}
+		if err := cleanupTmuxServer(tmux, socket); err != nil {
+			t.Errorf("cleanup private tmux server: %v", err)
+		}
+	})
+	path := os.Getenv("PATH")
+	if path == "" {
+		t.Fatal("PATH is required for the private tmux fixture")
+	}
+	// Keep the mock client environment deterministic and separate from the Go/Bazel action. In
+	// particular, do not leak the action's module cache, proxy, or test-only variables into panes.
+	env := []string{
+		"PATH=" + path,
+		"PYTHONPATH=" + repoRoot,
+		"HOME=" + root,
+		"TERM=xterm-256color",
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"PYTHONUNBUFFERED=1",
+	}
 	startMock := func(session, entryPoint, client string) {
 		start := exec.Command(tmux, "-S", socket, "new-session", "-d", "-s", session, "-x", "100", "-y", "35", "bash", "-lc", "exec -a "+entryPoint+" "+shellQuote(python)+" -u "+shellQuote(client)+" --mock")
 		start.Env = env
 		if output, err := start.CombinedOutput(); err != nil {
-			t.Skipf("private tmux server cannot start %s: %v: %s", entryPoint, err, output)
+			t.Fatalf("private tmux server cannot start %s: %v: %s", entryPoint, err, output)
 		}
 	}
-	startMock(claudeSession, "claude", filepath.Join(repoRoot, "tools", "mockers", "claude.py"))
-	codexMock := filepath.Join(repoRoot, "tools", "mockers", "codex.py")
+	startMock(claudeSession, "claude", mock)
+	codexMock := testsupport.RepoPath(t, "tools/mockers/codex.py")
 	if _, err := os.Stat(codexMock); err != nil {
-		t.Skipf("codex mock client is unavailable: %v", err)
+		t.Fatalf("codex mock client is unavailable: %v", err)
 	}
 	startMock(codexSession, "codex", codexMock)
-	t.Cleanup(func() {
-		_ = runTmux(tmux, socket, "kill-session", "-t", claudeSession)
-		_ = runTmux(tmux, socket, "kill-session", "-t", codexSession)
-		_ = runTmux(tmux, socket, "kill-server")
-	})
 
 	for _, session := range []string{claudeSession, codexSession} {
 		if err := waitForPane(tmux, socket, session+":0.0"); err != nil {
@@ -91,8 +118,17 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if len(recordsBySession) != 2 || recordsBySession[claudeSession].TmuxPaneID == "" || recordsBySession[codexSession].TmuxPaneID == "" {
-		panes, paneErr := linuxTmuxPanes(ctx)
-		t.Fatalf("mock clients were not discovered in live inventory (errors=%v panes=%+v paneErr=%v records=%+v)", inventoryErrors, panes, paneErr, recordsBySession)
+		diagnosticCtx := context.Background()
+		panes, paneErr := linuxTmuxPanes(diagnosticCtx)
+		processes, processErr := linuxProcesses(diagnosticCtx)
+		candidates := make([]AgentProcess, 0)
+		for _, process := range processes {
+			if ClassifyAgent(process.Command, process.Executable) != "" {
+				candidates = append(candidates, process)
+			}
+		}
+		rawPanes, rawPaneErr := exec.Command(tmux, "-S", socket, "list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}").CombinedOutput()
+		t.Fatalf("mock clients were not discovered in live inventory (errors=%v panes=%+v paneErr=%v candidates=%+v processErr=%v records=%+v rawPanes=%q rawPaneErr=%v)", inventoryErrors, panes, paneErr, candidates, processErr, recordsBySession, rawPanes, rawPaneErr)
 	}
 	if got := len(recordsBySession); got != 2 {
 		t.Fatalf("persistent-pane agent count = %d, want 2", got)
@@ -228,17 +264,63 @@ func payloadCounts(raw []byte) map[string]any {
 	return payload.Counts
 }
 
-func integrationRepoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+func tmuxStatus(binary, socket string, args ...string) (int, []byte) {
+	command := exec.Command(binary, append([]string{"-S", socket}, args...)...)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return 0, output
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		return exitError.ExitCode(), output
+	}
+	return -1, output
 }
 
-func runTmux(binary, socket string, args ...string) error {
-	return exec.Command(binary, append([]string{"-S", socket}, args...)...).Run()
+func cleanupTmuxSession(binary, socket, session string) error {
+	killCode, killOutput := tmuxStatus(binary, socket, "kill-session", "-t", session)
+	probeCode, probeOutput := tmuxStatus(binary, socket, "has-session", "-t", session)
+	if probeCode == 0 {
+		detail := strings.TrimSpace(string(killOutput))
+		if detail == "" {
+			detail = "kill-session did not retire the session"
+		}
+		return fmt.Errorf("session %s survived cleanup: %s", session, detail)
+	}
+	if probeCode != 1 {
+		detail := strings.TrimSpace(string(probeOutput))
+		if detail == "" {
+			detail = fmt.Sprintf("has-session exited %d", probeCode)
+		}
+		return fmt.Errorf("could not prove session %s was retired: %s", session, detail)
+	}
+	if killCode < 0 {
+		return fmt.Errorf("kill-session could not execute: %s", strings.TrimSpace(string(killOutput)))
+	}
+	return nil
+}
+
+func cleanupTmuxServer(binary, socket string) error {
+	killCode, killOutput := tmuxStatus(binary, socket, "kill-server")
+	probeCode, probeOutput := tmuxStatus(binary, socket, "list-sessions")
+	if probeCode == 0 {
+		detail := strings.TrimSpace(string(killOutput))
+		if detail == "" {
+			detail = "kill-server did not retire the server"
+		}
+		return fmt.Errorf("tmux server survived cleanup: %s", detail)
+	}
+	if probeCode != 1 {
+		detail := strings.TrimSpace(string(probeOutput))
+		if detail == "" {
+			detail = fmt.Sprintf("list-sessions exited %d", probeCode)
+		}
+		return fmt.Errorf("could not prove tmux server was retired: %s", detail)
+	}
+	if killCode < 0 {
+		return fmt.Errorf("kill-server could not execute: %s", strings.TrimSpace(string(killOutput)))
+	}
+	return nil
 }
 
 func waitForPane(binary, socket, target string) error {

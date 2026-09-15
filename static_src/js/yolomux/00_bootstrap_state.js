@@ -796,6 +796,7 @@ let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
 const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
+  retired: false,
   inFlight: false,
   request: null,
   activeKey: '',
@@ -1883,6 +1884,17 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  retireBackgroundProducers() {
+    serverWatchRootsState.retired = true;
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
+    serverWatchRootsState.scheduledKey = '';
+    serverWatchRootsState.pendingOptions = {};
+    serverWatchRootsState.watchDiffTrailing = null;
+    return this.operationState();
+  },
   async awaitPendingOperationReceipts() {
     while (true) {
       const pending = Array.from(apiOperationState.pending.values());
@@ -1957,6 +1969,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
       watchRootsInFlight,
       watchRootsBaselinePending,
       finderVisible,
+      watchRootsRetired: serverWatchRootsState.retired === true,
       finderWatchReady: !finderVisible || Boolean(fileExplorerFilesystemWatchToken),
     };
   },

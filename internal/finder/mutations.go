@@ -323,6 +323,9 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		return nil, filesystemError(requested, err)
 	}
 	if existing != nil {
+		if s.beforeWriteConflictRecheck != nil {
+			s.beforeWriteConflictRecheck()
+		}
 		current, currentErr := s.requireMutationTarget(parent, false)
 		if currentErr != nil {
 			return nil, currentErr
@@ -342,6 +345,21 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		quarantine, quarantineErr := s.quarantineMutationTarget(parent)
 		if quarantineErr != nil {
 			return nil, quarantineErr
+		}
+		// Re-read the quarantined name after the namespace move. The initial mtime check can race
+		// with an in-place editor write while the temporary file is being filled; device/inode still
+		// matches in that case, but the caller's expected content version does not. Restore the
+		// original name before returning the typed conflict so the external edit remains authoritative.
+		if expectedMtime != nil {
+			quarantinedInfo, statErr := os.Lstat(descriptorChildPath(parent.directory, quarantine))
+			if statErr != nil {
+				_ = restoreMutationTarget(parent, quarantine)
+				return nil, filesystemError(requested, statErr)
+			}
+			if !mtimeMatches(*expectedMtime, quarantinedInfo.ModTime().UnixNano(), quarantinedInfo.ModTime().Unix()) {
+				_ = restoreMutationTarget(parent, quarantine)
+				return nil, changed(requested)
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			_ = restoreMutationTarget(parent, quarantine)

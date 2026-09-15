@@ -81,9 +81,12 @@ test('Dockview keeps the group tab strip for singleton file surfaces', () => {
 });
 
 test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
-  assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewPaneContentDropAllowed\(paneInfo\)[\s\S]*moveSessionToSlot\(paneInfo\.item, paneInfo\.intent\.targetSlot/);
+  const paneCommit = dockview.slice(dockview.indexOf('function dockviewCommitPaneDrop('), dockview.indexOf('function dockviewPointerContentDropIntent('));
+  assert.match(paneCommit, /if \(intent\.zone === 'middle'\)[\s\S]*dockviewPaneContentDropAllowed\(\{item: intent\.item, intent\}\)[\s\S]*moveSessionToSlot\(intent\.item, intent\.targetSlot/);
+  assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event, classification\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewCommitPaneDrop\(event, paneInfo\.intent\)/);
   assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
-  assert.match(dockview, /dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewContentDropRegionForEvent\(releaseEvent\)[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
+  const pointerFallback = dockview.slice(dockview.indexOf('function dockviewFinishTabPointerDrag('), dockview.indexOf('function dockviewInstallTabPointerReorderFallback('));
+  assert.match(pointerFallback, /const contentIntent = dockviewPointerContentDropIntent\(releaseEvent, state\);[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
 });
 
 test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {

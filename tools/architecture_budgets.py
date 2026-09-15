@@ -103,6 +103,7 @@ RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
     ".git", ".claude", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
 RETIRED_SHARE_SKIPPED_SUFFIXES: Final[tuple[str, ...]] = (".agent-edit.lock",)
+RETIRED_SHARE_SKIPPED_FILENAMES: Final[frozenset[str]] = frozenset(("instance.lock",))
 
 
 def _is_core_dump_filename(filename: str) -> bool:
@@ -361,7 +362,7 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             and not directory.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
         )
         for filename in sorted(filenames):
-            if _is_core_dump_filename(filename):
+            if _is_core_dump_filename(filename) or filename in RETIRED_SHARE_SKIPPED_FILENAMES:
                 continue
             path = Path(parent) / filename
             if path.is_symlink():
@@ -513,6 +514,10 @@ def write_current_manifest(manifest: Path, current: dict[str, Any]) -> None:
         temporary.write(json.dumps(current, indent=2, sort_keys=True))
         temporary.write("\n")
         temporary_path = Path(temporary.name)
+    # The manifest is a checked-in read-only source input for the non-root Docker test runner.
+    # NamedTemporaryFile creates 0600 files by default; preserve the repository-readable contract
+    # across the atomic replacement rather than making the next container unable to read its gate.
+    temporary_path.chmod(0o644)
     temporary_path.replace(manifest)
 
 

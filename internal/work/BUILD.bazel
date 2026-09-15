@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "work_lib",
+    srcs = ["scheduler.go"],
+    importpath = "github.com/keivenchang/yolomux/internal/work",
+)
+
+go_test(
+    name = "work_test",
+    srcs = ["scheduler_test.go"],
+    embed = [":work_lib"],
+)
+
+go_test(
+    name = "work_race_test",
+    srcs = ["scheduler_test.go"],
+    embed = [":work_lib"],
+    race = "on",
+)

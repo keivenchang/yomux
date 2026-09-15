@@ -78,8 +78,8 @@ def assert_only_expected_browser_http_error(
     return matches[0]
 
 
-def assert_only_expected_browser_network_error(driver, *, url: str, reason: str) -> dict[str, Any]:
-    """Consume one deliberate external-resource failure and reject every other browser failure."""
+def assert_only_expected_browser_network_error(driver, *, url: str, reason: str, count: int = 1) -> dict[str, Any] | tuple[dict[str, Any], ...]:
+    """Consume an exact number of deliberate external-resource failures and reject every other browser failure."""
 
     entries = read_browser_console_log(driver)
     failure_entries = _browser_console_failures(entries)
@@ -92,12 +92,12 @@ def assert_only_expected_browser_network_error(driver, *, url: str, reason: str)
         and reason in str(entry.get("message") or "")
     ]
     unexpected = [entry for entry in failure_entries if entry not in matches]
-    if len(matches) != 1 or unexpected:
+    if len(matches) != int(count) or unexpected:
         raise AssertionError(
-            "expected exactly one matching browser network error: "
-            f"{json.dumps({'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
+            "expected exact matching browser network error count: "
+            f"{json.dumps({'expected_count': int(count), 'matches': matches, 'unexpected': unexpected}, sort_keys=True)}"
         )
-    return matches[0]
+    return matches[0] if int(count) == 1 else tuple(matches)
 
 
 def assert_only_expected_browser_warning(

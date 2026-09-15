@@ -177,8 +177,8 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
         )
     )
     view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
-    view.click()
-    view.send_keys("typed")
+    view.find_element(By.CSS_SELECTOR, 'p').click()
+    view.send_keys(Keys.END, "typed")
     immediate_view_state = e2e_browser.driver.execute_script(
         "const p=arguments[0]; return {source:fileEditorPanelState(p)?.content || '', cm:p._cmView?.state.doc.toString() || '', pm:p._pmView?.state.doc.textContent || ''};",
         panel,
@@ -225,7 +225,7 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
             const source = String(fileEditorPanelState(panel)?.content || '');
             const pm = panel?._pmView?.state?.doc?.textContent || '';
             const pmJson = panel?._pmView?.state?.doc?.toJSON?.() || null;
-                return source.endsWith(' source\\n') && pm.includes('source')
+            return source.endsWith(' source\\n') && pm.includes('source')
               ? {source, pm, pmJson, connected: panel._pmView.dom.isConnected}
               : false;
             """,
@@ -274,7 +274,7 @@ def test_real_chromium_markdown_vieweditor_double_enter_never_writes_backslash(e
         lambda driver: driver.find_element(By.CSS_SELECTOR, f'.file-editor-panel[data-file-path="{str(target)}"]')
     )
     view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
-    view.click()
+    view.find_element(By.CSS_SELECTOR, 'p').click()
     view.send_keys(Keys.END, Keys.ENTER, Keys.ENTER, "after")
     settled = WebDriverWait(e2e_browser.driver, 12).until(
         lambda driver: driver.execute_script(
@@ -362,7 +362,7 @@ def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_br
     assert view_idle == {"pm": "444ab", "cm": "444ab", "source": "444ab"}, view_idle
 
     text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
-    text.click()
+    text.find_elements(By.CSS_SELECTOR, '.cm-line')[-1].click()
     text.send_keys("c")
     first_text_key = e2e_browser.driver.execute_script(
         "const p=arguments[0]; return {pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString(), source:fileEditorPanelState(p).content};",
@@ -509,9 +509,9 @@ def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any)
     assert "<br>" not in view_state["source"], view_state
     assert view_state["source"].endswith("world\n"), {"before": before_view_edit, "settled": view_state}
 
-    text.click()
+    text.find_elements(By.CSS_SELECTOR, '.cm-line')[-1].click()
     text.send_keys(Keys.END, " from-text")
-    text_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("const p=arguments[0]; const s=fileEditorPanelState(p).content; return s.endsWith('from-text') && p._pmView.state.doc.textContent.includes('from-text') ? {source:s, pm:p._pmView.state.doc.textContent, connected:p._pmView.dom.isConnected} : false", panel))
+    text_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("const p=arguments[0]; const s=fileEditorPanelState(p).content; return s.replace(/\\n+$/, '').endsWith('from-text') && p._pmView.state.doc.textContent.includes('from-text') ? {source:s, pm:p._pmView.state.doc.textContent, connected:p._pmView.dom.isConnected} : false", panel))
     assert text_state["connected"] is True, text_state
     e2e_browser.driver.execute_script("window.dispatchEvent(new Event('load'))")
     visible_after_refresh = WebDriverWait(e2e_browser.driver, 4).until(lambda driver: driver.execute_script("return arguments[0]._pmView?.dom?.isConnected === true && arguments[0].querySelectorAll('.ProseMirror').length === 1", panel))

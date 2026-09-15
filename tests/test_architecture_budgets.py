@@ -142,17 +142,19 @@ def test_retired_share_surface_guard_allows_only_named_paths_and_done_archive(tm
     assert violations == (f"retired_share_surface: forbidden filename copies/{allowed[0]}",)
 
 
-def test_retired_share_surface_guard_never_reads_churning_document_lock_control_files(tmp_path, monkeypatch):
+def test_retired_share_surface_guard_never_reads_runtime_or_document_lock_control_files(tmp_path, monkeypatch):
     control = tmp_path / "docs" / "DEVELOPMENT.md.agent-edit.lock" / ".owner.json.transient"
     control.parent.mkdir(parents=True)
     control.write_text("/api/" + "sha" + "re", encoding="utf-8")
+    runtime_lock = tmp_path / "instance.lock"
+    runtime_lock.write_text("/api/" + "sha" + "re", encoding="utf-8")
     historical = tmp_path / ".claude" / "worktrees" / "historical.txt"
     historical.parent.mkdir(parents=True)
     historical.write_text("/api/" + "sha" + "re", encoding="utf-8")
     read_bytes = Path.read_bytes
 
     def reject_control_file_read(path):
-        if any(part.endswith(".agent-edit.lock") for part in path.parts):
+        if any(part.endswith(".agent-edit.lock") for part in path.parts) or path.name == "instance.lock":
             path.unlink()
             raise AssertionError("document-lock control metadata entered the source scan")
         return read_bytes(path)
@@ -193,6 +195,7 @@ def test_write_current_manifest_is_atomic_and_exact(tmp_path, monkeypatch):
 
     assert architecture_budgets.main(["--manifest", str(manifest_path), "--write-current"]) == 0
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+    assert manifest_path.stat().st_mode & 0o444 == 0o444
     assert not list(manifest_path.parent.glob(f".{manifest_path.name}.*.tmp"))
 
 

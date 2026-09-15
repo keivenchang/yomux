@@ -19455,6 +19455,7 @@ def test_the_health_observer_is_armed_after_the_local_scheduler_starts(monkeypat
     args = argparse.Namespace(
         host="127.0.0.1",
         port=19771,
+        backend="python",
         sessions=[],
         dangerously_yolo=False,
         self_signed=False,

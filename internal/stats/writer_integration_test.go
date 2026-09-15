@@ -7,9 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"testing"
+
+	"github.com/keivenchang/yolomux/internal/testsupport"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -141,11 +142,7 @@ func TestWriterIntegrationWithTranscriptAndOpenCodeFacts(t *testing.T) {
 
 func copyIntegrationFixture(t *testing.T, relative, destinationName string) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	source := filepath.Join(filepath.Dir(thisFile), "..", "..", "tests", "fixtures", "current_model_usage", destinationName)
+	source := testsupport.RepoPath(t, filepath.Join("tests", "fixtures", "current_model_usage", destinationName))
 	destination := filepath.Join(t.TempDir(), relative)
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		t.Fatal(err)

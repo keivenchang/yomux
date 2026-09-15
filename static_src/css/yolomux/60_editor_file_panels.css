@@ -829,6 +829,10 @@ body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane.mar
 body:not(.editor-theme-light) .file-editor-content .file-editor-preview-pane-panel.markdown-body {
   background: var(--markdown-preview-bg);
 }
+body.editor-theme-light .file-editor-content .file-editor-preview-pane.markdown-body,
+body.editor-theme-light .file-editor-content .file-editor-preview-pane-panel.markdown-body {
+  background: var(--light-readable-bg);
+}
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   margin: var(--space-10) 0 var(--space-5);
   font-weight: 600;
@@ -1163,6 +1167,7 @@ body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
 .prosemirror-editor.vanilla-preview-body :is(strong, em) { color: inherit; }
 .file-editor-preview-pane.vanilla-preview-body :is(code, pre),
 .file-editor-preview-pane-panel.vanilla-preview-body :is(code, pre),
+.file-editor-content .markdown-body.vanilla-preview-body :is(code, pre),
 .prosemirror-editor.vanilla-preview-body :is(code, pre) {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
@@ -2381,7 +2386,7 @@ body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-pre
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
 body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a,
 body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body a {
-  color: var(--light-readable-link) !important;
+  color: var(--vanilla-preview-link) !important;
 }
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body th,
 body.theme-light .file-editor-content .markdown-body.vanilla-preview-body td,
@@ -2418,6 +2423,13 @@ body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-pre
   color: var(--markdown-html-light-text) !important;
   background: var(--lt-panel) !important;
   border-color: var(--lt-line) !important;
+}
+body.theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body > code,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body > code {
+  color: var(--markdown-html-light-text) !important;
+  background: var(--lt-panel);
+  border-color: var(--lt-line);
 }
 body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);

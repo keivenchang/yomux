@@ -1,0 +1,10 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "testsupport_lib",
+    srcs = ["runfiles.go"],
+    importpath = "github.com/keivenchang/yolomux/internal/testsupport",
+    deps = ["@rules_go//go/runfiles"],
+)

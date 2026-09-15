@@ -887,6 +887,7 @@ async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) 
 }
 
 function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  if (serverWatchRootsState.retired) return Promise.resolve({retired: true});
   queueFileExplorerWatchDiffRefresh(payload, options);
   if (serverWatchRootsState.watchDiffPromise) return serverWatchRootsState.watchDiffPromise;
   const owned = (async () => {

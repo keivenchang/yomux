@@ -9,10 +9,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yolomux/internal/testsupport"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -1002,11 +1003,7 @@ func copyActualOpenCodeFixture(t *testing.T) string {
 
 func copyOpenCodeSQLFixture(t *testing.T, name string) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	sqlFixture, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "testdata", name))
+	sqlFixture, err := os.ReadFile(testsupport.RepoPath(t, filepath.Join("internal", "stats", "testdata", name)))
 	if err != nil {
 		t.Fatal(err)
 	}

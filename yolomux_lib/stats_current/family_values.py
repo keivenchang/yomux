@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 
 from .families_constants import (
     AGENT_COUNTS,
@@ -24,8 +25,6 @@ from .process_memory import MAX_PROCESS_BINARY_LENGTH, MAX_PROCESS_CPU_SERIES, M
 
 def validate_value(value: object, kind: str, path: str, *, error_type: type[ValueError]) -> None:
     """Validate one payload value against its bounded family kind."""
-
-    import math
 
     def fail(message: str) -> None:
         raise error_type(message)

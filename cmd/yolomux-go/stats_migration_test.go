@@ -13,11 +13,38 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/keivenchang/yolomux/internal/stats"
 )
+
+type statsStreamRecorder struct {
+	recorder  *httptest.ResponseRecorder
+	heartbeat chan struct{}
+	once      sync.Once
+}
+
+func newStatsStreamRecorder() *statsStreamRecorder {
+	return &statsStreamRecorder{recorder: httptest.NewRecorder(), heartbeat: make(chan struct{}, 1)}
+}
+
+func (r *statsStreamRecorder) Header() http.Header { return r.recorder.Header() }
+
+func (r *statsStreamRecorder) WriteHeader(status int) { r.recorder.WriteHeader(status) }
+
+func (r *statsStreamRecorder) Write(data []byte) (int, error) {
+	n, err := r.recorder.Write(data)
+	if bytes.Contains(data, []byte("event: heartbeat")) {
+		r.once.Do(func() { close(r.heartbeat) })
+	}
+	return n, err
+}
+
+func (r *statsStreamRecorder) Flush() {}
+
+func (r *statsStreamRecorder) Body() string { return r.recorder.Body.String() }
 
 func TestStatsAgentStatusRequiresGET(t *testing.T) {
 	s := &server{statsPath: filepath.Join(t.TempDir(), "missing.sqlite3")}
@@ -262,6 +289,45 @@ func TestStatsStreamAckIncludesRequestedResolution(t *testing.T) {
 	}
 	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"requested_resolution":"AUTO"`)) {
 		t.Fatalf("ack=%s", recorder.Body.String())
+	}
+}
+
+func TestStatsStreamWithSinceGenerationKeepsDeltaStreamAlive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := stats.OpenWriter(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &server{statsPath: path}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorder := newStatsStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.statsStream(recorder, httptest.NewRequest(http.MethodGet, "/api/stats-stream?range_seconds=900&resolution=AUTO&client_id=test&since_generation=0", nil).WithContext(ctx))
+		close(done)
+	}()
+	select {
+	case <-recorder.heartbeat:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stats stream did not emit a heartbeat")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stats stream did not stop")
+	}
+	body := recorder.Body()
+	if !strings.Contains(body, "event: heartbeat") {
+		t.Fatalf("stream did not emit a heartbeat: %s", body)
+	}
+	if strings.Contains(body, "event: unavailable") {
+		t.Fatalf("stream emitted unavailable after initial since_generation: %s", body)
 	}
 }
 

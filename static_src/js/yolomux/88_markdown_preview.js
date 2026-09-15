@@ -565,8 +565,7 @@ function markdownPreviewCopySelectionWithStyle(context) {
   if (!wrapper.innerHTML || (!text && !images.length)) return false;
   const clipboard = globalThis.navigator?.clipboard;
   if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
-    const imageData = images.map(image => fetch(clipboardImageSourceUrl(image), {credentials: 'same-origin'})
-      .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
+    const imageData = images.map(image => clipboardImageBlobFor(image)
       .then(blob => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve({blob, dataUrl: String(reader.result)});
@@ -1224,6 +1223,10 @@ function prosemirrorPreviewImageSource(image, path, options = {}) {
       image.classList.add('prosemirror-image-error');
       image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
     },
+    onDecodeFailure: error => {
+      image.classList.add('prosemirror-image-error');
+      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+    },
   }).then(result => result.ok === true);
 }
 
@@ -1267,8 +1270,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       continue;
     }
     // The fragment is detached until renderMarkdownPreviewInto replaces the container. Start the
-    // request after attachment so the browser does not discard a load from a detached image.
+    // request after attachment so the browser cannot start a relative request before authentication.
     img.dataset.markdownRawPath = target.path;
+    img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
@@ -1951,10 +1955,28 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   });
   container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
+  const localImagePromises = [];
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    img.src = rawFileUrl(rawPath);
+    if (options.snapshot === true) {
+      // A snapshot is copied into another document. Blob URLs belong to the source document's
+      // origin/URL store and become unusable there, so retain the authenticated same-origin URL
+      // for the destination document to request with its own cookie context.
+      img.src = rawFileUrl(rawPath);
+    } else if (img.isConnected) {
+      localImagePromises.push(installRawFileMediaSource(img, rawPath, {
+        isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
+        onFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+        onDecodeFailure: error => {
+          img.classList.add('markdown-preview-image-error');
+          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+        },
+      }));
+    }
     delete img.dataset.markdownRawPath;
   }
   applyMarkdownSourceLines(container, text);
@@ -1963,7 +1985,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
-  container._previewAsync = Promise.all([mermaid, ...localImages]);
+  container._previewAsync = Promise.all([mermaid, ...localImages, ...localImagePromises]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -1975,14 +1997,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  if (true) {
-    container.querySelectorAll('pre code').forEach(block => {
-      if (typeof window.hljs !== 'undefined') {
-        try { window.hljs.highlightElement(block); } catch (_) {}
-      }
-      applyMarkdownFenceFallbackHighlight(block);
-    });
-  }
+  refreshMarkdownFenceHighlights(container);
 }
 
 function markdownFenceLanguage(block) {
@@ -1997,6 +2012,7 @@ function markdownFenceLanguage(block) {
 
 function applyMarkdownFenceHighlight(block) {
   if (!block) return;
+  if (block.classList?.contains('editor-highlight-code')) return;
   const language = markdownFenceLanguage(block);
   if (language && !Array.from(block.classList).some(className => /^(?:language|lang)-/.test(className))) {
     block.classList.add(`language-${language}`);

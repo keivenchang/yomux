@@ -2911,6 +2911,41 @@ def _read_fixture_operation_state(driver) -> dict[str, Any]:
     return dict(state)
 
 
+def _retire_fixture_background_producers(driver) -> dict[str, Any]:
+    """Stop new browser-owned watch work before joining already-accepted operations."""
+
+    lifecycle = driver.execute_script(
+        """
+        const lifecycle = window.__yolomuxFixtureLifecycle;
+        if (!lifecycle) {
+          return {available: false};
+        }
+        return {available: true, diagnosticMode: lifecycle.diagnosticMode};
+        """
+    )
+    if not isinstance(lifecycle, Mapping) or lifecycle.get("available") is not True:
+        raise AssertionError(f"fixture lifecycle adapter is unreachable: {lifecycle}")
+    if lifecycle.get("diagnosticMode") != "retained-js":
+        return {}
+    result = driver.execute_script(
+        """
+        const lifecycle = window.__yolomuxFixtureLifecycle;
+        if (typeof lifecycle.retireBackgroundProducers !== 'function') {
+          return {available: false};
+        }
+        return {available: true, state: lifecycle.retireBackgroundProducers()};
+        """
+    )
+    if not isinstance(result, Mapping) or result.get("available") is not True:
+        raise AssertionError(f"fixture background-producer retirement is unavailable: {result}")
+    if result.get("skipped") is True:
+        return {}
+    state = result.get("state")
+    if not isinstance(state, Mapping):
+        raise AssertionError(f"fixture background-producer retirement state is malformed: {result}")
+    return dict(state)
+
+
 def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
     """Return whether every teardown-blocking operation surface has reached terminal state.
 
@@ -2924,6 +2959,10 @@ def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
     if state.get("watchRootsBaselinePending", False) is not True:
         pending -= set(state.get("watchDiffPendingOperationIds") or [])
 
+    # Finder readiness is required while its watch producer is live. Once teardown retires that
+    # producer, a failed or unnecessary baseline is no longer active work and must not keep the
+    # boundary open forever; the explicit retired bit prevents this from weakening live checks.
+    finder_watch_ready = state.get("finderWatchReady", True) is True or state.get("watchRootsRetired", False) is True
     return (
         not pending
         and int(state.get("batchQueued") or 0) == 0
@@ -2933,18 +2972,20 @@ def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
         and int(state.get("startupQueued") or 0) == 0
         and state.get("activityRefreshing") is not True
         and state.get("watchRootsPending", False) is False
-        and state.get("finderWatchReady", True) is True
+        and finder_watch_ready
     )
 
 
 def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
     """The single non-terminal condition is a known in-flight full watch-diff baseline receipt.
 
-    A held watch-root timer/registration/in-flight registration is not a baseline receipt: those are
-    ordinary pending work that must fail closed at the general timeout. The baseline parks its own
-    operation record in `pending` while it awaits a 202 result, and its tree application may enqueue
-    repo-info batch descendants before that promise settles. Disregard ONLY operation IDs and batch
-    lifecycle counts attributed to the same terminal owner; any unrelated work still fails closed.
+    A watch-root registration/in-flight registration is ordinary pending work that must fail closed at
+    the general timeout. A timer alongside the baseline is a queued continuation from this same watch
+    owner, so the bounded baseline receipt wait must let it run and then observe its replacement
+    generation. The baseline parks its own operation record in `pending` while it awaits a 202 result,
+    and its tree application may enqueue repo-info batch descendants before that promise settles.
+    Disregard ONLY operation IDs and batch lifecycle counts attributed to the same terminal owner; any
+    unrelated work still fails closed.
     """
 
     if state.get("diagnosticMode") != "retained-js":
@@ -2952,8 +2993,7 @@ def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
     if state.get("watchRootsBaselinePending", False) is not True:
         return False
     if (
-        state.get("watchRootsTimerPending", False) is True
-        or state.get("watchRootsRegistrationPending", False) is True
+        state.get("watchRootsRegistrationPending", False) is True
         or state.get("watchRootsInFlight", False) is True
     ):
         return False
@@ -3024,11 +3064,74 @@ def _blocked_only_by_filesystem_operation_receipt(state: Mapping[str, Any]) -> b
             "watchRootsInFlight",
             "watchRootsBaselinePending",
         )
-    ) and state.get("finderWatchReady", True) is True
+    ) and (
+        state.get("finderWatchReady", True) is True
+        or state.get("watchRootsRetired", False) is True
+    )
 
 
-def _await_filesystem_operation_receipts(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
-    """Await the lifecycle-owned filesystem receipt barrier, bounded fail-closed."""
+def _blocked_by_mixed_operation_receipts(state: Mapping[str, Any]) -> bool:
+    """Return whether only a filesystem write and the full watch baseline are still in flight.
+
+    The browser can acknowledge an editor write and start the watch-root baseline in the same
+    event turn. Both are lifecycle-owned completion receipts; treating either one as unrelated
+    work makes teardown fail even though the shared lifecycle adapter can await both together.
+    """
+
+    if state.get("diagnosticMode") != "retained-js" or state.get("watchRootsBaselinePending", False) is not True:
+        return False
+    if any(
+        state.get(field, False) is True
+        for field in ("watchRootsTimerPending", "watchRootsRegistrationPending", "watchRootsInFlight")
+    ):
+        return False
+    pending = set(state.get("pending") or [])
+    details = state.get("pendingDetails")
+    baseline_owned = set(state.get("watchDiffPendingOperationIds") or [])
+    if not pending or not baseline_owned or not baseline_owned <= pending or not isinstance(details, list):
+        return False
+    if state.get("pendingDetailsTruncated") is True or {detail.get("id") for detail in details} != pending:
+        return False
+    write_ids = set()
+    for detail in details:
+        operation_id = detail.get("id")
+        is_write = (
+            detail.get("kind") == "filesystem_operation"
+            and detail.get("contextOperation") == "write"
+            and detail.get("waiterCount") == 1
+        )
+        is_baseline = (
+            operation_id in baseline_owned
+            and detail.get("terminalOwner") == "filesystem-watch-diff-refresh"
+        )
+        if is_write:
+            write_ids.add(operation_id)
+        elif not is_baseline:
+            return False
+    if not write_ids or write_ids & baseline_owned or write_ids | baseline_owned != pending:
+        return False
+    if any(
+        int(state.get(total) or 0) != int(state.get(owned) or 0)
+        for total, owned in (
+            ("batchQueued", "watchDiffBatchQueued"),
+            ("batchPending", "watchDiffBatchPending"),
+            ("batchOperations", "watchDiffBatchOperations"),
+        )
+    ):
+        return False
+    return (
+        int(state.get("startupActive") or 0) == 0
+        and int(state.get("startupQueued") or 0) == 0
+        and state.get("activityRefreshing") is not True
+        and (
+            state.get("finderWatchReady", True) is True
+            or state.get("watchRootsRetired", False) is True
+        )
+    )
+
+
+def _await_lifecycle_operation_receipts(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Await lifecycle-owned operation receipts, bounded fail-closed."""
 
     receipt = driver.execute_async_script(
         """
@@ -3059,8 +3162,24 @@ def _await_filesystem_operation_receipts(driver, blocked_state: Mapping[str, Any
             "filesystem operation receipt did not deliver its completion barrier before the fail-closed bound: "
             f"blocked={json.dumps(dict(blocked_state), sort_keys=True)} receipt={json.dumps(dict(receipt), sort_keys=True)}"
         )
+    return dict(receipt)
+
+
+def _await_filesystem_operation_receipts(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Await the lifecycle-owned filesystem receipt barrier, bounded fail-closed."""
+
+    receipt = _await_lifecycle_operation_receipts(driver, blocked_state)
     state = _read_fixture_operation_state(driver)
-    state["filesystemOperationReceiptBarrier"] = dict(receipt)
+    state["filesystemOperationReceiptBarrier"] = receipt
+    return state
+
+
+def _await_mixed_operation_receipts(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Await a concurrent filesystem-write and watch-baseline receipt as one lifecycle barrier."""
+
+    receipt = _await_lifecycle_operation_receipts(driver, blocked_state)
+    state = _read_fixture_operation_state(driver)
+    state["combinedOperationReceiptBarrier"] = receipt
     return state
 
 
@@ -3073,13 +3192,31 @@ def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str,
         const done = arguments[arguments.length - 1];
         const state = (typeof serverWatchRootsState === 'undefined') ? null : serverWatchRootsState;
         const promise = state ? state.watchDiffPromise : null;
-        if (!promise) { done({hadPromise: false, settled: true}); return; }
+        if (!promise) { done({hadPromise: false, settled: true, samePromise: false}); return; }
         let finished = false;
         const finish = (result) => { if (finished) { return; } finished = true; done(result); };
         const timer = setTimeout(() => finish({hadPromise: true, settled: false, timedOut: true}), boundMs);
         Promise.resolve(promise).then(
-          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: false}); },
-          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: true}); },
+          () => {
+            clearTimeout(timer);
+            finish({
+              hadPromise: true,
+              settled: true,
+              rejected: false,
+              samePromise: (typeof serverWatchRootsState !== 'undefined')
+                && serverWatchRootsState.watchDiffPromise === promise,
+            });
+          },
+          () => {
+            clearTimeout(timer);
+            finish({
+              hadPromise: true,
+              settled: true,
+              rejected: true,
+              samePromise: (typeof serverWatchRootsState !== 'undefined')
+                && serverWatchRootsState.watchDiffPromise === promise,
+            });
+          },
         );
         """,
         int(max(0.0, float(timeout)) * 1000),
@@ -3129,10 +3266,14 @@ def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, An
         if receipt.get("settled") is not True:
             # The promise is genuinely still in flight; this await consumed its slice of the bound.
             continue
-        # The promise resolved or rejected. A still-set baseline flag is contradictory; other pending
-        # work may be a concrete descendant (for example deferred Finder repo-info enrichment).
+        # The promise resolved or rejected. A replacement baseline may have become current while the
+        # receipt callback was settling; that is a new owned receipt, not proof that the old promise
+        # is stuck. Re-enter the bounded loop for that replacement. An unchanged promise with its
+        # lifecycle flag still set remains a contradiction and fails closed below.
         state = _read_fixture_operation_state(driver)
         if state.get("watchRootsBaselinePending", False) is True:
+            if receipt.get("samePromise") is False:
+                continue
             raise AssertionError(
                 "watch-diff baseline receipt settled but its lifecycle flag is still pending: "
                 f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
@@ -3181,7 +3322,9 @@ def wait_for_fixture_api_quiescence(driver, timeout: float = 12.0) -> dict[str, 
     try:
         settled_state = WebDriverWait(driver, float(timeout)).until(settled)
     except TimeoutException as error:
-        if last_state is not None and _blocked_only_by_filesystem_operation_receipt(last_state):
+        if last_state is not None and _blocked_by_mixed_operation_receipts(last_state):
+            settled_state = _await_mixed_operation_receipts(driver, last_state)
+        elif last_state is not None and _blocked_only_by_filesystem_operation_receipt(last_state):
             settled_state = _await_filesystem_operation_receipts(driver, last_state)
         elif last_state is not None and _blocked_only_by_watch_diff_baseline(last_state):
             # The one remaining surface is a known in-flight full watch-diff baseline. Wait on its
@@ -3252,6 +3395,8 @@ def finish_browser_fixture_boundary(
     lifecycle_states = []
     for current_browser in owned_browsers:
         try:
+            if wait_for_api_quiescence:
+                _retire_fixture_background_producers(current_browser)
             if wait_for_api_quiescence:
                 lifecycle_state = wait_for_fixture_api_quiescence(current_browser)
             else:

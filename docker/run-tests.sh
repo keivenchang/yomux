@@ -3,15 +3,23 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}"
 
-# A rootless daemon maps container root to the invoking host user, but cannot map this directory
-# service's high numeric UID into its subordinate-ID range. Build and run as container root there
-# so the mounted worktree still has the caller's host ownership.
+# Rootless Docker maps container root to the invoking host user, but the image's non-root runner
+# account can still read the read-only worktree. Keep the image-selected USER at runtime so a
+# rootless invocation cannot mutate image-owned caches or gain unnecessary container privileges.
 rootless_docker=0
 if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
   rootless_docker=1
 fi
+
+if [ "$rootless_docker" = 1 ]; then
+  export YOLOMUX_IMAGE_RUNNER_UID=1000
+  export YOLOMUX_IMAGE_RUNNER_GID=1000
+else
+  export YOLOMUX_IMAGE_RUNNER_UID="$(id -u)"
+  export YOLOMUX_IMAGE_RUNNER_GID="$(id -g)"
+fi
+IMAGE="${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}"
 
 usage() {
   echo "usage: $0 [--build] [--workdir <dir>] [-- <command>]" >&2
@@ -34,21 +42,38 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Accept either the mapped container path or a caller-relative worktree directory.
+# Accept either the mapped container path or a caller-relative worktree directory. Normalize the
+# result before Docker sees it; otherwise `--workdir ../` becomes `/w/../` and silently escapes the
+# read-only source mount's intended working tree.
+normalize_container_workdir() {
+  local candidate="$1"
+  local normalized
+  normalized="$(realpath -m -- "$candidate")"
+  case "$normalized" in
+    /w|/w/*) printf '%s\n' "$normalized" ;;
+    *)
+      echo "workdir must remain inside /w: $candidate" >&2
+      exit 2
+      ;;
+  esac
+}
+
 case "$workdir" in
-  /w|/w/*) ;;
+  /w|/w/*) workdir="$(normalize_container_workdir "$workdir")" ;;
   /*)
-    if [[ "$workdir" == "$REPO_ROOT" ]]; then
+    host_workdir="$(realpath -e -- "$workdir")"
+    repo_root_real="$(realpath -e -- "$REPO_ROOT")"
+    if [[ "$host_workdir" == "$repo_root_real" ]]; then
       workdir=/w
-    elif [[ "$workdir" == "$REPO_ROOT/"* ]]; then
-      workdir="/w/${workdir#"$REPO_ROOT/"}"
+    elif [[ "$host_workdir" == "$repo_root_real/"* ]]; then
+      workdir="$(normalize_container_workdir "/w/${host_workdir#"$repo_root_real/"}")"
     else
       echo "workdir must be inside $REPO_ROOT: $workdir" >&2
       exit 2
     fi
     ;;
   .) workdir=/w ;;
-  *) workdir="/w/${workdir#./}" ;;
+  *) workdir="$(normalize_container_workdir "/w/${workdir#./}")" ;;
 esac
 
 # tools/docker_image.py is the sole image-identity owner. A changed build input creates a
@@ -56,13 +81,47 @@ esac
 if [ "$do_build" = 1 ] || [ "${YOLOMUX_TEST_IMAGE_REBUILD:-0}" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE (this is cached after the first run)" >&2
   build_args=()
+  go_mod_context="$(mktemp -d /tmp/yolomux-go-mod-context.XXXXXX)"
+  go_mod_context_cleanup() {
+    local context_status="$?"
+    trap - EXIT
+    if ! rm -rf -- "$go_mod_context"; then
+      echo "Go module build context cleanup failed: $go_mod_context" >&2
+      [ "$context_status" -ne 0 ] || context_status=1
+    elif [ -e "$go_mod_context" ]; then
+      echo "Go module build context remained after cleanup: $go_mod_context" >&2
+      [ "$context_status" -ne 0 ] || context_status=1
+    fi
+    exit "$context_status"
+  }
+  trap go_mod_context_cleanup EXIT
+  if ! python3 "$REPO_ROOT/tools/docker_image.py" --prepare-go-mod-cache "$go_mod_context"; then
+    echo "No complete local Go module cache is available; the Docker builder will use its network." >&2
+  fi
+  build_context_args=(--build-context "go-mod-cache=$go_mod_context")
   if [ "$rootless_docker" = 0 ]; then
     build_args=(--build-arg "RUNNER_UID=$(id -u)" --build-arg "RUNNER_GID=$(id -g)")
   fi
+  # Image construction is the only network-enabled phase: it resolves pinned dependencies and
+  # bakes them into the image. The test container below is always network-disabled. Use Docker's
+  # default builder network; host networking would expose the host network namespace to a build.
   docker build "${build_args[@]+"${build_args[@]}"}" \
+    "${build_context_args[@]+"${build_context_args[@]}"}" \
     -f "$REPO_ROOT/docker/Dockerfile.test" \
     -t "$IMAGE" \
     "$REPO_ROOT" >&2
+  build_status=$?
+  trap - EXIT
+  if ! rm -rf -- "$go_mod_context"; then
+    echo "Go module build context cleanup failed: $go_mod_context" >&2
+    [ "$build_status" -ne 0 ] || build_status=1
+  elif [ -e "$go_mod_context" ]; then
+      echo "Go module build context remained after cleanup: $go_mod_context" >&2
+      [ "$build_status" -ne 0 ] || build_status=1
+  fi
+  if [ "$build_status" -ne 0 ]; then
+    exit "$build_status"
+  fi
 fi
 
 # Linked worktrees store their gitdir outside the worktree bind mount. Mount that common
@@ -71,7 +130,10 @@ fi
 git_mount=()
 worktree_mount=()
 if [ -f "$REPO_ROOT/.git" ]; then
-  git_common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+  # The read-only source mount can be owned by a different numeric UID (for example an NFS UID
+  # on the host while this wrapper runs as the image's runner). Trust this exact mounted checkout
+  # for metadata discovery without weakening Git's global safe-directory policy.
+  git_common="$(git -c "safe.directory=$REPO_ROOT" -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)"
   git_mount=(-v "$git_common:$git_common:ro")
   # The .git file can retain the alternate /home spelling of the same NFS checkout. Git resolves
   # that literal path before consulting commondir, so expose the same common metadata at both
@@ -82,7 +144,7 @@ if [ -f "$REPO_ROOT/.git" ]; then
   fi
   # Linked-worktree config stores the checkout's host path. Mount the checkout at
   # that path too, so Git can honor core.worktree inside the /w test mount.
-  recorded_worktree="$(git -C "$REPO_ROOT" config --get core.worktree || true)"
+  recorded_worktree="$(git -c "safe.directory=$REPO_ROOT" -C "$REPO_ROOT" config --get core.worktree || true)"
   if [ -n "$recorded_worktree" ] && [ "$recorded_worktree" != "$REPO_ROOT" ]; then
     worktree_mount=(-v "$REPO_ROOT:$recorded_worktree:ro")
   else
@@ -105,10 +167,6 @@ if [ -n "${YOLOMUX_GO_BINARY:-}" ]; then
   go_binary_mount=(-v "$go_binary_host:/tmp/yolomux-go-binary:ro")
   test_env+=(-e YOLOMUX_GO_BINARY=/tmp/yolomux-go-binary)
 fi
-if [ -d /usr/share/fonts ]; then
-  agent_mounts+=(-v "/usr/share/fonts:/usr/share/fonts:ro")
-fi
-
 # The complete forwarded-environment allowlist, in one place. pytest re-executes itself inside
 # this container (see conftest.pytest_cmdline_main), and `docker run` passes through only the
 # names listed here. A variable that gates a test and is missing from this list does not fail
@@ -148,18 +206,63 @@ if [ "${YOLOMUX_AGENT_DOCKER_E2E:-0}" = 1 ]; then
   done
 fi
 
-# Browser failure evidence must outlive the throwaway container. Mount one host /tmp
-# directory at the same absolute path so the failure message remains actionable.
+validate_tmp_directory() {
+  local candidate="$1"
+  local label="$2"
+  case "$candidate" in
+    /tmp/*) ;;
+    *) echo "$label must be a child of /tmp: $candidate" >&2; exit 2 ;;
+  esac
+  local normalized
+  normalized="$(realpath -m -- "$candidate")"
+  case "$normalized" in
+    /tmp/*) ;;
+    *) echo "$label resolves outside /tmp: $normalized" >&2; exit 2 ;;
+  esac
+  local component="$candidate"
+  while [ "$component" != "/tmp" ]; do
+    if [ -L "$component" ]; then
+      echo "$label must not contain a symlink: $component" >&2
+      exit 2
+    fi
+    component="$(dirname -- "$component")"
+  done
+  mkdir -p -- "$candidate"
+  if [ -L "$candidate" ]; then
+    echo "$label must not be a symlink: $candidate" >&2
+    exit 2
+  fi
+  candidate="$(realpath -e -- "$candidate")"
+  case "$candidate" in
+    /tmp/*) ;;
+    *) echo "$label resolves outside /tmp: $candidate" >&2; exit 2 ;;
+  esac
+  if [ ! -O "$candidate" ]; then
+    echo "$label must be owned by the invoking user: $candidate" >&2
+    exit 2
+  fi
+  chmod 700 -- "$candidate"
+}
+
+# Browser failure evidence must outlive the throwaway container. Mount one host /tmp directory at
+# the same absolute path so the failure message remains actionable; arbitrary host paths are refused.
 evidence_dir="${YOLOMUX_E2E_EVIDENCE_DIR:-}"
 remove_empty_evidence_dir=0
 if [ -z "$evidence_dir" ]; then
   test_root="${YOLOMUX_TEST_ROOT:-/tmp/yolomux-test-${BASHPID}-$(id -u)}"
-  mkdir -p "$test_root"
-  chmod 700 "$test_root"
+  validate_tmp_directory "$test_root" "YOLOMUX_TEST_ROOT"
   evidence_dir="$(mktemp -d "$test_root/evidence.XXXXXX")"
   remove_empty_evidence_dir=1
 else
-  mkdir -p "$evidence_dir"
+  validate_tmp_directory "$evidence_dir" "YOLOMUX_E2E_EVIDENCE_DIR"
+fi
+# Rootless Docker maps the image's non-root UID to a subordinate host UID, so it cannot write a
+# host-owned 0700 bind source. The parent created above is 0700 and therefore private to the caller;
+# make only the explicitly mounted leaf writable so the container can preserve browser evidence.
+if [ "$rootless_docker" = 1 ]; then
+  chmod 777 -- "$evidence_dir"
+else
+  chmod 700 -- "$evidence_dir"
 fi
 agent_mounts+=(-v "$evidence_dir:$evidence_dir")
 test_env+=(-e "YOLOMUX_E2E_EVIDENCE_DIR=$evidence_dir")
@@ -174,11 +277,6 @@ if [ -n "${YOLOMUX_CHECK_RUN_TOKEN:-}" ]; then
   owner_label+=(--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN")
 fi
 
-run_user=()
-if [ "$rootless_docker" = 1 ]; then
-  run_user=(--user 0)
-fi
-
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
 # would hide image-owned ~/.local/bin. --init reaps tmux/chromium children; the enlarged
 # shared-memory segment prevents Chromium renderer crashes. Network access is disabled for
@@ -188,7 +286,6 @@ docker run --rm --init \
   --network none \
   --shm-size=1g \
   "${owner_label[@]+"${owner_label[@]}"}" \
-  "${run_user[@]+"${run_user[@]}"}" \
   -v "$REPO_ROOT:/w:ro" \
   "${git_mount[@]+"${git_mount[@]}"}" \
   "${worktree_mount[@]+"${worktree_mount[@]}"}" \
@@ -215,6 +312,35 @@ docker run --rm --init \
 status=$?
 set -e
 if [ "$remove_empty_evidence_dir" = 1 ]; then
-  rmdir "$evidence_dir" 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    echo "Retaining non-empty E2E evidence directory: $evidence_dir" >&2
+  else
+    cleanup_succeeded=1
+    if ! rm -rf -- "$evidence_dir"; then
+      # A rootless engine maps the image runner to a subordinate host UID. The test container must
+      # keep that non-root identity, but a child can leave a directory owned by that unmapped UID.
+      # Use a disposable, network-disabled root container only for this exact cleanup mount; under
+      # rootless Docker its container root maps back to the invoking host user.
+      echo "Host evidence cleanup could not remove all entries; retrying inside a disposable cleanup container: $evidence_dir" >&2
+      if docker run --rm --network none --user=0:0 -v "$evidence_dir:$evidence_dir" "$IMAGE" \
+          sh -c 'find "$1" -mindepth 1 -depth -exec rm -rf -- {} +' cleanup "$evidence_dir"; then
+        # The cleanup container cannot remove the bind-mount root while it is mounted. Remove the
+        # empty host-side mountpoint after Docker has released it.
+        if ! rm -rf -- "$evidence_dir"; then
+          cleanup_succeeded=0
+        fi
+      else
+        cleanup_succeeded=0
+      fi
+    fi
+    if [ "$cleanup_succeeded" -eq 1 ] && [ -e "$evidence_dir" ]; then
+      echo "E2E evidence directory remained after cleanup: $evidence_dir" >&2
+      cleanup_succeeded=0
+    fi
+    if [ "$cleanup_succeeded" -eq 0 ]; then
+      echo "Could not remove E2E evidence directory: $evidence_dir" >&2
+      status=1
+    fi
+  fi
 fi
 exit "$status"

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Real Chromium smoke for the Go terminal page and PTY resize contract."""
 
+import argparse
+import atexit
 import http.cookiejar
 import json
 import os
@@ -9,6 +11,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -19,7 +22,17 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.support.ui import WebDriverWait
+
+# Direct script invocations start with ``tools/`` as sys.path[0]. Add the runfiles/source root so
+# the same import topology works for local diagnostics and for the Bazel wrapper.
+_SCRIPT_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+if str(_SCRIPT_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_SOURCE_ROOT))
+
+from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tools.tmux_paths import short_tmux_socket_path
 
 
 def resolve_source_root() -> Path:
@@ -40,7 +53,32 @@ def main(binary: str) -> None:
         (config / "auth.yaml").write_text("users:\n  - username: e2e\n    password: test-password\n    role: admin\n", encoding="utf-8")
         (config / "auth-cookie-secret").write_text("11" * 32, encoding="ascii")
         port = 0
-        tmux_socket = str(root / "tmux.sock")
+        tmux_socket_path = short_tmux_socket_path("yogo")
+        cleanup_errors = []
+        tmux_socket_cleaned = False
+
+        def cleanup_tmux_socket_dir():
+            nonlocal tmux_socket_cleaned
+            if tmux_socket_cleaned:
+                return
+            try:
+                shutil.rmtree(tmux_socket_path.parent)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                message = f"tmux socket directory cleanup failed for {tmux_socket_path.parent}: {error}"
+                cleanup_errors.append(message)
+                print(message, file=sys.stderr)
+                return
+            if tmux_socket_path.parent.exists():
+                message = f"tmux socket directory remained after cleanup: {tmux_socket_path.parent}"
+                cleanup_errors.append(message)
+                print(message, file=sys.stderr)
+                return
+            tmux_socket_cleaned = True
+
+        atexit.register(cleanup_tmux_socket_dir)
+        tmux_socket = str(tmux_socket_path)
         tmux = ("tmux", "-S", tmux_socket)
         sessions = [f"yo-go-e2e-{os.getpid()}-{index}" for index in range(3)]
         session = sessions[0]
@@ -59,8 +97,10 @@ def main(binary: str) -> None:
         source_original = "package main\n\nfunc main() {}\n"
         source_file.write_text(source_original, encoding="utf-8")
         markdown_file = finder_root / "editor.md"
-        markdown_original = "# Editor\n\n<!-- hidden metadata -->\n\nA paragraph before the upload.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<u>under</u> and <mark>marked</mark>.\n<span>literal HTML</span>\n"
+        markdown_original = "# Editor\n\n<!-- hidden metadata -->\n\nA paragraph before the upload.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<u>under</u> and <mark>marked</mark>.\n"
         markdown_file.write_text(markdown_original, encoding="utf-8")
+        unsupported_markdown_file = finder_root / "unsupported.md"
+        unsupported_markdown_file.write_text("# Unsupported\n\n<span>literal HTML</span>\n", encoding="utf-8")
         git_root = finder_root / "git-fixture"
         git_root.mkdir()
         git_note = git_root / "note.txt"
@@ -79,6 +119,43 @@ def main(binary: str) -> None:
             if subprocess.run((*tmux, "has-session", "-t", session_name), check=False, stderr=subprocess.DEVNULL).returncode != 0:
                 subprocess.run((*tmux, "new-session", "-d", "-s", session_name), check=True)
                 created_sessions.append(session_name)
+
+        def stop_process(process, label, force=False):
+            if process is None or process.poll() is not None:
+                return
+            try:
+                (process.kill if force else process.terminate)()
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                cleanup_errors.append(f"{label} termination failed: {error}")
+                return
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                except OSError as error:
+                    cleanup_errors.append(f"{label} forced termination failed: {error}")
+                    return
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cleanup_errors.append(f"{label} survived its cleanup deadline (pid {process.pid})")
+            if process.poll() is None:
+                cleanup_errors.append(f"{label} remained alive after cleanup (pid {process.pid})")
+
+        def cleanup_tmux_session(session_name):
+            result = subprocess.run((*tmux, "kill-session", "-t", session_name), check=False, capture_output=True, text=True)
+            probe = subprocess.run((*tmux, "has-session", "-t", session_name), check=False, capture_output=True, text=True)
+            if probe.returncode == 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "kill-session returned without retiring the session"
+                cleanup_errors.append(f"tmux session {session_name} survived cleanup: {detail}")
+            elif probe.returncode != 1:
+                detail = probe.stderr.strip() or probe.stdout.strip() or f"tmux has-session exited {probe.returncode}"
+                cleanup_errors.append(f"could not prove tmux session {session_name} was retired: {detail}")
 
         def start_server():
             nonlocal port
@@ -106,34 +183,18 @@ def main(binary: str) -> None:
                     return process
                 except (urllib.error.URLError, TimeoutError):
                     time.sleep(0.1)
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            stop_process(process, "Go server startup process")
             for session_name in created_sessions:
-                subprocess.run((*tmux, "kill-session", "-t", session_name), check=False)
+                cleanup_tmux_session(session_name)
             raise SystemExit("Go server did not become ready")
 
         proc = start_server()
         driver = None
+        driver_lease = None
 
         def stop_server(force=False):
             nonlocal proc
-            if proc is None or proc.poll() is not None:
-                proc = None
-                return
-            if force:
-                proc.kill()
-            else:
-                proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+            stop_process(proc, "Go server", force=force)
             proc = None
 
         def assert_server_identity(driver, process):
@@ -148,14 +209,18 @@ def main(binary: str) -> None:
 
         try:
             options = Options()
-            options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
+            chrome_binary = os.environ.get("CHROME_BIN") or shutil.which("chromium") or shutil.which("google-chrome")
+            if not chrome_binary:
+                raise SystemExit("Chromium or Google Chrome is unavailable")
+            options.binary_location = chrome_binary
             for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors", "--window-size=1200,800"):
                 options.add_argument(arg)
-            driver_path = os.environ.get("CHROMEDRIVER_BIN")
+            driver_path = os.environ.get("CHROMEDRIVER_BIN") or shutil.which("chromedriver")
             if driver_path:
                 driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
             else:
                 driver = webdriver.Chrome(options=options)
+            driver_lease = WebDriverLease.from_driver(driver)
             try:
                 driver.get(f"https://127.0.0.1:{port}/login")
                 driver.find_element("name", "username").send_keys("e2e")
@@ -309,6 +374,7 @@ def main(binary: str) -> None:
                     )
                     raise SystemExit(f"Go Phase 6 native TextEdit state propagation failed: {diagnostics}") from error
                 text_after_input = driver.execute_script("return fileEditorPanelsForPath(arguments[0])[0]?._cmView?.state?.doc?.toString?.() || '';", str(source_file))
+                expected_saved_text = text_after_input + "\n" if source_original.endswith("\n") and not text_after_input.endswith("\n") else text_after_input
                 save_button = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{source_file}"] .file-editor-save-panel')
                 for close_button in driver.find_elements("css selector", "[data-toast-close]"):
                     if close_button.is_displayed():
@@ -351,18 +417,40 @@ def main(binary: str) -> None:
                     const done = arguments[arguments.length - 1];
                     const path = arguments[0];
                     const expected = arguments[1];
+                    let finished = false;
+                    const finish = value => {
+                      if (finished) return;
+                      finished = true;
+                      done(value);
+                    };
                     const waitFor = () => {
                       const state = fileState.get(path);
                       const panel = fileEditorPanelsForPath(path)[0];
                       return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
                     };
-                    const poll = () => waitFor() ? done({saved: true, text: fileEditorPanelsForPath(path)[0]._cmView.state.doc.toString()}) : setTimeout(poll, 40);
+                    const poll = () => waitFor() ? finish({saved: true, text: fileEditorPanelsForPath(path)[0]._cmView.state.doc.toString()}) : setTimeout(poll, 40);
                     poll();
-                    setTimeout(() => done({error: 'TextEdit save timeout'}), 12000);
-                """, str(source_file), text_after_input)
+                    setTimeout(() => {
+                      const state = fileState.get(path);
+                      const button = document.querySelector('.file-editor-panel[data-file-path="' + CSS.escape(path) + '"] .file-editor-save-panel');
+                      finish({
+                        error: 'TextEdit save timeout',
+                        text: fileEditorPanelsForPath(path)[0]?._cmView?.state?.doc?.toString?.() || '',
+                        expected,
+                        textMatchesExpected: fileEditorPanelsForPath(path)[0]?._cmView?.state?.doc?.toString?.() === expected,
+                        panelCount: fileEditorPanelsForPath(path).length,
+                        stateContent: state?.content || '',
+                        original: state?.original || '',
+                        dirty: state?.dirty === true,
+                        saving: state?.saving === true,
+                        buttonDisabled: button?.disabled === true,
+                        status: document.querySelector('.file-editor-status')?.textContent?.trim() || '',
+                      });
+                    }, 12000);
+                """, str(source_file), expected_saved_text)
                 if save_result.get('error'):
                     raise SystemExit(f"Go Phase 6 TextEdit save failed: {save_result}")
-                if source_file.read_text(encoding="utf-8") != text_after_input:
+                if source_file.read_text(encoding="utf-8") != expected_saved_text:
                     raise SystemExit("Go Phase 6 TextEdit disk content did not match the native editor input")
                 local_conflict_suffix = "\n// local unsaved conflict"
                 for character in local_conflict_suffix:
@@ -391,6 +479,7 @@ def main(binary: str) -> None:
                     const path = arguments[0];
                     const panel = fileEditorPanelsForPath(path)[0];
                     let finished = false;
+                    let externalAction = 'not-present';
                     const finish = value => {
                       if (finished) return;
                       finished = true;
@@ -398,6 +487,19 @@ def main(binary: str) -> None:
                     };
                     const deadline = performance.now() + 12000;
                     const observe = () => {
+                      const externalDialog = document.querySelector('.file-editor-external-change-dialog');
+                      if (externalDialog) {
+                        const keepEditing = [...externalDialog.querySelectorAll('button')]
+                          .find(button => /^keep editing$/i.test(button.textContent?.trim() || ''));
+                        if (!keepEditing) {
+                          finish({error: 'external-change dialog has no Keep editing action', text: externalDialog.textContent || ''});
+                          return;
+                        }
+                        externalAction = 'keep-editing';
+                        keepEditing.click();
+                        setTimeout(observe, 0);
+                        return;
+                      }
                       const dialog = document.querySelector('.file-editor-conflict-dialog');
                       if (dialog) {
                         const buttons = [...dialog.querySelectorAll('button')];
@@ -408,7 +510,7 @@ def main(binary: str) -> None:
                         }
                         const dialogText = dialog.textContent || '';
                         cancel.click();
-                        savePromise.then(result => finish({dialog: true, cancelled: result === false, result, text: dialogText, editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true}), error => finish({error: String(error?.stack || error)}));
+                        savePromise.then(result => finish({dialog: true, cancelled: result === false, result, externalAction, text: dialogText, editor: panel?._cmView?.state?.doc?.toString?.() || '', dirty: fileState.get(path)?.dirty === true}), error => finish({error: String(error?.stack || error)}));
                         return;
                       }
                       if (performance.now() >= deadline) {
@@ -444,7 +546,35 @@ def main(binary: str) -> None:
                           };
                           poll();
                         });
-                        await waitFor(() => panel()?._cmView && panel()?._pmView && panel()._cmView.state.doc.toString() === expected, 'ViewEdit open');
+                        try {
+                          await waitFor(() => panel()?._cmView && panel()?._pmView && panel()._cmView.state.doc.toString() === expected, 'ViewEdit open');
+                        } catch (error) {
+                          const currentPanel = panel();
+                          const currentState = currentPanel ? fileEditorPanelState(currentPanel) : fileState.get(path);
+                          done({
+                            error: String(error?.stack || error),
+                            phase: 'open',
+                            panelCount: fileEditorPanelsForPath(path).length,
+                            panelMode: currentPanel ? fileEditorPanelMode(currentPanel) : '',
+                            panelPath: currentPanel?.dataset?.filePath || '',
+                            state: currentState ? {
+                              kind: currentState.kind || '',
+                              loading: currentState.loading === true,
+                              content: currentState.content || '',
+                              original: currentState.original || '',
+                              dirty: currentState.dirty === true,
+                            } : null,
+                            cm: currentPanel?._cmView?.state?.doc?.toString?.() || '',
+                            pm: Boolean(currentPanel?._pmView),
+                            pmError: currentPanel?._pmError || '',
+                            pmEnsure: Boolean(currentPanel?._pmEnsurePromise),
+                            pmState: currentPanel?.querySelector('.file-editor-preview-pane-panel')?.dataset?.prosemirrorState || '',
+                            previewText: currentPanel?.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
+                            status: currentPanel?.querySelector('.file-editor-status')?.textContent?.trim() || '',
+                            scripts: [...document.scripts].map(script => script.src).filter(src => src.includes('prosemirror')),
+                          });
+                          return;
+                        }
                         const view = panel()._pmView;
                         let paragraphStart = 1;
                         let paragraph = null;
@@ -511,6 +641,7 @@ def main(binary: str) -> None:
                 """, str(markdown_file), markdown_original)
                 if markdown.get('error') or markdown.get('prevented') is not True or markdown.get('imageReady') is not True or not markdown.get('sourceImageReference') or not markdown.get('imageSource') or markdown.get('cm') != markdown.get('source') or markdown.get('serialized') != markdown.get('source'):
                     raise SystemExit(f"Go Phase 7 ViewEdit upload/round-trip failed: {markdown}")
+                markdown_saved_source = markdown['source'] + "\n" if markdown_original.endswith("\n") and not markdown['source'].endswith("\n") else markdown['source']
                 markdown_save = driver.find_element("css selector", f'.file-editor-panel[data-file-path="{markdown_file}"] .file-editor-save-panel')
                 try:
                     WebDriverWait(driver, 12).until(
@@ -526,7 +657,27 @@ def main(binary: str) -> None:
                     )
                 except TimeoutException as error:
                     raise SystemExit("Go Phase 7 save control never became enabled") from error
-                markdown_save.click()
+                try:
+                    markdown_save.click()
+                except Exception as error:
+                    save_click_diagnostics = driver.execute_script(
+                        """
+                        const path = arguments[0];
+                        const state = fileState.get(path);
+                        const panel = fileEditorPanelsForPath(path)[0];
+                        return {
+                          error: String(arguments[1]),
+                          modal: document.querySelector('.file-editor-external-change-dialog')?.textContent?.trim() || document.querySelector('.file-editor-conflict-dialog')?.textContent?.trim() || '',
+                          state: state ? {content: state.content || '', original: state.original || '', dirty: state.dirty === true, externalChanged: state.externalChanged || null, externalMissing: state.externalMissing === true, externalError: state.externalError || ''} : null,
+                          panelMode: panel ? fileEditorPanelMode(panel) : '',
+                          pmSource: panel?._pmSource || null,
+                          serialized: panel?._pmView ? serializeProseMirrorSource(panel) : null,
+                        };
+                        """,
+                        str(markdown_file),
+                        str(error),
+                    )
+                    raise SystemExit(f"Go Phase 7 Markdown save click was intercepted: {save_click_diagnostics}") from error
                 markdown_save_result = driver.execute_async_script(
                     """
                     const done = arguments[arguments.length - 1];
@@ -542,7 +693,7 @@ def main(binary: str) -> None:
                         return;
                       }
                       if (performance.now() >= deadline) {
-                        done({error: 'ViewEdit save timeout', text, dirty: state?.dirty === true});
+                        done({error: 'ViewEdit save timeout', text, expected, textMatchesExpected: text === expected, dirty: state?.dirty === true});
                         return;
                       }
                       setTimeout(poll, 40);
@@ -550,11 +701,11 @@ def main(binary: str) -> None:
                     poll();
                     """,
                     str(markdown_file),
-                    markdown['source'],
+                    markdown_saved_source,
                 )
                 if markdown_save_result.get('error') or markdown_save_result.get('saved') is not True:
                     raise SystemExit(f"Go Phase 7 Markdown save failed: {markdown_save_result}")
-                if markdown_file.read_text(encoding="utf-8") != markdown['source']:
+                if markdown_file.read_text(encoding="utf-8") != markdown_saved_source:
                     raise SystemExit("Go Phase 7 Markdown disk content did not match serialized ViewEdit source")
                 markdown_reopened = driver.execute_async_script(
                     """
@@ -586,10 +737,42 @@ def main(binary: str) -> None:
                     })();
                     """,
                     str(markdown_file),
-                    markdown['source'],
+                    markdown_saved_source,
                 )
-                if markdown_reopened.get('error') or markdown_reopened.get('reopened') is not True or markdown_reopened.get('serialized') != markdown['source']:
+                if markdown_reopened.get('error') or markdown_reopened.get('reopened') is not True or markdown_reopened.get('serialized') != markdown_saved_source:
                     raise SystemExit(f"Go Phase 7 Markdown reopen failed: {markdown_reopened}")
+                unsupported = driver.execute_async_script(
+                    """
+                    const done = arguments[arguments.length - 1];
+                    const path = arguments[0];
+                    (async () => {
+                      try {
+                        await openFileInEditor(path, {name: 'unsupported.md'}, {userInitiated: true, viewMode: 'preview'});
+                        const deadline = performance.now() + 12000;
+                        const poll = () => {
+                          const panel = fileEditorPanelsForPath(path)[0];
+                          const error = panel?._pmError || '';
+                          const watermark = panel?.querySelector('.file-editor-prosemirror-error');
+                          if (error && watermark) {
+                            done({failedClosed: true, error, watermark: watermark.textContent || '', status: panel.querySelector('.file-editor-status')?.textContent?.trim() || ''});
+                            return;
+                          }
+                          if (performance.now() >= deadline) {
+                            done({error: 'unsupported ViewEdit failure timeout', pm: Boolean(panel?._pmView), panelError: error, watermark: Boolean(watermark)});
+                            return;
+                          }
+                          setTimeout(poll, 40);
+                        };
+                        poll();
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                    """,
+                    str(unsupported_markdown_file),
+                )
+                if unsupported.get('failedClosed') is not True or unsupported.get('pm') is True or 'unsupported HTML tag' not in unsupported.get('error', ''):
+                    raise SystemExit(f"Go Phase 7 unsupported ViewEdit contract failed: {unsupported}")
                 finder = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const root = arguments[0];
@@ -773,12 +956,74 @@ def main(binary: str) -> None:
                     };
                     (async () => {
                       const item = await openFileInEditor(path, {name: 'note.txt'}, {userInitiated: true, viewMode: 'edit', includeGit: true});
-                      await waitFor(() => fileEditorPanelsForPath(path)[0]?._cmView?.state?.doc?.toString?.() === 'working\\n', 'TextEdit Git fixture open');
+                      const panel = () => fileEditorPanelsForPath(path)[0];
+                      await waitFor(() => panel()?._cmView?.state?.doc?.toString?.() === 'working\\n', 'TextEdit Git fixture open');
                       const state = fileEditorStateForItem(path, item);
                       if (!state) throw new Error('TextEdit Git state is unavailable');
-                      const refreshed = await refreshOpenFileDiff(path, {item, state, fromRef: 'HEAD', toRef: 'current', silent: true, renderOnComplete: false});
-                      if (!refreshed || state.diffLoaded !== true || state.diffUnavailable === true || state.diffFromRef !== 'HEAD' || state.diffToRef !== 'current' || state.diffOriginal !== 'changed\\n' || state.diffWorking !== 'working\\n' || !String(state.diff).includes('-changed') || !String(state.diff).includes('+working')) {
-                        throw new Error('TextEdit Git diff contract mismatch: ' + JSON.stringify({refreshed, diffLoaded: state.diffLoaded, diffUnavailable: state.diffUnavailable, from: state.diffFromRef, to: state.diffToRef, original: state.diffOriginal, working: state.diffWorking, diff: state.diff}));
+                      const diffButton = panel()?.querySelector('.file-editor-diff-panel');
+                      if (!diffButton || diffButton.hidden || diffButton.disabled) {
+                        throw new Error('TextEdit Git Differ control is not rendered or enabled: ' + JSON.stringify({
+                          present: Boolean(diffButton),
+                          hidden: diffButton?.hidden ?? null,
+                          disabled: diffButton?.disabled ?? null,
+                          state: {gitRoot: state.gitRoot || '', gitTracked: state.gitTracked === true, gitHasHistory: state.gitHasHistory === true},
+                        }));
+                      }
+                      const beforeMode = editorViewModeFor(path, item);
+                      diffButton.click();
+                      let lastDiffDiagnostics = {};
+                      try {
+                        await waitFor(() => {
+                          const currentPanel = panel();
+                          const diffContainer = currentPanel?.querySelector('.file-editor-diff-codemirror');
+                          const mergeView = diffContainer?.querySelector('.cm-editor');
+                          const currentState = fileEditorStateForItem(path, item);
+                          lastDiffDiagnostics = {
+                            mode: editorViewModeFor(path, item),
+                            diffLoaded: currentState?.diffLoaded ?? null,
+                            diffLoading: currentState?.diffLoading ?? null,
+                            diffUnavailable: currentState?.diffUnavailable ?? null,
+                            diffError: currentState?.diffError || '',
+                            container: Boolean(diffContainer),
+                            hidden: diffContainer?.hidden ?? null,
+                            mergeView: Boolean(mergeView),
+                            width: diffContainer?.clientWidth || 0,
+                            height: diffContainer?.clientHeight || 0,
+                            panelText: currentPanel?.textContent?.slice(0, 240) || '',
+                          };
+                          return beforeMode !== 'diff'
+                            && lastDiffDiagnostics.mode === 'diff'
+                            && lastDiffDiagnostics.diffLoaded === true
+                            && lastDiffDiagnostics.diffUnavailable !== true
+                            && lastDiffDiagnostics.hidden === false
+                            && lastDiffDiagnostics.mergeView
+                            && lastDiffDiagnostics.width > 0
+                            && lastDiffDiagnostics.height > 0;
+                        }, 'rendered TextEdit Git Differ view');
+                      } catch (error) {
+                        throw new Error(`${error.message}: ${JSON.stringify(lastDiffDiagnostics)}`);
+                      }
+                      const currentPanel = panel();
+                      const currentState = fileEditorStateForItem(path, item);
+                      const diffContainer = currentPanel?.querySelector('.file-editor-diff-codemirror');
+                      const mergeView = diffContainer?.querySelector('.cm-editor');
+                      const renderedText = diffContainer?.textContent || '';
+                      if (currentState?.diffFromRef !== 'HEAD' || currentState?.diffToRef !== 'current' || currentState?.diffOriginal !== 'changed\\n' || currentState?.diffWorking !== 'working\\n' || !String(currentState?.diff).includes('-changed') || !String(currentState?.diff).includes('+working') || !renderedText.includes('working') || !mergeView) {
+                        throw new Error('TextEdit Git rendered Differ contract mismatch: ' + JSON.stringify({
+                          beforeMode,
+                          mode: editorViewModeFor(path, item),
+                          diffLoaded: currentState?.diffLoaded,
+                          diffUnavailable: currentState?.diffUnavailable,
+                          from: currentState?.diffFromRef,
+                          to: currentState?.diffToRef,
+                          original: currentState?.diffOriginal,
+                          working: currentState?.diffWorking,
+                          diff: currentState?.diff,
+                          renderedText: renderedText.slice(0, 300),
+                          mergeView: Boolean(mergeView),
+                          width: diffContainer?.clientWidth || 0,
+                          height: diffContainer?.clientHeight || 0,
+                        }));
                       }
                       const history = await operationPayload('/api/fs/git-history?path=' + encodeURIComponent(repo) + '&limit=10', 'Git history');
                       if (history.repo !== repo || history.head !== head || !Array.isArray(history.commits) || history.commits.length < 2) throw new Error('Git history contract mismatch: ' + JSON.stringify(history));
@@ -786,7 +1031,7 @@ def main(binary: str) -> None:
                       if (commit.to_ref !== head || !Array.isArray(commit.files) || !commit.files.some(file => file.path === 'note.txt')) throw new Error('Git commit contract mismatch: ' + JSON.stringify(commit));
                       const blame = await operationPayload('/api/batch/blame?path=' + encodeURIComponent(path), 'Git blame');
                       if (blame.in_repo !== true || !blame.lines?.['1']) throw new Error('Git blame contract mismatch: ' + JSON.stringify(blame));
-                      done({diff: {from: state.diffFromRef, to: state.diffToRef, original: state.diffOriginal, working: state.diffWorking, changed: String(state.diff).includes('-changed'), workingChange: String(state.diff).includes('+working')}, history: {head: history.head, commits: history.commits.length}, commit: {to: commit.to_ref, files: commit.files.length}, blame: {inRepo: blame.in_repo, lines: Object.keys(blame.lines).length}});
+                      done({diff: {clicked: true, beforeMode, mode: editorViewModeFor(path, item), rendered: true, from: currentState.diffFromRef, to: currentState.diffToRef, original: currentState.diffOriginal, working: currentState.diffWorking, changed: String(currentState.diff).includes('-changed'), workingChange: String(currentState.diff).includes('+working'), width: diffContainer.clientWidth, height: diffContainer.clientHeight}, history: {head: history.head, commits: history.commits.length}, commit: {to: commit.to_ref, files: commit.files.length}, blame: {inRepo: blame.in_repo, lines: Object.keys(blame.lines).length}});
                     })().catch(error => done({error: String(error?.stack || error)}));
                 """, str(git_note), str(git_root), git_head)
                 if git_views.get('error'):
@@ -887,16 +1132,35 @@ def main(binary: str) -> None:
                     raise SystemExit(f"Go Phase 3 journal ack state missing: {journal_lines}")
                 print({'terminal': result, 'editor': editor, 'textedit_conflict': conflict, 'viewedit': markdown, 'viewedit_reopen': markdown_reopened, 'finder': finder, 'finder_ui': finder_ui, 'git_views': git_views, 'finder_watch': watch, 'event_repair': repair, 'operation_replay': replay, 'after_ack_restart': no_replay, 'pids': [first_pid, second_pid, proc.pid if proc else None], 'journal_records': len(journal_lines)})
             finally:
-                if driver is not None:
-                    driver.quit()
-                    driver = None
+                if driver_lease is not None:
+                    retirement = driver_lease.retire()
+                    if not retirement.proven_gone:
+                        cleanup_errors.append(f"Go browser E2E chromedriver survived retirement: {retirement.as_dict()}")
+                elif driver is not None:
+                    try:
+                        driver.quit()
+                    except WebDriverException as error:
+                        cleanup_errors.append(f"Go browser E2E WebDriver cleanup failed: {error}")
+                driver = None
         finally:
             if driver is not None:
-                driver.quit()
+                try:
+                    driver.quit()
+                except WebDriverException as error:
+                    cleanup_errors.append(f"Go browser E2E WebDriver cleanup failed: {error}")
             stop_server()
             for session_name in created_sessions:
-                subprocess.run((*tmux, "kill-session", "-t", session_name), check=False)
+                cleanup_tmux_session(session_name)
+            cleanup_tmux_socket_dir()
+            if cleanup_errors:
+                raise SystemExit("Go browser E2E cleanup failed: " + "; ".join(cleanup_errors))
 
 
 if __name__ == "__main__":
-    main(os.environ["Yolomux_GO_BINARY"] if "Yolomux_GO_BINARY" in os.environ else os.sys.argv[1])
+    parser = argparse.ArgumentParser(description="Run the Docker/Bazel Go Chromium E2E contract.")
+    parser.add_argument("binary", nargs="?", help="path to the Bazel-built Go server binary")
+    arguments = parser.parse_args()
+    binary = arguments.binary or os.environ.get("YOLOMUX_GO_BINARY")
+    if not binary:
+        parser.error("a Go server binary argument or YOLOMUX_GO_BINARY is required")
+    main(binary)

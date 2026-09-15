@@ -525,7 +525,10 @@ func TestUploadReturnsSynchronousCanonicalResultThroughFinderScheduler(t *testin
 func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	root := t.TempDir()
 	config := t.TempDir()
-	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: admin\n    role: admin\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: readonly\n    password: readonly\n    role: readonly\n  - username: admin\n    password: admin\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "auth-cookie-secret"), []byte(strings.Repeat("11", 32)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "note.txt")
@@ -545,40 +548,72 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	s := &server{root: root, config: config, port: 7221, finder: service, finderJobs: newFinderJobScheduler()}
+	s := &server{root: root, config: config, port: 7221, finder: service, finderJobs: newFinderJobScheduler(), capabilities: capabilities.New("go-test")}
 	defer s.finderJobs.Close()
 	mux := http.NewServeMux()
 	s.registerFilesystemRoutes(mux)
-	serve := func(method, requestURL string) *httptest.ResponseRecorder {
+	serve := func(username, password, method, requestURL string) *httptest.ResponseRecorder {
 		record := httptest.NewRecorder()
 		request := httptest.NewRequest(method, requestURL, nil)
-		request.SetBasicAuth("admin", "admin")
+		if username != "" {
+			request.SetBasicAuth(username, password)
+		}
 		mux.ServeHTTP(record, request)
 		return record
 	}
 
-	diff := serve(http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path)+"&from=HEAD&to=current")
+	diff := serve("readonly", "readonly", http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path)+"&from=HEAD&to=current")
 	if diff.Code != http.StatusOK || !bytes.Contains(diff.Body.Bytes(), []byte(`"relative_path":"note.txt"`)) || !bytes.Contains(diff.Body.Bytes(), []byte(`+two`)) {
-		t.Fatalf("diff route = %d %s", diff.Code, diff.Body.String())
+		t.Fatalf("readonly diff route = %d %s", diff.Code, diff.Body.String())
 	}
 
-	history := serve(http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1")
+	history := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1")
 	if history.Code != http.StatusOK || !bytes.Contains(history.Body.Bytes(), []byte(`"commits"`)) || !bytes.Contains(history.Body.Bytes(), []byte(`"subject":"initial"`)) {
-		t.Fatalf("history route = %d %s", history.Code, history.Body.String())
+		t.Fatalf("readonly history route = %d %s", history.Code, history.Body.String())
 	}
 	headOutput, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sha := string(bytes.TrimSpace(headOutput))
-	commit := serve(http.MethodGet, "/api/fs/git-commit?path="+url.QueryEscape(root)+"&commit="+url.QueryEscape(sha)+"&head="+url.QueryEscape(sha))
+	commit := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-commit?path="+url.QueryEscape(root)+"&commit="+url.QueryEscape(sha)+"&head="+url.QueryEscape(sha))
 	if commit.Code != http.StatusOK || !bytes.Contains(commit.Body.Bytes(), []byte(`"sha"`)) || !bytes.Contains(commit.Body.Bytes(), []byte(`"files"`)) {
-		t.Fatalf("commit route = %d %s", commit.Code, commit.Body.String())
+		t.Fatalf("readonly commit route = %d %s", commit.Code, commit.Body.String())
 	}
 
-	blame := serve(http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
+	blame := serve("admin", "admin", http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
 	if blame.Code != http.StatusOK || !bytes.Contains(blame.Body.Bytes(), []byte(`"in_repo":true`)) || !bytes.Contains(blame.Body.Bytes(), []byte(`"1":`)) {
-		t.Fatalf("blame route = %d %s", blame.Code, blame.Body.String())
+		t.Fatalf("admin blame route = %d %s", blame.Code, blame.Body.String())
+	}
+
+	readonlyBlame := serve("readonly", "readonly", http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
+	if readonlyBlame.Code != http.StatusForbidden || !bytes.Contains(readonlyBlame.Body.Bytes(), []byte(`"role":"readonly"`)) {
+		t.Fatalf("readonly blame route = %d %s", readonlyBlame.Code, readonlyBlame.Body.String())
+	}
+	unauthenticatedDiff := serve("", "", http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path))
+	if unauthenticatedDiff.Code != http.StatusUnauthorized || !bytes.Contains(unauthenticatedDiff.Body.Bytes(), []byte(`"key":"auth.error.authenticationRequired"`)) {
+		t.Fatalf("unauthenticated diff route = %d %s", unauthenticatedDiff.Code, unauthenticatedDiff.Body.String())
+	}
+	unauthenticatedBlame := serve("", "", http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
+	if unauthenticatedBlame.Code != http.StatusUnauthorized || !bytes.Contains(unauthenticatedBlame.Body.Bytes(), []byte(`"key":"auth.error.authenticationRequired"`)) {
+		t.Fatalf("unauthenticated blame route = %d %s", unauthenticatedBlame.Code, unauthenticatedBlame.Body.String())
+	}
+
+	if changed := s.capabilities.Set("finder.git.v1", capabilities.Entry{Reason: &capabilities.Reason{
+		Code: "disabled_for_test", MessageKey: "test.capabilityDisabled", MessageParams: map[string]any{},
+	}}); !changed {
+		t.Fatal("disabling the Git capability did not change the catalog")
+	}
+	for _, route := range []string{
+		"/api/fs/diff?path=" + url.QueryEscape(path),
+		"/api/fs/git-history?path=" + url.QueryEscape(root),
+		"/api/fs/git-commit?path=" + url.QueryEscape(root) + "&commit=" + url.QueryEscape(sha),
+		"/api/batch/blame?path=" + url.QueryEscape(path),
+	} {
+		disabled := serve("admin", "admin", http.MethodGet, route)
+		if disabled.Code != http.StatusNotImplemented || !bytes.Contains(disabled.Body.Bytes(), []byte(`"capability":"finder.git.v1"`)) {
+			t.Fatalf("disabled Git route %s = %d %s", route, disabled.Code, disabled.Body.String())
+		}
 	}
 }
 

@@ -124,8 +124,12 @@ def overflow_browser_receipt_blocker():
 
 class _RetainedJsLifecycleDriver:
     def execute_script(self, source):
-        assert "return lifecycle ? {diagnosticMode" in source
-        return {"diagnosticMode": "retained-js"}
+        if "retireBackgroundProducers" in source:
+            return {"available": True, "state": {"watchRootsRetired": True}}
+        if "return lifecycle ? {diagnosticMode" in source:
+            return {"diagnosticMode": "retained-js"}
+        assert "return {available: true, diagnosticMode: lifecycle.diagnosticMode}" in source
+        return {"available": True, "diagnosticMode": "retained-js"}
 
 
 @pytest.fixture(autouse=True)
@@ -396,6 +400,8 @@ def test_minimal_fixture_finite_work_reaches_gate_retirement_and_cleanup(monkeyp
             if "lifecycle.operationState()" in source:
                 calls.append("operation-state")
                 return self.operation_states.pop(0)
+            if "return {available: true, diagnosticMode: lifecycle.diagnosticMode}" in source:
+                return {"available": True, "diagnosticMode": "browser-console"}
             if "return lifecycle ? {diagnosticMode" in source:
                 return {"diagnosticMode": "browser-console"}
             raise AssertionError(source)

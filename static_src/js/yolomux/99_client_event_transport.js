@@ -1089,7 +1089,10 @@ function applyClientEventDemand(timer = clientEventTransportState.demandTimer, s
   const signature = clientEventDemandSignature(descriptor);
   const sameDemand = signature === clientEventTransportState.demandSignature;
   clientEventTransportState.demand = descriptor;
-  if (sameDemand && clientEventTransportState.source) return false;
+  if (sameDemand && clientEventTransportState.source) {
+    retryPendingOperationTerminalRepairs();
+    return false;
+  }
   clientEventTransportState.demandSignature = signature;
   if (!descriptor.channels.length) {
     if (!sameDemand) closeClientEventStream();

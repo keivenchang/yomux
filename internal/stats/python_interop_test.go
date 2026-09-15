@@ -6,10 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/keivenchang/yolomux/internal/testsupport"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -230,7 +230,7 @@ c.commit(); c.close()
 func pythonExecutable(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is required for the Python interoperability harness")
+		t.Fatalf("python3 is required for the Python interoperability harness: %v", err)
 	}
 	return "python3"
 }
@@ -238,22 +238,14 @@ func pythonExecutable(t *testing.T) string {
 func runPython(t *testing.T, python, script string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(python, append([]string{script}, args...)...)
-	cmd.Dir = repositoryRoot(t)
-	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+repositoryRoot(t))
+	repoRoot := testsupport.RepoRoot(t)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+repoRoot)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output)
-}
-
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Join(filepath.Dir(file), "..", "..")
 }
 
 func writePythonInteropScript(t *testing.T, path string) {

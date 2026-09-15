@@ -1063,6 +1063,9 @@ function startApiOperationTransport(record) {
   // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
   // cover a terminal published before the server subscribes it.
   if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
+  if (apiOperationState.repairs.has(record?.id) && typeof repairClientEventOperationTerminalResource === 'function') {
+    repairClientEventOperationTerminalResource(`operation_terminal:${record.id}`);
+  }
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -6137,6 +6140,22 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
+function clipboardImageBlobFor(image) {
+  const path = String(image?.dataset?.resolvedPath || '');
+  const url = String(image?.currentSrc || image?.src || '');
+  if (path && typeof fetchRawFileBlob === 'function') {
+    return fetchRawFileBlob(path).then(result => {
+      if (!result?.ok || !result.blob) throw result?.error || new Error(`Unable to read image: ${path}`);
+      return result.blob;
+    });
+  }
+  if (!url) return Promise.reject(new Error('Image source is unavailable'));
+  return fetch(url, {credentials: 'same-origin'}).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  });
+}
+
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
@@ -6716,14 +6735,12 @@ function clipboardImageSourceUrl(image) {
 
 async function copyMarkdownPreviewImageToClipboard(image, button) {
   const url = clipboardImageSourceUrl(image);
-  if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+  const path = String(image?.dataset?.resolvedPath || '');
+  if ((!url && !path) || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
     return;
   }
-  const imageBlob = fetch(url, {credentials: 'same-origin'}).then(response => {
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.blob();
-  });
+  const imageBlob = clipboardImageBlobFor(image);
   const dataUrl = imageBlob.then(blob => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -6741,7 +6758,7 @@ async function copyMarkdownPreviewImageToClipboard(image, button) {
     })]);
     showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
   } catch (error) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
   }
 }
 

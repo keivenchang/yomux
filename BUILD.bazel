@@ -1,75 +1,96 @@
-genrule(
+alias(
     name = "yolomux_go",
-    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]) + ["go.mod"],
-    outs = ["yolomux-go"],
-    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go build -buildvcs=false -trimpath -o $@ ./cmd/yolomux-go",
-    local = True,
-    tags = ["manual"],
+    actual = "//cmd/yolomux-go:yolomux_go",
 )
 
-genrule(
+alias(
     name = "fake_llm",
-    srcs = glob(["cmd/fake-llm/*.go", "internal/fakellm/*.go"]),
-    outs = ["fake-llm"],
-    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go build -buildvcs=false -trimpath -o $@ ./cmd/fake-llm",
-    local = True,
-    tags = ["manual"],
+    actual = "//cmd/fake-llm:fake_llm",
 )
 
-genrule(
-    name = "yolomux_go_race",
-    srcs = glob(["cmd/yolomux-go/*.go", "internal/**/*.go"]) + ["go.mod"],
-    outs = ["yolomux-go-race.ok"],
-    # Bazel exposes declared source directories as symlinks in its execution root. Go's ./...
-    # walker skips those symlinked directories, so keep the complete package set explicit here.
-    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go test -race -count=1 -skip '^TestAgentStatusLinuxAdaptersWithMockClient$$' ./cmd/yolomux-go ./internal/capabilities ./internal/finder ./internal/stats ./internal/work && touch $@",
-    local = True,
-    tags = ["manual"],
+# These are runtime inputs for native Go tests that invoke the repository's Python fixtures. The
+# files remain declared data rather than being discovered through the host checkout.
+filegroup(
+    name = "go_test_support",
+    visibility = ["//visibility:public"],
+    srcs = glob([
+        "tools/**/*.py",
+        "tests/fixtures/current_model_usage/**/*.jsonl",
+        "yolomux_lib/**/*.json",
+        "yolomux_lib/**/*.py",
+    ]),
+)
+
+filegroup(
+    name = "docker_bazel_test_data",
+    srcs = [
+        ".bazelversion",
+        ".dockerignore",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "WORKSPACE",
+        "conftest.py",
+        "docker/Dockerfile.test",
+        "docker/debian-packages.txt",
+        "docker/run-tests.sh",
+        "docker/agent-clients/package.json",
+        "docker/agent-clients/package-lock.json",
+        "go.mod",
+        "go.sum",
+        "package.json",
+        "package-lock.json",
+        "pyproject.toml",
+        "docker/requirements-test.txt",
+    ] + glob([
+        "static/**",
+        "static_src/**",
+        "tests/**",
+        "tools/**",
+        "yolomux_lib/**",
+    ], exclude = [
+        "**/__pycache__/**",
+        "**/*.pyc",
+    ]),
+)
+
+test_suite(
+    name = "go_unit_tests",
+    tests = [
+        "//cmd/yolomux-go:yolomux_go_test",
+        "//internal/capabilities:capabilities_test",
+        "//internal/fakellm:fakellm_test",
+        "//internal/finder:finder_test",
+        "//internal/stats:stats_test",
+        "//internal/stats:agent_status_integration_test",
+        "//internal/work:work_test",
+    ],
+)
+
+test_suite(
+    name = "go_race_tests",
+    tests = [
+        "//cmd/yolomux-go:yolomux_go_race_test",
+        "//internal/capabilities:capabilities_race_test",
+        "//internal/fakellm:fakellm_race_test",
+        "//internal/finder:finder_race_test",
+        "//internal/stats:stats_race_test",
+        "//internal/stats:agent_status_integration_race_test",
+        "//internal/work:work_race_test",
+    ],
 )
 
 test_suite(
     name = "go_tests",
-    tests = [":yolomux_go_contract_test", ":yolomux_go_race_test"],
-)
-
-sh_test(
-    name = "yolomux_go_race_test",
-    srcs = ["tools/bazel_go_race_test.sh"],
-    data = [":yolomux_go_race"],
-    args = ["$(location :yolomux_go_race)"],
-)
-
-sh_test(
-    name = "yolomux_go_browser_e2e",
-    srcs = ["tools/run_go_browser_e2e.sh"],
-    data = [
-        ":yolomux_go",
-        "docker/Dockerfile.test",
-        "docker/run-tests.sh",
-        "package.json",
-    ] + glob(["static/**", "tools/**", "yolomux_lib/**"]),
-    args = ["$(location :yolomux_go)", "$(location tools/bazel_go_browser_e2e.py)"],
-    tags = ["manual", "local", "no-sandbox"],
-)
-
-sh_test(
-    name = "yolomux_go_stats_browser_docker_e2e",
-    srcs = ["tools/bazel_go_stats_browser_docker_e2e.sh"],
-    data = [
-        "docker/Dockerfile.test",
-        "docker/run-tests.sh",
-        "package.json",
-        "static/vendor/xterm.js",
-        "static/vendor/xterm.css",
-        "static/vendor/xterm-addon-unicode11.js",
-    ] + glob([
-        "tests/**/*.py",
-        "tools/**/*.py",
-        "yolomux_lib/**/*.py",
-    ]),
-    args = ["$(location tools/bazel_go_stats_browser_docker_e2e.sh)"],
-    local = True,
-    tags = ["manual", "local", "no-sandbox"],
+    tests = [
+        ":go_unit_tests",
+        ":go_race_tests",
+        ":yolomux_go_contract_test",
+        ":bazel_action_environment_test",
+        ":docker_runtime_contract_test",
+        ":yolomux_go_browser_e2e",
+        ":yolomux_go_stats_browser_docker_e2e",
+        ":agent_status_docker_e2e",
+    ],
 )
 
 sh_test(
@@ -79,35 +100,47 @@ sh_test(
     args = ["$(location :yolomux_go)"],
 )
 
-genrule(
-    name = "yolomux_go_agent_status_integration_test",
-    srcs = glob([
-        "cmd/yolomux-go/*.go",
-        "internal/**/*.go",
-        "tools/mockers/*.py",
-    ]) + ["go.mod", "go.sum"],
-    outs = ["yolomux-go-agent-status-integration.ok"],
-    cmd = "mkdir -p $(@D)/go-cache $(@D)/go-path $(@D)/go-mod-cache && GOWORK=off GO111MODULE=on GOPATH=$$(pwd)/$(@D)/go-path GOMODCACHE=$$(pwd)/$(@D)/go-mod-cache GOCACHE=$$(pwd)/$(@D)/go-cache go test -race -count=1 ./internal/stats -run '^TestAgentStatusLinuxAdaptersWithMockClient$$' && touch $@",
+sh_test(
+    name = "bazel_action_environment_test",
+    srcs = ["tools/bazel_action_environment_test.sh"],
+)
+
+sh_test(
+    name = "docker_runtime_contract_test",
+    srcs = ["tools/docker_runtime_contract_test.sh"],
+)
+
+sh_test(
+    name = "yolomux_go_browser_e2e",
+    srcs = ["tools/run_go_browser_e2e.sh"],
+    data = [
+        ":yolomux_go",
+        ":docker_bazel_test_data",
+        "tools/bazel_go_browser_e2e.py",
+        "tests/browser_helpers/__init__.py",
+        "tests/browser_helpers/webdriver_lease.py",
+    ],
+    args = ["$(location :yolomux_go)", "$(location tools/bazel_go_browser_e2e.py)"],
+    tags = ["local", "no-sandbox"],
+)
+
+sh_test(
+    name = "yolomux_go_stats_browser_docker_e2e",
+    srcs = ["tools/bazel_go_stats_browser_docker_e2e.sh"],
+    data = [
+        ":yolomux_go",
+        ":docker_bazel_test_data",
+    ],
+    args = ["$(location :yolomux_go)"],
     local = True,
-    tags = ["manual", "local"],
+    tags = ["local", "no-sandbox"],
 )
 
 sh_test(
     name = "agent_status_docker_e2e",
     srcs = ["tools/bazel_agent_status_docker_e2e.sh"],
-    data = [
-        "docker/Dockerfile.test",
-        "docker/run-tests.sh",
-        "package.json",
-        "static/vendor/xterm.js",
-        "static/vendor/xterm.css",
-        "static/vendor/xterm-addon-unicode11.js",
-    ] + glob([
-        "tests/**/*.py",
-        "tools/**/*.py",
-        "yolomux_lib/**/*.py",
-    ]),
+    data = [":docker_bazel_test_data"],
     args = ["$(location tools/bazel_agent_status_docker_e2e.sh)"],
     local = True,
-    tags = ["manual", "local", "no-sandbox"],
+    tags = ["local", "no-sandbox"],
 )

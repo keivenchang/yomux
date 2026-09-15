@@ -6,9 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"testing"
+
+	"github.com/keivenchang/yolomux/internal/testsupport"
 )
 
 func writeJSONL(t *testing.T, path string, records ...map[string]any) {
@@ -84,11 +85,7 @@ func usageCodex(timestamp, input, cached, output float64) map[string]any {
 
 func copyObservedTranscript(t *testing.T, provider, relativePath string) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	fixture := filepath.Join(filepath.Dir(thisFile), "..", "..", "tests", "fixtures", "current_model_usage", "observed."+provider+".jsonl")
+	fixture := testsupport.RepoPath(t, filepath.Join("tests", "fixtures", "current_model_usage", "observed."+provider+".jsonl"))
 	data, err := os.ReadFile(fixture)
 	if err != nil {
 		t.Fatal(err)

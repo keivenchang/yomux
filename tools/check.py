@@ -48,6 +48,7 @@ import platform
 import re
 import resource
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -122,7 +123,7 @@ from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
 from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
-EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
+EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "bazel-go", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
 
 EXIT_LANE_FAILED = 1
 EXIT_USAGE = 2
@@ -154,6 +155,12 @@ RETIREMENT_POLL_SECONDS = 0.2
 LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES = 1024 * 1024 * 1024
 LANE_OUTPUT_FAILURE_DETAIL_CHARS = 256
 LANE_OUTPUT_WRITE_LOCK = threading.Lock()
+# The child test tools have their own class-specific pytest ceilings, but the gate itself must not
+# wait forever when a launcher exits while a descendant retains stdout/stderr. This is deliberately
+# much larger than any normal focused lane and is only the final process-lifecycle safety net.
+LANE_STEP_TIMEOUT_SECONDS = 1800.0
+LANE_STEP_TERMINATE_GRACE_SECONDS = 10.0
+LANE_STEP_TIMEOUT_RETURN_CODE = 124
 
 # One token minted per gate run and exported so docker/run-tests.sh stamps every container this run
 # starts with `--label CONTAINER_OWNER_LABEL=<token>`. The retirement probe then filters on that
@@ -346,8 +353,22 @@ def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = F
     return args
 
 
+def bazel_job_count(*, serial: bool = False) -> str:
+    """Return the Bazel action budget for one isolated test container."""
+
+    if serial:
+        return "1"
+    override = os.environ.get("YOLOMUX_BAZEL_JOBS", "").strip()
+    if override:
+        if not override.isdigit() or int(override) < 1:
+            raise ValueError("YOLOMUX_BAZEL_JOBS must be a positive integer")
+        return override
+    return "2"
+
+
 def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
     nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
+    bazel_jobs = bazel_job_count(serial=serial)
     return {
         StepId.PY_COMPILE: Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),
         StepId.STATIC_BUILD: Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
@@ -357,13 +378,14 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yolomux.js", ["node", "--check", "static/yolomux.js"]),
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
+        StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs]),
         StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]),
         StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"]),
         StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
         StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
         StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
         StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),
-        StepId.WHITESPACE: Step("git diff --check", ["git", "diff", "--check"]),
+        StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
     }
 
 
@@ -475,6 +497,109 @@ def command_text(args: list[str]) -> str:
     return shlex.join(args)
 
 
+def _process_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def _terminate_lane_process_group(process: subprocess.Popen[str]) -> None:
+    """Stop and reap one lane step's private session without waiting indefinitely."""
+
+    # start_new_session=True makes the leader PID the process-group ID. Keep using that captured
+    # identity even when the leader has already exited but a descendant still owns the pipe.
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # The process is ours, so still stop the leader if a platform refuses group signalling.
+        if process.poll() is None:
+            process.kill()
+    # The leader can exit while a descendant still owns stdout/stderr. Waiting only on the leader
+    # would return here and skip the forced group kill, leaving that descendant behind. Observe the
+    # private group itself for the grace window instead.
+    deadline = time.monotonic() + LANE_STEP_TERMINATE_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if process.poll() is None:
+            process.kill()
+    try:
+        process.wait(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # SIGKILL cannot be ignored; this fallback keeps a broken platform implementation from
+        # turning the gate's timeout path back into an unbounded wait.
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def run_lane_step(step: Step, *, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run one lane step with a private process group and a bounded timeout."""
+
+    process = subprocess.Popen(
+        step.args,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=LANE_STEP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        timed_out = True
+        initial_stdout = _process_output_text(error.output)
+        initial_stderr = _process_output_text(error.stderr)
+        _terminate_lane_process_group(process)
+        try:
+            stdout, stderr = process.communicate(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired as final_error:
+            # A child that called setsid() is outside our session. Do not wait forever on its copy
+            # of the pipe; retain the bounded output already collected and close our read ends.
+            stdout = _process_output_text(final_error.output) or initial_stdout
+            stderr = _process_output_text(final_error.stderr) or initial_stderr
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=LANE_STEP_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+    if timed_out:
+        stderr = (
+            f"{stderr.rstrip()}\n" if stderr else ""
+        ) + f"check step timed out after {LANE_STEP_TIMEOUT_SECONDS:.1f}s; process group terminated\n"
+    return subprocess.CompletedProcess(
+        step.args,
+        LANE_STEP_TIMEOUT_RETURN_CODE if timed_out else process.returncode,
+        stdout,
+        stderr,
+    )
+
+
 def state_dir_from_env() -> Path:
     return resolved_state_dir(os.environ)
 
@@ -525,13 +650,13 @@ def lower_current_process_priority(active_records: list[dict[str, object]], *, n
     return True
 
 
-HEAVY_LANE_NAME_PREFIX = "pytest"
+HEAVY_LANE_NAME_PREFIXES = ("pytest", "bazel")
 
 
 def heavy_lane_names(selected: list[Lane]) -> list[str]:
-    """Return the selected lanes that fan out browsers, daemons and xdist workers."""
+    """Return selected lanes that can materially load the host before certification."""
 
-    return [lane.name for lane in selected if lane.name.startswith(HEAVY_LANE_NAME_PREFIX)]
+    return [lane.name for lane in selected if lane.name.startswith(HEAVY_LANE_NAME_PREFIXES)]
 
 
 def admit_inotify_capacity(
@@ -549,6 +674,37 @@ def admit_inotify_capacity(
     if not heavy_lane_names(selected) or not resolved_profile["uses_inotify_capacity"]:
         return None
     return inotify_capacity_verdict()
+
+
+def admit_functional_host(
+    selected: list[Lane], *, evidence_dir: Path
+) -> dict[str, object] | None:
+    """Qualify the host before any selected heavy functional lane creates load.
+
+    Functional browser and Bazel lanes are not latency certification units, but they still need a
+    host on which their failures are attributable. Running them on an already-stalled host turns
+    scheduler pressure into misleading product reds. Reuse the certification host owner and retain
+    its complete measurement in the same /tmp evidence tree; cheap source-only lanes do not need
+    this admission.
+    """
+
+    required_by = heavy_lane_names(selected)
+    if not required_by:
+        return None
+    qualification = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
+    artifact = latency_calibration.write_latency_evidence(
+        nodeid="tools/check.py::functional_host_admission",
+        label="functional host admission",
+        payload={"stage": "functional_host_admission", "required_by": required_by, "qualification": qualification},
+        evidence_root=evidence_dir,
+    )
+    return {
+        "required_by": required_by,
+        "qualified": bool(qualification["qualified"]),
+        "reasons": qualification["reasons"],
+        "qualification": qualification,
+        "artifact": str(artifact),
+    }
 
 
 def selected_needs_tool_guard(selected: list[Lane], explicit_lane_names: list[str] | None) -> bool:
@@ -692,7 +848,7 @@ def run_lane(lane: Lane, *, output_root: Path | None = None) -> LaneResult:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
         environment = {**os.environ, CHECK_LANE_ENV: lane.name, **dict(step.env)}
-        result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True, env=environment)
+        result = run_lane_step(step, environment=environment)
         step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:
             chunks.append(result.stdout)
@@ -1092,6 +1248,7 @@ LANE_LAUNCH_ORDER = (
     "pytest-browser",
     "pytest-e2e",
     "pytest",
+    "bazel-go",
     "pytest-boot",
     "node-layout",
     "static",
@@ -1761,12 +1918,6 @@ def main(argv: list[str] | None = None) -> int:
         print("no lanes selected", file=sys.stderr)
         return 2
 
-    if selected_needs_browser(selected):
-        browser_capability = browser_capability_preflight()
-        if not browser_capability.available:
-            print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
-            return EXIT_LANE_FAILED
-
     # The exclusive phase belongs to the canonical command. A focused --lane run is deliberately
     # not a certification, and says so, rather than exiting 0 as if it had certified.
     certify = args.certification_only or args.lane is None
@@ -1814,24 +1965,40 @@ def main(argv: list[str] | None = None) -> int:
                     if lower_current_process_priority(active_records):
                         ports = sorted({str(record.get("port") or "?") for record in active_records})
                         print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-                cross_lane_serial = args.serial or args.serial_lanes
-                mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
-                if selected:
-                    print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-                    results = run_functional_lanes(
-                        selected, serial=cross_lane_serial, output_root=output_root
-                    )
-                # Always, even when a lane already failed. A phase that only runs on an otherwise
-                # green gate cannot be trusted on a box where some lane is usually red: its own
-                # regressions would never be observed.
-                if certify:
-                    print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
-                    certification, certification_lane = run_certification_phase(
-                        evidence_dir=evidence_dir,
-                        expected_containers=expected_containers,
-                        inherited_descendants=inherited_descendants,
-                    )
-                    print_certification(certification, certification_lane)
+                functional_admission = admit_functional_host(selected, evidence_dir=evidence_dir)
+                if functional_admission is not None and not functional_admission["qualified"]:
+                    certification = {
+                        "result": "not-certifiable",
+                        "reason": "functional_host_unqualified",
+                        "evidence": functional_admission,
+                        "wall_seconds": functional_admission["qualification"].get("wall_seconds", 0.0),
+                        "evidence_dir": str(evidence_dir),
+                    }
+                    print_certification(certification, None)
+                else:
+                    if selected_needs_browser(selected):
+                        browser_capability = browser_capability_preflight()
+                        if not browser_capability.available:
+                            print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
+                            return EXIT_LANE_FAILED
+                    cross_lane_serial = args.serial or args.serial_lanes
+                    mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
+                    if selected:
+                        print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
+                        results = run_functional_lanes(
+                            selected, serial=cross_lane_serial, output_root=output_root
+                        )
+                    # Always, even when a lane already failed. A phase that only runs on an otherwise
+                    # green gate cannot be trusted on a box where some lane is usually red: its own
+                    # regressions would never be observed.
+                    if certify:
+                        print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
+                        certification, certification_lane = run_certification_phase(
+                            evidence_dir=evidence_dir,
+                            expected_containers=expected_containers,
+                            inherited_descendants=inherited_descendants,
+                        )
+                        print_certification(certification, certification_lane)
                 elapsed = time.monotonic() - started
     except worktree_writer.WorktreeWriterBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
@@ -1857,6 +2024,9 @@ def main(argv: list[str] | None = None) -> int:
         certification_note = f"; certification: {certification['result']}" if certification else ""
         print(f"CHECK FAILED in {elapsed:.2f}s: " + ", ".join(failed) + certification_note)
         return EXIT_LANE_FAILED
+    if certification and certification["reason"] == "functional_host_unqualified":
+        print(f"CHECK {latency_calibration.NOT_CERTIFIABLE} in {elapsed:.2f}s: functional_host_unqualified")
+        return EXIT_NOT_CERTIFIABLE
     if not certify:
         print(f"CHECK PASSED in {elapsed:.2f}s (focused lane selection: NOT CERTIFIED, the exclusive latency phase did not run)")
         return 0

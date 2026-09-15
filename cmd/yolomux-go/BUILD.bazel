@@ -1,0 +1,33 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "yolomux_go_lib",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    importpath = "github.com/keivenchang/yolomux/cmd/yolomux-go",
+    deps = [
+        "//internal/capabilities:capabilities_lib",
+        "//internal/finder:finder_lib",
+        "//internal/stats:stats_lib",
+        "//internal/work:work_lib",
+    ],
+)
+
+go_binary(
+    name = "yolomux_go",
+    embed = [":yolomux_go_lib"],
+)
+
+go_test(
+    name = "yolomux_go_test",
+    srcs = glob(["*_test.go"]),
+    embed = [":yolomux_go_lib"],
+)
+
+go_test(
+    name = "yolomux_go_race_test",
+    srcs = glob(["*_test.go"]),
+    embed = [":yolomux_go_lib"],
+    race = "on",
+)

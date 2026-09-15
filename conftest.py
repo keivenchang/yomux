@@ -83,10 +83,12 @@ def _install_fallback_environment() -> None:
 
 
 # On a Docker-capable host, leave host test state untouched because the hook delegates before
-# collection. Inside the container, or when Docker is deliberately/unavoidably unavailable,
-# retain the Phase 1 protection and its short Unix-socket paths.
+# collection. Inside the container, retain the Phase 1 protection and its short Unix-socket paths.
+# A host invocation without Docker is a refusal by default: a green host fallback is not evidence
+# for a Dockerized gate. The explicit YOLOMUX_CHECK_CONTAINER=0 escape hatch remains for small
+# unit-test subprocesses that intentionally exercise the host-only fallback.
 _CONTAINER_AVAILABLE, _CONTAINER_REASON = docker_image.container_available(REPO_ROOT)
-if not _CONTAINER_AVAILABLE:
+if docker_image.running_inside_container() or (not _CONTAINER_AVAILABLE and os.environ.get("YOLOMUX_CHECK_CONTAINER") == "0"):
     _install_fallback_environment()
 
 
@@ -119,9 +121,12 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
 
     available, reason = docker_image.container_available(REPO_ROOT)
     if not available:
-        if not docker_image.running_inside_container():
-            print(f"pytest running on the host: {reason}", file=sys.stderr, flush=True)
-        return None
+        if docker_image.running_inside_container():
+            return None
+        if os.environ.get("YOLOMUX_CHECK_CONTAINER") == "0":
+            return None
+        print(f"PYTEST REFUSED: Docker is required for this test invocation: {reason}", file=sys.stderr, flush=True)
+        return 3
 
     arguments = [_translate_argument(argument, REPO_ROOT) for argument in config.invocation_params.args]
     arguments.extend(["-o", f"cache_dir={host_local_cache_dir()}"])

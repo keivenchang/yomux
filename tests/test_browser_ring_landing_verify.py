@@ -51,6 +51,49 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PAIRS = ((300, 10), (900, 10), (3_600, 60), (86_400, 300))
 
 
+def _repository_head_for_evidence() -> str:
+    """Read this checkout's head without inheriting a child Git namespace."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+    return subprocess.run(
+        (
+            "git",
+            "-c",
+            f"safe.directory={REPO_ROOT}",
+            "-C",
+            str(REPO_ROOT),
+            "rev-parse",
+            "--short=9",
+            "HEAD",
+        ),
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.e2e
+def test_ring_evidence_head_uses_checkout_when_cwd_and_git_namespace_differ(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Evidence must survive a fixture changing cwd or leaving Git child variables behind."""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "not-a-repository"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+
+    head = _repository_head_for_evidence()
+
+    assert len(head) == 9
+    assert all(character in "0123456789abcdef" for character in head)
+
+
 @dataclass(frozen=True)
 class ExternalRuntime:
     port: int
@@ -438,6 +481,13 @@ def _graph_state(driver) -> dict[str, object]:
           graphRenderPending: graph?.dataset?.jsDebugGraphRefreshPending || '',
           renderPaths: renderNodes.length,
           renderedCharts: document.querySelectorAll('.js-debug-panel .js-debug-chart svg').length,
+          generationSeries: Array.isArray(generation?.buckets)
+            ? generation.buckets.slice(-8).map(bucket => ({
+              start: Number(bucket?.start || 0),
+              duration: Number(bucket?.duration || 0),
+              series: Object.keys(bucket?.series || {}).filter(name => name.startsWith('gpu_')),
+            }))
+            : [],
           focusedChartToggle: document.activeElement?.dataset?.jsDebugChartToggle || '',
           zeroBars,
           gapRects,
@@ -732,6 +782,10 @@ def _load_real_stats_page(
         evidence_root=Path("/tmp/yolomux-ring-browser-evidence"),
         bound=25,
     )
+    # Retire the previous real app document before removing its cookie. Otherwise its scheduled
+    # filesystem batch can observe the cleared session during the navigation window and produce a
+    # spurious 401 that the strict browser-retirement gate correctly reports.
+    driver.get("about:blank")
     driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
     harness.authenticate(credentials)
     harness.load(tabs=("files", "__debug__", str(runtime.tmux.sessions[0])))
@@ -914,13 +968,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         ], restarted
 
         evidence = {
-            "head": subprocess.run(
-                ("git", "rev-parse", "--short=9", "HEAD"),
-                cwd=Path.cwd(),
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout.strip(),
+            "head": _repository_head_for_evidence(),
             "port": port,
             "pairs": first_pairs,
             "zero_bars": first_zero_gap["zeroBars"],
@@ -1119,7 +1167,17 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             "resolution": 60,
             "client_id": "ring-owed-pre-page",
         })
-        assert snapshot_metadata.get("ok") is True and snapshot_binary, snapshot_metadata
+        if snapshot_metadata.get("ok") is not True or not snapshot_binary:
+            status = restarted_client.status()
+            control = restarted_client.resource_state()
+            raise AssertionError(json.dumps({
+                "snapshot": snapshot_metadata,
+                "resource_state": control,
+                "status": {
+                    key: status.get(key)
+                    for key in ("generations", "warm", "queue", "materializer", "ring_writer")
+                },
+            }, sort_keys=True, default=str))
         pre_page_snapshot = json.loads(snapshot_binary)
         assert pre_page_snapshot["cost_report"]["total_tokens"] == 12, pre_page_snapshot
 

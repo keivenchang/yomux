@@ -53,7 +53,7 @@ class BrowserBootScenario:
     file_explorer_open_intent: str | None = None
     auto_approve_payload: Mapping | None = None
     access_role: str = "admin"
-    session_mutations_allowed: bool = True
+    session_mutations_allowed: bool | None = None
     terminal_only: bool = False
     auth_username: str = "alice"
     wrap_app_root: bool = False
@@ -65,7 +65,9 @@ class BrowserBootScenario:
     hold_auto_approve: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "agent_auth"):
+        if self.session_mutations_allowed is None:
+            object.__setattr__(self, "session_mutations_allowed", self.access_role == "admin")
+        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "agent_auth", "background_status_payload"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, MappingProxyType(dict(value)))

@@ -9,6 +9,7 @@ import subprocess
 import ssl
 import shutil
 import sqlite3
+import sys
 import time
 import urllib.request
 from http import HTTPStatus
@@ -16,6 +17,8 @@ from typing import Any
 
 import pytest
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import WebDriverException
 
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
@@ -184,6 +187,7 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
   ]);
   const counts = Object.fromEntries([...tracked].map(path => [path, 0]));
   globalThis.__yolomuxStatsRouteCounts = counts;
+  globalThis.__yolomuxStatsStreamEvents = [];
   const count = input => {
     try {
       const url = new URL(typeof input === 'string' ? input : input?.url || '', location.href);
@@ -202,13 +206,23 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
     globalThis.EventSource = new Proxy(NativeEventSource, {
       construct(target, args) {
         count(args[0]);
-        return Reflect.construct(target, args, target);
+        const source = Reflect.construct(target, args, target);
+        for (const eventName of ['ack', 'snapshot', 'ready', 'delta', 'unavailable', 'error']) {
+          source.addEventListener(eventName, event => {
+            globalThis.__yolomuxStatsStreamEvents.push({
+              event: eventName,
+              readyState: source.readyState,
+              data: String(event?.data || '').slice(0, 240),
+            });
+            if (globalThis.__yolomuxStatsStreamEvents.length > 64) globalThis.__yolomuxStatsStreamEvents.shift();
+          });
+        }
+        return source;
       },
     });
   }
 })();
 """
-
 
 def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
@@ -251,23 +265,39 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
     """Exercise the shipped JS validator against the live Go stats endpoint."""
     source_root = Path(__file__).resolve().parents[1]
     private_source_root = tmp_path / "source-root"
-    shutil.copytree(
-        source_root,
-        private_source_root,
-        dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns(".git", ".yolomux-*", "bazel-*"),
-    )
+    # The Go server only needs these runtime roots. Copying the whole checkout makes this
+    # non-root Docker test depend on unrelated developer-owned files (for example mode-600
+    # locks), and it needlessly enlarges the private server fixture.
+    for relative in ("static", "tools", "yolomux_lib"):
+        shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
     binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
     if not configured_binary:
         go_binary = shutil.which("go")
         if not go_binary:
             pytest.skip("Go browser regression requires the Go toolchain")
+        go_environment = {
+            **os.environ,
+            "GOTOOLCHAIN": "local",
+            "GOWORK": "off",
+            "GO111MODULE": "on",
+        }
+        image_module_cache = Path("/opt/yolomux-go-mod-cache")
+        if image_module_cache.is_dir():
+            go_environment.update(
+                {
+                    "GOMODCACHE": str(image_module_cache),
+                    "GOPROXY": "off",
+                    "GOSUMDB": "off",
+                    "GOCACHE": str(tmp_path / "go-cache"),
+                    "GOPATH": str(tmp_path / "go-path"),
+                }
+            )
         subprocess.run(
             [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yolomux-go"],
             cwd=source_root,
             check=True,
-            env={**os.environ, "GOTOOLCHAIN": "local"},
+            env=go_environment,
         )
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -279,6 +309,8 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
     tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1)
     port_lease = HttpPortLease.reserve()
     process = None
+    server_log_path = tmp_path / "go-server.log"
+    server_log = server_log_path.open("w", encoding="utf-8")
     try:
         _seed_go_stats_fixture(tmp_path / "stats.sqlite3")
         process = subprocess.Popen(
@@ -301,16 +333,19 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
                 "PYTHONPATH": str(private_source_root),
             },
-            stdout=subprocess.PIPE,
+            stdout=server_log,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
         )
+        server_log.close()
+        server_log = None
         port_lease.release()
         WebDriverWait(browser, 30, poll_frequency=0.05).until(
             lambda _driver: _go_server_is_ready(port_lease.port)
         )
         base_url = f"https://127.0.0.1:{port_lease.port}"
+        register_browser_new_document_script(browser, _STATS_ROUTE_INSTRUMENTATION)
         browser.get(f"{base_url}/login")
         login_form = WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.find_elements(By.CSS_SELECTOR, 'form[action="/login"]')
@@ -320,6 +355,19 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         login_form.find_element(By.NAME, "username").send_keys("e2e-admin")
         login_form.find_element(By.NAME, "password").send_keys("fixture-only-password")
         login_form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+        try:
+            WebDriverWait(browser, 15, poll_frequency=0.05).until(
+                lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
+            )
+        except TimeoutException as error:
+            raise AssertionError(
+                {
+                    "login_url_after_submit": browser.current_url,
+                    "login_title": browser.title,
+                    "login_source": browser.page_source[:2000],
+                    "go_server_log": server_log_path.read_text(encoding="utf-8")[-6000:],
+                }
+            ) from error
         browser.get(
             f"{base_url}/?sessions={tmux_runtime.sessions[0]},debug"
             f"&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1"
@@ -336,13 +384,56 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 "&& document.querySelector('#grid') !== null"
             )
         )
-        WebDriverWait(browser, 20, poll_frequency=0.05).until(
-            lambda driver: driver.execute_script(
-                "return typeof jsDebugHistoryReadiness !== 'undefined' "
-                "&& jsDebugHistoryReadiness.phase === 'ready' "
-                "&& jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.() !== null"
+        try:
+            WebDriverWait(browser, 20, poll_frequency=0.05).until(
+                lambda driver: driver.execute_script(
+                    "return typeof jsDebugHistoryReadiness !== 'undefined' "
+                    "&& jsDebugHistoryReadiness.phase === 'ready' "
+                    "&& jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.() !== null"
+                )
             )
-        )
+        except TimeoutException as error:
+            diagnostic = browser.execute_script(
+                """
+                const clientState = globalThis.jsDebugCurrentStatsClientState || {};
+                const controller = clientState.client?.controller?.();
+                const generation = controller?.generation?.() || null;
+                const panel = document.querySelector('.js-debug-panel');
+                const panelRect = panel?.getBoundingClientRect?.();
+                const events = (globalThis.jsDebugEvents || []).filter(event =>
+                  event?.type === 'stats_history' || event?.route === '/api/stats-stream');
+                return {
+                  url: location.href,
+                  readiness: globalThis.jsDebugHistoryReadinessSnapshot?.() || null,
+                  generation,
+                  streamEvidence: globalThis.jsDebugCurrentStatsStreamEvidence?.() || null,
+                  client: {
+                    selectionKey: clientState.selectionKey || '',
+                    failureLatched: clientState.failureLatched === true,
+                    startPromise: Boolean(clientState.startPromise),
+                  },
+                  streamEvents: (globalThis.__yolomuxStatsStreamEvents || []).slice(-32),
+                  routeCounts: globalThis.__yolomuxStatsRouteCounts || null,
+                  graph: {
+                    debugModeEnabled: globalThis.debugModeEnabled === true,
+                    panelPresent: Boolean(panel),
+                    panelVisible: Boolean(panelRect && panelRect.width > 0 && panelRect.height > 0),
+                    panelText: panel?.innerText?.slice(0, 800) || '',
+                    exactResolutionSeconds: typeof debugGraphRenderedResolutionSeconds === 'function'
+                      ? debugGraphRenderedResolutionSeconds(Date.now()) : null,
+                    resolutionOverrideSeconds: globalThis.debugRuntimeState?.graphResolutionOverrideSeconds ?? null,
+                  },
+                  events: events.slice(-20),
+                  apiResources: performance.getEntriesByType('resource')
+                    .map(entry => entry.name)
+                    .filter(name => name.includes('/api/stats'))
+                    .slice(-30),
+                  bodyText: document.body?.innerText?.slice(0, 1200) || '',
+                };
+                """
+            )
+            server_output = server_log_path.read_text(encoding="utf-8")
+            raise AssertionError({"browser": diagnostic, "server_log": server_output[-12000:]}) from error
         no_data_start = int(time.time()) - 20
         with sqlite3.connect(tmp_path / "stats.sqlite3") as connection:
             connection.executemany(
@@ -626,11 +717,37 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         assert len(result["fiveMinute"]["memoryValues"]) >= 2, result
         assert result["fiveMinute"]["geometry"] > 0, result
     finally:
+        active_error = sys.exc_info()[1]
+        browser_retirement_error = None
+        try:
+            # This test owns a Go listener, not the fixture HTTP server. Retire the shared browser
+            # page while that listener is still alive so EventSource/fetch teardown cannot turn into
+            # connection-refused noise in the autouse browser reset.
+            browser.get("about:blank")
+            WebDriverWait(browser, 3, poll_frequency=0.05).until(
+                lambda driver: str(driver.current_url) == "about:blank"
+            )
+        except WebDriverException as error:
+            browser_retirement_error = AssertionError(
+                f"Go stats browser page did not retire before server shutdown: {error}"
+            )
         port_lease.close()
+        if server_log is not None:
+            server_log.close()
         if process is not None:
-            process.terminate()
-            process.wait(timeout=10)
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
         stop_isolated_tmux_runtime(tmux_runtime)
+        if browser_retirement_error is not None:
+            if active_error is not None:
+                print(f"Go stats browser cleanup also failed: {browser_retirement_error}", file=sys.stderr)
+            else:
+                raise browser_retirement_error
 
 
 def _go_server_is_ready(port: int) -> bool:
