@@ -1508,6 +1508,7 @@ class StatsCurrentService:
         self._last_failure = ""
         self._last_failure_component = ""
         self._last_failure_at = 0.0
+        self._last_failure_detail: dict[str, object] = {}
         self._usage_atom_backfill: dict[str, object] | None = None
         self._snapshot_body_decoration_lock = threading.Lock()
         self._snapshot_body_decoration_cache: DecoratedSnapshotBody | None = None
@@ -2649,6 +2650,7 @@ class StatsCurrentService:
                 scanner=self._agent_token_scanner,
                 cursors=self._agent_token_cursors,
                 database=OPENCODE_DATABASE_PATH,
+                coverage_database=self.database_path,
                 inventory_provider=machinewide_opencode_inventory,
                 rows_provider=self._agent_token_rows,
                 settings_provider=lambda: settings_payload().get("settings", {}),
@@ -2741,7 +2743,16 @@ class StatsCurrentService:
         except (OSError, ValueError, storage.StatsCurrentError, storage.UsageAtomIdentityConflict) as error:
             if facts is not None and facts.receipt is not None:
                 facts.receipt.rollback()
-            self._record_failure("agent_tokens", error)
+            self._record_failure(
+                "agent_tokens",
+                error,
+                detail={
+                    "family": "agent_tokens",
+                    "source_id": self._agent_token_source_id(),
+                    "owner_generation": owner_generation,
+                    "reason": str(error)[:160],
+                },
+            )
 
     def agent_token_usage_status(self) -> dict[str, object]:
         return self._agent_token_scanner.status()
@@ -3921,16 +3932,24 @@ class StatsCurrentService:
         self._failed_builds += 1
         self._record_failure("materializer", error)
 
-    def _record_failure(self, component: str, error: object) -> None:
+    def _record_failure(
+        self,
+        component: str,
+        error: object,
+        *,
+        detail: Mapping[str, object] | None = None,
+    ) -> None:
         self._last_failure = type(error).__name__[:64]
         self._last_failure_component = component
         self._last_failure_at = self.clock()
+        self._last_failure_detail = dict(detail or {})
 
     def _clear_failure(self, component: str) -> None:
         if self._last_failure_component == component:
             self._last_failure = ""
             self._last_failure_component = ""
             self._last_failure_at = 0.0
+            self._last_failure_detail = {}
 
     def _record_request_latency(self, kind: str, started: float) -> None:
         elapsed = max(0.0, self.monotonic() - started)
@@ -5840,6 +5859,7 @@ class StatsStatusProjector:
                 "component": self._last_failure_component,
                 "kind": self._last_failure,
                 "at": self._last_failure_at,
+                **({"detail": dict(self._last_failure_detail)} if self._last_failure_detail else {}),
             },
             "host_collectors": {
                 "context": None if self.collector_context is None else dict(self.collector_context),

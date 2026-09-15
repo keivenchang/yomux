@@ -70,16 +70,41 @@ class AgentTokenCollector:
         source_identity_provider: SourceIdentityProvider,
         read_usage: UsageReader = opencode.read_usage,
         backfill_status_sink: BackfillStatusSink | None = None,
+        coverage_database: Path | None = None,
     ) -> None:
         self.scanner = scanner
         self.cursors = cursors
         self.database = Path(database)
+        self.coverage_database = Path(coverage_database) if coverage_database is not None else None
         self.inventory_provider = inventory_provider
         self.rows_provider = rows_provider
         self.settings_provider = settings_provider
         self.source_identity_provider = source_identity_provider
         self.read_usage = read_usage
         self.backfill_status_sink = backfill_status_sink
+        self._epoch_started_at_by_id: dict[tuple[str, str, str], float] = {}
+        self._unavailable_ended_at: dict[tuple[str, str], float] = {}
+
+    def _epoch_started_at(self, attempt: Any, source_id: str, epoch_id: str) -> float:
+        """Keep one start instant for each token source lifecycle.
+
+        StatsD reuses the same epoch IDs for every collection tick. Reusing the
+        scheduled time as ``started_at`` changes an immutable storage field and
+        makes the next append fail before any token atom or receipt can commit.
+        A new StatsD process gets new PID-based epoch IDs, so this in-memory
+        lifecycle map also resets naturally across restarts.
+        """
+
+        key = ("agent_tokens", source_id, epoch_id)
+        started_at = self._epoch_started_at_by_id.get(key)
+        if started_at is None:
+            if self.coverage_database is not None and self.coverage_database.exists():
+                with storage.Store.open_reader(self.coverage_database) as reader:
+                    started_at = reader.coverage_epoch_started_at(*key)
+            if started_at is None:
+                started_at = float(attempt.epoch_started_at)
+            self._epoch_started_at_by_id[key] = started_at
+        return started_at
 
     def collect(self, attempt: Any) -> collectors.CollectorFacts:
         inventory, inventory_errors = self.inventory_provider()
@@ -223,7 +248,11 @@ class AgentTokenCollector:
                 "agent_tokens",
                 source_id,
                 f"{attempt.epoch_id}:opencode:{result.session.session_id}",
-                attempt.epoch_started_at,
+                self._epoch_started_at(
+                    attempt,
+                    source_id,
+                    f"{attempt.epoch_id}:opencode:{result.session.session_id}",
+                ),
                 attempt.scheduled_at + attempt.cadence_seconds,
                 attempt.cadence_seconds,
                 attempt.owner_generation,
@@ -381,7 +410,9 @@ class AgentTokenCollector:
             tombstones,
             collectors.CollectorReceipt(commit_receipt, rollback_receipt),
             epoch_id=attempt.epoch_id,
-            epoch_started_at=attempt.epoch_started_at,
+            epoch_started_at=self._epoch_started_at(
+                attempt, self.source_identity_provider(), attempt.epoch_id,
+            ),
             observed_at=attempt.scheduled_at,
             cadence_seconds=attempt.cadence_seconds,
             owner_generation=attempt.owner_generation,
@@ -407,19 +438,26 @@ class AgentTokenCollector:
                 observed_at=observed_at,
             )
 
-    @staticmethod
     def _unavailable(
+        self,
         attempt: Any,
         source_id: str,
         key: str,
         reason: str,
     ) -> tuple[storage.UnavailableSpan, ...]:
+        epoch_id = f"{attempt.epoch_id}:opencode:{key}"
+        source_key = ("agent_tokens", source_id)
+        observed_at = max(
+            float(attempt.scheduled_at),
+            self._unavailable_ended_at.get(source_key, float(attempt.scheduled_at)),
+        )
+        self._unavailable_ended_at[source_key] = observed_at + float(attempt.cadence_seconds)
         return collectors.collector_unavailable(
             family="agent_tokens",
             source_id=source_id,
-            epoch_id=f"{attempt.epoch_id}:opencode:{key}",
-            epoch_started_at=attempt.epoch_started_at,
-            observed_at=attempt.scheduled_at,
+            epoch_id=epoch_id,
+            epoch_started_at=self._epoch_started_at(attempt, source_id, epoch_id),
+            observed_at=observed_at,
             cadence_seconds=attempt.cadence_seconds,
             owner_generation=attempt.owner_generation,
             reason=reason[:160],
