@@ -464,7 +464,14 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 
 function queueClientPushEvent(type, payload = {}, envelope = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientEventTransportState.queue.set(key, {type, payload, envelope});
+  clientEventTransportState.queue.set(key, {
+    type,
+    payload,
+    envelope,
+    epoch: String(envelope?.epoch || ''),
+    serverEvent: clientServerPushEventTypes.includes(type),
+    epochGeneration: clientEventTransportState.epochGeneration,
+  });
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
@@ -496,7 +503,10 @@ function flushQueuedClientPushEvents() {
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
-  for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
+  for (const event of events) {
+    if (event.serverEvent && event.epochGeneration !== clientEventTransportState.epochGeneration) continue;
+    handleClientPushEventNow(event.type, event.payload, event.envelope);
+  }
 }
 
 // A pushed metadata payload carries its own identity because the HTTP path has no envelope to read
@@ -508,7 +518,8 @@ function clientPushEventPayloadWithVerifiedIdentity(type, payload = {}, envelope
   if (type !== 'transcripts_changed' || !payload?.data) return payload;
   const envelopeEpoch = String(envelope?.epoch || '');
   const identity = sessionMetadataPayloadIdentity(payload.data);
-  if (identity && (!envelopeEpoch || identity.epoch === envelopeEpoch)) return payload;
+  const currentEpoch = clientEventTransportState.resourceEpoch;
+  if (identity && (envelopeEpoch ? identity.epoch === envelopeEpoch : !currentEpoch || identity.epoch === currentEpoch)) return payload;
   const {data, ...rest} = payload;
   return rest;
 }

@@ -1727,6 +1727,7 @@ const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
   replacementSource: null,
+  epochGeneration: 0,
   connected: false,
   reconnectPending: false,
   disconnectTimer: null,
@@ -1757,8 +1758,8 @@ const clientEventTransportState = {
 // falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
 const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
-// server: client-event resource revisions AND the session-metadata build generation. They all
-// restart at zero in a replacement process, so they reset together, here, once.
+// server: client-event resource revisions, session-metadata build generation, and tmux topology
+// generation. They all restart at zero in a replacement process, so they reset together, here, once.
 //
 // Two call sites in the client-event transport used to inline the transport half of this reset and
 // nothing reset the metadata half, which is how a browser kept claiming applied generation 50 while
@@ -1773,9 +1774,11 @@ function adoptServerEpoch(epoch) {
   if (!next || clientEventTransportState.resourceEpoch === next) return false;
   transcriptMetadataState.previousEpoch = transcriptMetadataState.epoch;
   clientEventTransportState.resourceEpoch = next;
+  clientEventTransportState.epochGeneration += 1;
   clientEventTransportState.resourceRevisions.clear();
   clientEventTransportState.resourceRepairs.clear();
   transcriptMetadataState.epoch = next;
+  tmuxTopologyGeneration = 0;
   // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
   // the previous process into a comparison against this one.
   transcriptMetadataState.generation = 0;

@@ -4015,6 +4015,32 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.clientEventReadyGapResourcesForTest({resource_revisions: {fs_changed: 4, 'event_log_changed:1': 3}})), ['event_log_changed:1']);
   });
 
+  test('queued events from the retired server epoch are dropped at frame flush', () => {
+    const frames = [];
+    const api = loadYolomux(
+      '?sessions=old&layout=left&tabs=left:old',
+      ['old'],
+      'http:',
+      'Linux x86_64',
+      'admin',
+      {requestAnimationFrame(callback) { frames.push(callback); return frames.length; }},
+    );
+    assert.equal(api.handleClientPushEventForTest('transcripts_changed', {
+      data: {
+        metadata_identity: {epoch: 'server-old', generation: 1},
+        topology_generation: 1,
+        session_order: ['old'],
+        sessions: {old: {panes: [], marker: 'stale-old-server'}},
+      },
+    }, {resource: 'transcripts_changed', resource_revision: 1}), true);
+    assert.equal(api.clientEventTransportStateForTest().queued, 1);
+    assert.equal(api.applyClientEventReadyEnvelopeForTest({epoch: 'server-new'}), true);
+    frames[0]();
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(state.epoch, 'server-new');
+    assert.equal(state.payload.sessions?.old, undefined, 'the queued old-server transcript event never applies');
+  });
+
   await testAsync('status deltas repair a missed revision and a late joiner to the latest snapshots', async () => {
     const latestAuto = {
       agent_window_snapshot_revision: 3,
@@ -4402,6 +4428,203 @@ async function runLayoutAsyncSuite() {
     await Promise.all([freshMetadata, freshStatus]);
     assert.equal(api.transcriptMetadataStateForTest().payload.marker, 'fresh-topology');
     assert.equal(api.autoApproveStateForTest('1')?.marker, 'fresh-topology');
+  });
+
+  await testAsync('metadata roster responses cannot move topology backward or erase a rename', async () => {
+    const pending = [];
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
+      ['glm-5_3'],
+    );
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const staleRequest = api.refreshSessionMetadataForTest({
+      refreshAuto: false,
+      refreshActivity: false,
+      refreshContext: false,
+    });
+    assert.equal(pending.length, 1, 'the pre-rename metadata response is held in flight');
+    api.applyAutoApprovePayloadForTest({
+      topology_generation: 4,
+      session_order: ['glm-5_3'],
+      sessions: {'glm-5_3': {target: 'glm-5_3'}},
+    }, {render: false});
+    api.replaceTmuxSessionInClient('glm-5_3', '234-glm-5_3', ['234-glm-5_3']);
+    pending[0].resolve(jsonResponse({
+      topology_generation: 3,
+      session_order: ['glm-5_3'],
+      sessions: {'glm-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }));
+    await staleRequest;
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_topology_generation');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-glm-5_3'], active: '234-glm-5_3'}},
+      'releasing the delayed pre-rename response cannot erase the renamed tab',
+    );
+
+    const stale = await api.applySessionMetadataPayloadForTest({
+      topology_generation: 3,
+      session_order: ['glm-5_3'],
+      sessions: {'glm-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(stale, false, 'a response from before the rename is rejected');
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_topology_generation');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-glm-5_3'], active: '234-glm-5_3'}},
+      'the stale roster cannot restore the retired session identity',
+    );
+
+    const refreshing = await api.applySessionMetadataPayloadForTest({
+      status: 'refreshing',
+      topology_generation: 4,
+      session_order: [],
+      sessions: {},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(refreshing, false, 'a transient statusd refresh is not an empty authoritative roster');
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'refreshing');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-glm-5_3'], active: '234-glm-5_3'}},
+      'a transient roster rebuild preserves the optimistic rename',
+    );
+
+    const fresh = await api.applySessionMetadataPayloadForTest({
+      topology_generation: 5,
+      session_order: ['234-glm-5_3'],
+      sessions: {'234-glm-5_3': {panes: [], marker: 'authoritative-rename'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(fresh, true, 'the later authoritative roster is accepted');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['234-glm-5_3'].marker, 'authoritative-rename');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['glm-5_3'], undefined);
+  });
+
+  await testAsync('a replacement server can apply its own topology generation', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['old']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-old', generation: 1},
+      topology_generation: 50,
+      session_order: ['old'],
+      sessions: {old: {panes: []}},
+    }, quiet);
+    const applied = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-new', generation: 1},
+      topology_generation: 1,
+      session_order: ['new'],
+      sessions: {new: {panes: []}},
+    }, quiet);
+    assert.equal(applied, true, 'a new server topology sequence is independent of the old server');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['new']);
+    assert.equal(api.transcriptMetadataStateForTest().epoch, 'server-new');
+  });
+
+  await testAsync('a delayed old-epoch metadata request cannot overwrite the replacement server', async () => {
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=old&layout=left&tabs=left:old',
+      ['old'],
+    );
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const pending = [];
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const delayed = api.refreshSessionMetadataForTest(quiet);
+    assert.equal(pending.length, 1, 'the old-server metadata request is held in flight');
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-new', generation: 1},
+      topology_generation: 2,
+      session_order: ['new'],
+      sessions: {new: {panes: [], marker: 'replacement'}},
+    }, quiet);
+    const stateAfterReplacement = api.transcriptMetadataStateForTest();
+    const layoutAfterReplacement = canonical(api.serialize(api.currentSlots()).panes);
+    pending[0].resolve(jsonResponse({
+      metadata_identity: {epoch: 'server-old', generation: 2},
+      topology_generation: 99,
+      session_order: ['old'],
+      sessions: {old: {panes: [], marker: 'stale-old-server'}},
+    }));
+    await delayed;
+    const stateAfterDelayed = api.transcriptMetadataStateForTest();
+    assert.equal(stateAfterDelayed.lastApply.reason, 'superseded_request');
+    assert.equal(stateAfterDelayed.epoch, 'server-new');
+    assert.equal(stateAfterDelayed.generation, stateAfterReplacement.generation);
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['new']);
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), layoutAfterReplacement);
+    assert.equal(stateAfterDelayed.payload.sessions.new.marker, 'replacement');
+    assert.equal(stateAfterDelayed.payload.sessions.old, undefined);
+  });
+
+  await testAsync('the real rename flow survives a delayed pre-rename metadata response', async () => {
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
+      ['glm-5_3'],
+    );
+    const pending = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/session-metadata' && !parsed.searchParams.has('force')) {
+        const request = deferredFetch();
+        pending.push(request);
+        return request.promise;
+      }
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({
+          new_session: '234-glm-5_3',
+          sessions: ['234-glm-5_3'],
+          topology_generation: 4,
+          ok: true,
+        }));
+      }
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({session: '234-glm-5_3', created: false, ok: true}));
+      }
+      if (parsed.pathname === '/api/session-metadata' && parsed.searchParams.get('force') === '1') {
+        return Promise.resolve(jsonResponse({
+          metadata_identity: {epoch: 'rename-server', generation: 4},
+          cache: {pending_identity: {epoch: 'rename-server', generation: 4}},
+          topology_generation: 4,
+          session_order: ['234-glm-5_3'],
+          sessions: {'234-glm-5_3': {panes: [], marker: 'fresh-after-rename'}},
+        }));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['234-glm-5_3'], sessions: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const staleRequest = api.refreshSessionMetadataForTest({
+      refreshAuto: false,
+      refreshActivity: false,
+      refreshContext: false,
+    });
+    assert.equal(pending.length, 1, 'the metadata request started before the rename');
+    const rename = api.renameTmuxSessionForTest('glm-5_3', '234-glm-5_3');
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['234-glm-5_3'], 'the real mutation commits the new roster before reconciliation');
+    pending[0].resolve(jsonResponse({
+      topology_generation: 3,
+      session_order: ['glm-5_3'],
+      sessions: {'glm-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }));
+    await staleRequest;
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'superseded_request');
+    assert.equal(await rename, true, 'the committed rename does not fail on stale reconciliation bytes');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-glm-5_3'], active: '234-glm-5_3'}},
+    );
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['234-glm-5_3'].marker, 'fresh-after-rename');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['glm-5_3'], undefined);
   });
 
   test('tmux lifecycle generations make kill-create reuse ABA-safe', () => {
@@ -4860,6 +5083,35 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.payload.sessions['1'].marker, 'replacement', 'the replacement payload is still rendered; only the verdict fails');
     assert.equal(requests.length, 2, 'the pinned force stops instead of chasing an unrelated counter');
     assert.equal(state.lastApply.awaitedGeneration, 51);
+  });
+
+  await testAsync('forced convergence rejects a delayed read from the replaced server', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    await applyOldServerMetadata(api);
+    const convergence = deferredFetch();
+    let requestCount = 0;
+    api.setFetchForTest(async input => {
+      requestCount += 1;
+      assert.equal(String(input), requestCount === 1 ? '/api/session-metadata?force=1' : '/api/session-metadata');
+      return requestCount === 1
+        ? jsonResponse(metadataPayload(EPOCH_A, 50, {pending: {epoch: EPOCH_A, generation: 51}}))
+        : convergence.promise;
+    });
+    const resultPromise = api.refreshSessionMetadataForTest({force: true, refreshAuto: false, refreshActivity: false});
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(requestCount, 2, 'forced convergence issued its cache read');
+    await api.applySessionMetadataPayloadForTest(
+      metadataPayload(EPOCH_B, 3, {sessions: {'1': {panes: [], marker: 'replacement'}}}),
+      {refreshAuto: false, refreshActivity: false, refreshContext: false},
+    );
+    convergence.resolve(jsonResponse(metadataPayload(EPOCH_A, 51, {sessions: {'1': {panes: [], marker: 'stale-old-server'}}})));
+    const result = await resultPromise;
+    const state = api.transcriptMetadataStateForTest();
+    assert.deepStrictEqual({ok: result.ok, reason: result.reason}, {ok: false, reason: 'forced_settle_epoch_changed'});
+    assert.equal(state.epoch, EPOCH_B);
+    assert.equal(state.payload.sessions['1'].marker, 'replacement');
+    assert.equal(state.generation, 3);
   });
 
   await testAsync('an epoch change drops the previous process\'s generation-dependent baseline', async () => {

@@ -1096,6 +1096,7 @@ globalThis.__layoutTestApi = {
   setTranscriptMetadataLoadErrorForTest(value) { transcriptMetadataState.error = value; },
   refreshSessionMetadataForTest: refreshSessionMetadata,
   applySessionMetadataPayloadForTest: applySessionMetadataPayload,
+  sessionsForTest() { return sessions.slice(); },
   transcriptMetadataStateForTest() {
     return {
       payload: transcriptMetadataState.payload,

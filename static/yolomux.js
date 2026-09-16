@@ -1728,6 +1728,7 @@ const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
   replacementSource: null,
+  epochGeneration: 0,
   connected: false,
   reconnectPending: false,
   disconnectTimer: null,
@@ -1758,8 +1759,8 @@ const clientEventTransportState = {
 // falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
 const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
-// server: client-event resource revisions AND the session-metadata build generation. They all
-// restart at zero in a replacement process, so they reset together, here, once.
+// server: client-event resource revisions, session-metadata build generation, and tmux topology
+// generation. They all restart at zero in a replacement process, so they reset together, here, once.
 //
 // Two call sites in the client-event transport used to inline the transport half of this reset and
 // nothing reset the metadata half, which is how a browser kept claiming applied generation 50 while
@@ -1774,9 +1775,11 @@ function adoptServerEpoch(epoch) {
   if (!next || clientEventTransportState.resourceEpoch === next) return false;
   transcriptMetadataState.previousEpoch = transcriptMetadataState.epoch;
   clientEventTransportState.resourceEpoch = next;
+  clientEventTransportState.epochGeneration += 1;
   clientEventTransportState.resourceRevisions.clear();
   clientEventTransportState.resourceRepairs.clear();
   transcriptMetadataState.epoch = next;
+  tmuxTopologyGeneration = 0;
   // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
   // the previous process into a comparison against this one.
   transcriptMetadataState.generation = 0;
@@ -85464,7 +85467,19 @@ async function applySessionMetadataPayload(payload, options = {}) {
     return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  if (epochChanged && typeof options.onServerEpochAdopted === 'function') options.onServerEpochAdopted();
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
+  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration < tmuxTopologyGeneration) {
+    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {
+      topologyGeneration: payloadTopologyGeneration,
+      currentTopologyGeneration: tmuxTopologyGeneration,
+    });
+  }
+  if (payload.status === 'refreshing') {
+    return finalizeSessionMetadataOutcome(false, 'refreshing', payload, {
+      topologyGeneration: payloadTopologyGeneration,
+    });
+  }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
     Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
@@ -85491,7 +85506,6 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
   adoptTopologyGeneration(payload);
-  finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -85506,6 +85520,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   updateMetadataBadgePulses(transcriptMetadataState.payload);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
+  finalizeSessionMetadataOutcome(true, 'applied', payload);
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
@@ -85645,17 +85660,22 @@ async function settleForcedSessionMetadata(target) {
     // outcome of the convergence, never of the caller's own work: the caller may be a session
     // mutation that has already committed, and throwing here would roll it back.
     //
-    // The apply is gated on topology alone: a payload from a replacement server is valid to render
-    // -- refusing it would leave the pane on bytes from a dead process -- it just cannot count as
-    // the awaited build, which the ground check at the top of the next pass decides.
+    // A payload from a replacement server is valid to render -- refusing it would leave the pane on
+    // bytes from a dead process -- but a delayed response from the server that was replaced is not.
+    const fetchEpochGeneration = clientEventTransportState.epochGeneration;
+    const fetchServerEpoch = clientEventTransportState.resourceEpoch;
     try {
       const payload = await apiFetchJson('/api/session-metadata');
+      const payloadEpoch = sessionMetadataPayloadIdentity(payload)?.epoch || '';
+      const responseIsCurrent = () => topologyIsCurrent()
+        && (fetchEpochGeneration === clientEventTransportState.epochGeneration
+          || (payloadEpoch && payloadEpoch !== fetchServerEpoch && payloadEpoch === clientEventTransportState.resourceEpoch));
       await applySessionMetadataPayload(payload, {
         refreshAuto: false,
         refreshActivity: false,
         refreshContext: false,
         source: 'request',
-        requestIsCurrent: topologyIsCurrent,
+        requestIsCurrent: responseIsCurrent,
       });
     } catch (error) {
       return noteForcedSessionMetadataSettleOutcome('forced_settle_read_failed', target.generation, {
@@ -85669,7 +85689,13 @@ async function refreshSessionMetadata(options = {}) {
   if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;
   const guardIsCurrent = transcriptMetadataState.guard.begin();
   const topologyEpoch = tmuxTopologyEpoch;
-  const requestIsCurrent = () => guardIsCurrent() && topologyEpoch === tmuxTopologyEpoch;
+  let serverEpochGeneration = clientEventTransportState.epochGeneration;
+  const requestIsCurrent = () => guardIsCurrent()
+    && topologyEpoch === tmuxTopologyEpoch
+    && serverEpochGeneration === clientEventTransportState.epochGeneration;
+  const onServerEpochAdopted = () => {
+    serverEpochGeneration = clientEventTransportState.epochGeneration;
+  };
   transcriptMetadataState.loading = true;
   transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
@@ -85687,6 +85713,7 @@ async function refreshSessionMetadata(options = {}) {
           refreshActivity: options.refreshActivity !== false,
           source: 'request',
           requestIsCurrent,
+          onServerEpochAdopted,
         }),
       );
       if (!result.ok && requestIsCurrent()) {
@@ -86955,7 +86982,14 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 
 function queueClientPushEvent(type, payload = {}, envelope = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientEventTransportState.queue.set(key, {type, payload, envelope});
+  clientEventTransportState.queue.set(key, {
+    type,
+    payload,
+    envelope,
+    epoch: String(envelope?.epoch || ''),
+    serverEvent: clientServerPushEventTypes.includes(type),
+    epochGeneration: clientEventTransportState.epochGeneration,
+  });
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
@@ -86987,7 +87021,10 @@ function flushQueuedClientPushEvents() {
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
-  for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
+  for (const event of events) {
+    if (event.serverEvent && event.epochGeneration !== clientEventTransportState.epochGeneration) continue;
+    handleClientPushEventNow(event.type, event.payload, event.envelope);
+  }
 }
 
 // A pushed metadata payload carries its own identity because the HTTP path has no envelope to read
@@ -86999,7 +87036,8 @@ function clientPushEventPayloadWithVerifiedIdentity(type, payload = {}, envelope
   if (type !== 'transcripts_changed' || !payload?.data) return payload;
   const envelopeEpoch = String(envelope?.epoch || '');
   const identity = sessionMetadataPayloadIdentity(payload.data);
-  if (identity && (!envelopeEpoch || identity.epoch === envelopeEpoch)) return payload;
+  const currentEpoch = clientEventTransportState.resourceEpoch;
+  if (identity && (envelopeEpoch ? identity.epoch === envelopeEpoch : !currentEpoch || identity.epoch === currentEpoch)) return payload;
   const {data, ...rest} = payload;
   return rest;
 }
