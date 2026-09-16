@@ -41,6 +41,9 @@ class ClientWatchDescriptor:
 class ClientEventWatcherRecord:
     worker: threading.Thread | None = None
     snapshot_worker: threading.Thread | None = None
+    tmux_roster_worker: threading.Thread | None = None
+    tmux_roster_dirty: bool = False
+    tmux_roster_rename_hint: bool = False
     status_generation_worker: threading.Thread | None = None
     status_generation_stop_event: threading.Event = field(default_factory=threading.Event)
     status_generation_lease_id: str = ""

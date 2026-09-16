@@ -1645,6 +1645,7 @@ const transcriptMetadataState = {
   epoch: '',
   previousEpoch: '',
   generation: 0,
+  rosterGeneration: 0,
   pendingGeneration: 0,
   // Every non-apply outcome, with a machine-readable reason. A dropped payload used to be a bare
   // `false` that no caller read, so a metadata refresh that silently declined to apply looked
@@ -1779,11 +1780,12 @@ function adoptServerEpoch(epoch) {
   clientEventTransportState.resourceRevisions.clear();
   clientEventTransportState.resourceRepairs.clear();
   transcriptMetadataState.epoch = next;
-  tmuxTopologyGeneration = 0;
-  // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
-  // the previous process into a comparison against this one.
+  // Reset server-owned generations to zero BEFORE the incoming generation is considered, so nothing
+  // can carry a number from the previous process into a comparison against this one.
   transcriptMetadataState.generation = 0;
+  transcriptMetadataState.rosterGeneration = 0;
   transcriptMetadataState.pendingGeneration = 0;
+  tmuxTopologyGeneration = 0;
   return true;
 }
 const clientEventDisconnectGraceMs = 15000;
@@ -18740,11 +18742,9 @@ function refreshOpenTabsMenuRows() {
 }
 
 function refreshTabsMenuMetadataOnOpen() {
-  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
-  // forced request then performs tmux list-sessions in the background and refreshes only this
-  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
-  if (typeof refreshSessionMetadata !== 'function') return;
-  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
+  // Opening Tabs is a cache read. The tmux watcher owns asynchronous roster updates, so opening
+  // this menu must not start a metadata rebuild or a timer-backed refresh.
+  refreshOpenTabsMenuRows();
 }
 
 function fileMenuVirtualCommand(item, detail) {
@@ -38264,9 +38264,35 @@ function tmuxSessionMutationReconciliation(metadata, autoStatuses) {
 // Reconciliation NEVER throws. It runs after the server mutation and the local commit, so a
 // rejection here is a stale view, not a failed mutation, and letting it propagate would put a
 // post-commit failure on a path whose only handler rolls the mutation back.
-async function refreshTmuxSessionMutationState() {
+const tmuxRosterMutationPollMs = 50;
+const tmuxRosterMutationTimeoutMs = 1500;
+
+function tmuxRosterMutationConverged(payload) {
+  const expectedOrder = tmuxRosterEventOrder(payload);
+  if (!expectedOrder) return false;
+  const expectedGeneration = tmuxRosterEventGeneration(payload);
+  return expectedGeneration <= tmuxTopologyGeneration
+    && expectedOrder.length === sessions.length
+    && expectedOrder.every((session, index) => session === sessions[index]);
+}
+
+async function waitForTmuxRosterMutation(payload) {
+  const deadline = Date.now() + tmuxRosterMutationTimeoutMs;
+  while (true) {
+    if (tmuxRosterMutationConverged(payload)) return sessionMetadataResult(true, 'roster_converged');
+    if (Date.now() >= deadline) {
+      return noteForcedSessionMetadataSettleOutcome('roster_generation_never_arrived', tmuxRosterEventGeneration(payload));
+    }
+    await new Promise(resolve => setTimeout(resolve, tmuxRosterMutationPollMs));
+  }
+}
+
+async function refreshTmuxSessionMutationState(options = {}) {
+  const metadataPromise = options.kind === 'rename'
+    ? waitForTmuxRosterMutation(options.payload)
+    : refreshTranscripts({force: true, refreshActivity: false});
   const [metadata, autoStatuses] = await Promise.allSettled([
-    refreshTranscripts({force: true, refreshActivity: false}),
+    metadataPromise,
     refreshAutoStatuses({force: true, sessionFallback: false}),
   ]);
   return noteTmuxSessionMutationMetadataConvergence(tmuxSessionMutationReconciliation(metadata, autoStatuses));
@@ -38302,7 +38328,7 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
     }
     failure = error;
   }
-  const metadata = await refreshTmuxSessionMutationState();
+  const metadata = await refreshTmuxSessionMutationState({kind, payload});
   if (requestSucceeded) {
     return {
       committed: true,
@@ -85469,11 +85495,18 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   if (epochChanged && typeof options.onServerEpochAdopted === 'function') options.onServerEpochAdopted();
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
-  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration < tmuxTopologyGeneration) {
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration < tmuxTopologyGeneration) {
     return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {
-      topologyGeneration: payloadTopologyGeneration,
+      payloadTopologyGeneration,
       currentTopologyGeneration: tmuxTopologyGeneration,
     });
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration >= transcriptMetadataState.rosterGeneration) {
+    transcriptMetadataState.rosterGeneration = payloadTopologyGeneration;
   }
   if (payload.status === 'refreshing') {
     return finalizeSessionMetadataOutcome(false, 'refreshing', payload, {
@@ -85588,6 +85621,72 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
     ? {key: 'transcript.lookupFailed', params: {}, fallback: ''}
     : {key: '', params: {}, fallback: String(error?.message || error || '')};
   return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
+}
+
+function tmuxRosterEventOrder(payload) {
+  const raw = Array.isArray(payload?.session_order)
+    ? payload.session_order
+    : (Array.isArray(payload?.sessions) ? payload.sessions : payload?.roster);
+  return normalizedSessionOrder(raw);
+}
+
+function tmuxRosterEventGeneration(payload) {
+  const raw = payload?.roster_generation ?? payload?.topology_generation ?? payload?.generation;
+  return Number.isSafeInteger(Number(raw)) && Number(raw) >= 0 ? Number(raw) : 0;
+}
+
+function applyTmuxRosterPayload(payload, envelope = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventEpoch = String(payload.server_epoch || payload.epoch || envelope.epoch || '');
+  if (!eventEpoch) return false;
+  if (transcriptMetadataState.epoch && transcriptMetadataState.epoch !== eventEpoch) return false;
+  const nextOrder = tmuxRosterEventOrder(payload);
+  const generation = tmuxRosterEventGeneration(payload);
+  if (!nextOrder || generation < transcriptMetadataState.rosterGeneration || generation < tmuxTopologyGeneration) return false;
+  const sameOrder = nextOrder.length === sessions.length && nextOrder.every((session, index) => session === sessions[index]);
+  if (generation === transcriptMetadataState.rosterGeneration && !sameOrder) return false;
+  adoptServerEpoch(eventEpoch);
+  const renames = Array.isArray(payload.renames) ? payload.renames : [];
+  const validRenames = renames.filter(rename => {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    return oldSession && newSession && oldSession !== newSession
+      && nextOrder.includes(newSession) && sessions.includes(oldSession);
+  });
+  for (const rename of validRenames) {
+    const oldSession = String(rename.old_session).trim();
+    const newSession = String(rename.new_session).trim();
+    if (typeof replaceTmuxSessionInClient === 'function') replaceTmuxSessionInClient(oldSession, newSession, nextOrder);
+  }
+  const priorPayload = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+    ? transcriptMetadataState.payload
+    : {};
+  const metadataSessions = Object.fromEntries(
+    Object.entries(priorPayload.sessions || {}).filter(([session]) => nextOrder.includes(session)),
+  );
+  for (const rename of validRenames) {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    if (oldSession && newSession && metadataSessions[oldSession] && !metadataSessions[newSession]) {
+      metadataSessions[newSession] = metadataSessions[oldSession];
+      delete metadataSessions[oldSession];
+    }
+  }
+  setTranscriptMetadataPayload({
+    ...priorPayload,
+    sessions: metadataSessions,
+    session_order: nextOrder,
+    topology_generation: generation,
+  });
+  transcriptMetadataState.rosterGeneration = generation;
+  adoptTopologyGeneration({topology_generation: generation});
+  const sessionsChanged = updateSessionList(nextOrder);
+  if (sessionsChanged) {
+    updateDocumentTitle();
+    renderSessionButtons();
+  }
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
+  return true;
 }
 
 function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {
@@ -86960,7 +87059,7 @@ const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -87143,6 +87242,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
         updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
       }
     }
+    return;
+  }
+  if (type === 'tmux_roster_changed') {
+    applyTmuxRosterPayload(payload, envelope);
     return;
   }
   if (type === 'watched_prs_changed') {

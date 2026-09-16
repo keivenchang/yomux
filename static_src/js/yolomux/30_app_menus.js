@@ -768,11 +768,9 @@ function refreshOpenTabsMenuRows() {
 }
 
 function refreshTabsMenuMetadataOnOpen() {
-  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
-  // forced request then performs tmux list-sessions in the background and refreshes only this
-  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
-  if (typeof refreshSessionMetadata !== 'function') return;
-  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
+  // Opening Tabs is a cache read. The tmux watcher owns asynchronous roster updates, so opening
+  // this menu must not start a metadata rebuild or a timer-backed refresh.
+  refreshOpenTabsMenuRows();
 }
 
 function fileMenuVirtualCommand(item, detail) {

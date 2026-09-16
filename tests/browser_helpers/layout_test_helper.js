@@ -1097,6 +1097,7 @@ globalThis.__layoutTestApi = {
   refreshSessionMetadataForTest: refreshSessionMetadata,
   applySessionMetadataPayloadForTest: applySessionMetadataPayload,
   sessionsForTest() { return sessions.slice(); },
+  applyTmuxRosterPayloadForTest: applyTmuxRosterPayload,
   transcriptMetadataStateForTest() {
     return {
       payload: transcriptMetadataState.payload,
@@ -1107,6 +1108,7 @@ globalThis.__layoutTestApi = {
       epoch: transcriptMetadataState.epoch,
       previousEpoch: transcriptMetadataState.previousEpoch,
       generation: transcriptMetadataState.generation,
+      rosterGeneration: transcriptMetadataState.rosterGeneration,
       pendingGeneration: transcriptMetadataState.pendingGeneration,
       lastApply: transcriptMetadataState.lastApply,
     };

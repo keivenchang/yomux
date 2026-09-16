@@ -1644,6 +1644,7 @@ const transcriptMetadataState = {
   epoch: '',
   previousEpoch: '',
   generation: 0,
+  rosterGeneration: 0,
   pendingGeneration: 0,
   // Every non-apply outcome, with a machine-readable reason. A dropped payload used to be a bare
   // `false` that no caller read, so a metadata refresh that silently declined to apply looked
@@ -1778,11 +1779,12 @@ function adoptServerEpoch(epoch) {
   clientEventTransportState.resourceRevisions.clear();
   clientEventTransportState.resourceRepairs.clear();
   transcriptMetadataState.epoch = next;
-  tmuxTopologyGeneration = 0;
-  // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
-  // the previous process into a comparison against this one.
+  // Reset server-owned generations to zero BEFORE the incoming generation is considered, so nothing
+  // can carry a number from the previous process into a comparison against this one.
   transcriptMetadataState.generation = 0;
+  transcriptMetadataState.rosterGeneration = 0;
   transcriptMetadataState.pendingGeneration = 0;
+  tmuxTopologyGeneration = 0;
   return true;
 }
 const clientEventDisconnectGraceMs = 15000;

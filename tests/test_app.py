@@ -5676,6 +5676,110 @@ def test_session_roster_transition_invalidates_status_before_metadata_publish(mo
     ]
 
 
+def test_tmux_roster_signal_publishes_compact_external_rename_without_metadata_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["old"])
+    published = []
+    monkeypatch.setattr(webapp.status_client, "invalidate", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["renamed"], None))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload, **kwargs: published.append((event_type, payload, kwargs)))
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda **kwargs: pytest.fail("roster watcher must not start metadata refresh"))
+    try:
+        webapp.handle_tmux_signal_event({"type": "session-renamed", "time": 10.0})
+        record = webapp.client_watch_service.event_watcher_record
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and webapp.sessions != ["renamed"]:
+            time.sleep(0.01)
+        assert webapp.sessions == ["renamed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert webapp.sessions == ["renamed"]
+    assert [event_type for event_type, _payload, _kwargs in published] == ["tmux_roster_changed"]
+    event_type, payload, kwargs = published[0]
+    assert event_type == "tmux_roster_changed"
+    assert payload == {
+        "sessions": ["renamed"],
+        "session_order": ["renamed"],
+        "roster_generation": 1,
+        "topology_generation": 1,
+        "server_epoch": webapp.server_epoch,
+        "renames": [{"old_session": "old", "new_session": "renamed"}],
+    }
+    assert kwargs["cache"] == "ready"
+
+
+def test_tmux_roster_signal_burst_coalesces_behind_one_worker(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    monkeypatch.setattr(webapp.status_client, "invalidate", lambda *args, **kwargs: {"ok": True})
+
+    def list_roster():
+        calls.append(True)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(timeout=2.0)
+            return (["1", "2"], None)
+        return (["1", "3"], None)
+
+    published = []
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    monkeypatch.setattr(app_module, "list_tmux_session_names", list_roster)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload, **kwargs: published.append((event_type, payload)))
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda **kwargs: pytest.fail("coalesced roster rebuild must not start metadata refresh"))
+    try:
+        assert webapp.schedule_tmux_roster_rebuild() is True
+        assert entered.wait(timeout=2.0)
+        worker = webapp.client_watch_service.event_watcher_record.tmux_roster_worker
+        assert worker is not None
+        assert webapp.schedule_tmux_roster_rebuild() is False
+        assert webapp.schedule_tmux_roster_rebuild() is False
+        release.set()
+        worker.join(timeout=2.0)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        webapp.control_server.stop()
+
+    assert len(calls) == 2
+    assert not thread_errors, thread_errors
+    assert len(published) == 1
+    assert published[0][1]["sessions"] == ["1", "3"]
+    assert published[0][1]["renames"] == [], "a create/remove burst must not be labeled as a rename"
+    assert webapp.sessions == ["1", "3"]
+
+
+def test_tmux_roster_worker_retries_transient_read_failure(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = []
+    published = []
+    monkeypatch.setattr(webapp.status_client, "invalidate", lambda *args, **kwargs: {"ok": True})
+
+    def list_roster():
+        calls.append(True)
+        if len(calls) < 3:
+            return ([], "tmux unavailable")
+        return (["2"], None)
+
+    monkeypatch.setattr(app_module, "list_tmux_session_names", list_roster)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload, **kwargs: published.append((event_type, payload)))
+    try:
+        assert webapp.schedule_tmux_roster_rebuild(rename_hint=True) is True
+        worker = webapp.client_watch_service.event_watcher_record.tmux_roster_worker
+        assert worker is not None
+        worker.join(timeout=2.0)
+        assert not worker.is_alive()
+    finally:
+        webapp.control_server.stop()
+
+    assert len(calls) == 3
+    assert len(published) == 1
+    assert published[0][1]["renames"] == [{"old_session": "1", "new_session": "2"}]
+    assert webapp.sessions == ["2"]
+
+
 def test_forced_metadata_refresh_reuses_a_build_that_already_started_after_the_request(monkeypatch):
     """Forward coalescing only. A build that began after the request already answers it, so the
     forced read must name that generation rather than queue a second identical rebuild."""

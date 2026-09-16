@@ -442,7 +442,7 @@ const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -625,6 +625,10 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
         updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
       }
     }
+    return;
+  }
+  if (type === 'tmux_roster_changed') {
+    applyTmuxRosterPayload(payload, envelope);
     return;
   }
   if (type === 'watched_prs_changed') {

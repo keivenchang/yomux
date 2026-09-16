@@ -6103,11 +6103,18 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   if (epochChanged && typeof options.onServerEpochAdopted === 'function') options.onServerEpochAdopted();
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
-  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration < tmuxTopologyGeneration) {
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration < tmuxTopologyGeneration) {
     return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {
-      topologyGeneration: payloadTopologyGeneration,
+      payloadTopologyGeneration,
       currentTopologyGeneration: tmuxTopologyGeneration,
     });
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration >= transcriptMetadataState.rosterGeneration) {
+    transcriptMetadataState.rosterGeneration = payloadTopologyGeneration;
   }
   if (payload.status === 'refreshing') {
     return finalizeSessionMetadataOutcome(false, 'refreshing', payload, {
@@ -6222,6 +6229,72 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
     ? {key: 'transcript.lookupFailed', params: {}, fallback: ''}
     : {key: '', params: {}, fallback: String(error?.message || error || '')};
   return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
+}
+
+function tmuxRosterEventOrder(payload) {
+  const raw = Array.isArray(payload?.session_order)
+    ? payload.session_order
+    : (Array.isArray(payload?.sessions) ? payload.sessions : payload?.roster);
+  return normalizedSessionOrder(raw);
+}
+
+function tmuxRosterEventGeneration(payload) {
+  const raw = payload?.roster_generation ?? payload?.topology_generation ?? payload?.generation;
+  return Number.isSafeInteger(Number(raw)) && Number(raw) >= 0 ? Number(raw) : 0;
+}
+
+function applyTmuxRosterPayload(payload, envelope = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventEpoch = String(payload.server_epoch || payload.epoch || envelope.epoch || '');
+  if (!eventEpoch) return false;
+  if (transcriptMetadataState.epoch && transcriptMetadataState.epoch !== eventEpoch) return false;
+  const nextOrder = tmuxRosterEventOrder(payload);
+  const generation = tmuxRosterEventGeneration(payload);
+  if (!nextOrder || generation < transcriptMetadataState.rosterGeneration || generation < tmuxTopologyGeneration) return false;
+  const sameOrder = nextOrder.length === sessions.length && nextOrder.every((session, index) => session === sessions[index]);
+  if (generation === transcriptMetadataState.rosterGeneration && !sameOrder) return false;
+  adoptServerEpoch(eventEpoch);
+  const renames = Array.isArray(payload.renames) ? payload.renames : [];
+  const validRenames = renames.filter(rename => {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    return oldSession && newSession && oldSession !== newSession
+      && nextOrder.includes(newSession) && sessions.includes(oldSession);
+  });
+  for (const rename of validRenames) {
+    const oldSession = String(rename.old_session).trim();
+    const newSession = String(rename.new_session).trim();
+    if (typeof replaceTmuxSessionInClient === 'function') replaceTmuxSessionInClient(oldSession, newSession, nextOrder);
+  }
+  const priorPayload = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+    ? transcriptMetadataState.payload
+    : {};
+  const metadataSessions = Object.fromEntries(
+    Object.entries(priorPayload.sessions || {}).filter(([session]) => nextOrder.includes(session)),
+  );
+  for (const rename of validRenames) {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    if (oldSession && newSession && metadataSessions[oldSession] && !metadataSessions[newSession]) {
+      metadataSessions[newSession] = metadataSessions[oldSession];
+      delete metadataSessions[oldSession];
+    }
+  }
+  setTranscriptMetadataPayload({
+    ...priorPayload,
+    sessions: metadataSessions,
+    session_order: nextOrder,
+    topology_generation: generation,
+  });
+  transcriptMetadataState.rosterGeneration = generation;
+  adoptTopologyGeneration({topology_generation: generation});
+  const sessionsChanged = updateSessionList(nextOrder);
+  if (sessionsChanged) {
+    updateDocumentTitle();
+    renderSessionButtons();
+  }
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
+  return true;
 }
 
 function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {

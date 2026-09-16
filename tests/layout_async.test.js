@@ -4862,6 +4862,68 @@ async function runLayoutAsyncSuite() {
     assert.equal(afterUnidentified.generation, 8, 'a bare generation scalar cannot advance the applied identity');
   });
 
+  await testAsync('tmux roster events update cached Tabs state without metadata polling', async () => {
+    const api = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 4},
+      topology_generation: 1,
+      session_order: ['old'],
+      sessions: {old: {panes: [], marker: 'cached'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    let metadataReads = 0;
+    api.setFetchForTest(() => {
+      metadataReads += 1;
+      return Promise.reject(new Error('roster event must not poll metadata'));
+    });
+    const applied = api.applyTmuxRosterPayloadForTest({
+      session_order: ['renamed'],
+      roster_generation: 2,
+      topology_generation: 2,
+      server_epoch: 'epoch-a',
+      renames: [{old_session: 'old', new_session: 'renamed'}],
+    }, {epoch: 'epoch-a'});
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(applied, true);
+    assert.equal(api.itemInLayout('old'), false, 'the external rename retires the old layout item');
+    assert.equal(api.itemInLayout('renamed'), true, 'the external rename preserves the layout item under the new name');
+    assert.deepStrictEqual(canonical(state.payload.session_order), ['renamed']);
+    assert.equal(state.payload.sessions.renamed.marker, 'cached', 'the compact roster event rekeys cached row data');
+    assert.equal(state.payload.sessions.old, undefined);
+    assert.equal(state.rosterGeneration, 2);
+    assert.equal(metadataReads, 0, 'roster event convergence does not request full metadata');
+
+    const stale = api.applyTmuxRosterPayloadForTest({
+      session_order: ['old'],
+      roster_generation: 1,
+      topology_generation: 1,
+      server_epoch: 'epoch-a',
+    }, {epoch: 'epoch-a'});
+    assert.equal(stale, false, 'a lower roster generation cannot overwrite the renamed row');
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['renamed']);
+    const foreign = api.applyTmuxRosterPayloadForTest({
+      session_order: ['foreign'],
+      roster_generation: 3,
+      topology_generation: 3,
+      server_epoch: 'epoch-b',
+    }, {epoch: 'epoch-b'});
+    assert.equal(foreign, false, 'a roster from another server epoch is rejected');
+
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-b', generation: 1},
+      topology_generation: 0,
+      session_order: ['foreign'],
+      sessions: {foreign: {panes: [], marker: 'new-server'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    const fresh = api.applyTmuxRosterPayloadForTest({
+      session_order: ['fresh'],
+      roster_generation: 1,
+      topology_generation: 1,
+      server_epoch: 'epoch-b',
+    }, {epoch: 'epoch-b'});
+    assert.equal(fresh, true, 'a replacement server can restart roster generations at one');
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['fresh']);
+  });
+
   await testAsync('a superseded response still records the build the server promised', async () => {
     // Regression: the pending identity is a fact about the SERVER's build queue, not about whether
     // this client's request is still current, but it was read AFTER the supersede check and so was
@@ -5286,56 +5348,22 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.sessionAgentWindowStatusModelForTest('2').stateRevision, 17, 'metadata convergence releases the held sealed status snapshot');
   });
 
-  await testAsync('Tabs menu shows cached labels immediately then refreshes its open rows from live session metadata', async () => {
-    const pending = [];
+  await testAsync('Tabs menu opens from cached rows without forcing metadata refresh', async () => {
     const api = loadYolomux('', ['1']);
-    api.setFetchForTest(url => {
-      assert.equal(String(url), '/api/session-metadata?force=1', 'opening Tabs requests one live metadata refresh after rendering cached rows');
-      const request = deferredFetch();
-      pending.push(request);
-      return request.promise;
+    let metadataReads = 0;
+    api.setFetchForTest(() => {
+      metadataReads += 1;
+      return Promise.reject(new Error('opening Tabs must not poll metadata'));
     });
     api.renderSessionButtonsForTest({force: true});
     const tabs = Array.from(api.sessionButtonsForTest().querySelectorAll('.app-menu'))
       .find(menu => menu.dataset.appMenu === 'tabs');
-    assert.ok(tabs, 'Tabs menu is rendered from the existing cached session snapshot');
+    assert.ok(tabs, 'Tabs is rendered from the existing cached session snapshot');
     const cachedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
-    assert.ok(cachedCommand, 'cached session row is available without waiting for list-sessions');
-    assert.equal(cachedCommand.html.includes('fresh-session-name'), false, 'the initial row is the pre-refresh cached label');
-
+    assert.ok(cachedCommand, 'cached session row is available immediately');
     api.openAppMenuForTest(tabs);
-    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately while live metadata is pending');
-    assert.equal(pending.length, 1, 'reopening work is coalesced through the shared metadata request record');
-    pending[0].resolve(jsonResponse({
-      session_order: ['1'],
-      sessions: {
-        '1': {
-          panes: [],
-          agents: [],
-          work_graph: {
-            version: 1,
-            generation: 1,
-            tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
-            tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: '', tmux_pane_ids: ['tmux-pane:1:0.0']}},
-            tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', target: '%1-0', index: '0', current_path: '/tmp/fresh-session-name', active: true, window_active: true, runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
-            runtime_actors: {'actor:1:0': {id: 'actor:1:0', tmux_pane_id: 'tmux-pane:1:0.0', kind: 'shell', cwd: '/tmp/fresh-session-name', status: '', path_observation_ids: ['observation:1:0']}},
-            path_observations: {'observation:1:0': {id: 'observation:1:0', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: 'actor:1:0', git_worktree_id: 'worktree:/tmp/fresh-session-name', path: '/tmp/fresh-session-name', source: 'fixture', priority: 0, last_observed_at: 1}},
-            git_worktrees: {'worktree:/tmp/fresh-session-name': {id: 'worktree:/tmp/fresh-session-name', root: '/tmp/fresh-session-name', git_dir: '/tmp/fresh-session-name/.git', kind: 'primary', parent_root: '', local_repository_id: 'local:/tmp/fresh-session-name', hosted_repository_id: null, current_branch_id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', branch_activity_ids: [], path_observation_ids: ['observation:1:0'], git: {root: '/tmp/fresh-session-name', branch: 'fresh-session-name'}}},
-            local_repositories: {'local:/tmp/fresh-session-name': {id: 'local:/tmp/fresh-session-name', common_git_dir: '/tmp/fresh-session-name/.git', git_worktree_ids: ['worktree:/tmp/fresh-session-name'], local_branch_ids: ['branch:local:/tmp/fresh-session-name:fresh-session-name'], hosted_repository_id: null}},
-            hosted_repositories: {},
-            local_branches: {'branch:local:/tmp/fresh-session-name:fresh-session-name': {id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', local_repository_id: 'local:/tmp/fresh-session-name', name: 'fresh-session-name', current: true, pull_request_ids: [], linear_issue_ids: []}},
-            pull_requests: {},
-            linear_issues: {},
-            worktree_branch_activity: {},
-          },
-        },
-      },
-    }));
-    await flushAsyncWork();
-    assert.equal(tabs.classList.contains('open'), true, 'the live update patches the open Tabs menu instead of closing it');
-    const refreshedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
-    assert.ok(refreshedCommand, 'the live update retains the cached session row identity');
-    assert.equal(refreshedCommand.html.includes('fresh-session-name'), true, 'the open Tabs row receives the live list-sessions name/description');
+    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately');
+    assert.equal(metadataReads, 0, 'opening Tabs does not start a full metadata request');
   });
 
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {

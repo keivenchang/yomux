@@ -4627,20 +4627,112 @@ class WatchBridge:
                 app.tmux_signal_cache.clear()
                 record.wake_event.set()
             return
-        if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
+        if event_type in {"pane-exited", "pane-died", "window-close", "session-renamed", "sessions-changed"}:
             event_time = float(event.get("time") or time.time())
             with self.state.lock:
                 self.state.tmux_signal_removal_event = {"type": event_type, "time": event_time}
             # The retained statusd roster is the sole agent-window authority. A topology event
             # must retire it so its next snapshot cannot keep a dead pane as a transition row.
             app.status_client.invalidate("tmux-topology")
-            if event_type == "sessions-changed":
-                app.refresh_sessions(maintenance=False)
+            if event_type in {"session-renamed", "sessions-changed"}:
+                self.schedule_tmux_roster_rebuild(app, rename_hint=event_type == "session-renamed")
         app.tmux_signal_cache.clear()
         with self.state.lock:
             record = self.state.event_watcher_record
             record.tmux_signal_refresh_at = time.monotonic()
         record.wake_event.set()
+
+    def schedule_tmux_roster_rebuild(self, app, *, rename_hint: bool = False) -> bool:
+        """Queue one asynchronous tmux roster read, coalescing events while it runs."""
+
+        with self.state.lock:
+            record = self.state.event_watcher_record
+            if record.stop_event.is_set():
+                return False
+            record.tmux_roster_dirty = True
+            record.tmux_roster_rename_hint |= rename_hint
+            worker = record.tmux_roster_worker
+            if worker is not None and worker.is_alive():
+                record.wake_event.set()
+                return False
+            worker = threading.Thread(
+                target=app.rebuild_tmux_roster,
+                args=(record,),
+                name="tmux-roster-rebuild",
+                daemon=True,
+            )
+            record.tmux_roster_worker = worker
+        try:
+            worker.start()
+        except BaseException:
+            with self.state.lock:
+                if self.state.event_watcher_record is record and record.tmux_roster_worker is worker:
+                    record.tmux_roster_worker = None
+            raise
+        return True
+
+    def rebuild_tmux_roster(self, app, record: ClientEventWatcherRecord) -> None:
+        """Read and publish the latest compact roster until no tmux event remains dirty."""
+
+        worker = threading.current_thread()
+        read_failures = 0
+        rename_hint = False
+        try:
+            while True:
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    rename_hint |= record.tmux_roster_rename_hint
+                    record.tmux_roster_rename_hint = False
+                    record.tmux_roster_dirty = False
+                roster, error = list_tmux_session_names()
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    if record.tmux_roster_dirty:
+                        continue
+                if error is not None:
+                    read_failures += 1
+                    if read_failures >= 3:
+                        return
+                    if record.stop_event.wait(0.1):
+                        return
+                    continue
+                read_failures = 0
+                previous = list(app.sessions)
+                if app.apply_session_roster(roster, refresh_metadata=False):
+                    removed = [session for session in previous if session not in roster]
+                    added = [session for session in roster if session not in previous]
+                    renames = (
+                        [{"old_session": removed[0], "new_session": added[0]}]
+                        if rename_hint and len(removed) == 1 and len(added) == 1
+                        else []
+                    )
+                    app.publish_client_event(
+                        "tmux_roster_changed",
+                        {
+                            "sessions": list(app.sessions),
+                            "session_order": list(app.sessions),
+                            "roster_generation": app.topology_generation,
+                            "topology_generation": app.topology_generation,
+                            "server_epoch": app.server_epoch,
+                            "renames": renames,
+                        },
+                        trigger="tmux-roster",
+                        cache="ready",
+                    )
+                rename_hint = False
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    if record.tmux_roster_dirty:
+                        continue
+                    record.tmux_roster_worker = None
+                    return
+        finally:
+            with self.state.lock:
+                if self.state.event_watcher_record is record and record.tmux_roster_worker is worker:
+                    record.tmux_roster_worker = None
 
     def tmux_signal_event_watcher_healthy(self, app) -> bool:
         return app.tmux_signal_event_watcher_status().get("state") == "attached"
@@ -4772,6 +4864,9 @@ class WatchBridge:
             thread = record.worker
             watchd_worker = record.watchd_worker
             snapshot_worker = record.snapshot_worker
+            roster_worker = record.tmux_roster_worker
+            record.tmux_roster_dirty = False
+            record.tmux_roster_rename_hint = False
             record.snapshot_worker = None
         app.stop_status_generation_watcher(record)
         # Keep an in-flight metadata worker as the single-flight owner until its finally block
@@ -4781,6 +4876,8 @@ class WatchBridge:
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
             watchd_worker.join(timeout=5.0)
+        if roster_worker is not None and roster_worker is not threading.current_thread():
+            roster_worker.join(timeout=2.0)
         with self.state.lock:
             if self.state.event_watcher_record is record:
                 self.state.event_watcher_record = ClientEventWatcherRecord()
@@ -9897,7 +9994,13 @@ class TmuxWebtermApp:
             return []
         return [error]
 
-    def apply_session_roster(self, sessions: list[str], *, invalidate_status: bool = True) -> bool:
+    def apply_session_roster(
+        self,
+        sessions: list[str],
+        *,
+        invalidate_status: bool = True,
+        refresh_metadata: bool = True,
+    ) -> bool:
         """Install one tmux-session roster and invalidate metadata on membership transitions."""
 
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
@@ -9921,7 +10024,8 @@ class TmuxWebtermApp:
             # web owner must either start now or queue one publishing follow-up behind that older
             # build. statusd owns roster production only; it has no browser metadata consumer and
             # must not publish a second transcript-metadata stream from its internal app.
-            self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
+            if refresh_metadata:
+                self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
         return membership_changed
 
     def advance_topology_generation(self) -> int:
@@ -11234,6 +11338,12 @@ class TmuxWebtermApp:
 
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
         return self._watch_bridge.handle_tmux_signal_event(self, event)
+
+    def schedule_tmux_roster_rebuild(self, *, rename_hint: bool = False) -> bool:
+        return self._watch_bridge.schedule_tmux_roster_rebuild(self, rename_hint=rename_hint)
+
+    def rebuild_tmux_roster(self, record: ClientEventWatcherRecord) -> None:
+        return self._watch_bridge.rebuild_tmux_roster(self, record)
 
     def tmux_signal_event_watcher_healthy(self) -> bool:
         return self._watch_bridge.tmux_signal_event_watcher_healthy(self)
