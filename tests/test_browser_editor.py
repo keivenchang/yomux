@@ -1309,6 +1309,41 @@ def test_markdown_vieweditor_failure_claims_image_paste_without_terminal_fallbac
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_markdown_prosemirror_ignores_incomplete_html_fragment_in_prose(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/INCOMPLETE-TAG.md';
+            const source = 'Parser note with a literal `</th\\n\\n'
+              + 'and a later marker `<think>` on another line.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 12000, description: 'incomplete tag ViewEditor'});
+            done({ready: Boolean(panel._pmView), error: panel._pmError || '', state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '', text: panel.querySelector('[data-editor-surface="view-editor"]')?.textContent || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["ready"] and not metrics["error"], metrics
+    assert metrics["state"] == "ready" and "</th" in metrics["text"] and "<think>" in metrics["text"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_prosemirror_supports_safe_html_round_trip(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(

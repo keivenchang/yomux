@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.8.8 | `v0.8.8` | `v0.8.8^{commit}` | [v0.8.8-evidence.md](v0.8.8-evidence.md) | token-coverage and metadata-epoch convergence, lower-latency Tabs roster updates, and incomplete-HTML ViewEditor recovery |
 | 0.8.7 | `v0.8.7` | `v0.8.7^{commit}` | [v0.8.7-evidence.md](v0.8.7-evidence.md) | product-root isolation, editor/theme fixes, token collection ownership, metadata refresh coalescing, and terminal upload compatibility |
 | 0.8.6 | `v0.8.6` | `v0.8.6^{commit}` | [v0.8.6-evidence.md](v0.8.6-evidence.md) | coalesced cold session-metadata reads to reduce request-driven CPU and metadata rebuilds |
 | 0.8.5 | `v0.8.5` | `v0.8.5^{commit}` | [v0.8.5-evidence.md](v0.8.5-evidence.md) | OpenCode/session stats attribution, internal pricing coverage, terminal URL continuation, autosave conflict prevention, and Dockview drop-preview fixes |
@@ -43,7 +44,7 @@ One evidence page per shipped version. Each page records what that release actua
 | 0.7.1 | `v0.7.1` | `a4209e0fb` | [v0.7.1-evidence.md](v0.7.1-evidence.md) | accepted, tagged, live |
 | 0.7.0 | `v0.7.0` | `bba47f31e` | [v0.7.0-evidence.md](v0.7.0-evidence.md) | evidence page audits an earlier rejected candidate, not the rewritten shipped commit |
 
-Verified 2026-08-18 against the local annotated tag objects, `origin/main`, and the direct and peeled origin tag refs in `yolomux.dev7771`.
+Verified 2026-09-16 against the local annotated tag objects, `origin/main`, and the direct and peeled origin tag refs in the release checkout.
 
 ## Historical note
 

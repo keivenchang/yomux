@@ -342,7 +342,9 @@ const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
 ]);
 
 function prosemirrorUnsupportedHtmlSource(source) {
-  const tags = String(source || '').matchAll(/<\/?([a-z][a-z0-9:-]*)\b[^>]*>/gi);
+  // Do not let an incomplete tag-shaped fragment in prose consume later Markdown lines while
+  // searching for a `>`; only a tag completed on the same line is actual HTML here.
+  const tags = String(source || '').matchAll(/<\/?([a-z][a-z0-9:-]*)\b[^>\r\n]*>/gi);
   for (const match of tags) {
     const name = match[1].toLowerCase();
     if (PROSEMIRROR_KNOWN_HTML_TAGS.has(name) && !PROSEMIRROR_SAFE_HTML_TAGS.has(name)) return match[0];
