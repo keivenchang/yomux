@@ -25,6 +25,11 @@ const lifecycleScopeSource = coreSource.slice(
   coreSource.indexOf('function createLifecycleScope('),
   coreSource.indexOf('\nfunction createLatestResource(', coreSource.indexOf('function createLifecycleScope(')),
 );
+
+const capabilityRequestSource = bootstrapSource.slice(
+  bootstrapSource.indexOf('function capabilityNameForRequest('),
+  bootstrapSource.indexOf('\nconst statsWriterFence', bootstrapSource.indexOf('function capabilityNameForRequest(')),
+);
 const terminalSource = [
   'static_src/js/yolomux/99_terminal_boot.js',
   'static_src/js/yolomux/99_client_event_transport.js',
@@ -35,6 +40,15 @@ const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'
 let passed = 0;
 let failed = 0;
 const pending = [];
+
+test('session metadata uses the bootstrap capability while Tabber routes stay Tabber-owned', () => {
+  const context = {URL, globalThis: {location: {href: 'https://example.test/'}}};
+  vm.runInNewContext(`${capabilityRequestSource}\nresult = [
+    capabilityNameForRequest('/api/session-metadata?force=1'),
+    capabilityNameForRequest('/api/transcripts?session=1'),
+  ];`, context);
+  assert.deepEqual([...context.result], ['core.bootstrap.v1', 'pane.tabber.v1']);
+});
 
 function test(name, body) {
   try {
@@ -748,7 +762,8 @@ test('model output chart is fixed to generated output without a dimension picker
 
 test('fresh Graphs defaults show Agents, Session tokens/min, and system/process memory without Daemons', () => {
   assert.match(source, /\{key: 'activity',[^\n]+series: jsDebugAgentStatusSeriesKeys/);
-  assert.match(source, /\{key: 'agentTokens',[^\n]+displayedSummary: 'agentTokens'/);
+  assert.match(source, /\{key: 'agentTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'agentTokens'/);
+  assert.match(source, /\{key: 'modelTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'modelTokens'/);
   assert.match(source, /\{key: 'memory',[^\n]+hostMetric: 'memory'/);
   assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['serversLoad', 'gpuUtil', 'gpuMemory'\]\)/);
   const context = {
@@ -1146,6 +1161,80 @@ test('Agent-window live detail joins current sessions, diagnoses stale sessions,
   vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
   assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="changed"/);
   assert.match(context.result, /waiting for the chart snapshot/);
+});
+
+test('Agents detail consumes the stats-owner roster when auto-approve is unavailable', () => {
+  const detailStart = source.indexOf('function debugGraphStatsAgentState');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  assert.notEqual(detailStart, -1, 'stats-owner roster adapter exists');
+  assert.notEqual(detailEnd, -1, 'stats-owner roster adapter has a bounded source region');
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    STATE_KEY: {working: 'working', idle: 'idle'},
+    autoApproveStates: new Map(),
+    jsDebugStatsAgentStatusState: {
+      payload: {
+        available: true,
+        payload: {snapshot_revision: 7},
+        agents: [
+          {id: 'debug|0|%debug-0|codex', kind: 'codex', state: 'run', session: 'debug', pane: '%debug-0'},
+          {id: 'debug|1|%debug-1|claude', kind: 'claude', state: 'idle', session: 'debug', pane: '%debug-1'},
+        ],
+      },
+      revision: 7,
+    },
+    jsDebugStatsPollState: {agentWindowSnapshotRevision: 7},
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => ['claude', 'codex', 'opencode'].includes(String(kind || '').toLowerCase()) ? String(kind).toLowerCase() : '',
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
+    agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
+    agentWindowCanonicalLabel: (index, kind) => index === null ? kind : `${index}:${kind}`,
+    agentWindowStateKey: state => String(state || 'idle'),
+    esc: value => String(value),
+    document: {querySelectorAll: () => []},
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /2 agent windows across 1 sessions/);
+  assert.match(context.result, /debug → 0:codex → codex → working/);
+  assert.match(context.result, /debug → 1:claude → claude → idle/);
+  assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
+});
+
+test('Agents detail reports typed stats-owner unavailability instead of fabricated zero windows', () => {
+  const detailStart = source.indexOf('function debugGraphStatsAgentState');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    STATE_KEY: {working: 'working', idle: 'idle'},
+    autoApproveStates: new Map(),
+    jsDebugStatsAgentStatusState: {payload: {available: false, unavailable: {reason: 'pane-capture-unavailable'}}, revision: 0},
+    jsDebugStatsPollState: {agentWindowSnapshotRevision: 7},
+    statsOnlyBootEnabled: () => true,
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || ''),
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || ''),
+    agentWindowIndex: agent => Number(agent?.window_index),
+    agentWindowCanonicalLabel: (_index, kind) => kind,
+    agentWindowStateKey: state => String(state || 'idle'),
+    esc: value => String(value),
+    document: {querySelectorAll: () => []},
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /data-js-debug-agent-window-detail-state="unavailable"/);
+  assert.match(context.result, /pane-capture-unavailable/);
+  assert.doesNotMatch(context.result, /0 agent windows across 0 sessions/);
 });
 
 test('YO!stats puts Charts before Size, Range, and Resolution without changing YO!cost ordering', () => {
@@ -2415,6 +2504,13 @@ test('YO!stats startup begins before locale boot can delay the app shell', () =>
   const statsStart = boot.indexOf('initializeJsDebugStatsBeforeStreams');
   const localeWait = boot.indexOf('await applyLocale(resolveLocalePref');
   assert.ok(statsStart >= 0 && localeWait >= 0 && statsStart < localeWait);
+});
+
+test('stats-only boot does not schedule unrelated deferred settings metadata', () => {
+  assert.match(
+    editorSettingsSource,
+    /function scheduleDeferredSettingsMetadataRefresh\(\)[\s\S]*?statsOnlyBootEnabled\(\)[\s\S]*?if \(!clientSettingsMetadataDeferred\)/,
+  );
 });
 
 test('a complete snapshot replaces graph data once and resolves readiness', () => {

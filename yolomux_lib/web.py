@@ -305,6 +305,7 @@ def html_page(
     recent_sessions: list[str] | None = None,
     terminal_only: bool = False,
     capability_snapshot: dict | None = None,
+    stats_only: bool = False,
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
@@ -318,6 +319,10 @@ def html_page(
         # explicitly opted in with --dangerously-yolo.
         "dangerouslyYolo": dangerously_yolo,
         "terminalOnly": terminal_only,
+        # A partial Go server can serve the stats surface without owning every
+        # legacy application route. The client uses this explicit bit to keep
+        # unrelated boot 404s from masking stats readiness.
+        "statsOnly": stats_only,
         # Optional backend-owned negotiation document. Python leaves this absent for compatibility;
         # an opt-in backend can use the same page renderer without teaching the UI its language.
         "capabilities": capability_snapshot,

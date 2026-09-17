@@ -1374,6 +1374,7 @@ function applySettingsPayload(payload, options = {}) {
 }
 
 function scheduleDeferredSettingsMetadataRefresh() {
+  if (typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled()) return null;
   if (!clientSettingsMetadataDeferred) return null;
   if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
   if (clientSettingsMetadataRefreshTimer) return null;

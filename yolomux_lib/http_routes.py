@@ -463,7 +463,12 @@ def get_stats_snapshot(request: Any, parsed: Any, route: Route) -> None:
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )
-    if result.payload is not None:
+    if result.status in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+        # 304/204 are bodyless by the API writer contract. The forwarder
+        # returns metadata for in-process callers, but never pass that
+        # metadata to the transport writer for a bodyless status.
+        request.write_json(None, status=result.status)
+    elif result.payload is not None:
         request.write_json(result.payload, status=result.status)
     elif result.status == HTTPStatus.OK:
         request.write_product_bytes(result.body, inline_json_product_metadata(result.body))
@@ -477,7 +482,9 @@ def get_stats_delta(request: Any, parsed: Any, route: Route) -> None:
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )
-    if result.payload is not None:
+    if result.status in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+        request.write_json(None, status=result.status)
+    elif result.payload is not None:
         request.write_json(result.payload, status=result.status)
     elif result.status == HTTPStatus.OK:
         request.write_product_bytes(result.body, inline_json_product_metadata(result.body))

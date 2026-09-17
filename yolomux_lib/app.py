@@ -9198,7 +9198,12 @@ class TmuxWebtermApp:
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
         self.pricing_refresh_coordinator.start_periodic()
         self.start_status_collector_lease()
-        self.stats_current_runtime.start()
+        # Parity and migration fixtures may supply a fixed stats database and
+        # deliberately disable live collectors. Keep the production HTTP and
+        # statsd paths active while preventing host/tmux/transcript collectors
+        # from appending nondeterministic facts to that fixture.
+        if os.environ.get("YOLOMUX_STATS_DISABLE_COLLECTORS") != "1":
+            self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
         # Startup must bind before any repository snapshot work.  The old warm-cache probe
         # constructed a session-files cache key synchronously; an uncovered repository turns

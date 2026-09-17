@@ -35,6 +35,50 @@ type HostCollectorTimer interface {
 	Stop() bool
 }
 
+// waitCollectorCadence waits for the next collection deadline while allowing
+// a demand transition to wake an idle collector immediately. Without the
+// bounded idle polls, a collector that selected its 60-second idle cadence
+// before a browser opened stats would remain asleep for the whole interval.
+// The polling is only a timer wakeup; it never performs a collection while
+// demand remains absent.
+func waitCollectorCadence(ctx context.Context, clock HostCollectorClock, active, idle time.Duration, activeFunc func() bool) bool {
+	if active <= 0 {
+		active = time.Second
+	}
+	if idle <= 0 {
+		idle = active
+	}
+	if activeFunc == nil || activeFunc() {
+		timer := clock.NewTimer(active)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C():
+			return true
+		}
+	}
+	remaining := idle
+	for remaining > 0 {
+		delay := remaining
+		if delay > time.Second {
+			delay = time.Second
+		}
+		timer := clock.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C():
+		}
+		remaining -= delay
+		if activeFunc() {
+			return true
+		}
+	}
+	return true
+}
+
 type realHostCollectorClock struct{}
 
 func (realHostCollectorClock) Now() time.Time { return time.Now() }
@@ -134,6 +178,7 @@ type HostCollector struct {
 type hostEpochState struct {
 	epochID    string
 	started    float64
+	cadence    float64
 	rotate     bool
 	hadSuccess bool
 }
@@ -190,21 +235,20 @@ func (c *HostCollector) familyLoop(ctx context.Context, family string, active, i
 	first := true
 	for {
 		if !first {
-			delay := active
-			if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
-				delay = idle
-			}
-			timer := c.clock.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitCollectorCadence(ctx, c.clock, active, idle, c.config.ActiveFunc) {
 				return
-			case <-timer.C():
 			}
 		}
 		first = false
 		if ctx.Err() != nil {
 			return
+		}
+		// CPU and GPU are demand-driven. Do not persist an unavailable span for
+		// an idle period: its idle cadence would overlap the first active
+		// coverage epoch when a stats stream opens before that cadence expires.
+		// The cadence wait above still polls for demand and wakes promptly.
+		if family != "system_memory" && c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
+			continue
 		}
 		c.runFamily(ctx, family)
 	}
@@ -278,12 +322,16 @@ func (c *HostCollector) familyFactContext(family string, at time.Time, cadence t
 	if !ok {
 		state = hostEpochState{epochID: c.config.EpochID, started: c.config.EpochStartedAt}
 	}
+	if state.cadence != 0 && state.cadence != cadence.Seconds() {
+		state.rotate = true
+	}
 	if state.rotate {
 		state.epochID = fmt.Sprintf("%s-%s-%d", c.config.EpochID, family, at.UnixNano())
 		state.started = float64(at.UnixNano()) / 1e9
 		state.rotate = false
-		c.familyEpochs[family] = state
 	}
+	state.cadence = cadence.Seconds()
+	c.familyEpochs[family] = state
 	return HostFactContext{EpochID: state.epochID, EpochStartedAt: state.started, ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
 }
 

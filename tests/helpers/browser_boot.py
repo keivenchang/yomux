@@ -63,6 +63,7 @@ class BrowserBootScenario:
     runtime_script_uri: str | None = None
     dangerously_yolo: bool = False
     hold_auto_approve: bool = False
+    stats_only: bool = False
 
     def __post_init__(self) -> None:
         if self.session_mutations_allowed is None:

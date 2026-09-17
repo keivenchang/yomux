@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
 // RepoRoot returns the source/runfiles root for the current test. Bazel tests must
@@ -40,22 +38,39 @@ func RepoPath(t testing.TB, relative string) string {
 }
 
 func rootFromRunfiles() (string, bool) {
-	rf, err := runfiles.New()
-	if err != nil {
-		return "", false
-	}
 	const marker = "yolomux_lib/__init__.py"
+	baseDirectories := make([]string, 0, 4)
+	for _, name := range []string{"RUNFILES_DIR", "TEST_SRCDIR"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			baseDirectories = append(baseDirectories, value)
+		}
+	}
 	relativeNames := []string{marker, "_main/" + marker, "yolomux/" + marker}
 	if workspace := os.Getenv("TEST_WORKSPACE"); workspace != "" {
 		relativeNames = append([]string{workspace + "/" + marker}, relativeNames...)
 	}
-	for _, name := range relativeNames {
-		path, err := rf.Rlocation(name)
-		if err != nil {
-			continue
+	for _, base := range baseDirectories {
+		for _, name := range relativeNames {
+			path := filepath.Join(base, filepath.FromSlash(name))
+			if _, err := os.Stat(path); err == nil {
+				return filepath.Dir(filepath.Dir(path)), true
+			}
 		}
-		if _, err := os.Stat(path); err == nil {
-			return filepath.Dir(filepath.Dir(path)), true
+	}
+	// A manifest-only launcher may omit RUNFILES_DIR. Resolve just the marker
+	// entry; the remaining declared files stay under the same runfiles root.
+	manifestPath := strings.TrimSpace(os.Getenv("RUNFILES_MANIFEST_FILE"))
+	if manifestPath != "" {
+		data, err := os.ReadFile(manifestPath)
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 2 && fields[0] == marker {
+					if _, statErr := os.Stat(fields[1]); statErr == nil {
+						return filepath.Dir(filepath.Dir(fields[1])), true
+					}
+				}
+			}
 		}
 	}
 	return "", false

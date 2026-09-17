@@ -41,6 +41,12 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	// The mock client and the host-side test image may probe this vendor
+	// directory during startup. Keep it inside the synthetic HOME so that a
+	// missing optional host directory cannot become visible pane error text.
+	if err := os.Mkdir(filepath.Join(root, ".GlobalProtect"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	socket := filepath.Join(root, "tmux.sock")
 	originalSocket := os.Getenv("YOLOMUX_TMUX_SOCKET")
 	if err := os.Setenv("YOLOMUX_TMUX_SOCKET", socket); err != nil {
@@ -160,7 +166,8 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 		record := recordsBySession[session]
 		classified := ClassifyAgentStatus(ctx, AgentStatusRequest{Kind: record.Kind, PID: record.PID, Command: record.Command, Executable: record.Executable, PaneTarget: record.TmuxPaneID}, LinuxAgentStatusSources(filepath.Join(root, "missing-opencode.sqlite3")))
 		if classified.Status == AgentStatusUnavailable || classified.Reason == "pane-capture-failed" {
-			t.Fatalf("live agent status classification failed for %s: %+v", session, classified)
+			pane, paneErr := linuxCaptureAgentPane(ctx, record.TmuxPaneID)
+			t.Fatalf("live agent status classification failed for %s: %+v pane_err=%v visible=%q", session, classified, paneErr, pane.VisibleText)
 		}
 	}
 

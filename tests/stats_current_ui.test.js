@@ -2791,6 +2791,7 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
   ManualEventSource.instances = [];
   const clock = new FakeClock();
   const states = [];
+  const failures = [];
   const client = loadNamespace().createBrowserClient({
     fetch: async url => {
       if (url === '/api/stats-capabilities') return response(200, capabilities());
@@ -2801,7 +2802,12 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
     savedRange: 7200,
     savedResolution: 300,
     onState: state => states.push(state),
-    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+    controllerOptions: {
+      clock,
+      repairBaseMs: 100,
+      repairMaxMs: 400,
+      onFailure: failure => failures.push(failure),
+    },
   });
 
   await client.start();
@@ -2832,7 +2838,54 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
   assert.ok(states.includes('pending'));
   assert.equal(states.at(-1), 'ready');
   assert.ok(ManualEventSource.instances.every(stream => stream.url.includes('range_seconds=7200&resolution=300')));
+  assert.deepEqual(failures, [], 'retryable pending materialization never reports a contract failure');
   client.stop();
+});
+
+test('typed stream errors after readiness preserve their state and retry metadata', async () => {
+  for (const [kind, payload, expectedState, check] of [
+    ['pending', {status: 'pending', reason: 'generation is still building', retry_after_seconds: 2}, 'pending', error => {
+      assert.equal(error.pending, true);
+      assert.equal(error.retryAfterMs, 2000);
+    }],
+    ['upgrade_required', {status: 'upgrade_required', reason: 'read fence changed', required_protocol_version: 24}, 'error', error => {
+      assert.equal(error.versionFence, true);
+      assert.equal(error.recoverableReadFence, true);
+    }],
+    ['unavailable', {status: 'unavailable', status_code: 503, reason: 'stats source unavailable'}, 'error', error => {
+      assert.equal(error.status, 503);
+      assert.equal(error.reason, 'stats source unavailable');
+    }],
+  ]) {
+    ManualEventSource.instances = [];
+    const clock = new FakeClock();
+    const states = [];
+    const client = loadNamespace().createBrowserClient({
+      fetch: async (url, options) => {
+        if (url === '/api/stats-capabilities') return response(200, capabilities());
+        if (url === '/api/stats-retry' && options?.method === 'POST') return response(200, {ok: true});
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      EventSource: ManualEventSource,
+      clientId: `typed-${kind}`,
+      savedRange: 7200,
+      savedResolution: 300,
+      onState: (state, error) => states.push({state, error}),
+      controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+    });
+    await client.start();
+    await clock.advance(0);
+    emitSnapshotSequence(ManualEventSource.instances[0], snapshot({range: 7200, requested: 300, resolution: 300, cache: 4, sourceGeneration: 4}));
+    await flushPromises();
+    ManualEventSource.instances[0].emit(kind, JSON.stringify(payload));
+    await flushPromises();
+    await flushPromises();
+    const state = states.at(-1);
+    assert.equal(state.state, expectedState, `${kind} state`);
+    check(state.error);
+    assert.equal(ManualEventSource.instances[0].closeCount, 1, `${kind} closes the old stream`);
+    client.stop();
+  }
 });
 
 test('an arbitrary 503 remains an offline error with bounded exponential retry', async () => {

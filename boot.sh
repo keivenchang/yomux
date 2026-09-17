@@ -172,6 +172,11 @@ if [[ "$backend" == "go" ]]; then
   go_binary="${YOLOMUX_GO_BINARY:-}"
   if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
     go_binary="$repo_root/bazel-bin/yolomux-go"
+  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go" ]]; then
+    # Bazel's go_binary rule places the executable under the rule package's
+    # _runfiles wrapper directory. Keep the flat path above for older builds,
+    # but recognize the canonical output produced by the current target.
+    go_binary="$repo_root/bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go"
   elif [[ -z "$go_binary" && -x "$repo_root/yolomux-go" ]]; then
     go_binary="$repo_root/yolomux-go"
   fi

@@ -250,3 +250,27 @@ func TestCPUDeltaSamplerRuntimeSnapshotsSkipChangedBinaryMembership(t *testing.T
 		t.Fatalf("grouped series = %#v", got.ProcessCPUPercent)
 	}
 }
+
+func TestCPUDeltaSamplerBoundsBinarySeriesToTopFour(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 200, Total: 300}, Processes: map[string]CPUProcessCounters{}}
+	for index, binary := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"} {
+		identity := binary + "-pid"
+		first.Processes[identity] = CPUProcessCounters{Identity: identity, CPU: 0, Binary: binary}
+		cpu := uint64(index + 1)
+		if binary == "foxtrot" {
+			cpu = 200
+		}
+		second.Processes[identity] = CPUProcessCounters{Identity: identity, CPU: cpu, Binary: binary}
+	}
+	sampler := NewCPUDeltaSampler("alpha", nil, 1)
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUValid {
+		t.Fatalf("sample = %+v", got)
+	}
+	want := map[string]float64{"foxtrot": 100, "echo": 5, "delta": 4, "charlie": 3}
+	if !reflect.DeepEqual(got.ProcessCPUPercent, want) {
+		t.Fatalf("grouped series = %#v, want %#v", got.ProcessCPUPercent, want)
+	}
+}

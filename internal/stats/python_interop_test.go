@@ -3,9 +3,12 @@ package stats
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -85,6 +88,515 @@ func TestPythonInterop(t *testing.T) {
 	result = runPython(t, python, script, "check-opencode", opencodeGoPath)
 	if !strings.Contains(result, `"provider": "openai"`) || !strings.Contains(result, `"input": 3`) || !strings.Contains(result, `"state": "paused"`) {
 		t.Fatalf("Python OpenCode readback = %s", result)
+	}
+}
+
+func TestPythonGoCutoverRollbackPreservesFactsAndGeneration(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	statsPath := filepath.Join(root, "stats-v9.sqlite3")
+	script := filepath.Join(root, "cutover.py")
+	const scriptBody = `import json, sqlite3, sys
+from yolomux_lib.stats_current.storage import Observation, Store, UsageAtom
+
+path, operation = sys.argv[1:3]
+if operation == "python-write-first":
+    store = Store.open(path, include_browser_diagnostics=False)
+    result = store.append_batch(
+        observations=(Observation("python-before", "cpu", "host", 100, "cpu", 1, {"process_percent": 3}),),
+        usage_atoms=(UsageAtom("python-usage-before", "input", "text", "none", "tokens", 101, {"quantity": 4, "provider": "openai", "model": "fixture", "agent_id": "agent-python"}),),
+    )
+    store.close()
+    print(json.dumps({"generation": result.source_generation, "observations": result.observations_accepted, "usage": result.usage_atoms_accepted}, separators=(",", ":")))
+elif operation == "python-write-rollback":
+    store = Store.open(path, include_browser_diagnostics=False)
+    result = store.append_batch(
+        observations=(Observation("python-after", "memory", "host", 103, "memory", 1, {"used_bytes": 8, "capacity_bytes": 16}),),
+        usage_atoms=(UsageAtom("python-usage-after", "output", "text", "none", "tokens", 104, {"quantity": 2, "provider": "openai", "model": "fixture", "agent_id": "agent-python"}),),
+    )
+    store.close()
+    print(json.dumps({"generation": result.source_generation, "observations": result.observations_accepted, "usage": result.usage_atoms_accepted}, separators=(",", ":")))
+elif operation == "python-read":
+    connection = sqlite3.connect(path)
+    generation = connection.execute("SELECT source_generation FROM schema_meta WHERE singleton=1").fetchone()[0]
+    observations = [row[0] for row in connection.execute("SELECT event_id FROM observations ORDER BY event_id")]
+    usage = [row[0] for row in connection.execute("SELECT event_id FROM usage_atoms ORDER BY event_id")]
+    connection.close()
+    print(json.dumps({"generation": generation, "observations": observations, "usage": usage}, separators=(",", ":")))
+else:
+    raise SystemExit(f"unknown operation: {operation}")
+`
+	if err := os.WriteFile(script, []byte(scriptBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := runPython(t, python, script, statsPath, "python-write-first")
+	if !strings.Contains(first, `"generation":1`) || !strings.Contains(first, `"observations":1`) || !strings.Contains(first, `"usage":1`) {
+		t.Fatalf("Python first cutover append = %s", first)
+	}
+
+	goWriter, err := OpenWriter(context.Background(), statsPath)
+	if err != nil {
+		t.Fatalf("Go could not take ownership after Python: %v", err)
+	}
+	goResult, err := goWriter.AppendBatch(context.Background(), AppendBatch{
+		Observations: []Observation{{EventID: "go-during-cutover", Family: "cpu", SourceID: "host", ObservedAt: 102, EpochID: "cpu", OwnerGeneration: 2, Payload: map[string]any{"process_percent": 7}}},
+		UsageAtoms:   []UsageAtom{{EventID: "go-usage-during-cutover", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 102.5, Payload: map[string]any{"quantity": 5.0, "provider": "openai", "model": "fixture", "agent_id": "agent-go"}}},
+	})
+	if err != nil {
+		_ = goWriter.Close()
+		t.Fatalf("Go cutover append failed: %v", err)
+	}
+	if goResult.Generation != 2 || goResult.ObservationsAccepted != 1 || goResult.UsageAccepted != 1 {
+		_ = goWriter.Close()
+		t.Fatalf("Go cutover append = %+v", goResult)
+	}
+	if err := goWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	pythonRead := runPython(t, python, script, statsPath, "python-read")
+	if !strings.Contains(pythonRead, `"generation":2`) || !strings.Contains(pythonRead, "python-before") || !strings.Contains(pythonRead, "go-during-cutover") || !strings.Contains(pythonRead, "python-usage-before") || !strings.Contains(pythonRead, "go-usage-during-cutover") {
+		t.Fatalf("Python readback after Go ownership = %s", pythonRead)
+	}
+	rollback := runPython(t, python, script, statsPath, "python-write-rollback")
+	if !strings.Contains(rollback, `"generation":3`) || !strings.Contains(rollback, `"observations":1`) || !strings.Contains(rollback, `"usage":1`) {
+		t.Fatalf("Python rollback append = %s", rollback)
+	}
+
+	goWriter, err = OpenWriter(context.Background(), statsPath)
+	if err != nil {
+		t.Fatalf("Go could not reclaim ownership after Python rollback: %v", err)
+	}
+	if err := goWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnly(context.Background(), statsPath)
+	if err != nil {
+		t.Fatalf("open Go readback after rollback: %v", err)
+	}
+	observations, err := reader.ReadObservations(context.Background(), 0, 200, MaxFactReadLimit)
+	if err != nil {
+		_ = reader.Close()
+		t.Fatal(err)
+	}
+	usage, err := reader.ReadUsageAtoms(context.Background(), 0, 200, MaxFactReadLimit)
+	if err != nil {
+		_ = reader.Close()
+		t.Fatal(err)
+	}
+	if len(observations) != 3 || len(usage) != 3 {
+		_ = reader.Close()
+		t.Fatalf("Go readback after rollback: observations=%d usage=%d", len(observations), len(usage))
+	}
+	if reader.Header.SourceGeneration != 3 {
+		_ = reader.Close()
+		t.Fatalf("Go generation after rollback = %d, want 3", reader.Header.SourceGeneration)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPythonAndGoSchema9TopologyIsBidirectionallyCompatible(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	script := filepath.Join(root, "schema-topology.py")
+	writePythonSchemaTopologyScript(t, script)
+	pythonPath := filepath.Join(root, "python", "stats-v9.sqlite3")
+	goPath := filepath.Join(root, "go", "stats-v9.sqlite3")
+
+	runPython(t, python, script, "create", pythonPath)
+	wantRaw := runPython(t, python, script, "topology", pythonPath)
+	var want []string
+	if err := json.Unmarshal([]byte(wantRaw), &want); err != nil {
+		t.Fatalf("decode Python schema topology: %v\n%s", err, wantRaw)
+	}
+
+	writer, err := OpenWriter(context.Background(), pythonPath)
+	if err != nil {
+		t.Fatalf("Go rejected Python-created schema-9 database: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gotPythonPath := goSchemaTopology(t, pythonPath)
+	if !sameSchemaTopology(gotPythonPath, want) {
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("Go changed Python schema topology\nGo: %s\nPython: %s", gotPythonPath, wantJSON)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(goPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err = OpenWriter(context.Background(), goPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gotGoPath := goSchemaTopology(t, goPath)
+	if !sameSchemaTopology(gotGoPath, want) {
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("Go-created schema topology differs from Python\nGo: %s\nPython: %s", gotGoPath, wantJSON)
+	}
+	runPython(t, python, script, "open-reader", goPath)
+}
+
+func TestPythonAndGoCompressedRingPayloadsAreBidirectionallyCompatible(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	payload := `{"start":1000,"duration":10,"series":{"metric":"` + strings.Repeat("stable-value,", 2000) + `"},"source":{"count":1,"first_timestamp":1001,"last_timestamp":1001},"open":false}`
+	goPath := filepath.Join(root, "go", "stats-v9.sqlite3")
+	if err := os.MkdirAll(filepath.Dir(goPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := OpenWriter(context.Background(), goPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(context.Background(), []RingBucketWrite{{
+		ResolutionSeconds: 10,
+		BucketStart:       1000,
+		BucketJSON:        payload,
+		Complete:          true,
+	}}, 1, 110, true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	var stored any
+	if err := writer.db.QueryRowContext(context.Background(), `SELECT bucket_json FROM aggregate_ring_slots WHERE resolution_seconds=10 AND bucket_start=1000`).Scan(&stored); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	compressed, ok := stored.([]byte)
+	if !ok || len(compressed) < len("YRB1\x00") || string(compressed[:len("YRB1\x00")]) != "YRB1\x00" {
+		_ = writer.Close()
+		t.Fatalf("Go ring payload storage = %T %v, want YRB1 compressed blob", stored, stored)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	goReadScript := filepath.Join(root, "read-ring.py")
+	const readRing = `import json, sqlite3, sys
+from yolomux_lib.stats_current.storage import Store
+path = sys.argv[1]
+connection = sqlite3.connect(path)
+kind, value = connection.execute("SELECT typeof(bucket_json), bucket_json FROM aggregate_ring_slots WHERE resolution_seconds=10 AND bucket_start=1000").fetchone()
+connection.close()
+if kind != "blob" or not isinstance(value, bytes) or value[:5] != b"YRB1\0":
+    raise SystemExit(f"unexpected ring storage: {kind!r} {type(value)!r} {value[:5] if isinstance(value, bytes) else value!r}")
+store = Store.open_reader(path, include_browser_diagnostics=False)
+window = store.read_ring_window(range_seconds=300, resolution_seconds=10, window_end=1300)
+store.close()
+if len(window.rows) != 1 or window.rows[0].bucket_json != sys.argv[2]:
+    raise SystemExit("Python did not decode the Go ring payload")
+print(json.dumps({"kind": kind, "magic": value[:5].decode("ascii", "strict"), "bucket": window.rows[0].bucket_json}, separators=(",", ":")))
+`
+	if err := os.WriteFile(goReadScript, []byte(readRing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	goRead := runPython(t, python, goReadScript, goPath, payload)
+	var readback map[string]string
+	if err := json.Unmarshal([]byte(goRead), &readback); err != nil {
+		t.Fatalf("decode Python compressed-ring readback: %v\n%s", err, goRead)
+	}
+	if readback["magic"] != "YRB1\x00" || readback["bucket"] != payload {
+		t.Fatalf("Python compressed-ring readback = %#v", readback)
+	}
+
+	pythonPath := filepath.Join(root, "python", "stats-v9.sqlite3")
+	if err := os.MkdirAll(filepath.Dir(pythonPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pythonWriteScript := filepath.Join(root, "write-ring.py")
+	const writeRing = `import sys
+from yolomux_lib.stats_current.storage import RingBucketWrite, Store
+path, payload = sys.argv[1], sys.argv[2]
+store = Store.open(path, include_browser_diagnostics=False)
+store.initialize_ring_storage()
+store.publish_ring_buckets(buckets=(RingBucketWrite(10, 1000, payload, True),), source_generation=1, published_at=1120)
+store.close()
+`
+	if err := os.WriteFile(pythonWriteScript, []byte(writeRing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPython(t, python, pythonWriteScript, pythonPath, payload)
+	reopened, err := OpenWriter(context.Background(), pythonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := reopened.ReadRingWindow(context.Background(), 300, 10, 1300)
+	if err != nil {
+		_ = reopened.Close()
+		t.Fatal(err)
+	}
+	if len(window.Rows) != 1 || window.Rows[0].BucketJSON != payload || window.Rows[0].SourceGeneration != 1 || window.Rows[0].RingGeneration != 1 {
+		_ = reopened.Close()
+		t.Fatalf("Go Python-ring readback = %+v", window)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPythonAndGoInvalidationLedgersMatchForSparseMutations(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	pythonPath := filepath.Join(root, "python", "stats-v9.sqlite3")
+	goPath := filepath.Join(root, "go", "stats-v9.sqlite3")
+	script := filepath.Join(root, "invalidation-ledger.py")
+	if err := os.MkdirAll(filepath.Dir(pythonPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(goPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const scriptBody = `import json, sys
+from yolomux_lib.stats_current.storage import CoverageEpoch, Observation, RingBucketWrite, Store, UnavailableSpan, UsageAtom, UsageAtomTombstone
+
+path = sys.argv[1]
+store = Store.open(path, include_browser_diagnostics=False)
+seed = [(1, 1003), (1, 1012), (1, 1040), (1, 1070), (10, 1000), (10, 1020), (10, 1050), (10, 1060), (60, 960), (60, 1020), (300, 900)]
+store.publish_ring_buckets(
+    buckets=tuple(RingBucketWrite(resolution, bucket, '{"value":1}', True) for resolution, bucket in seed),
+    source_generation=0,
+    published_at=1,
+)
+store.append_batch(observations=(Observation('obs', 'cpu', 'host', 1003, 'cpu', 1, {'process_percent': 10}),))
+atom = UsageAtom('codex:thread:atom', 'input', 'text', 'none', 'tokens', 1012, {'quantity': 4, 'provider': 'openai', 'model': 'm', 'thread_id': 'thread', 'execution_source': 'codex'})
+store.append_batch(usage_atoms=(UsageAtom('codex:thread:atom', 'input', 'text', 'none', 'tokens', 1012, atom.payload),))
+store.append_batch(usage_tombstones=(UsageAtomTombstone('codex:thread:atom', 'input', 'text', 'none', 'tokens', 1012, 4, 'openai', 'm', 'thread'),))
+store.append_batch(coverage_epochs=(CoverageEpoch('cpu', 'host', 'epoch', 1000, 1060, 10, 1),))
+store.append_batch(unavailable_spans=(UnavailableSpan('gpu', 'gpu:0', 'gap', 1060, 1080, 10, 'driver unavailable', 1),))
+store.publish_ring_buckets(buckets=(RingBucketWrite(1, 1003, '{"value":2}', True),), source_generation=5, published_at=2)
+rows = [(resolution, bucket, generation, reason, bool(applied)) for resolution, bucket, generation, reason, applied in store._connection().execute('SELECT resolution_seconds, bucket_start, source_generation, reason, applied_at IS NOT NULL FROM ring_invalidations ORDER BY resolution_seconds, bucket_start')]
+print(json.dumps(rows, separators=(',', ':')))
+store.close()
+`
+	if err := os.WriteFile(script, []byte(scriptBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var pythonRows [][]any
+	if err := json.Unmarshal([]byte(runPython(t, python, script, pythonPath)), &pythonRows); err != nil {
+		t.Fatalf("decode Python invalidation ledger: %v", err)
+	}
+	seed := []RingBucketWrite{
+		{1, 1003, `{"value":1}`, true}, {1, 1012, `{"value":1}`, true}, {1, 1040, `{"value":1}`, true}, {1, 1070, `{"value":1}`, true},
+		{10, 1000, `{"value":1}`, true}, {10, 1020, `{"value":1}`, true}, {10, 1050, `{"value":1}`, true}, {10, 1060, `{"value":1}`, true},
+		{60, 960, `{"value":1}`, true}, {60, 1020, `{"value":1}`, true}, {300, 900, `{"value":1}`, true},
+	}
+	writer, err := OpenWriter(context.Background(), goPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := writer.PublishRingBuckets(ctx, seed, 0, 1, true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{EventID: "obs", Family: "cpu", SourceID: "host", ObservedAt: 1003, EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 10}}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: []UsageAtom{{EventID: "codex:thread:atom", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 1012, Payload: map[string]any{"quantity": 4.0, "provider": "openai", "model": "m", "thread_id": "thread", "execution_source": "codex"}}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{UsageTombstones: []UsageTombstone{{EventID: "codex:thread:atom", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 1012, Quantity: 4, Provider: "openai", Model: "m", ThreadID: "thread"}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{CoverageEpochs: []CoverageEpoch{{Family: "cpu", SourceID: "host", EpochID: "epoch", StartedAt: 1000, EndedAt: floatPointer(1060), NativeCadenceSeconds: 10, OwnerGeneration: 1}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{UnavailableSpans: []UnavailableSpan{{Family: "gpu", SourceID: "gpu:0", EpochID: "gap", StartedAt: 1060, EndedAt: 1080, NativeCadenceSeconds: 10, Reason: "driver unavailable", OwnerGeneration: 1}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{1, 1003, `{"value":2}`, true}}, 5, 2, true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	rows, err := writer.db.QueryContext(ctx, "SELECT resolution_seconds, bucket_start, source_generation, reason, applied_at IS NOT NULL FROM ring_invalidations ORDER BY resolution_seconds, bucket_start")
+	if err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	var goRows [][]any
+	for rows.Next() {
+		var resolution, bucket, generation int64
+		var reason string
+		var applied bool
+		if err := rows.Scan(&resolution, &bucket, &generation, &reason, &applied); err != nil {
+			_ = rows.Close()
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+		goRows = append(goRows, []any{resolution, bucket, generation, reason, applied})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	goJSON, _ := json.Marshal(goRows)
+	pythonJSON, _ := json.Marshal(pythonRows)
+	if string(goJSON) != string(pythonJSON) {
+		t.Fatalf("Python/Go invalidation ledger mismatch\nGo: %s\nPython: %s", goJSON, pythonJSON)
+	}
+}
+
+func sameSchemaTopology(got []byte, want []string) bool {
+	var actual []string
+	if json.Unmarshal(got, &actual) != nil {
+		return false
+	}
+	return len(actual) == len(want) && strings.Join(actual, "\n") == strings.Join(want, "\n")
+}
+
+func goSchemaTopology(t *testing.T, path string) []byte {
+	t.Helper()
+	database, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	var objects []struct{ kind, name string }
+	for rows.Next() {
+		var kind, name string
+		if err := rows.Scan(&kind, &name); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		objects = append(objects, struct{ kind, name string }{kind, name})
+		lines = append(lines, fmt.Sprintf("object|%s|%s", kind, name))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range objects {
+		if object.kind != "table" {
+			continue
+		}
+		columns, err := database.Query("PRAGMA table_info(" + object.name + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for columns.Next() {
+			var cid int
+			var name, columnType string
+			var notNull, primaryKey int
+			var defaultValue any
+			if err := columns.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = columns.Close()
+				t.Fatal(err)
+			}
+			lines = append(lines, fmt.Sprintf("column|%s|%d|%s|%s|%d|%v|%d", object.name, cid, name, columnType, notNull, defaultValue, primaryKey))
+		}
+		if err := columns.Close(); err != nil {
+			t.Fatal(err)
+		}
+		indexes, err := database.Query("PRAGMA index_list(" + object.name + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for indexes.Next() {
+			var sequence, unique, partial int
+			var name, origin string
+			if err := indexes.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+				_ = indexes.Close()
+				t.Fatal(err)
+			}
+			lines = append(lines, fmt.Sprintf("index|%s|%d|%s|%d|%s|%d", object.name, sequence, name, unique, origin, partial))
+			indexColumns, err := database.Query("PRAGMA index_info(" + name + ")")
+			if err != nil {
+				_ = indexes.Close()
+				t.Fatal(err)
+			}
+			for indexColumns.Next() {
+				var indexSequence, columnNumber int
+				var columnName sql.NullString
+				if err := indexColumns.Scan(&indexSequence, &columnNumber, &columnName); err != nil {
+					_ = indexColumns.Close()
+					_ = indexes.Close()
+					t.Fatal(err)
+				}
+				lines = append(lines, fmt.Sprintf("index-column|%s|%s|%d|%d|%s", object.name, name, indexSequence, columnNumber, columnName.String))
+			}
+			if err := indexColumns.Close(); err != nil {
+				_ = indexes.Close()
+				t.Fatal(err)
+			}
+		}
+		if err := indexes.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Strings(lines)
+	encoded, err := json.Marshal(lines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func writePythonSchemaTopologyScript(t *testing.T, path string) {
+	t.Helper()
+	const script = `import json, sqlite3, sys
+from pathlib import Path
+from yolomux_lib.stats_current.storage import Store
+
+def topology(path):
+    connection = sqlite3.connect(path)
+    lines = []
+    objects = connection.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").fetchall()
+    for kind, name in objects:
+        lines.append(f"object|{kind}|{name}")
+    for kind, name in objects:
+        if kind != "table":
+            continue
+        for cid, column, column_type, not_null, default_value, primary_key in connection.execute(f"PRAGMA table_info({name})"):
+            lines.append(f"column|{name}|{cid}|{column}|{column_type}|{not_null}|{default_value if default_value is not None else '<nil>'}|{primary_key}")
+        for sequence, index, unique, origin, partial in connection.execute(f"PRAGMA index_list({name})"):
+            lines.append(f"index|{name}|{sequence}|{index}|{unique}|{origin}|{partial}")
+            for index_sequence, column_number, column in connection.execute(f"PRAGMA index_info({index})"):
+                lines.append(f"index-column|{name}|{index}|{index_sequence}|{column_number}|{column or ''}")
+    connection.close()
+    print(json.dumps(sorted(lines), separators=(",", ":")))
+
+mode, path = sys.argv[1], Path(sys.argv[2])
+if mode == "create":
+    path.parent.mkdir(parents=True, exist_ok=True)
+    store = Store.open(path, include_browser_diagnostics=False)
+    store.close()
+elif mode == "open-reader":
+    store = Store.open_reader(path, include_browser_diagnostics=False)
+    store.close()
+elif mode == "topology":
+    topology(path)
+else:
+    raise SystemExit(f"unknown mode: {mode}")
+`
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -174,7 +686,7 @@ INSERT INTO schema_meta VALUES (1,25,8,1,0);
 def add(event, family, source, at, payload):
     c.execute("INSERT INTO observations VALUES (?,?,?,?,?,?,?)", (event, family, source, at, "epoch-"+family, 1, json.dumps(payload, separators=(",", ":"), sort_keys=True)))
 families = [
-    ("cpu", "host", {"process_percent": 20, "system_percent": 40}),
+	("cpu", "host", {"process_percent": 20, "system_percent": 40, "process_cpu_percent": {"python": 4}}),
     ("agent_status", "host", {"states": {"a": "run", "b": "idle"}, "session_states": {"s": "run"}}),
     ("gpu", "host", {"util_percent": 50, "memory_used_bytes": 100, "memory_capacity_bytes": 200, "label": "gpu"}),
     ("service_load", "statsd", {"running": True, "cpu_percent": 3, "rss_bytes": 1000}),
@@ -219,8 +731,11 @@ c.commit(); c.close()
 	if len(layer.NoData) != 1 || layer.NoData[0].Reason != "driver unavailable" {
 		t.Fatalf("no-data parity = %+v", layer.NoData)
 	}
-	if got := seriesValue(layer.Buckets[0], "process_cpu_percent"); got != 20 {
+	if got := seriesValue(layer.Buckets[0], "cpu_percent:host"); got != 20 {
 		t.Fatalf("CPU parity = %v", got)
+	}
+	if got := seriesValue(layer.Buckets[0], "process_cpu_percent:python"); got != 4 {
+		t.Fatalf("per-binary CPU parity = %v", got)
 	}
 	if got := seriesValue(layer.Buckets[0], "model_tokens_per_minute:input:m"); got != 60 {
 		t.Fatalf("token parity = %v", got)
@@ -230,7 +745,7 @@ c.commit(); c.close()
 func pythonExecutable(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
-		t.Fatalf("python3 is required for the Python interoperability harness: %v", err)
+		t.Skip("python3 is required for the Python interoperability harness")
 	}
 	return "python3"
 }
@@ -238,14 +753,18 @@ func pythonExecutable(t *testing.T) string {
 func runPython(t *testing.T, python, script string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(python, append([]string{script}, args...)...)
-	repoRoot := testsupport.RepoRoot(t)
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+repoRoot)
+	cmd.Dir = repositoryRoot(t)
+	cmd.Env = testsupport.SyntheticEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+repositoryRoot(t))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output)
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	return testsupport.RepoRoot(t)
 }
 
 func writePythonInteropScript(t *testing.T, path string) {

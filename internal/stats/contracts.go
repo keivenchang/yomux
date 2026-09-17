@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -311,6 +312,299 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 	}
 	sort.Strings(result.IdempotencyKeys)
 	return result, nil
+}
+
+// validateCurrentFamilyBatch is deliberately separate from AppendBatch.Validate.
+// The database reader must continue to accept immutable legacy/sparse rows, while
+// a current Go producer must not publish a payload that the Python family owner
+// would reject. Writer.EnableCurrentFamilyValidation selects this write-only path.
+func validateCurrentFamilyBatch(batch AppendBatch) error {
+	for index, item := range batch.Observations {
+		if err := validateCurrentFamilyObservation(item); err != nil {
+			return fmt.Errorf("observations[%d]: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func validateCurrentFamilyObservation(item Observation) error {
+	allowed, required := currentFamilyFields(item.Family)
+	if allowed == nil {
+		return invalid("observation", "family", "is not a current stats family")
+	}
+	for name := range item.Payload {
+		if !allowed[name] {
+			return invalid("observation", "payload", fmt.Sprintf("%s has unknown field %q", item.Family, name))
+		}
+	}
+	for name := range required {
+		if _, ok := item.Payload[name]; !ok {
+			return invalid("observation", "payload", fmt.Sprintf("%s is missing field %q", item.Family, name))
+		}
+	}
+	validateNumberField := func(name string, allowNil bool) error {
+		value, present := item.Payload[name]
+		if !present {
+			return nil
+		}
+		if value == nil && allowNil {
+			return nil
+		}
+		if !currentNonNegativeNumber(value) {
+			return invalid("observation", "payload", fmt.Sprintf("%s.%s must be a non-negative finite number", item.Family, name))
+		}
+		return nil
+	}
+	for _, name := range []string{"process_percent", "system_percent", "util_percent", "memory_used_bytes", "memory_capacity_bytes", "cpu_percent", "used_bytes", "capacity_bytes", "snapshot_revision", "pressure_percent", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level"} {
+		if err := validateNumberField(name, false); err != nil {
+			return err
+		}
+	}
+	if err := validateNumberField("rss_bytes", true); err != nil {
+		return err
+	}
+	if value, ok := item.Payload["running"]; ok {
+		if _, valid := value.(bool); !valid {
+			return invalid("observation", "payload", "service_load.running must be a boolean")
+		}
+	}
+	for _, name := range []string{"label", "kind"} {
+		if value, ok := item.Payload[name]; ok {
+			if text, valid := value.(string); !valid || strings.TrimSpace(text) == "" {
+				return invalid("observation", "payload", fmt.Sprintf("%s.%s must be a non-empty string", item.Family, name))
+			}
+		}
+	}
+	for _, name := range []string{"process_cpu_percent", "process_memory_bytes"} {
+		if value, ok := item.Payload[name]; ok {
+			if err := validateCurrentProcessSeries(item.Family, name, value); err != nil {
+				return err
+			}
+		}
+	}
+	if item.Family == "agent_status" {
+		for _, name := range []string{"states", "session_states"} {
+			if value, ok := item.Payload[name]; ok {
+				if err := validateCurrentAgentStates(name, value); err != nil {
+					return err
+				}
+			}
+		}
+		if value, ok := item.Payload["counts"]; ok {
+			if err := validateCurrentAgentCounts(value); err != nil {
+				return err
+			}
+		}
+		if value, ok := item.Payload["agents"]; ok {
+			if err := validateCurrentAgentRoster(value); err != nil {
+				return err
+			}
+		}
+	}
+	if item.Family == "browser" {
+		if value, ok := item.Payload["kind"]; !ok || !browserKindCurrent(value) {
+			return invalid("observation", "payload", "browser.kind is unsupported")
+		}
+	}
+	return nil
+}
+
+func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
+	fields := map[string][]string{
+		"cpu":           {"process_percent", "system_percent", "process_cpu_percent"},
+		"agent_status":  {"states", "session_states", "snapshot_revision", "counts", "agents"},
+		"gpu":           {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
+		"service_load":  {"running", "cpu_percent", "rss_bytes"},
+		"system_memory": {"used_bytes", "capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level", "process_memory_bytes", "pressure_percent"},
+		"browser":       {"kind", "latency_ms", "bytes", "duration_ms", "endpoint", "method", "request_id", "status", "journey_id", "code_revision", "browser_family", "connection_protocol", "max_concurrency", "entry_count", "input_delay_ms", "processing_ms", "presentation_delay_ms", "interaction_type", "operation_kind", "outcome", "signature", "message", "stack", "source", "provenance", "route", "event_type", "wall_time", "delivery_outcome", "line", "column", "fanout_count", "queue_ms", "connect_ms", "tls_ms", "ttfb_ms", "download_ms", "apply_render_ms", "navigation_ms", "bundle_parse_eval_ms", "first_paint_ms", "first_contentful_paint_ms", "first_api_ms", "fanout_ms", "interactive_ms", "app_ready_ms", "upload_queue_depth", "upload_drops", "upload_retries", "instrumentation_cost_ms"},
+	}
+	requiredFields := map[string][]string{
+		"cpu": {"process_percent", "system_percent"}, "agent_status": {"states"},
+		"gpu":          {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
+		"service_load": {"running", "cpu_percent", "rss_bytes"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
+	}
+	names, ok := fields[family]
+	if !ok {
+		return nil, nil
+	}
+	allowed, required := make(map[string]bool, len(names)), make(map[string]bool, len(requiredFields[family]))
+	for _, name := range names {
+		allowed[name] = true
+	}
+	for _, name := range requiredFields[family] {
+		required[name] = true
+	}
+	return allowed, required
+}
+
+func currentNonNegativeNumber(value any) bool {
+	if value == nil || reflect.ValueOf(value).Kind() == reflect.Bool {
+		return false
+	}
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Float64()
+		return err == nil && currentFiniteNonNegative(parsed)
+	case float32:
+		return currentFiniteNonNegative(float64(number))
+	case float64:
+		return currentFiniteNonNegative(number)
+	case int:
+		return number >= 0
+	case int8:
+		return number >= 0
+	case int16:
+		return number >= 0
+	case int32:
+		return number >= 0
+	case int64:
+		return number >= 0
+	case uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+func currentFiniteNonNegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func validateCurrentProcessSeries(family, name string, value any) error {
+	rows, ok := value.(map[string]any)
+	if !ok {
+		return invalid("observation", "payload", fmt.Sprintf("%s.%s must be an object", family, name))
+	}
+	maximum := 8
+	if name == "process_cpu_percent" {
+		maximum = 4
+	}
+	if len(rows) > maximum {
+		return invalid("observation", "payload", fmt.Sprintf("%s.%s has too many binaries", family, name))
+	}
+	for binary, metric := range rows {
+		if binary == "" || len([]byte(binary)) > 64 || normalizeHostBinary(binary) != binary || !currentNonNegativeNumber(metric) {
+			return invalid("observation", "payload", fmt.Sprintf("%s.%s has an invalid binary series", family, name))
+		}
+		if name == "process_cpu_percent" {
+			value, _ := currentNumber(metric)
+			if value > 100 {
+				return invalid("observation", "payload", fmt.Sprintf("%s.%s must be at most 100", family, name))
+			}
+		}
+	}
+	return nil
+}
+
+func currentNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	case float32:
+		return float64(number), true
+	case float64:
+		return number, true
+	case int:
+		return float64(number), true
+	case int8:
+		return float64(number), true
+	case int16:
+		return float64(number), true
+	case int32:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case uint:
+		return float64(number), true
+	case uint8:
+		return float64(number), true
+	case uint16:
+		return float64(number), true
+	case uint32:
+		return float64(number), true
+	case uint64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
+}
+
+func validateCurrentAgentStates(field string, value any) error {
+	rows, ok := value.(map[string]any)
+	if !ok {
+		return invalid("observation", "payload", fmt.Sprintf("agent_status.%s must be an object", field))
+	}
+	valid := map[string]bool{"ask": true, "run": true, "transition": true, "idle": true}
+	for identity, state := range rows {
+		text, textOK := state.(string)
+		if strings.TrimSpace(identity) == "" || !textOK || !valid[text] {
+			return invalid("observation", "payload", fmt.Sprintf("agent_status.%s contains an invalid state", field))
+		}
+	}
+	return nil
+}
+
+func validateCurrentAgentCounts(value any) error {
+	rows, ok := value.(map[string]any)
+	if !ok {
+		return invalid("observation", "payload", "agent_status.counts must be an object")
+	}
+	if len(rows) != 4 {
+		return invalid("observation", "payload", "agent_status.counts must contain exactly four fields")
+	}
+	for _, name := range []string{"total", "running", "red", "yellow"} {
+		metric, present := rows[name]
+		number, valid := currentNumber(metric)
+		if !present || !valid || math.Trunc(number) != number || number < 0 {
+			return invalid("observation", "payload", "agent_status.counts contains an invalid count")
+		}
+	}
+	return nil
+}
+
+func validateCurrentAgentRoster(value any) error {
+	rows, ok := value.([]map[string]any)
+	if !ok {
+		generic, genericOK := value.([]any)
+		if !genericOK {
+			return invalid("observation", "payload", "agent_status.agents must be a bounded list")
+		}
+		rows = make([]map[string]any, 0, len(generic))
+		for _, item := range generic {
+			row, rowOK := item.(map[string]any)
+			if !rowOK {
+				return invalid("observation", "payload", "agent_status.agents contains an invalid row")
+			}
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) > 256 {
+		return invalid("observation", "payload", "agent_status.agents exceeds its bound")
+	}
+	validStates := map[string]bool{"ask": true, "run": true, "transition": true, "idle": true, "error": true, "unavailable": true}
+	for _, row := range rows {
+		if len(row) != 5 {
+			return invalid("observation", "payload", "agent_status.agents contains an invalid row")
+		}
+		for _, name := range []string{"id", "kind", "state", "session", "pane"} {
+			if _, ok := row[name].(string); !ok || strings.TrimSpace(row[name].(string)) == "" {
+				return invalid("observation", "payload", "agent_status.agents contains an invalid identity")
+			}
+		}
+		if !validStates[row["state"].(string)] {
+			return invalid("observation", "payload", "agent_status.agents contains an invalid state")
+		}
+	}
+	return nil
+}
+
+func browserKindCurrent(value any) bool {
+	kind, ok := value.(string)
+	if !ok {
+		return false
+	}
+	return map[string]bool{"api": true, "sse": true, "heartbeat": true, "disconnect": true, "page_load": true, "finder_usable": true, "interaction": true, "operation_wait": true, "long_task": true, "warning": true, "error": true, "unhandledrejection": true}[kind]
 }
 
 func validateIntervals(coverage []CoverageEpoch, unavailable []UnavailableSpan) error {

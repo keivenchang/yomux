@@ -25,9 +25,11 @@ bazel_test_source_root() {
   fi
   if [ -n "${TEST_SRCDIR:-}" ]; then
     candidates+=("$TEST_SRCDIR/__main__")
+    candidates+=("$TEST_SRCDIR/_main")
   fi
   if [ -n "${RUNFILES_DIR:-}" ]; then
     candidates+=("$RUNFILES_DIR/__main__")
+    candidates+=("$RUNFILES_DIR/_main")
   fi
   if [ -n "$script_path" ] && [ -e "$script_path" ]; then
     # Keep the lexical runfiles path. Resolving a Bazel runfile symlink here points back to the
@@ -38,6 +40,23 @@ bazel_test_source_root() {
 
   for candidate in "${candidates[@]}"; do
     if [ -f "$candidate/docker/Dockerfile.test" ]; then
+      # Docker's BuildKit daemon cannot dereference a runfiles Dockerfile symlink whose target
+      # lives outside the sandbox. Materialize the declared runfiles tree into the action-owned
+      # TEST_TMPDIR instead of resolving the symlink back to the source checkout. Bazel removes
+      # TEST_TMPDIR after the action, and cp -RL dereferences only the files already present in
+      # the declared runfiles tree.
+      if [ -L "$candidate/docker/Dockerfile.test" ]; then
+        local materialized_root
+        materialized_root="$(mktemp -d "${TEST_TMPDIR:-/tmp}/yolomux-bazel-source.XXXXXX")"
+        # The source context is bind-mounted into the rootless Docker runner. mktemp creates a
+        # 0700 directory owned by the host UID, which the container's runner UID cannot traverse;
+        # make this action-owned read-only context traversable before handing it to Docker.
+        chmod 0755 -- "$materialized_root"
+        # Do not preserve source ownership/timestamps: runfile targets can be owned by a different
+        # account, while executable mode is part of the Docker input for the wrapper scripts.
+        \cp -RL --no-preserve=ownership,timestamps -- "$candidate/." "$materialized_root/"
+        candidate="$materialized_root"
+      fi
       (cd -- "$candidate" && pwd)
       return 0
     fi

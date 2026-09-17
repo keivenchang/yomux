@@ -58,6 +58,18 @@ type AgentStatusSnapshot struct {
 	Unavailable      *AgentStatusQueryUnavailable  `json:"unavailable,omitempty"`
 }
 
+// ReadAgentStatus is the stats-owner read boundary for the public status
+// projection. HTTP callers should receive this through StatsService rather
+// than opening the SQLite database in a request handler.
+func ReadAgentStatus(ctx context.Context, path string, query AgentStatusQuery) (AgentStatusSnapshot, error) {
+	database, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	defer database.Close()
+	return database.QueryAgentStatus(ctx, query)
+}
+
 // QueryAgentStatus returns the latest committed agent_status payload and a
 // bounded token rate derived from the same SQLite read snapshot.
 func (d *Database) QueryAgentStatus(ctx context.Context, query AgentStatusQuery) (AgentStatusSnapshot, error) {

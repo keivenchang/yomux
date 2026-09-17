@@ -11,6 +11,175 @@ import (
 
 const MaxFactReadLimit = 10000
 
+// FactPageSize is deliberately small so a lifecycle pass never retains a
+// whole history range merely to fold one ring cell. Callers may issue as many
+// pages as their explicit row/byte/time budget allows.
+const FactPageSize = 256
+
+type observationPageCursor struct {
+	ObservedAt       float64
+	Family, SourceID string
+	EventID          string
+}
+
+type coveragePageCursor struct {
+	StartedAt        float64
+	Family, SourceID string
+	EpochID          string
+}
+
+type unavailablePageCursor struct {
+	StartedAt        float64
+	Family, SourceID string
+	EpochID          string
+	EndedAt          float64
+}
+
+type usagePageCursor struct {
+	ObservedAt                   float64
+	EventID, Direction, Modality string
+	CacheRole, Unit              string
+}
+
+func pageLimit(limit int) error {
+	if limit <= 0 || limit > MaxFactReadLimit {
+		return fmt.Errorf("invalid page limit %d", limit)
+	}
+	return nil
+}
+
+func (d *Database) ReadObservationsPage(ctx context.Context, start, end float64, after *observationPageCursor, limit int) ([]Observation, *observationPageCursor, error) {
+	if err := validateReadRange(start, end, MaxFactReadLimit); err != nil {
+		return nil, nil, err
+	}
+	if err := pageLimit(limit); err != nil {
+		return nil, nil, err
+	}
+	query := `SELECT event_id, family, source_id, observed_at, epoch_id, owner_generation, payload_json
+FROM observations WHERE observed_at >= ? AND observed_at < ?`
+	args := []any{start, end}
+	if after != nil {
+		query += ` AND (observed_at > ? OR (observed_at = ? AND (family > ? OR (family = ? AND (source_id > ? OR (source_id = ? AND event_id > ?))))))`
+		args = append(args, after.ObservedAt, after.ObservedAt, after.Family, after.Family, after.SourceID, after.SourceID, after.EventID)
+	}
+	query += ` ORDER BY observed_at ASC, family ASC, source_id ASC, event_id ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.reader.Rows(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read observation page: %w", err)
+	}
+	result := make([]Observation, 0, len(rows))
+	var cursor *observationPageCursor
+	for i, row := range rows {
+		item, decodeErr := decodeObservation(row)
+		if decodeErr != nil {
+			return nil, nil, fmt.Errorf("observations page row %d: %w", i, decodeErr)
+		}
+		result = append(result, item)
+		cursor = &observationPageCursor{ObservedAt: item.ObservedAt, Family: item.Family, SourceID: item.SourceID, EventID: item.EventID}
+	}
+	return result, cursor, nil
+}
+
+func (d *Database) ReadCoverageEpochsPage(ctx context.Context, start, end float64, after *coveragePageCursor, limit int) ([]CoverageEpoch, *coveragePageCursor, error) {
+	if err := validateReadRange(start, end, MaxFactReadLimit); err != nil {
+		return nil, nil, err
+	}
+	if err := pageLimit(limit); err != nil {
+		return nil, nil, err
+	}
+	query := `SELECT family, source_id, epoch_id, started_at, ended_at, native_cadence_seconds, owner_generation
+FROM coverage_epochs WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)`
+	args := []any{end, start}
+	if after != nil {
+		query += ` AND (started_at > ? OR (started_at = ? AND (family > ? OR (family = ? AND (source_id > ? OR (source_id = ? AND epoch_id > ?))))))`
+		args = append(args, after.StartedAt, after.StartedAt, after.Family, after.Family, after.SourceID, after.SourceID, after.EpochID)
+	}
+	query += ` ORDER BY started_at ASC, family ASC, source_id ASC, epoch_id ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.reader.Rows(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read coverage epoch page: %w", err)
+	}
+	result := make([]CoverageEpoch, 0, len(rows))
+	var cursor *coveragePageCursor
+	for i, row := range rows {
+		item, decodeErr := decodeCoverageEpoch(row)
+		if decodeErr != nil {
+			return nil, nil, fmt.Errorf("coverage page row %d: %w", i, decodeErr)
+		}
+		result = append(result, item)
+		cursor = &coveragePageCursor{StartedAt: item.StartedAt, Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID}
+	}
+	return result, cursor, nil
+}
+
+func (d *Database) ReadUnavailableSpansPage(ctx context.Context, start, end float64, after *unavailablePageCursor, limit int) ([]UnavailableSpan, *unavailablePageCursor, error) {
+	if err := validateReadRange(start, end, MaxFactReadLimit); err != nil {
+		return nil, nil, err
+	}
+	if err := pageLimit(limit); err != nil {
+		return nil, nil, err
+	}
+	query := `SELECT family, source_id, epoch_id, started_at, ended_at, native_cadence_seconds, reason, owner_generation
+FROM unavailable_spans WHERE ended_at > ? AND started_at < ?`
+	args := []any{start, end}
+	if after != nil {
+		query += ` AND (started_at > ? OR (started_at = ? AND (family > ? OR (family = ? AND (source_id > ? OR (source_id = ? AND (epoch_id > ? OR (epoch_id = ? AND ended_at > ?))))))))`
+		args = append(args, after.StartedAt, after.StartedAt, after.Family, after.Family, after.SourceID, after.SourceID, after.EpochID, after.EpochID, after.EndedAt)
+	}
+	query += ` ORDER BY started_at ASC, family ASC, source_id ASC, epoch_id ASC, ended_at ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.reader.Rows(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read unavailable page: %w", err)
+	}
+	result := make([]UnavailableSpan, 0, len(rows))
+	var cursor *unavailablePageCursor
+	for i, row := range rows {
+		item, decodeErr := decodeUnavailableSpan(row)
+		if decodeErr != nil {
+			return nil, nil, fmt.Errorf("unavailable page row %d: %w", i, decodeErr)
+		}
+		result = append(result, item)
+		cursor = &unavailablePageCursor{StartedAt: item.StartedAt, Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID, EndedAt: item.EndedAt}
+	}
+	return result, cursor, nil
+}
+
+func (d *Database) ReadUsageAtomsPage(ctx context.Context, start, end float64, after *usagePageCursor, limit int) ([]UsageAtom, *usagePageCursor, error) {
+	if err := validateReadRange(start, end, MaxFactReadLimit); err != nil {
+		return nil, nil, err
+	}
+	if err := pageLimit(limit); err != nil {
+		return nil, nil, err
+	}
+	query := `SELECT event_id, direction, modality, cache_role, unit, observed_at, payload_json
+FROM usage_atoms WHERE observed_at >= ? AND observed_at < ?`
+	args := []any{start, end}
+	if after != nil {
+		query += ` AND (observed_at > ? OR (observed_at = ? AND (event_id > ? OR (event_id = ? AND (direction > ? OR (direction = ? AND (modality > ? OR (modality = ? AND (cache_role > ? OR (cache_role = ? AND unit > ?))))))))))`
+		args = append(args, after.ObservedAt, after.ObservedAt, after.EventID, after.EventID, after.Direction, after.Direction, after.Modality, after.Modality, after.CacheRole, after.CacheRole, after.Unit)
+	}
+	query += ` ORDER BY observed_at ASC, event_id ASC, direction ASC, modality ASC, cache_role ASC, unit ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := d.reader.Rows(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read usage page: %w", err)
+	}
+	result := make([]UsageAtom, 0, len(rows))
+	var cursor *usagePageCursor
+	for i, row := range rows {
+		item, decodeErr := decodeUsageAtom(row)
+		if decodeErr != nil {
+			return nil, nil, fmt.Errorf("usage page row %d: %w", i, decodeErr)
+		}
+		result = append(result, item)
+		cursor = &usagePageCursor{ObservedAt: item.ObservedAt, EventID: item.EventID, Direction: item.Direction, Modality: item.Modality, CacheRole: item.CacheRole, Unit: item.Unit}
+	}
+	return result, cursor, nil
+}
+
 // ReadObservations returns observations with start <= observed_at < end.
 func (d *Database) ReadObservations(ctx context.Context, start, end float64, limit int) ([]Observation, error) {
 	if err := validateReadRange(start, end, limit); err != nil {

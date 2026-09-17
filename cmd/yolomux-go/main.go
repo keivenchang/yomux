@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -49,37 +50,70 @@ const version = "0.1.0-phase4"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 type server struct {
-	root               string
-	host               string
-	port               int
-	config             string
-	httpMode           bool
-	mu                 sync.Mutex
-	children           map[*exec.Cmd]struct{}
-	events             *eventBroker
-	operationsMu       sync.Mutex
-	operations         map[string]*goOperation
-	operationsPath     string
-	operationsJournal  string
-	eventLogPath       string
-	background         *goBackgroundOwner
-	finder             *finder.Service
-	finderJobs         *work.Scheduler
-	finderBulkJobs     *work.Scheduler
-	finderStreamJobs   *work.Scheduler
-	capabilities       *capabilities.Catalog
-	statsPath          string
-	statsWriter        *stats.Writer
-	tokenCollector     *stats.AgentTokenCollector
-	pricing            *stats.PricingCatalog
-	metadataMu         sync.Mutex
-	metadataGeneration uint64
-	logRing            *goLogRing
-	rootLease          *os.File
-	shutdownOnce       sync.Once
-	startedAt          time.Time
-	authMu             sync.Mutex
-	authFailures       map[string]authFailure
+	root                    string
+	host                    string
+	port                    int
+	config                  string
+	httpMode                bool
+	mu                      sync.Mutex
+	children                map[*exec.Cmd]struct{}
+	events                  *eventBroker
+	operationsMu            sync.Mutex
+	operations              map[string]*goOperation
+	operationsPath          string
+	operationsJournal       string
+	eventLogPath            string
+	background              *goBackgroundOwner
+	finder                  *finder.Service
+	finderJobs              *work.Scheduler
+	finderBulkJobs          *work.Scheduler
+	finderStreamJobs        *work.Scheduler
+	capabilities            *capabilities.Catalog
+	statsPath               string
+	statsNow                func() time.Time
+	statsHeartbeat          time.Duration
+	statsWriter             *stats.Writer
+	statsService            *stats.StatsService
+	statsLifecycle          *stats.Lifecycle
+	statsMigration          map[string]any
+	statsDeltaMu            sync.Mutex
+	statsDeltaHistory       map[statsDeltaKey]map[int64]map[string]any
+	statsDeltaNextRevision  map[statsDeltaKey]int64
+	statsDemand             atomic.Int64
+	tokenCollector          *stats.AgentTokenCollector
+	pricing                 *stats.PricingCatalog
+	pricingRefreshMu        sync.Mutex
+	pricingRefreshing       bool
+	pricingRefreshState     map[string]any
+	pricingRefreshEpoch     uint64
+	metadataMu              sync.Mutex
+	metadataGeneration      uint64
+	logRing                 *goLogRing
+	rootLease               *os.File
+	shutdownOnce            sync.Once
+	startedAt               time.Time
+	authMu                  sync.Mutex
+	authFailures            map[string]authFailure
+	performanceMu           sync.Mutex
+	performanceRecords      []goPerformanceRecord
+	performanceCaptureTotal uint64
+	state                   string
+	finderBackgroundJobs    *work.Scheduler
+	sessionFilesCacheMu     sync.Mutex
+	sessionFilesCache       map[string]sessionFilesCacheRecord
+	sessionFilesRefresh     map[string]bool
+}
+
+const goPerformanceRecordLimit = 4096
+
+type goPerformanceRecord struct {
+	Role         string
+	Surface      string
+	Time         float64
+	ComputeMS    float64
+	PayloadBytes int
+	CacheStatus  string
+	Details      map[string]any
 }
 
 type authFailure struct {
@@ -2477,6 +2511,8 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 }
 
 func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
+	mux.Handle("/api/session-files", s.protected(http.HandlerFunc(s.sessionFiles), "readonly"))
+	mux.Handle("/api/session-files-batch", s.protected(http.HandlerFunc(s.sessionFilesBatch), "readonly"))
 	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
 	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
 	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead), "readonly"))
@@ -2502,6 +2538,31 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip), "admin"))
 	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount), "admin"))
 	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
+}
+
+// explicitCollectorPaths is deliberately fail-closed. Collector inputs are
+// mutable host state, so deriving them from HOME, CODEX_HOME, or XDG_DATA_HOME
+// would let a development/test process read an operator's real client data.
+// Production may opt in by passing all three absolute paths explicitly.
+func explicitCollectorPaths() (claudeRoot, codexRoot, opencodeDatabase string, err error) {
+	values := []struct {
+		name  string
+		value *string
+	}{
+		{"YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", &claudeRoot},
+		{"YOLOMUX_CODEX_TRANSCRIPT_ROOT", &codexRoot},
+		{"YOLOMUX_OPENCODE_DATABASE", &opencodeDatabase},
+	}
+	for _, item := range values {
+		*item.value = strings.TrimSpace(os.Getenv(item.name))
+		if *item.value == "" {
+			return "", "", "", fmt.Errorf("stats collectors require explicit %s", item.name)
+		}
+		if !filepath.IsAbs(*item.value) {
+			return "", "", "", fmt.Errorf("stats collector path %s must be absolute", item.name)
+		}
+	}
+	return claudeRoot, codexRoot, opencodeDatabase, nil
 }
 
 func main() {
@@ -2542,7 +2603,16 @@ func main() {
 		fatal("YOLOmux product root is already owned by another server or unavailable: " + err.Error())
 	}
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	stateDir := strings.TrimSpace(os.Getenv("YOLOMUX_STATE_DIR"))
+	if stateDir == "" {
+		stateDir = *configDir
+	}
+	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	// Stats routes are implemented as soon as the server starts. Materialization readiness is a
+	// separate runtime state: capability discovery and the typed pending response must reach the
+	// stats handlers while the first ring build is still in flight, or the browser cannot ever learn
+	// the matrix it needs to start that build's read path.
+	s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{}}})
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
 		return err
@@ -2550,6 +2620,9 @@ func main() {
 	if finderErr != nil {
 		if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
 			slog.Warn("finder job scheduler did not stop before shutdown timeout")
+		}
+		if !s.finderBackgroundJobs.CloseWithTimeout(5 * time.Second) {
+			slog.Warn("finder background scheduler did not stop before shutdown timeout")
 		}
 		if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
 			slog.Warn("finder stream scheduler did not stop before shutdown timeout")
@@ -2581,14 +2654,21 @@ func main() {
 	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus), "readonly"))
 	mux.Handle("/api/stats-capabilities", s.protected(http.HandlerFunc(s.statsCapabilities), "readonly"))
 	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations), "readonly"))
+	mux.Handle("/api/stats-retry", s.protected(http.HandlerFunc(s.statsRetry), "readonly"))
 	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot), "readonly"))
 	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta), "readonly"))
 	mux.Handle("/api/stats-stream", s.protected(http.HandlerFunc(s.statsStream), "readonly"))
 	mux.Handle("/api/pricing-catalog", s.protected(http.HandlerFunc(s.pricingCatalog), "readonly"))
+	mux.Handle("/api/pricing-catalog/refresh", s.protected(http.HandlerFunc(s.pricingCatalogRefresh), "admin"))
 	mux.Handle("/readyz", s.protected(http.HandlerFunc(s.ready), "readonly"))
 	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck), "readonly"))
 	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
 	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus), "readonly"))
+	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance), "admin"))
+	// The browser requests session metadata during boot, before it opens the
+	// stats surface. Keep this route on the Go mux so a stats-capable process
+	// does not turn a boot identity probe into the generic unsupported response.
+	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata), "readonly"))
 	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim), "admin"))
 	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept), "admin"))
 	mux.Handle("/api/operations/terminalize", s.protected(http.HandlerFunc(s.operationTerminalize), "admin"))
@@ -2612,7 +2692,7 @@ func main() {
 	mux.HandleFunc("/ws", s.websocket)
 	mux.HandleFunc("/static/", s.static)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	httpServer := &http.Server{Addr: addr, Handler: logging(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
+	httpServer := &http.Server{Addr: addr, Handler: s.logging(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
 	go s.reaper()
 	var listener net.Listener
 	if *listenFD >= 0 {
@@ -2667,80 +2747,121 @@ func main() {
 		fatal("stats setup failed: " + err.Error())
 	}
 	defer statsWriter.Close()
+	if migrationStatus, migrationErr := statsWriter.MigrationStatus(shutdownContext); migrationErr != nil {
+		_ = listener.Close()
+		s.shutdown()
+		fatal("stats migration status failed: " + migrationErr.Error())
+	} else if migrationStatus.Present {
+		s.statsMigration = map[string]any{
+			"state":       migrationStatus.State,
+			"result":      migrationStatus.Result,
+			"issue_kinds": migrationStatus.IssueKinds,
+		}
+	}
+	// Live Go collectors and browser uploads are current-family producers. Keep
+	// legacy/sparse fixture compatibility in the library writer, but enforce the
+	// typed Python family contract for this serving process.
+	statsWriter.EnableCurrentFamilyValidation()
 	s.statsWriter = statsWriter
-	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second})
+	productKeys := make([]stats.ProductKey, 0)
+	for _, window := range statsRanges {
+		for _, resolution := range []int{1, 10, 60, 300} {
+			if supportedResolution(window, resolution) {
+				productKeys = append(productKeys, stats.ProductKey{RangeSeconds: window, ResolutionSeconds: resolution})
+			}
+		}
+	}
+	statsService := stats.NewStatsService(statsWriter, stats.StatsServiceConfig{
+		Products: productKeys, Price: stats.PricingResolver(pricing),
+		AgentStatus: func(ctx context.Context) (stats.AgentStatusSnapshot, error) {
+			return stats.ReadAgentStatus(ctx, s.statsPath, stats.AgentStatusQuery{})
+		},
+	})
+	s.statsService = statsService
+	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second, Busy: func() bool {
+		return s.statsDemand.Load() > 0
+	}, StateFunc: func(counters stats.LifecycleCounters) {
+		_ = statsService.Refresh(shutdownContext)
+		serviceState := statsService.State()
+		pending := 0
+		if cells, pendingErr := statsWriter.PendingInvalidationCells(shutdownContext); pendingErr == nil {
+			pending = len(cells)
+		}
+		if counters.Runs > 0 && (counters.LastRunSucceeded || counters.Errors == 0) && pending == 0 && serviceState.Ready {
+			s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true})
+			return
+		}
+		// Availability describes the implemented route surface; readiness is reported separately by
+		// /readyz and by the typed stats pending response. Keep the route admitted while materialization
+		// catches up so a fresh browser can discover capabilities and receive a retryable state.
+		s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{"pending_cells": pending, "pending_products": serviceState.PendingProducts}}})
+	}, Price: stats.PricingResolver(pricing)})
 	statsWriter.AttachLifecycle(statsLifecycle)
+	s.statsLifecycle = statsLifecycle
 	if err := statsLifecycle.Start(shutdownContext); err != nil {
 		_ = listener.Close()
 		s.shutdown()
 		fatal("stats lifecycle setup failed: " + err.Error())
 	}
 	defer statsLifecycle.Stop()
-	home := os.Getenv("HOME")
-	claudeTranscriptRoot := os.Getenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT")
-	if claudeTranscriptRoot == "" {
-		claudeTranscriptRoot = filepath.Join(home, ".claude", "projects")
-	}
-	codexTranscriptRoot := os.Getenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT")
-	if codexTranscriptRoot == "" {
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(home, ".codex")
+	collectorsDisabled := os.Getenv("YOLOMUX_STATS_DISABLE_COLLECTORS") == "1"
+	claudeTranscriptRoot, codexTranscriptRoot, opencodeDatabase := "", "", ""
+	if !collectorsDisabled {
+		var collectorErr error
+		claudeTranscriptRoot, codexTranscriptRoot, opencodeDatabase, collectorErr = explicitCollectorPaths()
+		if collectorErr != nil {
+			_ = listener.Close()
+			s.shutdown()
+			fatal("stats collector setup failed: " + collectorErr.Error())
 		}
-		codexTranscriptRoot = filepath.Join(codexHome, "sessions")
 	}
-	opencodeDatabase := os.Getenv("YOLOMUX_OPENCODE_DATABASE")
-	if opencodeDatabase == "" {
-		dataHome := os.Getenv("XDG_DATA_HOME")
-		if dataHome == "" {
-			dataHome = filepath.Join(home, ".local", "share")
+	if !collectorsDisabled {
+		agentInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
+			return stats.BuildAgentInventory(ctx, stats.LinuxAgentInventorySources())
 		}
-		opencodeDatabase = filepath.Join(dataHome, "opencode", "opencode.db")
+		openCodeInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
+			return stats.BuildOpenCodeInventory(ctx, stats.LinuxOpenCodeInventorySources())
+		}
+		statusCollector := stats.NewAgentStatusCollector(agentInventory, func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+			return stats.ClassifyAgentStatus(ctx, request, stats.LinuxAgentStatusSources(opencodeDatabase))
+		}, statsWriter, nil, stats.AgentStatusCollectorConfig{
+			ActiveCadence: 10 * time.Second, IdleCadence: time.Minute,
+			EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+			SnapshotRevision: func() uint64 { return uint64(time.Now().UnixNano()) },
+		})
+		if err := statusCollector.Start(shutdownContext); err != nil {
+			_ = listener.Close()
+			s.shutdown()
+			fatal("agent status collector setup failed: " + err.Error())
+		}
+		defer statusCollector.Stop()
+		tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
+			Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
+			ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
+			OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),
+			EpochID: fmt.Sprintf("agent-tokens-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+		})
+		s.tokenCollector = tokenCollector
+		if err := tokenCollector.Start(shutdownContext); err != nil {
+			_ = listener.Close()
+			s.shutdown()
+			fatal("agent token collector setup failed: " + err.Error())
+		}
+		defer tokenCollector.Stop()
+		hostCollector := stats.NewHostCollector(stats.NewHostSources(), statsWriter, nil, stats.HostCollectorConfig{
+			ActiveCadence: time.Second, IdleCadence: time.Minute, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
+			EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(), ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+		})
+		if err := hostCollector.Start(shutdownContext); err != nil {
+			_ = listener.Close()
+			s.shutdown()
+			fatal("stats host collector setup failed: " + err.Error())
+		}
+		defer hostCollector.Stop()
 	}
-	agentInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
-		return stats.BuildAgentInventory(ctx, stats.LinuxAgentInventorySources())
-	}
-	openCodeInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
-		return stats.BuildOpenCodeInventory(ctx, stats.LinuxOpenCodeInventorySources())
-	}
-	statusCollector := stats.NewAgentStatusCollector(agentInventory, func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
-		return stats.ClassifyAgentStatus(ctx, request, stats.LinuxAgentStatusSources(opencodeDatabase))
-	}, statsWriter, nil, stats.AgentStatusCollectorConfig{
-		ActiveCadence: 10 * time.Second, IdleCadence: time.Minute,
-		EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-		OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
-	})
-	if err := statusCollector.Start(shutdownContext); err != nil {
-		_ = listener.Close()
-		s.shutdown()
-		fatal("agent status collector setup failed: " + err.Error())
-	}
-	defer statusCollector.Stop()
-	tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
-		Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
-		ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
-		OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),
-		EpochID: fmt.Sprintf("agent-tokens-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-		OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
-	})
-	s.tokenCollector = tokenCollector
-	if err := tokenCollector.Start(shutdownContext); err != nil {
-		_ = listener.Close()
-		s.shutdown()
-		fatal("agent token collector setup failed: " + err.Error())
-	}
-	defer tokenCollector.Stop()
-	hostCollector := stats.NewHostCollector(stats.NewHostSources(), statsWriter, nil, stats.HostCollectorConfig{
-		ActiveCadence: time.Second, IdleCadence: time.Minute, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
-		EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-		OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(),
-	})
-	if err := hostCollector.Start(shutdownContext); err != nil {
-		_ = listener.Close()
-		s.shutdown()
-		fatal("stats host collector setup failed: " + err.Error())
-	}
-	defer hostCollector.Stop()
 	scheme := "https"
 	if *httpMode {
 		scheme = "http"
@@ -2818,6 +2939,11 @@ func (s *server) shutdown() {
 		if s.finderJobs != nil {
 			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
 				slog.Warn("finder job scheduler did not stop before shutdown timeout")
+			}
+		}
+		if s.finderBackgroundJobs != nil {
+			if !s.finderBackgroundJobs.CloseWithTimeout(5 * time.Second) {
+				slog.Warn("finder background scheduler did not stop before shutdown timeout")
 			}
 		}
 		if s.finderBulkJobs != nil {
@@ -3342,12 +3468,140 @@ func tlsConfig(certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}, nil
 }
 
-func logging(next http.Handler) http.Handler {
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(value)
+	w.bytes += n
+	return n, err
+}
+
+func (w *loggingResponseWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	if w.status == 0 {
+		w.status = http.StatusSwitchingProtocols
+	}
+	return hijacker.Hijack()
+}
+
+func (w *loggingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if optimized, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := optimized.ReadFrom(reader)
+		w.bytes += int(n)
+		return n, err
+	}
+	n, err := io.Copy(struct{ io.Writer }{Writer: w.ResponseWriter}, reader)
+	w.bytes += int(n)
+	return n, err
+}
+
+func (s *server) logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		logged := &loggingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(logged, r)
+		elapsed := time.Since(start)
+		status := logged.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", elapsed.Milliseconds())
+		s.recordPerformance(r, status, logged.bytes, elapsed)
 	})
+}
+
+func (s *server) recordPerformance(r *http.Request, status, payloadBytes int, elapsed time.Duration) {
+	marker := strings.TrimSpace(r.Header.Get("X-YOLOmux-Measurement"))
+	if marker == "" {
+		return
+	}
+	requestID := strings.TrimSpace(r.Header.Get("X-YOLOmux-Request-ID"))
+	digestBytes := sha256.Sum256([]byte(marker))
+	digest := hex.EncodeToString(digestBytes[:])[:16]
+	record := goPerformanceRecord{
+		Role: "http-endpoint", Surface: r.Method + " " + r.URL.Path,
+		Time: float64(time.Now().UnixNano()) / 1e9, ComputeMS: float64(elapsed.Microseconds()) / 1000,
+		PayloadBytes: payloadBytes,
+		Details: map[string]any{
+			"measurement_scope": "capture", "measurement_request_id": digest,
+			"transport_request_id": requestID, "method": r.Method, "path": r.URL.Path,
+			"status": status, "request_total_ms": float64(elapsed.Microseconds()) / 1000,
+		},
+	}
+	s.performanceMu.Lock()
+	defer s.performanceMu.Unlock()
+	s.performanceCaptureTotal++
+	s.performanceRecords = append(s.performanceRecords, record)
+	if len(s.performanceRecords) > goPerformanceRecordLimit {
+		s.performanceRecords = s.performanceRecords[len(s.performanceRecords)-goPerformanceRecordLimit:]
+	}
+}
+
+func (s *server) diagnosticsPerformance(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("measurement_scope"))
+	if scope != "" && scope != "capture" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "unsupported measurement scope"})
+		return
+	}
+	s.performanceMu.Lock()
+	records := append([]goPerformanceRecord(nil), s.performanceRecords...)
+	captureTotal := s.performanceCaptureTotal
+	s.performanceMu.Unlock()
+	recent := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		details := map[string]any{}
+		for key, value := range record.Details {
+			details[key] = value
+		}
+		recent = append(recent, map[string]any{
+			"role": record.Role, "surface": record.Surface, "time": record.Time,
+			"compute_ms": record.ComputeMS, "payload_bytes": record.PayloadBytes,
+			"cache_status": record.CacheStatus, "details": details,
+		})
+	}
+	perf := map[string]any{
+		"window_seconds": 60.0, "record_limit": goPerformanceRecordLimit,
+		"record_count": len(records), "summary": []any{}, "top_payload_bytes": []any{}, "recent": recent,
+		"capture": map[string]any{"capacity": goPerformanceRecordLimit, "retained": len(recent), "total": captureTotal, "evicted": maxInt(0, int(captureTotal)-len(recent)), "first_sequence": maxUint64(1, captureTotal-uint64(len(recent))+1), "last_sequence": captureTotal},
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"perf": perf, "transport": map[string]any{"teardowns_total": 0, "teardowns_by_exception": map[string]any{}}, "shared_phase_counters": []any{}, "repeated_work": []any{}, "browser_profiles": map[string]any{}, "browser_observation_status": map[string]any{}})
+}
+
+func maxUint64(left, right uint64) uint64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -3388,10 +3642,12 @@ func (s *server) fsFastList(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = s.root
 	}
-	// Keep the normal fast path synchronous, but move slow directory reads behind the bounded
-	// scheduler once the small HTTP budget expires. The browser already understands this pending
-	// operation shape through the shared operation transport.
-	s.enqueueFinderFastList(w, r.Context(), path)
+	// This is the first-paint route. Keep it independent of the Finder Git/session worker pool so a
+	// slow backfill cannot delay the plain directory rows. FastList performs only one-level
+	// descriptor-bound filesystem metadata reads; repository history, status, and +/- counts arrive
+	// through the later session-files/enrichment requests.
+	payload, finderErr := s.finder.FastList(r.Context(), path)
+	finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
 }
 
 func (s *server) fsList(w http.ResponseWriter, r *http.Request) {
@@ -3481,8 +3737,13 @@ func (s *server) fsGitHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := r.URL.Query().Get("limit")
 	cursor := r.URL.Query().Get("cursor")
-	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "git_history", path, func(ctx context.Context) (map[string]any, *finder.Error) {
-		return s.finder.GitHistory(ctx, path, limit, cursor)
+	withStats := r.URL.Query().Get("stats") == "1"
+	scheduler := s.finderJobs
+	if withStats {
+		scheduler = s.finderBackgroundScheduler()
+	}
+	s.enqueueFinderJSONWithScheduler(w, r.Context(), scheduler, r.URL.Path, "git_history", path, 0, func(ctx context.Context) (map[string]any, *finder.Error) {
+		return s.finder.GitHistory(ctx, path, limit, cursor, withStats)
 	})
 }
 
@@ -4155,6 +4416,10 @@ func (s *server) fsBlame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Query().Get("path")
+	if path == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.pathRequired", Message: "path is required"})
+		return
+	}
 	ref := r.URL.Query().Get("ref")
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "blame", path, func(ctx context.Context) (map[string]any, *finder.Error) {
 		return s.finder.Blame(ctx, path, ref)
@@ -4441,7 +4706,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 		demanded[id] = true
 	}
 	globalOperationStream := clientID != "" && operationID == ""
-	if len(demandedIDs) > 0 {
+	writeDemandedOperationTerminals := func() {
 		for _, id := range demandedIDs {
 			if record := s.operationRecord(id); operationIsTerminal(record) && !record.Acknowledged && !record.DeliveryAcknowledged {
 				if event := record.TerminalEvent; event != nil {
@@ -4450,6 +4715,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	writeDemandedOperationTerminals()
 	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("YOLOMUX_GO_EVENT_STREAM_DELAY_MS"))); err == nil && value > 0 {
 		timer := time.NewTimer(time.Duration(value) * time.Millisecond)
 		select {
@@ -4461,6 +4727,10 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A bounded or deliberately delayed stream can receive the terminal event while its startup
+	// delay is active, then lose it to a later queue replacement before the read loop begins. Recheck
+	// demanded receipts at the handoff boundary so an accepted operation cannot strand its waiter.
+	writeDemandedOperationTerminals()
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -4756,6 +5026,9 @@ func (s *server) operationCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.finderJobs != nil {
 		s.finderJobs.Cancel(id)
+	}
+	if s.finderBackgroundJobs != nil {
+		s.finderBackgroundJobs.Cancel(id)
 	}
 	if s.finderBulkJobs != nil {
 		s.finderBulkJobs.Cancel(id)
@@ -5292,9 +5565,14 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
+	// The Go backend currently exposes the deliberate stats-only boot contract. The
+	// remaining application routes are capability-gated below, so advertising a full
+	// boot here would make the frontend probe unsupported APIs and turn their 404/501
+	// responses into misleading stats failures. Promote this to full boot only when
+	// every non-stats capability has a tested Go owner.
 	script := `import json,sys
 from yolomux_lib.web import html_page
-print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5])), end="")`
+print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5]), stats_only=True), end="")`
 	sessions, _ := json.Marshal(s.sessionNames())
 	capabilityData, _ := json.Marshal(s.capabilities.Snapshot())
 	command := exec.Command("python3", "-c", script, string(sessions), user.role, user.username, r.Header.Get("Accept-Language"))
@@ -5642,6 +5920,10 @@ func (s *server) reaper() {
 func jsonResponse(w http.ResponseWriter, status int, value any) {
 	b, _ := json.Marshal(value)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// JSON API representations are request-scoped products. Match the Python
+	// response writer so browsers and parity clients cannot reuse a stale
+	// snapshot, error, or capability response from an intermediary cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
 }

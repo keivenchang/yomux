@@ -111,28 +111,49 @@ def image_input_paths(repo_root: Path = REPO_ROOT) -> tuple[Path, ...]:
 def prepare_go_module_cache(destination: Path, repo_root: Path = REPO_ROOT) -> bool:
     """Copy only this checkout's already-cached Go modules into a build context."""
 
+    # Bazel scrubbed test actions do not always provide HOME. Go then returns
+    # empty GOPATH/GOMODCACHE values even though the invoking user's cache is
+    # available, causing the Docker wrapper to fall back to a network build.
+    go_environment = os.environ.copy()
+    if not go_environment.get("HOME"):
+        go_environment["HOME"] = str(Path.home())
     try:
-        module_cache = Path(
+        configured_cache = Path(
             subprocess.check_output(
-                ["go", "env", "GOMODCACHE"], cwd=repo_root, text=True, stderr=subprocess.DEVNULL
+                ["go", "env", "GOMODCACHE"], cwd=repo_root, env=go_environment, text=True, stderr=subprocess.DEVNULL
             ).strip()
         )
+        configured_gopath = subprocess.check_output(
+            ["go", "env", "GOPATH"], cwd=repo_root, env=go_environment, text=True, stderr=subprocess.DEVNULL
+        ).strip()
     except (OSError, subprocess.CalledProcessError):
         return False
-    if not module_cache.is_dir():
-        return False
+    candidates = [configured_cache]
+    candidates.extend(Path(entry) / "pkg" / "mod" for entry in configured_gopath.split(os.pathsep) if entry)
+    unique_candidates = []
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
 
-    environment = os.environ.copy()
-    environment.update(GOWORK="off", GOPROXY="off", GOSUMDB="off")
-    completed = subprocess.run(
-        ["go", "mod", "download", "-json"],
-        cwd=repo_root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
+    completed = None
+    module_cache = None
+    for candidate in unique_candidates:
+        environment = os.environ.copy()
+        environment.update(GOMODCACHE=str(candidate), GOWORK="off", GOPROXY="off", GOSUMDB="off")
+        probe = subprocess.run(
+            ["go", "mod", "download", "-json"],
+            cwd=repo_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            completed = probe
+            module_cache = candidate
+            break
+    if completed is None or module_cache is None:
         return False
 
     destination.mkdir(parents=True, exist_ok=True)

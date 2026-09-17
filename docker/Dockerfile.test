@@ -98,15 +98,16 @@ COPY .bazelversion MODULE.bazel BUILD.bazel WORKSPACE /opt/yolomux-bazel-seed/
 COPY cmd /opt/yolomux-bazel-seed/cmd
 COPY internal /opt/yolomux-bazel-seed/internal
 # The launcher supplies a temporary context containing only modules returned by `go mod download`
-# for this checkout. The builder may still use its normal network if a module is not locally cached;
-# no host module cache is mounted into the runtime test container.
+# for this checkout. The image build is deliberately fail-closed: the Go seed must be complete,
+# and this layer may not reach a proxy to fill a missing module. That keeps a passing image tied to
+# the declared checkout cache rather than an ambient network or host dependency.
 COPY --from=go-mod-cache . /opt/yolomux-go-mod-cache/
 RUN mkdir -p /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache \
       /opt/yolomux-bazel-go-path /opt/yolomux-bazel-go-cache \
  && cd /opt/yolomux-bazel-seed \
  && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
       GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
-      GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org go mod download \
+      GOPROXY=off GOSUMDB=off go mod download \
  && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
       GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
       bazel --output_user_root=/opt/yolomux-bazel-output \

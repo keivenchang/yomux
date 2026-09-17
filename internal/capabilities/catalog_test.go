@@ -15,11 +15,16 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 	if !ok || contract["version"] != ContractVersion || contract["backendBuild"] != "go-test" || contract["epoch"] == "" || contract["revision"] != uint64(1) {
 		t.Fatalf("contract = %#v", snapshot["contract"])
 	}
-	if !catalog.Available("finder.read.v1") || !catalog.Available("pane.finder.v1") {
+	if !catalog.Available("finder.read.v1") || !catalog.Available("pane.finder.v1") || !catalog.Available("pane.differ.v1") {
 		t.Fatal("Finder read capability is not enabled")
 	}
-	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("terminal.status.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
+	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
 		t.Fatal("capability availability does not match the implemented Finder and stats surfaces")
+	}
+	for _, name := range []string{"terminal.status.v1", "core.settings.v1", "core.integrations.v1", "pane.tabber.v1", "pane.chat.v1"} {
+		if catalog.Available(name) {
+			t.Fatalf("unimplemented capability %q is unexpectedly available", name)
+		}
 	}
 }
 
@@ -45,6 +50,12 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 		"POST /api/create-session":          "session.create.v1",
 		"GET /api/yoagent/conversation":     "pane.agent.v1",
 		"GET /api/system-status":            "core.diagnostics.v1",
+		"GET /api/session-files?session=1":  "finder.git.v1",
+		"GET /api/settings":                 "core.settings.v1",
+		"POST /api/settings":                "core.settings.v1",
+		"GET /api/update-status":            "core.integrations.v1",
+		"GET /api/watched-prs":              "core.integrations.v1",
+		"GET /api/auto-approve":             "terminal.status.v1",
 	}
 	for request, want := range checks {
 		var method, path string

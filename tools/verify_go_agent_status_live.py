@@ -10,13 +10,17 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 
-
 REPO = Path(__file__).resolve().parents[1]
 CLIENTS = ("claude", "codex", "opencode")
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools.instance_isolation import synthetic_test_environment
 
 
 def run(*args: str, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -91,6 +95,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="yolomux-go-live-") as raw_root:
         root = Path(raw_root)
+        server_root = root / "server-root"
+        server_root.mkdir()
         socket_path = root / "tmux.sock"
         config = root / "config"
         stats = root / "stats.sqlite3"
@@ -108,10 +114,31 @@ def main() -> int:
         opencode_interpreter.chmod(0o700)
         prefix = "yolo-live-" + root.name[-8:]
         sessions = {client: f"{prefix}-{client}" for client in CLIENTS}
-        env = os.environ.copy()
-        env.update({"HOME": str(home), "PYTHONPATH": str(REPO), "TERM": "xterm-256color", "PYTHONUNBUFFERED": "1", "YOLOMUX_TMUX_SOCKET": str(socket_path), "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"), "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"), "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"), "PATH": os.environ.get("PATH", "")})
+        env = synthetic_test_environment()
+        private_environment_roots = {
+            "XDG_CONFIG_HOME": root / "xdg-config",
+            "XDG_DATA_HOME": root / "xdg-data",
+            "XDG_STATE_HOME": root / "xdg-state",
+            "XDG_CACHE_HOME": root / "xdg-cache",
+            "XDG_RUNTIME_DIR": root / "xdg-runtime",
+            "CODEX_HOME": root / "codex-home",
+            "CLAUDE_CONFIG_DIR": root / "claude-config",
+            "TMPDIR": root / "tmp",
+        }
+        for private_root in private_environment_roots.values():
+            private_root.mkdir(parents=True, exist_ok=True)
+        env.update({
+            "HOME": str(home),
+            **{key: str(value) for key, value in private_environment_roots.items()},
+            "PYTHONPATH": str(REPO), "TERM": "xterm-256color", "PYTHONUNBUFFERED": "1",
+            "YOLOMUX_TMUX_SOCKET": str(socket_path), "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"),
+            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
+            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
+            "PATH": os.environ.get("PATH", ""),
+        })
         started_sessions: list[str] = []
         server: subprocess.Popen[str] | None = None
+        stats_stream = None
         server_log_path = root / "server.log"
         try:
             for client in CLIENTS:
@@ -148,13 +175,18 @@ def main() -> int:
                 run("go", "build", "-buildvcs=false", "-o", str(go_binary), "./cmd/yolomux-go", env=build_env)
             server_env = env | {
                 "YOLOMUX_DEBUG_AGENT_STATUS": "1",
+                # This verifier owns a private tmux socket. Scope native
+                # OpenCode discovery to that socket so unrelated operator
+                # processes cannot contaminate the isolated fixture's root.
+                "YOLOMUX_OPENCODE_TMUX_SCOPE": "1",
                 "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"),
                 "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
                 "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
+                "YOLOMUX_PRICING_CATALOG": str(REPO / "yolomux_lib" / "data" / "model_pricing.json"),
             }
             print(json.dumps({"verification": "starting", "YOLOMUX_TMUX_SOCKET": server_env["YOLOMUX_TMUX_SOCKET"], "tmux_panes": inventory.splitlines()}, sort_keys=True), flush=True)
             server_log = server_log_path.open("w", encoding="utf-8")
-            command = [str(go_binary), "--http", "--host", "127.0.0.1", "--port", str(port), "--root", str(REPO), "--config", str(config), "--stats", str(stats)]
+            command = [str(go_binary), "--http", "--host", "127.0.0.1", "--port", str(port), "--root", str(server_root), "--config", str(config), "--stats", str(stats)]
             if os.environ.get("YOLOMUX_LIVE_STRACE"):
                 command = ["strace", "-f", "-e", "trace=execve", "-o", str(root / "strace.log"), *command]
             server = subprocess.Popen(command, env=server_env, stdout=server_log, stderr=subprocess.STDOUT, text=True)
@@ -162,6 +194,19 @@ def main() -> int:
             auth = {"Authorization": "Basic bGl2ZTpsaXZlLXBhc3N3b3Jk"}
             wait_for(base + "/healthz", {}, server)
             wait_for(base + "/api/stats-agent-status", auth, server)
+            # Keep the same demand lease that the browser's stats stream holds. Without
+            # an active stream the collector intentionally falls back to its 60-second
+            # idle cadence, so a 45-second probe would misclassify a healthy roster as stale.
+            stats_stream = urllib.request.urlopen(
+                urllib.request.Request(
+                    base + "/api/stats-stream?range_seconds=300&resolution=AUTO&client_id=live-status",
+                    headers=auth,
+                ),
+                timeout=5,
+            )
+            first_stream_line = stats_stream.readline().decode("utf-8", errors="replace")
+            if not first_stream_line.startswith("id: "):
+                raise AssertionError(f"stats stream did not start with an SSE id: {first_stream_line!r}")
             time.sleep(45)
             status = get_json(base + "/api/stats-agent-status", auth)
             captures = {}
@@ -178,6 +223,15 @@ def main() -> int:
                     f"live collector persisted no usage_atoms; observations={observations}; unavailable={unavailable}; "
                     f"inventory={inventory}; status={status}"
                 )
+            cpu_rows = [json.loads(payload) for family, payload in observations if family == "cpu"]
+            memory_rows = [json.loads(payload) for family, payload in observations if family == "system_memory"]
+            gpu_rows = [json.loads(payload) for family, payload in observations if family == "gpu"]
+            if len(cpu_rows) < 2 or not any(float(row.get("system_percent", 0)) > 0 for row in cpu_rows):
+                raise AssertionError(f"live collector persisted insufficient CPU facts: {cpu_rows}")
+            if not memory_rows or not any(int(row.get("used_bytes", 0)) > 0 for row in memory_rows):
+                raise AssertionError(f"live collector persisted no positive memory facts: {memory_rows}")
+            if not gpu_rows and not any(family == "gpu" for family, _source_id, _reason in unavailable):
+                raise AssertionError("live collector persisted neither GPU facts nor explicit GPU unavailable evidence")
             if any(timestamp < now - 60 or timestamp >= now for timestamp in usage_times):
                 raise AssertionError(f"live usage_atoms timestamps are outside the query window: {usage_times}")
             providers_models = {(json.loads(payload).get("provider"), json.loads(payload).get("model")) for _, _, _, payload in usage}
@@ -189,7 +243,11 @@ def main() -> int:
                 raise AssertionError(f"live token rates are not positive: {rates}")
             if not rates.get("provider_models"):
                 raise AssertionError("live token rates have no provider/model attribution")
-            print(json.dumps({"tmux_panes": inventory.splitlines(), "captures": captures, "api": status, "db": {"observations": [{"family": family, "payload": json.loads(payload)} for family, payload in observations], "unavailable": [{"family": family, "source_id": source_id, "reason": reason} for family, source_id, reason in unavailable], "usage_atoms": [{"direction": direction, "cache_role": cache_role, "unit": unit, "payload": json.loads(payload)} for direction, cache_role, unit, payload in usage]}}, sort_keys=True))
+            snapshot = get_json(base + "/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=live-status", auth)
+            cost_report = snapshot.get("cost_report", {})
+            if int(cost_report.get("total_tokens", 0)) <= 0 or int(cost_report.get("unpriced", {}).get("tokens", 0)) <= 0:
+                raise AssertionError(f"live cost report did not preserve usage: {cost_report}")
+            print(json.dumps({"tmux_panes": inventory.splitlines(), "captures": captures, "api": status, "snapshot": snapshot, "db": {"observations": [{"family": family, "payload": json.loads(payload)} for family, payload in observations], "unavailable": [{"family": family, "source_id": source_id, "reason": reason} for family, source_id, reason in unavailable], "usage_atoms": [{"direction": direction, "cache_role": cache_role, "unit": unit, "payload": json.loads(payload)} for direction, cache_role, unit, payload in usage]}}, sort_keys=True))
             server_log.flush()
             print(server_log_path.read_text(encoding="utf-8"), flush=True)
         finally:
@@ -200,6 +258,8 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=5)
+            if stats_stream is not None:
+                stats_stream.close()
             if 'server_log' in locals():
                 server_log.close()
             for session in started_sessions:

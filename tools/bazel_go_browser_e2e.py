@@ -3,6 +3,7 @@
 
 import argparse
 import atexit
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -32,7 +33,21 @@ if str(_SCRIPT_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_SOURCE_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tools.instance_isolation import synthetic_test_environment as isolated_test_environment
 from tools.tmux_paths import short_tmux_socket_path
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def synthetic_server_environment(overrides: dict[str, str]) -> dict[str, str]:
+    """Remove ambient product/client roots before launching the fixture server."""
+    return isolated_test_environment(overrides)
 
 
 def resolve_source_root() -> Path:
@@ -50,6 +65,27 @@ def main(binary: str) -> None:
         root = Path(tmp)
         config = root / "config"
         config.mkdir()
+        fixture_home = root / "home"
+        fixture_home.mkdir()
+        private_environment_roots = {
+            "XDG_CONFIG_HOME": root / "xdg-config",
+            "XDG_DATA_HOME": root / "xdg-data",
+            "XDG_STATE_HOME": root / "xdg-state",
+            "XDG_CACHE_HOME": root / "xdg-cache",
+            "XDG_RUNTIME_DIR": root / "xdg-runtime",
+            "CODEX_HOME": root / "codex-home",
+            "YOLOMUX_CODEX_HOME": root / "codex-home",
+            "CLAUDE_CONFIG_DIR": root / "claude-config",
+            "TMPDIR": root / "tmp",
+            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": root / "claude-transcripts",
+            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": root / "codex-transcripts",
+            "YOLOMUX_OPENCODE_DATABASE": root / "opencode.db",
+        }
+        for key, private_root in private_environment_roots.items():
+            if key.endswith("DATABASE"):
+                private_root.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                private_root.mkdir(parents=True, exist_ok=True)
         (config / "auth.yaml").write_text("users:\n  - username: e2e\n    password: test-password\n    role: admin\n", encoding="utf-8")
         (config / "auth-cookie-secret").write_text("11" * 32, encoding="ascii")
         port = 0
@@ -85,6 +121,11 @@ def main(binary: str) -> None:
         source_root = resolve_source_root()
         private_source_root = root / "server-root"
         shutil.copytree(source_root / "static", private_source_root / "static")
+        expected_bundle_hashes = {
+            "yolomux.js": sha256_file(private_source_root / "static" / "yolomux.js"),
+            "yolomux.css": sha256_file(private_source_root / "static" / "yolomux.css"),
+        }
+        binary_hash = sha256_file(Path(binary))
         shutil.copytree(source_root / "tools", private_source_root / "tools")
         shutil.copytree(source_root / "yolomux_lib", private_source_root / "yolomux_lib")
         finder_root = private_source_root / "finder-fixture"
@@ -162,7 +203,13 @@ def main(binary: str) -> None:
             generation = len(list(root.glob("server-*.txt"))) + 1
             log_path = root / f"server-{generation}.txt"
             log_file = log_path.open("w", encoding="utf-8")
-            environment = os.environ.copy()
+            environment = synthetic_server_environment({
+                "HOME": str(fixture_home),
+                **{key: str(value) for key, value in private_environment_roots.items()},
+                # This terminal/browser contract uses seeded stats facts and must
+                # never scan the host's client databases or transcripts.
+                "YOLOMUX_STATS_DISABLE_COLLECTORS": "1",
+            })
             environment["YOLOMUX_TMUX_SOCKET"] = tmux_socket
             # Keep this deliberate backpressure fixture private to the uncached browser contract:
             # the normal queue remains 256, while Chromium proves that an evicted resource reaches
@@ -186,7 +233,8 @@ def main(binary: str) -> None:
             stop_process(process, "Go server startup process")
             for session_name in created_sessions:
                 cleanup_tmux_session(session_name)
-            raise SystemExit("Go server did not become ready")
+            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-12000:]
+            raise SystemExit(f"Go server did not become ready; log={log_tail!r}")
 
         proc = start_server()
         driver = None
@@ -221,6 +269,20 @@ def main(binary: str) -> None:
             else:
                 driver = webdriver.Chrome(options=options)
             driver_lease = WebDriverLease.from_driver(driver)
+            served_bundle_hashes = {}
+            for asset, expected in expected_bundle_hashes.items():
+                with urllib.request.urlopen(
+                    f"https://127.0.0.1:{port}/static/{asset}",
+                    context=ssl._create_unverified_context(),
+                    timeout=5,
+                ) as response:
+                    served = response.read()
+                actual = sha256_bytes(served)
+                if actual != expected:
+                    raise SystemExit(
+                        f"served {asset} hash mismatch: expected {expected}, got {actual}"
+                    )
+                served_bundle_hashes[asset] = actual
             try:
                 driver.get(f"https://127.0.0.1:{port}/login")
                 driver.find_element("name", "username").send_keys("e2e")
@@ -1130,7 +1192,7 @@ def main(binary: str) -> None:
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
                 if not any(line.get("type") == "snapshot" and any(item.get("id") == "op-chrome-replay" and item.get("delivery_acknowledged") is True for item in line.get("operations", [])) for line in journal_lines):
                     raise SystemExit(f"Go Phase 3 journal ack state missing: {journal_lines}")
-                print({'terminal': result, 'editor': editor, 'textedit_conflict': conflict, 'viewedit': markdown, 'viewedit_reopen': markdown_reopened, 'finder': finder, 'finder_ui': finder_ui, 'git_views': git_views, 'finder_watch': watch, 'event_repair': repair, 'operation_replay': replay, 'after_ack_restart': no_replay, 'pids': [first_pid, second_pid, proc.pid if proc else None], 'journal_records': len(journal_lines)})
+                print({'terminal': result, 'editor': editor, 'textedit_conflict': conflict, 'viewedit': markdown, 'viewedit_reopen': markdown_reopened, 'finder': finder, 'finder_ui': finder_ui, 'git_views': git_views, 'finder_watch': watch, 'event_repair': repair, 'operation_replay': replay, 'after_ack_restart': no_replay, 'pids': [first_pid, second_pid, proc.pid if proc else None], 'journal_records': len(journal_lines), 'binary_sha256': binary_hash, 'served_bundle_sha256': served_bundle_hashes})
             finally:
                 if driver_lease is not None:
                     retirement = driver_lease.retire()

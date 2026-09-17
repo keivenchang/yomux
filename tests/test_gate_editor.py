@@ -524,6 +524,18 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
           if (url.pathname === '/api/stats-observations') {
             return Promise.resolve(new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
           }
+          if (url.pathname.startsWith('/api/operations/')) {
+            const operationId = url.pathname.split('/').pop();
+            const operation = operations.find(item => item.operationId === operationId);
+            if (operation) {
+              return Promise.resolve(new Response(JSON.stringify({
+                state: 'queued',
+                status: 'pending',
+                retry_after_seconds: 1,
+                operation: {id: operationId, kind: 'filesystem_operation'},
+              }), {status: 202, headers: {'Content-Type': 'application/json'}}));
+            }
+          }
           if (url.pathname !== '/api/fs/write') return nativeFetch(input, options);
           const body = JSON.parse(options.body || '{}');
           writes.push(body);

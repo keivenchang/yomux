@@ -403,7 +403,11 @@ The same launcher can start the Go backend with the shared lifecycle and port ch
 ./boot.sh --backend go <port>
 ```
 
-Both launcher modes bind to `0.0.0.0` by default. The Go binary is selected from `YOLOMUX_GO_BINARY`, `bazel-bin/yolomux-go`, the canonical Bazel output `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, or `yolomux-go` in that order; use `--print-command` to inspect the resolved command without starting a server.
+### Go YO!stats migration scope
+
+The Go backend currently has an intentional stats-only product scope: its root bootstrap advertises `statsOnly: true`, starts the current YO!stats surface without probing unrelated application routes, and returns a typed `501 feature_unavailable` capability response for routes owned by later YOLOmux phases. This scope is a replacement for the Python YO!stats writer, materializer, HTTP/SSE surface, and browser charts; it is not a full Go YOLOmux replacement. `cmd/yolomux-go/main_test.go::TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes` and `tests/test_browser_stats_coverage.py::test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic` are the contract gates, and full-mode promotion is prohibited until every non-stats route has a tested Go owner and a fresh full-application browser gate.
+
+Both launcher modes bind to `0.0.0.0` by default. The Go binary is selected from `YOLOMUX_GO_BINARY`, `bazel-bin/yolomux-go`, the current Bazel Go rule output `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, or `yolomux-go` in that order; use `--print-command` to inspect the resolved command without starting a server.
 
 The script accepts any valid TCP port and supplies `--self-signed` plus `--dang` to the Python launcher; direct `yolomux.py` launches default to HTTPS on port `9998`. In Go mode those compatibility flags, along with an automatically selected `--dev`, are parsed before the launcher replaces itself but are not carried into the Go command. `boot.sh` requires an explicit positional port, `YOLOMUX_PORT`, or host-provided `YOLOMUX_DEFAULT_PORT`; it does not define a machine-wide default. `YOLOMUX_PORT` selects the primary port and keeps the normal non-dev launch behavior. `yolo-dev-start` owns the host-specific session/worktree/port table and exports the primary-port preference for each managed row. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use Python `--dev` automatically:
 

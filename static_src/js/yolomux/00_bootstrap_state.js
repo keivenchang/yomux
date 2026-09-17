@@ -1,5 +1,8 @@
 const pageLoadBundleEvalStartedAt = Number(globalThis.performance?.now?.()) || 0;
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
+function statsOnlyBootEnabled() {
+  return bootstrap.statsOnly === true;
+}
 const capabilityDocument = (() => {
   const value = bootstrap.capabilities;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -31,11 +34,14 @@ function capabilityNameForRequest(url, options = {}) {
   let pathname = '';
   try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
   if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
+  if (pathname === '/api/settings') return 'core.settings.v1';
+  if (pathname === '/api/update-status' || pathname === '/api/watched-prs') return 'core.integrations.v1';
   if (pathname === '/ws' || pathname === '/api/tmux' || pathname === '/api/tmux-session-exists') return 'terminal.websocket.v1';
   if (pathname === '/api/ensure-session' || pathname === '/api/create-session-plan' || pathname === '/api/create-session') return 'session.create.v1';
   if (pathname === '/api/kill-session') return 'session.kill.v1';
   if (pathname === '/api/rename-session') return 'session.rename.v1';
-  if (pathname === '/api/transcripts' || pathname === '/api/session-metadata' || pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname.startsWith('/api/session-files')) return 'pane.tabber.v1';
+  if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
+  if (pathname === '/api/transcripts' || pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname.startsWith('/api/session-files')) return 'pane.tabber.v1';
   if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/context-items' || pathname === '/api/events') return 'terminal.status.v1';
 	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';

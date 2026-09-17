@@ -78,6 +78,10 @@ type OpenCodeInventorySources struct {
 	CWD       func(int) (string, error)
 	Started   func(int) (string, error)
 	StartTime func(int) (float64, error)
+	// RequireTmuxPane scopes a test/managed instance to processes visible from
+	// its private tmux server. The normal operator inventory remains
+	// machine-wide so pane-less native OpenCode processes are still collected.
+	RequireTmuxPane bool
 }
 
 // BuildAgentInventory creates stable records from process and tmux snapshots.
@@ -191,34 +195,28 @@ func BuildOpenCodeInventory(ctx context.Context, sources OpenCodeInventorySource
 		// server must not hide a machine-wide native OpenCode process. Give this
 		// enrichment its own very small budget and return process rows first.
 		paneCtx, cancel := context.WithTimeout(ctx, opencodeTmuxAnnotationTimeout)
-		paneResult := make(chan struct {
-			panes []AgentTmuxPane
-			err   error
-		}, 1)
-		go func() {
-			panes, paneErr := sources.Panes(paneCtx)
-			paneResult <- struct {
-				panes []AgentTmuxPane
-				err   error
-			}{panes, paneErr}
-		}()
-		select {
-		case result := <-paneResult:
-			if result.err != nil {
-				errorsOut = append(errorsOut, result.err)
-			} else {
-				for _, pane := range result.panes {
-					for _, process := range append([]AgentProcess{{PID: pane.PID}}, descendants(pane.PID, children)...) {
-						if _, exists := paneByPID[process.PID]; !exists {
-							paneByPID[process.PID] = pane
-						}
+		panes, paneErr := sources.Panes(paneCtx)
+		if paneErr != nil {
+			errorsOut = append(errorsOut, paneErr)
+		} else {
+			for _, pane := range panes {
+				for _, process := range append([]AgentProcess{{PID: pane.PID}}, descendants(pane.PID, children)...) {
+					if _, exists := paneByPID[process.PID]; !exists {
+						paneByPID[process.PID] = pane
 					}
 				}
 			}
-		case <-paneCtx.Done():
-			errorsOut = append(errorsOut, paneCtx.Err())
 		}
 		cancel()
+	}
+	if sources.RequireTmuxPane && len(paneByPID) > 0 {
+		scoped := make([]AgentProcess, 0, len(processes))
+		for _, process := range processes {
+			if _, ok := paneByPID[process.PID]; ok {
+				scoped = append(scoped, process)
+			}
+		}
+		processes = scoped
 	}
 
 	records := make([]AgentRecord, 0)
@@ -374,7 +372,11 @@ func LinuxAgentInventorySources() AgentInventorySources {
 // reads command lines only for OpenCode candidates. Tmux enrichment is bounded
 // separately by the token collector and remains optional.
 func LinuxOpenCodeInventorySources() OpenCodeInventorySources {
-	return OpenCodeInventorySources{Processes: linuxOpenCodeProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD, Started: linuxStartedIdentity, StartTime: linuxProcessStartedAt}
+	return OpenCodeInventorySources{
+		Processes: linuxOpenCodeProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD,
+		Started: linuxStartedIdentity, StartTime: linuxProcessStartedAt,
+		RequireTmuxPane: os.Getenv("YOLOMUX_OPENCODE_TMUX_SCOPE") == "1",
+	}
 }
 
 func linuxProcesses(ctx context.Context) ([]AgentProcess, error) {

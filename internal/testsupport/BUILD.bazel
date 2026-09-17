@@ -1,10 +1,17 @@
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["BUILD.bazel"])
+
+filegroup(
+    name = "docker_source_files",
+    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
 load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "testsupport_lib",
-    srcs = ["runfiles.go"],
+    srcs = ["environment.go", "runfiles.go"],
     importpath = "github.com/keivenchang/yolomux/internal/testsupport",
     deps = ["@rules_go//go/runfiles"],
 )

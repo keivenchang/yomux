@@ -23,6 +23,22 @@ from yolomux_lib.live_browser_soak import js_debug_event_enrichment_matches
 BROWSER_JOURNEY_OBSERVATION_SECONDS = 16.0
 BROWSER_JOURNEY_POLL_SECONDS = 0.25
 
+# A stats-only fixture deliberately models a partial Go boot: the browser still probes these
+# known non-stats routes, but their absence must not be allowed to decide YO!stats readiness. Keep
+# this allowlist narrow and route-specific so a missing stats endpoint or an unexpected route still
+# fails the browser gate.
+STATS_ONLY_EXPECTED_BOOT_404_ROUTES = frozenset({
+    "/api/chat/bootstrap", "/api/chat/delta", "/api/chat/page", "/api/chat/context",
+    "/api/chat/search", "/api/chat/send", "/api/chat/yoagent", "/api/chat/typing",
+    "/api/chat/read", "/api/yoagent/chat", "/api/settings", "/api/notify",
+    "/api/create-session-plan", "/api/create-session", "/api/rename-session",
+    "/api/ensure-session", "/api/attention-ack", "/api/auto-approve", "/api/session-metadata",
+    "/api/transcripts", "/api/activity-summary", "/api/background/status", "/api/session-files",
+    "/api/ping", "/api/event", "/api/events", "/api/logs", "/api/tmux-window",
+    "/api/fs/list", "/api/fs/fast/list", "/api/fs/batch", "/api/watched-prs",
+    "/api/update-status",
+})
+
 
 def read_browser_console_log(driver) -> tuple[dict[str, Any], ...]:
     """Read and drain Chrome's browser log through one shared owner."""
@@ -740,10 +756,10 @@ def _read_js_debug_store(driver, *, required: bool = True) -> Mapping[str, Any]:
         const failureReaderDefined = typeof jsDebugFailureEvents === 'function';
         const receiptBarrierDefined = typeof jsDebugCurrentObservationReceiptBarrier === 'function';
         if (!eventsDefined && !failureReaderDefined && !receiptBarrierDefined) {
-          return {reachable: false, isArray: false, events: [], errors: []};
+          return {reachable: false, isArray: false, events: [], errors: [], statsOnly: window.__fixtureStatsOnly === true};
         }
         if (!eventsDefined || !failureReaderDefined || !receiptBarrierDefined) {
-          return {reachable: true, isArray: false, events: [], errors: []};
+          return {reachable: true, isArray: false, events: [], errors: [], statsOnly: window.__fixtureStatsOnly === true};
         }
         const isArray = Array.isArray(jsDebugEvents);
         const events = isArray ? Array.from(jsDebugEvents) : [];
@@ -753,6 +769,7 @@ def _read_js_debug_store(driver, *, required: bool = True) -> Mapping[str, Any]:
           events,
           errors: jsDebugFailureEvents(),
           receiptBarrier: jsDebugCurrentObservationReceiptBarrier(),
+          statsOnly: window.__fixtureStatsOnly === true,
         };
         """
     )
@@ -803,6 +820,16 @@ def _browser_local_failure_evidence(event: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def stats_only_expected_boot_404(event: Mapping[str, Any], *, stats_only: bool = False) -> bool:
+    """Classify only the fixture's declared non-stats boot probes as expected 404s."""
+
+    if not stats_only:
+        return False
+    status = event.get("status")
+    route = str(event.get("endpoint") or event.get("url") or event.get("route") or "").split("?", 1)[0]
+    return status == 404 and route in STATS_ONLY_EXPECTED_BOOT_404_ROUTES
+
+
 def _read_browser_local_error_evidence(
     driver,
     *,
@@ -821,6 +848,7 @@ def _browser_local_error_evidence_from_snapshots(
     console_entries: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     js_debug_errors = list(js_debug.get("errors") or ())
+    stats_only = js_debug.get("statsOnly") is True
     failure_events: list[Mapping[str, Any]] = []
     failure_ids: set[Any] = set()
     for event in (*js_debug_errors, *(js_debug.get("events") or ())):
@@ -835,7 +863,15 @@ def _browser_local_error_evidence_from_snapshots(
             continue
         failure_ids.add(identity)
         failure_events.append(event)
-    browser_local_failures = [_browser_local_failure_evidence(event) for event in failure_events]
+    all_browser_local_failures = [_browser_local_failure_evidence(event) for event in failure_events]
+    expected_browser_local_failures = [
+        failure for failure in all_browser_local_failures
+        if stats_only_expected_boot_404(failure, stats_only=stats_only)
+    ]
+    browser_local_failures = [
+        failure for failure in all_browser_local_failures
+        if not stats_only_expected_boot_404(failure, stats_only=stats_only)
+    ]
     receipt_barrier = js_debug.get("receiptBarrier")
     browser_log_failures = [
         entry
@@ -848,6 +884,8 @@ def _browser_local_error_evidence_from_snapshots(
         "jsDebugEventCount": len(js_debug.get("events") or ()),
         "jsDebugErrors": js_debug_errors,
         "browserLocalFailures": browser_local_failures,
+        "expectedBrowserLocalFailures": expected_browser_local_failures,
+        "statsOnly": stats_only,
         "browserReceiptBarrier": receipt_barrier,
         **surface_evidence,
         "browserLogFailures": browser_log_failures,
@@ -873,9 +911,9 @@ def retire_browser_after_strict_diagnostic_gate(
         const receiptBarrierDefined = typeof jsDebugCurrentObservationReceiptBarrier === 'function';
         let jsDebug;
         if (!eventsDefined && !failureReaderDefined && !receiptBarrierDefined) {
-          jsDebug = {reachable: false, isArray: false, events: [], errors: []};
+          jsDebug = {reachable: false, isArray: false, events: [], errors: [], statsOnly: window.__fixtureStatsOnly === true};
         } else if (!eventsDefined || !failureReaderDefined || !receiptBarrierDefined) {
-          jsDebug = {reachable: true, isArray: false, events: [], errors: []};
+          jsDebug = {reachable: true, isArray: false, events: [], errors: [], statsOnly: window.__fixtureStatsOnly === true};
         } else {
           const isArray = Array.isArray(jsDebugEvents);
           jsDebug = {
@@ -884,6 +922,7 @@ def retire_browser_after_strict_diagnostic_gate(
             events: isArray ? Array.from(jsDebugEvents) : [],
             errors: jsDebugFailureEvents(),
             receiptBarrier: jsDebugCurrentObservationReceiptBarrier(),
+            statsOnly: window.__fixtureStatsOnly === true,
           };
         }
         const journeyState = window.__yolomuxBrowserJourneyGate;

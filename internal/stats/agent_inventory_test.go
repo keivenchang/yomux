@@ -145,8 +145,10 @@ func TestBuildOpenCodeInventoryKeepsProcessRowsWhenTmuxAnnotationFails(t *testin
 		Processes: func(context.Context) ([]AgentProcess, error) { return processes, nil },
 		Panes: func(ctx context.Context) ([]AgentTmuxPane, error) {
 			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		},
 		CWD:     func(int) (string, error) { return "/repo/live", nil },
 		Started: func(int) (string, error) { return "proc:702", nil },
@@ -161,6 +163,27 @@ func TestBuildOpenCodeInventoryKeepsProcessRowsWhenTmuxAnnotationFails(t *testin
 	case <-started:
 	default:
 		t.Fatal("tmux annotation was not attempted")
+	}
+}
+
+func TestBuildOpenCodeInventoryCanScopeToPrivateTmuxPanes(t *testing.T) {
+	processes := []AgentProcess{
+		{PID: 701, PPID: 1, Command: "node /opt/opencode --session=outside", Executable: "/opt/opencode"},
+		{PID: 702, PPID: 1, Command: "node /opt/opencode --session=current", Executable: "/opt/opencode"},
+	}
+	got, errs := BuildOpenCodeInventory(context.Background(), OpenCodeInventorySources{
+		Processes: func(context.Context) ([]AgentProcess, error) { return processes, nil },
+		Panes: func(context.Context) ([]AgentTmuxPane, error) {
+			return []AgentTmuxPane{{Session: "private", PaneID: "%0", PID: 702}}, nil
+		},
+		Started:         func(pid int) (string, error) { return fmt.Sprintf("proc:%d", pid), nil },
+		RequireTmuxPane: true,
+	})
+	if len(errs) != 0 {
+		t.Fatalf("scoped inventory errors = %v", errs)
+	}
+	if len(got) != 1 || got[0].PID != 702 || got[0].TmuxSession != "private" {
+		t.Fatalf("scoped OpenCode inventory = %#v", got)
 	}
 }
 

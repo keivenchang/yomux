@@ -123,7 +123,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "0ba72ff00cc7280bd81263f22cd741e04f89e071d89d5e979acca9d300b91843"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "ec20db6a75f34771146c3a824cb7e5fd9e8f303509357380bc7fea6a3087eb8b"
 
 
 @dataclass(frozen=True, slots=True)

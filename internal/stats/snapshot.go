@@ -39,6 +39,8 @@ const (
 // identical metadata and bucket contents.
 type StatsSnapshot struct {
 	SourceGeneration int64
+	CacheGeneration  int64
+	GeneratedAt      float64
 	Request          SnapshotRequest
 	Generated        GeneratedMetadata
 	Observations     ObservationProjection
@@ -140,8 +142,8 @@ func BuildSnapshotWithPricing(ctx context.Context, database *Database, request S
 		availability.State = SnapshotNoData
 	}
 	return StatsSnapshot{
-		SourceGeneration: generation,
-		Request:          SnapshotRequest{Start: request.Start, End: request.End, Resolution: request.Resolution, FactLimit: limit},
+		SourceGeneration: generation, CacheGeneration: generation, GeneratedAt: request.End,
+		Request: SnapshotRequest{Start: request.Start, End: request.End, Resolution: request.Resolution, FactLimit: limit},
 		Generated: GeneratedMetadata{
 			SchemaVersion: database.Header.SchemaVersion, MinimumWriterProtocol: database.Header.MinimumWriterProtocol,
 			MinimumWriterBuild: database.Header.MinimumWriterBuild,
@@ -168,6 +170,12 @@ func pricingResolver(catalog *PricingCatalog) PriceResolver {
 		model, _ := atom.Payload["model"].(string)
 		profile, _ := atom.Payload["pricing_profile"].(string)
 		tier, _ := atom.Payload["service_tier"].(string)
+		if profile == "" {
+			profile = "default"
+		}
+		if tier == "" {
+			tier = "default"
+		}
 		timestamp := time.Unix(int64(atom.ObservedAt), int64((atom.ObservedAt-float64(int64(atom.ObservedAt)))*1e9)).UTC().Format("2006-01-02T15:04:05.999999Z07:00")
 		api := catalog.Resolve(provider, model, atom.Direction, atom.Modality, atom.CacheRole, atom.Unit, "default", tier, timestamp)
 		if api == nil {
@@ -191,8 +199,26 @@ func pricingResolver(catalog *PricingCatalog) PriceResolver {
 			}
 			api = resolved
 		}
-		return marginal, apiCost, &PriceEvidence{CatalogModel: api.Model, RateUSD: api.Rate.USD, RateScale: api.Rate.Scale, EffectiveFrom: api.Rate.EffectiveFrom, SourceKind: api.Source.Kind, SourceURL: api.Source.URL, CatalogRevision: api.CatalogRevision}, true, nil
+		return marginal, apiCost, &PriceEvidence{
+			// Keep evidence identity tied to every rendered pricing fact. This is
+			// the same length-delimited key used by Python, so HTTP cost reports
+			// remain byte-comparable across implementations and catalog revisions.
+			Key:      stableCostKey(provider, model, usageCostDimension(atom), atom.Direction, atom.Modality, atom.CacheRole, atom.Unit, profile, tier, api.Model, api.Rate.USD, fmt.Sprintf("%d", api.Rate.Scale), api.Rate.EffectiveFrom, api.Source.Kind, api.Source.URL, fmt.Sprintf("%d", api.CatalogRevision)),
+			Provider: provider, Model: model, Dimension: usageCostDimension(atom), Direction: atom.Direction,
+			Modality: atom.Modality, CacheRole: atom.CacheRole, Unit: atom.Unit,
+			PricingProfile: profile, ServiceTier: tier, CatalogModel: api.Model,
+			RateUSD: api.Rate.USD, RateScale: api.Rate.Scale, EffectiveFrom: api.Rate.EffectiveFrom,
+			SourceKind: api.Source.Kind, SourceURL: api.Source.URL, CatalogRevision: api.CatalogRevision,
+			Tokens: int64(quantity), MicroUSD: marginal, APIListMicroUSD: apiCost, PricedAtoms: 1,
+		}, true, nil
 	}
+}
+
+// PricingResolver exposes the same catalog resolution used by snapshots to
+// lifecycle materialization. Keeping one resolver prevents ring products and
+// cold projections from assigning different prices to the same atom.
+func PricingResolver(catalog *PricingCatalog) PriceResolver {
+	return pricingResolver(catalog)
 }
 
 func snapshotPriceResolver(atom UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
@@ -220,6 +246,22 @@ func integerPayload(payload map[string]any, key string) (int64, bool) {
 }
 
 type transactionReader struct{ tx *sql.Tx }
+
+// beginReadSnapshot pins all fact pages to one SQLite read transaction. A
+// lifecycle fold must not combine observations from one source generation
+// with coverage or usage rows committed by a later generation.
+func (d *Database) beginReadSnapshot(ctx context.Context) (*Database, func(), error) {
+	if d == nil || d.sqlDB == nil {
+		return d, func() {}, nil
+	}
+	tx, err := d.sqlDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin stats read snapshot: %w", err)
+	}
+	snapshot := &Database{Header: d.Header, reader: transactionReader{tx: tx}}
+	closeSnapshot := func() { _ = tx.Rollback() }
+	return snapshot, closeSnapshot, nil
+}
 
 func (r transactionReader) Scalar(ctx context.Context, query string, args ...any) (any, error) {
 	var value any

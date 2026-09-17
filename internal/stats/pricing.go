@@ -2,8 +2,10 @@ package stats
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +21,8 @@ type PricingCatalog struct {
 	GeneratedAt     string         `json:"generated_at,omitempty"`
 	Models          []PricingModel `json:"models"`
 	path            string
+	root            string
+	configured      string
 	mu              sync.RWMutex
 }
 
@@ -80,29 +84,76 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 		paths = append(paths, filepath.Join(root, "yolomux_lib", "data", "internal_model_pricing.json"))
 	}
 	var loaded []*PricingCatalog
+	configuredOwnsLuna := false
 	for _, path := range paths {
 		catalog, err := LoadPricingCatalog(path)
 		if err == nil {
+			// A repository's bundled catalogs are the offline seed, even though
+			// their embedded source metadata identifies the upstream authority.
+			// Keep that provenance distinct from an explicitly configured live
+			// catalog so Go emits the same evidence as Python for the default
+			// repository startup path.
+			if configured == "" && root != "" {
+				bundledPath := filepath.Join(root, "yolomux_lib", "data")
+				if path == filepath.Join(bundledPath, "model_pricing.json") || path == filepath.Join(bundledPath, "internal_model_pricing.json") {
+					for index := range catalog.Models {
+						catalog.Models[index].Source.Kind = "seed"
+					}
+				}
+			}
 			loaded = append(loaded, catalog)
+			if configured != "" && path == configured {
+				for _, model := range catalog.Models {
+					if model.Provider == "openai" && (model.Model == "gpt-5.6-luna" || containsPricingAlias(model.Aliases, "gpt-5.6-luna")) {
+						configuredOwnsLuna = true
+						break
+					}
+				}
+			}
 			continue
 		}
-		if !os.IsNotExist(err) {
+		// LoadPricingCatalog wraps the underlying PathError with context. Use
+		// errors.Is so an absent optional fallback remains ignorable while real
+		// catalog failures still fail startup.
+		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 	}
 	if len(loaded) > 0 {
 		result := loaded[0]
-		seen := map[string]bool{}
-		for _, model := range result.Models {
-			for _, alias := range model.Aliases {
-				seen[model.Provider+"\x00"+alias] = true
-			}
-		}
 		for _, extra := range loaded[1:] {
 			if extra.CatalogRevision > result.CatalogRevision {
 				result.CatalogRevision = extra.CatalogRevision
 			}
+			// The packaged Python seed deliberately replaces the public Luna
+			// model with the newer internal rate set before deduplicating the
+			// remaining aliases. Keep that same precedence here; otherwise the
+			// older public $6 rate silently wins over the internal $0.8808 rate.
+			if filepath.Base(extra.path) == "internal_model_pricing.json" && !configuredOwnsLuna {
+				for _, replacement := range extra.Models {
+					if replacement.Provider != "openai" || replacement.Model != "gpt-5.6-luna" {
+						continue
+					}
+					filtered := result.Models[:0]
+					for _, existing := range result.Models {
+						if existing.Provider == replacement.Provider && existing.Model == replacement.Model {
+							continue
+						}
+						filtered = append(filtered, existing)
+					}
+					result.Models = append(filtered, replacement)
+				}
+			}
+			seen := map[string]bool{}
+			for _, model := range result.Models {
+				for _, alias := range model.Aliases {
+					seen[model.Provider+"\x00"+alias] = true
+				}
+			}
 			for _, model := range extra.Models {
+				if filepath.Base(extra.path) == "internal_model_pricing.json" && model.Provider == "openai" && model.Model == "gpt-5.6-luna" {
+					continue
+				}
 				duplicate := false
 				for _, alias := range model.Aliases {
 					if seen[model.Provider+"\x00"+alias] {
@@ -119,6 +170,11 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 				}
 			}
 		}
+		if err := result.validate(); err != nil {
+			return nil, err
+		}
+		result.root = root
+		result.configured = configured
 		return result, nil
 	}
 	return nil, fmt.Errorf("pricing catalog not found")
@@ -162,7 +218,18 @@ func (c *PricingCatalog) validate() error {
 func (c *PricingCatalog) Refresh() error {
 	c.mu.RLock()
 	path := c.path
+	root, configured := c.root, c.configured
 	c.mu.RUnlock()
+	if root != "" {
+		next, err := LoadRepositoryPricingCatalog(root, configured)
+		if err != nil {
+			return err
+		}
+		c.mu.Lock()
+		c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
+		c.mu.Unlock()
+		return nil
+	}
 	if path == "" {
 		return fmt.Errorf("pricing catalog has no source path")
 	}
@@ -174,6 +241,15 @@ func (c *PricingCatalog) Refresh() error {
 	c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
 	c.mu.Unlock()
 	return nil
+}
+
+func containsPricingAlias(aliases []string, wanted string) bool {
+	for _, alias := range aliases {
+		if alias == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *PricingCatalog) Resolve(provider, model, direction, modality, cacheRole, unit, profile, tier, timestamp string) *ResolvedPricingRate {
@@ -224,7 +300,10 @@ func catalogIdentity(provider, model string) (string, string) {
 		return "openai", model[len("switchyard/openai/"):]
 	}
 	if provider == "inferencehub" && strings.HasPrefix(lower, "openai/") {
-		return "openai", model[len("openai/"):]
+		for strings.HasPrefix(strings.ToLower(model), "openai/") {
+			model = model[len("openai/"):]
+		}
+		return "openai", model
 	}
 	if provider == "switchyard" {
 		if index := strings.IndexByte(model, '/'); index >= 0 {
@@ -234,7 +313,9 @@ func catalogIdentity(provider, model string) (string, string) {
 		}
 	}
 	if provider == "openai" {
-		model = strings.TrimPrefix(strings.TrimPrefix(model, "openai/"), "openai/")
+		for strings.HasPrefix(strings.ToLower(model), "openai/") {
+			model = model[len("openai/"):]
+		}
 	}
 	return provider, model
 }
@@ -242,11 +323,69 @@ func catalogIdentity(provider, model string) (string, string) {
 func (c *PricingCatalog) PublicPayload() map[string]any {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	models := append([]PricingModel(nil), c.Models...)
-	sort.Slice(models, func(i, j int) bool {
-		return models[i].Provider+"/"+models[i].Model < models[j].Provider+"/"+models[j].Model
+	type sourceRecord struct {
+		kind     string
+		url      string
+		revision int64
+	}
+	seen := map[string]struct{}{}
+	sources := make([]sourceRecord, 0, len(c.Models))
+	for _, model := range c.Models {
+		sourceURL := safePricingSourceURL(model.Source.URL)
+		if sourceURL == "" {
+			continue
+		}
+		kind := model.Source.Kind
+		if kind == "" {
+			kind = "seed"
+		}
+		record := sourceRecord{kind: kind, url: sourceURL, revision: c.CatalogRevision}
+		key := fmt.Sprintf("%s\x00%s\x00%d", record.kind, record.url, record.revision)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		sources = append(sources, record)
+	}
+	sort.Slice(sources, func(i, j int) bool {
+		if sources[i].kind != sources[j].kind {
+			return sources[i].kind < sources[j].kind
+		}
+		if sources[i].url != sources[j].url {
+			return sources[i].url < sources[j].url
+		}
+		return sources[i].revision < sources[j].revision
 	})
-	return map[string]any{"schema_version": c.SchemaVersion, "catalog_revision": c.CatalogRevision, "generated_at": c.GeneratedAt, "models": models, "status": "loaded"}
+	publicSources := make([]map[string]any, 0, len(sources))
+	for _, source := range sources {
+		publicSources = append(publicSources, map[string]any{"kind": source.kind, "url": source.url, "revision": source.revision})
+	}
+	status := map[string]any{
+		"state": "seed-only", "seed_revision": c.CatalogRevision,
+		"catalog_revision": c.CatalogRevision, "last_checked_at": float64(0),
+		// Go loads the catalog from immutable JSON rather than the Python
+		// refresh SQLite; keep the field explicit without exposing a misleading
+		// source path as a database identity.
+		"database": "",
+	}
+	return map[string]any{"status": status, "sources": publicSources}
+}
+
+func safePricingSourceURL(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch host {
+	case "platform.openai.com", "developers.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "platform.claude.com", "ai.google.dev", "cloud.google.com", "inference-backend.internal", "openrouter.ai", "raw.githubusercontent.com", "github.com":
+		return parsed.String()
+	default:
+		return ""
+	}
 }
 
 func PricingMicroUSD(quantity float64, rate *ResolvedPricingRate) (int64, error) {

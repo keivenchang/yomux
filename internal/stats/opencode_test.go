@@ -250,9 +250,9 @@ func TestOpenCodeReadOnlyReadsCopiedLiveRowShape(t *testing.T) {
 		`CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT NOT NULL, version TEXT NOT NULL, share_url TEXT, summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER, summary_diffs TEXT, metadata TEXT, cost REAL DEFAULT 0 NOT NULL, tokens_input INTEGER DEFAULT 0 NOT NULL, tokens_output INTEGER DEFAULT 0 NOT NULL, tokens_reasoning INTEGER DEFAULT 0 NOT NULL, tokens_cache_read INTEGER DEFAULT 0 NOT NULL, tokens_cache_write INTEGER DEFAULT 0 NOT NULL, revert TEXT, permission TEXT, agent TEXT, model TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_compacting INTEGER, time_archived INTEGER)`,
 		`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
 		`CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
-		`INSERT INTO session (id, project_id, slug, directory, title, version, model, agent, time_created, time_updated) VALUES ('ses_live_yo7221', 'global', 'rebase-yo7221', '/nfs/keivenc/dev/yolomux/yo7221', 'rebase yo7221 to main rolls', '1.18.30', '{"id":"switchyard/openai/gpt-5.6-luna","providerID":"inferencehub"}', 'build', 1789197166435, 1789246752375)`,
-		`INSERT INTO message VALUES ('msg_live_yo7221', 'ses_live_yo7221', 1789246750000, 1789246752140, '{"parentID":"msg-parent","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/nfs/keivenc/dev/yolomux/yo7221","root":"/"},"cost":0,"tokens":{"input":8032,"output":135,"reasoning":0,"cache":{"write":0,"read":295233}},"modelID":"openai/openai/gpt-5.6-luna","providerID":"inferencehub","time":{"created":1789246750000,"completed":1789246752141},"finish":"stop"}')`,
-		`INSERT INTO part VALUES ('prt_live_yo7221', 'msg_live_yo7221', 'ses_live_yo7221', 1789246752141, 1789246752141, '{"snapshot":"665a7c375544594e6779bb518c0002fa629f2747","type":"step-finish","tokens":{"total":303400,"input":8032,"output":135,"reasoning":0,"cache":{"write":0,"read":295233}},"cost":0}')`,
+		`INSERT INTO session (id, project_id, slug, directory, title, version, model, agent, time_created, time_updated) VALUES ('ses_fixture', 'global', 'synthetic-session', '/fixture/workspace/yo7222', 'synthetic OpenCode session', '1.18.30', '{"id":"switchyard/openai/gpt-5.6-luna","providerID":"inferencehub"}', 'build', 1789197166435, 1789246752375)`,
+		`INSERT INTO message VALUES ('msg_fixture', 'ses_fixture', 1789246750000, 1789246752140, '{"parentID":"msg-parent","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/fixture/workspace/yo7222","root":"/"},"cost":0,"tokens":{"input":8032,"output":135,"reasoning":0,"cache":{"write":0,"read":295233}},"modelID":"openai/openai/gpt-5.6-luna","providerID":"inferencehub","time":{"created":1789246750000,"completed":1789246752141},"finish":"stop"}')`,
+		`INSERT INTO part VALUES ('prt_fixture', 'msg_fixture', 'ses_fixture', 1789246752141, 1789246752141, '{"snapshot":"665a7c375544594e6779bb518c0002fa629f2747","type":"step-finish","tokens":{"total":303400,"input":8032,"output":135,"reasoning":0,"cache":{"write":0,"read":295233}},"cost":0}')`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			_ = db.Close()
@@ -268,8 +268,8 @@ func TestOpenCodeReadOnlyReadsCopiedLiveRowShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer readOnly.Close()
-	resolved, err := readOnly.ResolveSessionID(context.Background(), "/nfs/keivenc/dev/yolomux/yo7221", "OC | rebase yo7221 to main rolls", 1789197150.86, 1789248000)
-	if err != nil || resolved != "ses_live_yo7221" {
+	resolved, err := readOnly.ResolveSessionID(context.Background(), "/fixture/workspace/yo7222", "synthetic OpenCode session", 1789197150.86, 1789248000)
+	if err != nil || resolved != "ses_fixture" {
 		t.Fatalf("resolved copied live session = %q err=%v", resolved, err)
 	}
 	parts, err := readOnly.ReadStepFinishParts(context.Background(), resolved, 1789246750000, 1789246760000, MaxOpenCodePartReadLimit)

@@ -243,7 +243,7 @@ def test_stats_agent_window_rows_falls_back_to_discovered_opencode_during_status
     webapp.status_snapshot_payload = lambda: None
     monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({
         "yo7110": SimpleNamespace(agents=[SimpleNamespace(
-            kind="opencode", pane_target="%55", cwd="/home/keivenc/dev/yolomux/yo7110",
+            kind="opencode", pane_target="%55", cwd="/fixture/workspace/yo7110",
             session_id="ses-current", started_at=123.0,
         )]),
     }, []))
@@ -253,7 +253,7 @@ def test_stats_agent_window_rows_falls_back_to_discovered_opencode_during_status
 
     assert rows == [{
         "session": "yo7110", "window": "0", "window_index": 0, "pane_target": "%55",
-        "kind": "opencode", "agent_session_id": "ses-current", "cwd": "/home/keivenc/dev/yolomux/yo7110",
+        "kind": "opencode", "agent_session_id": "ses-current", "cwd": "/fixture/workspace/yo7110",
         "started_at": 123.0,
     }]
 

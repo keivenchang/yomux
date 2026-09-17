@@ -36,6 +36,34 @@ def test_capture_tools_share_proc_cpu_reader_and_positive_validators():
     assert "process_cpu_seconds(pid)" in contention_source
 
 
+def test_live_stats_acceptance_timeout_preserves_bounded_browser_diagnostics():
+    tool = load_tool_module()
+
+    class TimeoutDriver:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_script(self, _script):
+            self.calls += 1
+            if self.calls == 1:
+                return False
+            return {
+                "readiness": {"phase": "loading", "reason": "snapshot_pending"},
+                "charts": [{"key": "agentTokens", "plotted": 0, "noData": 0}],
+                "stream": {"streamOpen": True, "lastDeliveryKind": "pending"},
+                "body": "Waiting for server stats",
+            }
+
+    driver = TimeoutDriver()
+    with pytest.raises(RuntimeError, match="live stats acceptance timed out") as raised:
+        tool.capture_live_stats_acceptance(driver, timeout=0)
+    message = str(raised.value)
+    assert "snapshot_pending" in message
+    assert "agentTokens" in message
+    assert "Waiting for server stats" in message
+    assert driver.calls >= 2
+
+
 def test_process_cpu_seconds_falls_back_to_portable_ps_without_procfs(tmp_path):
     def run(command, **_kwargs):
         assert command == ["ps", "-p", "4242", "-o", "time="]

@@ -32,6 +32,18 @@ PRODUCT_ROOT_KEYS = (
     "PYTHONPYCACHEPREFIX",
     "TMPDIR",
 )
+
+
+def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return a child environment with no ambient product/client-data roots."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("YOLOMUX_", "XDG_", "OPENCODE_", "CODEX_", "CLAUDE_"))
+        and key not in {"HOME", "TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX"}
+    }
+    environment.update(overrides or {})
+    return environment
 ROOTED_OVERRIDE_KEYS = (
     *ROOT_KEYS,
     "YOLOMUX_CODEX_HOME",

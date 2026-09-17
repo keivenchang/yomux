@@ -1,5 +1,12 @@
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["BUILD.bazel"])
+
+filegroup(
+    name = "docker_source_files",
+    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
@@ -22,12 +29,16 @@ go_binary(
 go_test(
     name = "yolomux_go_test",
     srcs = glob(["*_test.go"]),
+    data = ["//:go_test_support"],
+    deps = ["//internal/testsupport:testsupport_lib"],
     embed = [":yolomux_go_lib"],
 )
 
 go_test(
     name = "yolomux_go_race_test",
     srcs = glob(["*_test.go"]),
+    data = ["//:go_test_support"],
+    deps = ["//internal/testsupport:testsupport_lib"],
     embed = [":yolomux_go_lib"],
     race = "on",
 )

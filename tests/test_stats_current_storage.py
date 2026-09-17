@@ -6,9 +6,12 @@ import inspect
 import json
 import random
 import sqlite3
+import subprocess
+import sys
 import time
 import weakref
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -439,7 +442,7 @@ def test_writer_open_truncates_a_recycled_oversized_wal_allocation(tmp_path):
         assert first._connection().execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[0] == 0
         retained_bytes = wal_path.stat().st_size
         assert retained_bytes > 0
-
+        first.close()
         with Store.open(path):
             assert wal_path.stat().st_size == 0
 
@@ -464,6 +467,76 @@ def test_current_store_rejects_legacy_names_and_symbolic_link_aliases(tmp_path):
         Store.open(alias_path)
 
     assert _files(real_path) == before
+
+
+def test_writer_lease_resolves_parent_directory_aliases(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    alias_dir = tmp_path / "alias"
+    alias_dir.symlink_to(real_dir, target_is_directory=True)
+    real_path = real_dir / DATABASE_FILENAME
+    alias_path = alias_dir / DATABASE_FILENAME
+
+    with storage_module.writer_lease(alias_path):
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path\n"
+                "import sys\n"
+                "from yolomux_lib.stats_current.storage import Store\n"
+                "try:\n"
+                "    Store.open(Path(sys.argv[1]))\n"
+                "except Exception as error:\n"
+                "    print(type(error).__name__, str(error))\n"
+                "else:\n"
+                "    print('opened')\n",
+                str(real_path),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert probe.stdout.startswith("StatsCurrentError YO!stats writer is already owned")
+
+    with Store.open(real_path):
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path\n"
+                "import sys\n"
+                "from yolomux_lib.stats_current.storage import Store\n"
+                "try:\n"
+                "    Store.open(Path(sys.argv[1]))\n"
+                "except Exception as error:\n"
+                "    print(type(error).__name__, str(error))\n"
+                "else:\n"
+                "    print('opened')\n",
+                str(alias_path),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert probe.stdout.startswith("StatsCurrentError YO!stats writer is already owned")
+
+
+def test_writer_preflight_runs_under_the_shared_lease(tmp_path, monkeypatch):
+    path = tmp_path / DATABASE_FILENAME
+    observed = []
+    original = Store._preflight_fence
+
+    def probe(database_path, writer_protocol, writer_build):
+        observed.append(str(Path(database_path).absolute()) in storage_module._WRITER_LEASES)
+        return original(database_path, writer_protocol, writer_build)
+
+    monkeypatch.setattr(Store, "_preflight_fence", staticmethod(probe))
+    with Store.open(path):
+        pass
+    assert observed == [True]
 
 
 def test_older_protocol_runner_cannot_create_or_open_the_current_database(tmp_path):

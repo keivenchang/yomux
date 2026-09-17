@@ -361,12 +361,11 @@ def gate_runtime_paths(
     # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
     # deletes pytest's cached base and every later tmp_path fixture fails during setup.
     tmp_path_factory.getbasetemp()
-    # The gate run root carries a long per-run namespace.  It is a suitable parent for
-    # test evidence and tmux sockets, but using it as YOLOMUX_ROOT leaves too little room
-    # for the product's longest rooted local-service socket.  Keep this fixture's product
-    # root independently short; every path it owns remains below this root and cleanup
-    # still removes it as one unit.
-    root = Path(tempfile.mkdtemp(prefix=f"y{os.getpid()}-", dir="/tmp"))
+    # ``YOLOMUX_TEST_ROOT`` is already a per-run, identity-fenced root. Keep
+    # the per-test discriminator short so the deepest rooted control socket
+    # remains bindable under Linux's fixed sockaddr_un path limit.
+    root = Path(os.environ["YOLOMUX_TEST_ROOT"]) / f"g-{uuid.uuid4().hex[:4]}"
+    root.mkdir(mode=0o700)
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
     home_dir = root / "home"

@@ -892,6 +892,10 @@ function completeApiOperationRecord(record, payload) {
   if (!record || record.phase !== 'accepted' || !apiOperationTerminalMatchesRecord(record, payload)) return false;
   const result = payload.result;
   record.phase = 'terminal';
+  if (record.statusPollTimer !== null) {
+    clearTimeout(record.statusPollTimer);
+    record.statusPollTimer = null;
+  }
   record.cursor = {...payload.operation.cursor};
   record.source?.close?.();
   record.source = null;
@@ -907,6 +911,35 @@ function completeApiOperationRecord(record, payload) {
   }
   window.dispatchEvent(new CustomEvent('yolomux:operation-terminal', {detail: payload}));
   enqueueOperationTerminalAck(record.id, record.cursor);
+  return true;
+}
+
+function scheduleApiOperationStatusPoll(record, delayMs = 250) {
+  if (!record || record.phase !== 'accepted' || !record.statusUrl || record.statusPollTimer !== null) return false;
+  record.statusPollTimer = setTimeout(async () => {
+    record.statusPollTimer = null;
+    if (record.phase !== 'accepted' || !apiOperationState.waiters.has(record.id)) return;
+    try {
+      const response = await apiFetch(record.statusUrl, {cache: 'no-store'}, {recordDebug: false});
+      const payload = await response.json().catch(() => ({}));
+      const state = String(payload?.state || '').toLowerCase();
+      if (state === 'ready' || state === 'failed' || state === 'cancelled') {
+        // GET /api/operations/{id} returns the terminal result without the operation cursor. The
+        // accepted receipt starts at seq 0 and terminalization advances it once, so restore the
+        // canonical envelope locally before passing through the shared terminal owner.
+        applyApiOperationTerminal({
+          operation: {id: record.id, cursor: {epoch: record.cursor.epoch, seq: record.cursor.seq + 1}},
+          result: payload,
+          status: response.status,
+        });
+        return;
+      }
+    } catch (_) {
+      // SSE remains the primary delivery path; a transient status poll failure must not terminate
+      // the operation waiter or hide a later event-stream repair.
+    }
+    scheduleApiOperationStatusPoll(record);
+  }, Math.max(1, Number(delayMs) || 250));
   return true;
 }
 
@@ -1051,6 +1084,7 @@ function waitForApiOperationResult(pending, expected = {}) {
     }
     const raced = apiOperationState.terminal.get(record.id);
     if (raced && record.phase === 'accepted') completeApiOperationRecord(record, raced);
+    scheduleApiOperationStatusPoll(record);
   }).catch(error => {
     recordApiOperationTerminalFailure(record, error, expected);
     throw error;
@@ -1086,6 +1120,7 @@ function registerApiOperationReceipt(pending) {
     eventsUrl: String(operation.events_url || ''),
     cursor: {...(operation.cursor || {})},
     source: null,
+    statusPollTimer: null,
     acceptedAt: performanceNow(),
     journeyId: newClientJourneyId('operation'),
     handlerInvocations: 0,

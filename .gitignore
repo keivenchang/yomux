@@ -22,3 +22,5 @@ DOIT*.md
 
 # Local crash dumps.
 core
+# Generated Bazel output directories.
+bazel-*/

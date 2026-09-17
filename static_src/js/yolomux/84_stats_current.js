@@ -427,7 +427,9 @@
     // a server upgraded under an already-open tab sends; both catch sites below used to discard that
     // rejection, so YO!stats went blank and said nothing until the page was reloaded.
     function reportContractViolation(error) {
-      if (error?.statsContractViolation !== true) return false;
+      if (error?.statsContractViolation !== true
+          || error?.cancelled === true
+          || isCurrentStatsTerminalAuthentication(error)) return false;
       return reportFailure(`YO!stats cannot read this server's data (${error.message}); reload the page to pick up the current YOLOmux bundle`);
     }
 
@@ -607,7 +609,13 @@
         if (error?.pending === true && Number.isSafeInteger(error.retryAfterMs)) {
           pendingRetryMs = error.retryAfterMs;
         }
-        reportContractViolation(error);
+        // Snapshot validation errors already carry the explicit contract marker.
+        // Transport and server-unavailable errors do not: repair owns their
+        // bounded retry path and must not relabel a transient outage as a
+        // schema violation in the browser failure ledger.
+        if (error?.pending !== true) {
+          reportContractViolation(error);
+        }
       } finally {
         repairBusy = false;
         if (succeeded) {
@@ -753,8 +761,9 @@
       scheduleTick();
     }
 
-    function handleReconnect({requiresFullSnapshot = true} = {}) {
+    function handleReconnect({requiresFullSnapshot = true, retryAfterMs = null} = {}) {
       repairRequiresFullSnapshot ||= requiresFullSnapshot === true;
+      if (Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 1) repairDelayMs = retryAfterMs;
       // A server can reject a just-accepted cursor while it publishes the next
       // generation. Keep that repair on the controller's bounded cadence: an
       // immediate snapshot/stream/repair loop otherwise refetches forever.
@@ -969,6 +978,10 @@
     function handleReadinessFailure(error, epoch) {
       if (epoch !== readinessEpoch) return false;
       if (retireForTerminalAuthentication(error)) return false;
+      // Terminal authentication may already have been claimed by the shared
+      // auth owner while this activation promise was unwinding. Do not turn
+      // that expected signed-out transition into a second stats failure.
+      if (terminalAuthenticationError || isCurrentStatsTerminalAuthentication(error)) return false;
       readinessEpoch += 1;
       clearReadinessTimer();
       resetUnreadyClient();
@@ -1099,10 +1112,10 @@
           try {
             const error = snapshotStreamError(JSON.parse(event.data), kind);
             if (!settled) void fail(error);
-            else routeStreamFailure(candidate, epoch);
+            else void routeTypedStreamError(candidate, epoch, error);
           } catch (error) {
             if (!settled) void fail(error);
-            else routeStreamFailure(candidate, epoch);
+            else void routeTypedStreamError(candidate, epoch, error);
           }
         };
         scope.replace('snapshot-request', cancel, callback => callback());
@@ -1252,6 +1265,19 @@
       if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleReconnect({requiresFullSnapshot: false});
+    }
+
+    async function routeTypedStreamError(candidate, epoch, error) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      closeStream();
+      if (retireForTerminalAuthentication(error)) return;
+      onState(error?.pending === true ? 'pending' : 'error', error);
+      if (error?.recoverableReadFence === true) await recoverReadFence(error);
+      if (lifecycleScope?.value('stream') !== null || streamEpoch !== epoch + 1) return;
+      controller.handleReconnect({
+        requiresFullSnapshot: error?.versionFence === true,
+        retryAfterMs: error?.pending === true ? error.retryAfterMs : null,
+      });
     }
 
 

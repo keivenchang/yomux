@@ -185,7 +185,7 @@ def test_g9_corrupt_current_database_is_quarantined_and_rebuilt(gate_runtime_pat
 
     quarantined = sorted(
         path for path in state_dir.glob(f"{storage.DATABASE_FILENAME}.*")
-        if not path.name.endswith(("-wal", "-shm", "-journal"))
+        if not path.name.endswith(("-wal", "-shm", "-journal", ".writer.lock"))
     )
     assert len(quarantined) == 1, [path.name for path in quarantined]
     assert quarantined[0].read_bytes() == damaged, "the damaged database was not preserved verbatim"

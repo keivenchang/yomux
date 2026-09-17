@@ -6303,7 +6303,7 @@ async function refreshSessionMetadata(options = {}) {
       );
       if (!result.ok && requestIsCurrent()) {
         transcriptMetadataState.error = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
-        console.error(`session metadata ${result.stage} failed`, result.error);
+        if (!statsOnlyBootEnabled()) console.error(`session metadata ${result.stage} failed`, result.error);
         for (const session of activeSessions.filter(isTmuxSession)) {
           renderTranscriptMetadataLoadError(session);
         }
@@ -7012,6 +7012,7 @@ function resyncVisibleTerminalRemoteSizes(reason = '') {
 }
 
 function installReconnectResyncHandlers() {
+  if (statsOnlyBootEnabled()) return;
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
@@ -7069,19 +7070,34 @@ async function boot() {
   syncInitialLayoutUrl();
   statusEl.textContent = t('status.yoloLoading');
   loadNotificationDelivery();
-  const initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
-    console.warn('initial auto-status refresh failed', error);
+  const initialAutoStatusesPromise = statsOnlyBootEnabled()
+    ? Promise.resolve(false)
+    : loadAutoStatuses().catch(error => {
+      console.warn('initial auto-status refresh failed', error);
+      return false;
+    });
+  bindClipboardPaste();
+  paintInitialAppShell();
+  // Stats-only Go boot owns the stats surface and app shell. Do not start
+  // unrelated route work that the negotiated backend explicitly does not
+  // implement; those requests used to create misleading boot failures.
+  if (statsOnlyBootEnabled()) return;
+  refreshBackgroundOwnerStatus({render: false}).catch(error => {
+    console.warn('initial background-owner status refresh failed', error);
     return false;
   });
   bindClipboardPaste();
   paintInitialAppShell();
   scheduleDeferredSettingsMetadataRefresh();
+  // Start the shared event stream before any slow or unsupported application boot request. Async
+  // filesystem operations rely on its terminal replay; waiting for transcript/terminal startup can
+  // otherwise leave an accepted operation pending even though the server has already completed it.
+  installClientEventStream();
   await refreshTranscripts({refreshAuto: false});
   installYolomuxFontMetricRefresh();
   updatePanelInactiveOverlays();
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  installClientEventStream();
   initialAutoStatusesPromise.then(() => {
     renderAutoApproveButtons();
     updateSessionButtonStates();

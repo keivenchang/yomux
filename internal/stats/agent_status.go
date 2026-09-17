@@ -416,6 +416,7 @@ type AgentStatusCollector struct {
 	epochID      string
 	epochStart   float64
 	lastRevision uint64
+	lastCadence  float64
 	statusCache  map[string]agentStatusCacheEntry
 }
 
@@ -458,16 +459,8 @@ func (c *AgentStatusCollector) loop(ctx context.Context) {
 	first := true
 	for {
 		if !first {
-			delay := c.config.ActiveCadence
-			if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
-				delay = c.config.IdleCadence
-			}
-			timer := c.clock.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
 				return
-			case <-timer.C():
 			}
 		}
 		first = false
@@ -500,6 +493,15 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 		cadence = c.config.IdleCadence
 	}
 	c.stateMu.Lock()
+	if c.lastCadence != 0 && c.lastCadence != cadence.Seconds() {
+		// Native cadence is immutable within a coverage epoch. Demand can
+		// switch a collector between idle and active cadence, so begin a new
+		// epoch instead of attempting to rewrite the old metadata row.
+		c.epochID = fmt.Sprintf("%s-%d", c.config.EpochID, started.UnixNano())
+		c.epochStart = float64(started.UnixNano()) / 1e9
+		c.hadSuccess = false
+	}
+	c.lastCadence = cadence.Seconds()
 	fact := HostFactContext{EpochID: c.epochID, EpochStartedAt: c.epochStart, ObservedAt: float64(started.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
 	c.stateMu.Unlock()
 	batch := c.collect(parent, fact)

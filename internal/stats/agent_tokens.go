@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,7 @@ const (
 	defaultAuxiliaryInventoryTimeout  = 250 * time.Millisecond
 	maxDiagnosticPathBytes            = 256
 	maxDiagnosticTextBytes            = 512
+	maxAgentTokenEpochIDBytes         = 128
 )
 
 // AgentTokenInventory is deliberately the same coherent inventory boundary as
@@ -48,6 +51,7 @@ type AgentTokenCollectorConfig struct {
 	CodexTranscriptRoot         string
 	OpenCodeDatabase            string
 	CursorPath                  string
+	TranscriptCursorPath        string
 	SkipTranscriptScan          bool
 	EpochID                     string
 	EpochStartedAt              float64
@@ -68,11 +72,15 @@ func (c AgentTokenCollectorConfig) withDefaults() AgentTokenCollectorConfig {
 	if c.EpochID == "" {
 		c.EpochID = "agent-tokens"
 	}
+	c.EpochID = boundedAgentTokenEpochID(c.EpochID)
 	if c.SourceID == "" {
 		c.SourceID = "agent-tokens"
 	}
 	if c.CursorPath == "" {
 		c.CursorPath = filepath.Join(os.TempDir(), "yolomux-opencode-token-cursors.json")
+	}
+	if c.TranscriptCursorPath == "" {
+		c.TranscriptCursorPath = c.CursorPath + ".transcripts"
 	}
 	if c.TranscriptDiscoveryMaxFiles <= 0 {
 		c.TranscriptDiscoveryMaxFiles = defaultTranscriptDiscoveryFiles
@@ -108,6 +116,27 @@ func (c AgentTokenCollectorConfig) withDefaults() AgentTokenCollectorConfig {
 		}
 	}
 	return c
+}
+
+func boundedAgentTokenEpochID(value string) string {
+	return truncateAgentTokenEpochID(value, maxAgentTokenEpochIDBytes)
+}
+
+func truncateAgentTokenEpochID(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len([]byte(value)) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	if end == 0 {
+		return "agent-tokens"[:min(len("agent-tokens"), maxBytes)]
+	}
+	return value[:end]
 }
 
 type AgentTokenCollectorCounters struct {
@@ -187,6 +216,7 @@ type AgentTokenCollector struct {
 	clock            HostCollectorClock
 	config           AgentTokenCollectorConfig
 	transcriptStates map[string]*TranscriptScannerState
+	transcriptCursor *TranscriptCursorStore
 	cursor           *OpenCodeTokenCursor
 	counters         agentTokenCounters
 	diagnosticMu     sync.RWMutex
@@ -195,6 +225,9 @@ type AgentTokenCollector struct {
 	run              bool
 	stop             context.CancelFunc
 	done             chan struct{}
+	lastCadence      float64
+	epochBaseID      string
+	epochSequence    uint64
 }
 
 func NewAgentTokenCollector(writer BatchWriter, clock HostCollectorClock, config AgentTokenCollectorConfig) *AgentTokenCollector {
@@ -203,7 +236,7 @@ func NewAgentTokenCollector(writer BatchWriter, clock HostCollectorClock, config
 	}
 	config = config.withDefaults()
 	cursor := NewOpenCodeTokenCursor(config.CursorPath)
-	return &AgentTokenCollector{writer: writer, clock: clock, config: config, transcriptStates: make(map[string]*TranscriptScannerState), cursor: cursor}
+	return &AgentTokenCollector{writer: writer, clock: clock, config: config, transcriptStates: make(map[string]*TranscriptScannerState), transcriptCursor: NewTranscriptCursorStore(config.TranscriptCursorPath), cursor: cursor, epochBaseID: config.EpochID}
 }
 
 func (c *AgentTokenCollector) Counters() AgentTokenCollectorCounters { return c.counters.snapshot() }
@@ -340,7 +373,14 @@ func (c *AgentTokenCollector) recordBatch(batch AppendBatch) {
 	c.diagnostics.batch.BatchAtoms = len(batch.UsageAtoms)
 	c.diagnostics.batch.BatchCoverageEpochs = len(batch.CoverageEpochs)
 	c.diagnostics.batch.BatchUnavailableSpans = len(batch.UnavailableSpans)
-	if len(batch.UnavailableSpans) > 0 {
+	// A cycle can legitimately publish usable atoms while recording an
+	// unavailable span for an unrelated stale process. Keep that span in the
+	// durable product, but do not let it masquerade as the cycle's overall
+	// failure in the latest-success diagnostic. A batch with no usable facts
+	// still reports its concrete unavailable reason.
+	if len(batch.UsageAtoms) > 0 {
+		c.diagnostics.lastReason = ""
+	} else if len(batch.UnavailableSpans) > 0 {
 		c.diagnostics.lastReason = diagnosticText(batch.UnavailableSpans[len(batch.UnavailableSpans)-1].Reason)
 	}
 	c.diagnosticMu.Unlock()
@@ -401,16 +441,8 @@ func (c *AgentTokenCollector) loop(ctx context.Context) {
 	first := true
 	for {
 		if !first {
-			delay := AgentTokenActiveCadence
-			if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
-				delay = AgentTokenIdleCadence
-			}
-			timer := c.clock.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitCollectorCadence(ctx, c.clock, AgentTokenActiveCadence, AgentTokenIdleCadence, c.config.ActiveFunc) {
 				return
-			case <-timer.C():
 			}
 		}
 		first = false
@@ -430,6 +462,18 @@ func (c *AgentTokenCollector) RunOnce(parent context.Context) {
 	if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
 		cadence = AgentTokenIdleCadence
 	}
+	if c.lastCadence != 0 && c.lastCadence != cadence.Seconds() {
+		// Coverage rows pin their native cadence. A demand transition therefore
+		// starts a new token epoch rather than mutating an existing row.
+		c.epochSequence++
+		suffix := strconv.FormatUint(c.epochSequence, 10)
+		base := c.epochBaseID
+		limit := maxAgentTokenEpochIDBytes - len(suffix) - 1
+		base = truncateAgentTokenEpochID(base, limit)
+		c.config.EpochID = base + "-" + suffix
+		c.config.EpochStartedAt = float64(started.UnixNano()) / 1e9
+	}
+	c.lastCadence = cadence.Seconds()
 	now := float64(started.UnixNano()) / 1e9
 	if c.config.OpenCodeDatabase != "" && (c.config.Inventory != nil || c.config.OpenCodeInventory != nil) {
 		c.runOnceSplit(parent, now, cadence.Seconds(), started)
@@ -441,8 +485,8 @@ func (c *AgentTokenCollector) RunOnce(parent context.Context) {
 		return
 	}
 	c.recordBatch(batch)
-	if !c.appendCollected(parent, batch, receipts) {
-		c.recordAppendError(errors.New("append failed"), hasMetadataFacts(batch))
+	if ok, err := c.appendCollected(parent, batch, receipts); !ok {
+		c.recordAppendError(err, hasMetadataFacts(batch))
 		return
 	}
 	c.setSuccess(started)
@@ -472,8 +516,8 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 	if len(records) > maxAgentTokenSources {
 		batch := AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, c.config.SourceID, observed, cadence, "inventory-bound-exceeded")}}
 		c.recordBatch(batch)
-		if !c.appendCollected(parent, batch, nil) {
-			c.recordAppendError(errors.New("append failed"), true)
+		if ok, err := c.appendCollected(parent, batch, nil); !ok {
+			c.recordAppendError(err, true)
 		} else {
 			c.setSuccess(attemptedAt)
 		}
@@ -488,11 +532,11 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 	}
 	openAppendCtx, openAppendCancel := context.WithTimeout(parent, c.config.OpenCodeAppendTimeout)
 	c.recordBatch(openBatch)
-	appendOK, metadataError := c.appendOpenCodeCollected(openAppendCtx, openBatch, receipt)
+	appendOK, metadataError, appendErr := c.appendOpenCodeCollected(openAppendCtx, openBatch, receipt)
 	openAppendCancel()
 	openCollectCancel()
 	if !appendOK {
-		c.recordAppendError(errors.New("OpenCode append failed"), metadataError)
+		c.recordAppendError(appendErr, metadataError)
 		return
 	}
 
@@ -529,81 +573,75 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 	// OpenCode is already durable; do not turn a transcript timeout into a
 	// second failed transaction.
 	c.recordBatch(batch)
-	if !c.appendCollected(parent, batch, receipts) {
-		c.recordAppendError(errors.New("append failed"), hasMetadataFacts(batch))
+	if ok, err := c.appendCollected(parent, batch, receipts); !ok {
+		c.recordAppendError(err, hasMetadataFacts(batch))
 	} else {
 		c.setSuccess(attemptedAt)
 	}
 }
 
-type agentInventoryResult struct {
-	records []AgentRecord
-	errors  []error
-}
-
-// runBoundedAgentInventory isolates an inventory implementation that may call
-// an external command or a test double that ignores cancellation. The result
-// channel is buffered so a late worker can finish without blocking the token
-// collector after its deadline has already expired.
+// runBoundedAgentInventory calls the inventory cooperatively. Inventory owners
+// must honor ctx; spawning a detached timeout goroutine would let a stuck
+// provider accumulate one live goroutine per cadence and survive collector
+// shutdown.
 func runBoundedAgentInventory(ctx context.Context, inventory AgentTokenInventory) ([]AgentRecord, []error, bool) {
 	if inventory == nil {
 		return nil, []error{errors.New("inventory-unavailable")}, false
 	}
-	result := make(chan agentInventoryResult, 1)
-	go func() {
-		records, errorsOut := inventory(ctx)
-		result <- agentInventoryResult{records: records, errors: errorsOut}
-	}()
-	select {
-	case output := <-result:
-		return output.records, output.errors, false
-	case <-ctx.Done():
-		return nil, []error{ctx.Err()}, true
+	records, errorsOut := inventory(ctx)
+	if err := ctx.Err(); err != nil {
+		return records, append(errorsOut, err), true
 	}
+	return records, errorsOut, false
 }
 
-func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendBatch, receipts []agentTokenReceipt) bool {
+func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendBatch, receipts []agentTokenReceipt) (bool, error) {
 	if c.writer == nil {
-		for _, receipt := range receipts {
-			receipt.rollback()
-		}
-		return false
+		return false, errors.Join(errors.New("stats writer is unavailable"), rollbackReceipts(receipts))
 	}
 	result, err := c.writer.AppendBatch(ctx, batch)
 	if err != nil {
-		for _, receipt := range receipts {
-			receipt.rollback()
+		if isUnavailableIntervalConflict(err) {
+			// A cadence can rediscover an outage interval that an earlier owner
+			// already recorded. Preserve usage facts and advance their cursor;
+			// the interval itself is idempotent metadata, while other append
+			// failures remain strict below.
+			usageBatch := AppendBatch{UsageAtoms: batch.UsageAtoms, UsageTombstones: batch.UsageTombstones}
+			usageResult, usageErr := c.writer.AppendBatch(ctx, usageBatch)
+			if usageErr != nil {
+				return false, errors.Join(usageErr, rollbackReceipts(receipts))
+			}
+			c.counters.usage.Add(uint64(usageResult.UsageAccepted))
+			c.counters.usageDuplicates.Add(uint64(usageResult.UsageDuplicate))
+			if err := commitReceipts(receipts); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
-		return false
+		return false, errors.Join(err, rollbackReceipts(receipts))
 	}
-	for _, receipt := range receipts {
-		receipt.commit()
+	if err := commitReceipts(receipts); err != nil {
+		return false, err
 	}
 	c.counters.usage.Add(uint64(result.UsageAccepted))
 	c.counters.usageDuplicates.Add(uint64(result.UsageDuplicate))
 	c.counters.coverage.Add(uint64(result.CoverageChanged))
 	c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
-	return true
+	return true, nil
 }
 
 // appendOpenCodeCollected keeps valid usage facts independent from partial
 // history metadata. A bounded OpenCode tree can produce useful fresh atoms
 // while its coverage/unavailable intervals are incomplete or conflicting.
 // Metadata remains strict, but it must not roll back those atoms.
-func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch AppendBatch, receipt *agentTokenReceipt) (bool, bool) {
+func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch AppendBatch, receipt *agentTokenReceipt) (bool, bool, error) {
 	if c.writer == nil {
-		if receipt != nil {
-			receipt.rollback()
-		}
-		return false, false
+		return false, false, errors.Join(errors.New("stats writer is unavailable"), rollbackReceipt(receipt))
 	}
 	if len(batch.UsageAtoms) > 0 {
 		result, err := c.writer.AppendBatch(ctx, AppendBatch{UsageAtoms: batch.UsageAtoms})
 		if err != nil {
-			if receipt != nil {
-				receipt.rollback()
-			}
-			return false, false
+			return false, false, errors.Join(err, rollbackReceipt(receipt))
 		}
 		c.counters.usage.Add(uint64(result.UsageAccepted))
 		c.counters.usageDuplicates.Add(uint64(result.UsageDuplicate))
@@ -612,23 +650,77 @@ func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch
 	if len(metadata.CoverageEpochs) > 0 || len(metadata.UnavailableSpans) > 0 {
 		result, err := c.writer.AppendBatch(ctx, metadata)
 		if err != nil {
-			if receipt != nil {
-				receipt.rollback()
+			// An outage interval may already have been persisted by the prior
+			// cadence or by an earlier owner. The writer deliberately rejects
+			// overlapping coverage/outage rows, so treat that specific conflict
+			// as an idempotent metadata result while preserving the fresh atoms.
+			// Other metadata failures remain fatal and roll the source cursor back.
+			if !isUnavailableIntervalConflict(err) {
+				return false, true, errors.Join(err, rollbackReceipt(receipt))
 			}
-			return false, true
+			if receipt != nil {
+				if commitErr := receipt.commit(); commitErr != nil {
+					return false, false, commitErr
+				}
+			}
+			return true, false, nil
 		}
 		c.counters.coverage.Add(uint64(result.CoverageChanged))
 		c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
 	}
 	if receipt != nil {
-		receipt.commit()
+		if err := receipt.commit(); err != nil {
+			return false, false, err
+		}
 	}
-	return true, false
+	return true, false, nil
+}
+
+func isUnavailableIntervalConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "unavailable spans overlap") ||
+		strings.Contains(message, "coverage epoch overlaps an unavailable span")
 }
 
 type agentTokenReceipt struct {
-	commit   func()
-	rollback func()
+	commit   func() error
+	rollback func() error
+}
+
+func rollbackReceipt(receipt *agentTokenReceipt) error {
+	if receipt == nil || receipt.rollback == nil {
+		return nil
+	}
+	return receipt.rollback()
+}
+
+func rollbackReceipts(receipts []agentTokenReceipt) error {
+	var errs []error
+	for index := range receipts {
+		if receipts[index].rollback == nil {
+			continue
+		}
+		if err := receipts[index].rollback(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func commitReceipts(receipts []agentTokenReceipt) error {
+	var errs []error
+	for index := range receipts {
+		if receipts[index].commit == nil {
+			continue
+		}
+		if err := receipts[index].commit(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *AgentTokenCollector) collect(parent context.Context, observed, cadence float64) (batch AppendBatch, receipts []agentTokenReceipt, err error) {
@@ -667,11 +759,16 @@ func (c *AgentTokenCollector) collect(parent context.Context, observed, cadence 
 func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observed, cadence float64, records []AgentRecord, inventoryErrors []error, batch AppendBatch, receipts []agentTokenReceipt) (AppendBatch, []agentTokenReceipt, error) {
 	sources, err := c.config.TranscriptSources(parent, records)
 	if err != nil {
-		reason := err.Error()
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			reason = "transcript-discovery-timeout"
+		// Discovery budgets describe deferred backlog, not an outage. Keep the
+		// candidates returned before the bound and let their bounded scanners
+		// contribute current usage without recording a false unavailable span.
+		if !isTranscriptDiscoveryBudget(err) {
+			reason := err.Error()
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				reason = "transcript-discovery-timeout"
+			}
+			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, reason))
 		}
-		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, reason))
 	}
 	if len(sources) > maxAgentTokenSources {
 		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, "agent-token-source-bound-exceeded"))
@@ -682,15 +779,34 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, "transcript-discovery-timeout"))
 			break
 		}
-		state := c.transcriptStates[source.Path]
+		stateKey := transcriptCursorKey(source)
+		state := c.transcriptStates[stateKey]
 		if state == nil {
-			state = &TranscriptScannerState{}
-			c.transcriptStates[source.Path] = state
+			persisted, stateErr := c.transcriptCursor.State(source)
+			if stateErr != nil {
+				batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, source.SourceID, observed, cadence, "transcript-cursor-"+stateErr.Error()))
+				continue
+			}
+			state = &persisted
+			c.transcriptStates[stateKey] = state
 		}
 		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{MaxRecords: maxAgentTokenRecords})
 		if scanErr != nil {
 			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, source.SourceID, observed, cadence, scanErr.Error()))
 			continue
+		}
+		if result.Receipt != nil {
+			changed := !reflect.DeepEqual(result.Receipt.before, result.Receipt.after)
+			if changed {
+				if err := c.transcriptCursor.Prepare(source, result.Receipt.before, result.Receipt.after); err != nil {
+					result.Receipt.Rollback()
+					batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, source.SourceID, observed, cadence, "transcript-cursor-"+err.Error()))
+					continue
+				}
+			}
+			if !changed {
+				result.Receipt = nil
+			}
 		}
 		batch.UsageAtoms = append(batch.UsageAtoms, result.Atoms...)
 		if result.RecordsParsed > 0 || result.Reset || state.Offset == 0 {
@@ -698,13 +814,36 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 		if result.Receipt != nil {
 			receipt := result.Receipt
-			receipts = append(receipts, agentTokenReceipt{receipt.Commit, receipt.Rollback})
+			receipts = append(receipts, agentTokenReceipt{
+				commit: func() error {
+					if err := c.transcriptCursor.Commit(source, receipt.after); err != nil {
+						return err
+					}
+					receipt.Commit()
+					return nil
+				},
+				rollback: func() error {
+					receipt.Rollback()
+					return c.transcriptCursor.Rollback(source)
+				},
+			})
 		}
 	}
 	for _, inventoryErr := range inventoryErrors {
 		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "inventory", observed, cadence, inventoryErr.Error()))
 	}
+	deduplicateUnavailableSpans(&batch)
 	return batch, receipts, nil
+}
+
+func isTranscriptDiscoveryBudget(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "transcript-discovery-file-budget-exhausted") ||
+		strings.Contains(message, "transcript-discovery-directory-budget-exhausted") ||
+		strings.Contains(message, "transcript-discovery-byte-budget-exhausted")
 }
 
 func agentTokenCoverage(c AgentTokenCollectorConfig, source string, observed, cadence float64) CoverageEpoch {
@@ -726,8 +865,10 @@ type unavailableSpanKey struct {
 // deduplicateUnavailableSpans is the final collector boundary for unavailable
 // facts. OpenCode can report one bad session through multiple inventory rows,
 // root walks, and transcript-source paths; all of those paths must agree before
-// AppendBatch validates the interval set. Choose the lexicographically smallest
-// reason so the retained fact does not depend on source traversal order.
+// AppendBatch validates the interval set. Exact duplicates are collapsed, and
+// overlapping intervals with one semantic source/epoch are coalesced. Choose
+// the lexicographically smallest reason so the retained fact does not depend on
+// source traversal order.
 func deduplicateUnavailableSpans(batch *AppendBatch) {
 	if len(batch.UnavailableSpans) < 2 {
 		return
@@ -760,10 +901,51 @@ func deduplicateUnavailableSpans(batch *AppendBatch) {
 		}
 		return left.end < right.end
 	})
-	batch.UnavailableSpans = make([]UnavailableSpan, 0, len(keys))
+	spans := make([]UnavailableSpan, 0, len(keys))
 	for _, key := range keys {
-		batch.UnavailableSpans = append(batch.UnavailableSpans, byKey[key])
+		spans = append(spans, byKey[key])
 	}
+	sort.SliceStable(spans, func(i, j int) bool {
+		left, right := spans[i], spans[j]
+		if left.Family != right.Family {
+			return left.Family < right.Family
+		}
+		if left.SourceID != right.SourceID {
+			return left.SourceID < right.SourceID
+		}
+		if left.EpochID != right.EpochID {
+			return left.EpochID < right.EpochID
+		}
+		if left.NativeCadenceSeconds != right.NativeCadenceSeconds {
+			return left.NativeCadenceSeconds < right.NativeCadenceSeconds
+		}
+		if left.OwnerGeneration != right.OwnerGeneration {
+			return left.OwnerGeneration < right.OwnerGeneration
+		}
+		if left.StartedAt != right.StartedAt {
+			return left.StartedAt < right.StartedAt
+		}
+		return left.EndedAt < right.EndedAt
+	})
+	coalesced := make([]UnavailableSpan, 0, len(spans))
+	for _, span := range spans {
+		if len(coalesced) > 0 {
+			previous := &coalesced[len(coalesced)-1]
+			if previous.Family == span.Family && previous.SourceID == span.SourceID &&
+				previous.EpochID == span.EpochID && previous.NativeCadenceSeconds == span.NativeCadenceSeconds &&
+				previous.OwnerGeneration == span.OwnerGeneration && span.StartedAt < previous.EndedAt {
+				if span.EndedAt > previous.EndedAt {
+					previous.EndedAt = span.EndedAt
+				}
+				if unavailableSpanLess(span, *previous) {
+					previous.Reason = span.Reason
+				}
+				continue
+			}
+		}
+		coalesced = append(coalesced, span)
+	}
+	batch.UnavailableSpans = coalesced
 }
 
 func unavailableSpanLess(left, right UnavailableSpan) bool {
@@ -787,6 +969,7 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 	if err != nil {
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
 	}
+	cursorBefore := cursorState.clone()
 	if cursorState.Device != 0 && (cursorState.Device != device || cursorState.Inode != inode) {
 		cursorState = openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}, Device: device, Inode: inode}
 	}
@@ -799,7 +982,8 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 	proposed := cursorState.clone()
 	batch = AppendBatch{}
 	type rootClaim struct {
-		key string
+		key    string
+		record AgentRecord
 	}
 	claims := map[string]rootClaim{}
 	for _, record := range records {
@@ -823,17 +1007,29 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 		}
 		rootSessionID, rootErr := db.RootSessionID(ctx, sessionID, MaxOpenCodeSessionTree)
 		if rootErr != nil {
+			// Deterministic mock clients are terminal-test fixtures. Their pane
+			// processes can outlive the fixture database and therefore carry a
+			// session id that is intentionally absent from the operator's native
+			// OpenCode database. Do not let those stale fixtures manufacture an
+			// unavailable interval or mask a valid native root.
+			if isStaleOpenCodeMockRecord(record, rootErr) {
+				continue
+			}
 			c.appendOpenCodeUnavailable(&batch, "opencode:"+sessionID, observed, cadence, rootErr.Error())
 			continue
 		}
 		sessionID = rootSessionID
-		if _, ok := claims[sessionID]; ok {
-			// Python's inventory exposes one row per resolved root session. Keep
-			// the first deterministic claim so duplicate process observations do
-			// not double-count the same root/child tree.
-			continue
+		candidate := rootClaim{key: agentKey, record: record}
+		if current, ok := claims[sessionID]; ok {
+			// A machine-wide /proc scan can see stale wrappers for the same
+			// persisted root. Prefer the process anchored to the current tmux
+			// pane before falling back to a deterministic start/PID order; using
+			// the first PID let an unrelated old process own a live root.
+			if !openCodeRootClaimBetter(candidate.record, current.record) {
+				continue
+			}
 		}
-		claims[sessionID] = rootClaim{key: agentKey}
+		claims[sessionID] = candidate
 	}
 	rootIDs := make([]string, 0, len(claims))
 	for sessionID := range claims {
@@ -930,10 +1126,33 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 	if !proposed.changed(cursorState) {
 		return batch, nil, nil
 	}
-	if err := c.cursor.prepare(proposed); err != nil {
+	if err := c.cursor.prepare(cursorBefore, proposed); err != nil {
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
 	}
-	return batch, &agentTokenReceipt{func() { _ = c.cursor.commit() }, func() { _ = c.cursor.rollback() }}, nil
+	committed := proposed.clone()
+	return batch, &agentTokenReceipt{
+		commit:   func() error { return c.cursor.commit(committed) },
+		rollback: c.cursor.rollback,
+	}, nil
+}
+
+func isStaleOpenCodeMockRecord(record AgentRecord, err error) bool {
+	if err == nil || !strings.Contains(err.Error(), "OpenCode root session not found") {
+		return false
+	}
+	return strings.Contains(record.Command, "--mock") && record.OpenCodeSession != ""
+}
+
+func openCodeRootClaimBetter(candidate, current AgentRecord) bool {
+	candidatePane := candidate.TmuxPaneID != "" || candidate.TmuxSession != ""
+	currentPane := current.TmuxPaneID != "" || current.TmuxSession != ""
+	if candidatePane != currentPane {
+		return candidatePane
+	}
+	if candidate.StartedAt != current.StartedAt {
+		return candidate.StartedAt > current.StartedAt
+	}
+	return candidate.PID > current.PID
 }
 
 func openCodeProcessSource(record AgentRecord) string {
@@ -996,28 +1215,20 @@ func (s openCodeCursorState) clone() openCodeCursorState {
 	return out
 }
 func (s openCodeCursorState) changed(other openCodeCursorState) bool {
-	return s.Device != other.Device || s.Inode != other.Inode || len(s.Events) != len(other.Events) || len(s.Parts) != len(other.Parts) || func() bool {
-		for k, v := range s.Events {
-			if other.Events[k] != v {
-				return true
-			}
-		}
-		for k, v := range s.Parts {
-			if other.Parts[k] != v {
-				return true
-			}
-		}
-		return false
-	}()
+	return !reflect.DeepEqual(s.clone(), other.clone())
 }
 
-// OpenCodeTokenCursor is a small fail-closed sidecar transaction. A pending
-// journal is never silently replayed after a crash.
+// OpenCodeTokenCursor is a small sidecar transaction. A pending journal is
+// discarded on reload and the committed state is replayed through statsd's
+// stable event-id dedupe; promoting the pending state would lose the ability
+// to distinguish a crash before versus after the fact append.
 type OpenCodeTokenCursor struct {
-	path    string
-	mu      sync.Mutex
-	current openCodeCursorState
-	pending *openCodeCursorState
+	path         string
+	mu           sync.Mutex
+	current      openCodeCursorState
+	pending      *openCodeCursorState
+	pendingToken string
+	generation   uint64
 }
 
 func NewOpenCodeTokenCursor(path string) *OpenCodeTokenCursor {
@@ -1029,28 +1240,47 @@ func (c *OpenCodeTokenCursor) state() (openCodeCursorState, error) {
 	if c.pending != nil {
 		return openCodeCursorState{}, errors.New("cursor-state-pending")
 	}
-	if err := c.load(); err != nil {
-		return openCodeCursorState{}, err
-	}
-	return c.current.clone(), nil
+	var result openCodeCursorState
+	err := withSidecarLock(c.path, func() error {
+		disk, err := c.readDisk()
+		if err != nil {
+			return err
+		}
+		if disk.Pending != nil {
+			cleanGeneration := disk.Generation + 1
+			clean := openCodeCursorDisk{Version: 1, Generation: cleanGeneration, State: disk.State}
+			if err := atomicSidecarWrite(c.path, clean); err != nil {
+				return err
+			}
+			disk.Generation = cleanGeneration
+		}
+		c.current, c.generation = disk.State, disk.Generation
+		c.pending, c.pendingToken = nil, ""
+		result = c.current.clone()
+		return nil
+	})
+	return result, err
 }
-func (c *OpenCodeTokenCursor) load() error {
+
+type openCodeCursorDisk struct {
+	Version      int                  `json:"version"`
+	Generation   uint64               `json:"generation,omitempty"`
+	State        openCodeCursorState  `json:"state"`
+	Pending      *openCodeCursorState `json:"pending,omitempty"`
+	PendingToken string               `json:"pending_token,omitempty"`
+}
+
+func (c *OpenCodeTokenCursor) readDisk() (openCodeCursorDisk, error) {
 	data, err := os.ReadFile(c.path)
 	if os.IsNotExist(err) {
-		return nil
+		return openCodeCursorDisk{Version: 1, State: openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}}, nil
 	}
 	if err != nil {
-		return err
+		return openCodeCursorDisk{}, err
 	}
-	var disk struct {
-		State   openCodeCursorState  `json:"state"`
-		Pending *openCodeCursorState `json:"pending"`
-	}
-	if json.Unmarshal(data, &disk) != nil {
-		return errors.New("cursor-state-malformed")
-	}
-	if disk.Pending != nil {
-		return errors.New("cursor-state-pending")
+	var disk openCodeCursorDisk
+	if json.Unmarshal(data, &disk) != nil || (disk.Version != 0 && disk.Version != 1) {
+		return openCodeCursorDisk{}, errors.New("cursor-state-malformed")
 	}
 	if disk.State.Events == nil {
 		disk.State.Events = map[string]string{}
@@ -1058,52 +1288,84 @@ func (c *OpenCodeTokenCursor) load() error {
 	if disk.State.Parts == nil {
 		disk.State.Parts = map[string]OpenCodePartCursor{}
 	}
-	c.current = disk.State
-	return nil
+	return disk, nil
 }
-func (c *OpenCodeTokenCursor) prepare(next openCodeCursorState) error {
+func (c *OpenCodeTokenCursor) prepare(before, next openCodeCursorState) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending != nil {
 		return errors.New("cursor-state-pending")
 	}
-	if err := c.load(); err != nil {
-		return err
-	}
-	c.pending = &next
-	return c.write()
+	return withSidecarLock(c.path, func() error {
+		disk, err := c.readDisk()
+		if err != nil {
+			return err
+		}
+		if disk.Pending != nil {
+			return errors.New("cursor-state-pending")
+		}
+		if disk.State.changed(before) {
+			return errors.New("cursor-state-stale")
+		}
+		token := strconv.FormatUint(disk.Generation+1, 10) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		prepared := next.clone()
+		staged := openCodeCursorDisk{Version: 1, Generation: disk.Generation + 1, State: disk.State, Pending: &prepared, PendingToken: token}
+		if err := atomicSidecarWrite(c.path, staged); err != nil {
+			return err
+		}
+		c.current, c.generation = disk.State, staged.Generation
+		c.pending, c.pendingToken = &prepared, token
+		return nil
+	})
 }
-func (c *OpenCodeTokenCursor) commit() error {
+func (c *OpenCodeTokenCursor) commit(expected openCodeCursorState) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending == nil {
 		return errors.New("cursor-state-pending-missing")
 	}
-	c.current = c.pending.clone()
-	c.pending = nil
-	return c.write()
+	return withSidecarLock(c.path, func() error {
+		disk, err := c.readDisk()
+		if err != nil {
+			return err
+		}
+		if disk.Pending == nil || disk.PendingToken == "" || disk.PendingToken != c.pendingToken || disk.Pending.changed(expected) {
+			return errors.New("cursor-state-stale")
+		}
+		committed := disk.Pending.clone()
+		staged := openCodeCursorDisk{Version: 1, Generation: disk.Generation + 1, State: committed}
+		if err := atomicSidecarWrite(c.path, staged); err != nil {
+			return err
+		}
+		c.current, c.generation, c.pending, c.pendingToken = committed, staged.Generation, nil, ""
+		return nil
+	})
 }
 func (c *OpenCodeTokenCursor) rollback() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pending = nil
-	return c.write()
+	if c.pending == nil {
+		return nil
+	}
+	return withSidecarLock(c.path, func() error {
+		disk, err := c.readDisk()
+		if err != nil {
+			return err
+		}
+		if disk.PendingToken != c.pendingToken {
+			return errors.New("cursor-state-stale")
+		}
+		staged := openCodeCursorDisk{Version: 1, Generation: disk.Generation + 1, State: disk.State}
+		if err := atomicSidecarWrite(c.path, staged); err != nil {
+			return err
+		}
+		c.current, c.generation, c.pending, c.pendingToken = disk.State, staged.Generation, nil, ""
+		return nil
+	})
 }
 func (c *OpenCodeTokenCursor) write() error {
-	if err := os.MkdirAll(filepath.Dir(c.path), 0700); err != nil {
-		return err
-	}
-	pending := c.pending
-	disk := struct {
-		State   openCodeCursorState  `json:"state"`
-		Pending *openCodeCursorState `json:"pending,omitempty"`
-	}{c.current, pending}
-	data, _ := json.Marshal(disk)
-	temp := c.path + ".tmp"
-	if err := os.WriteFile(temp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(temp, c.path)
+	disk := openCodeCursorDisk{Version: 1, Generation: c.generation, State: c.current, Pending: c.pending, PendingToken: c.pendingToken}
+	return atomicSidecarWrite(c.path, disk)
 }
 
 type transcriptDiscoveryBounds struct {
@@ -1142,6 +1404,9 @@ func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord,
 			continue
 		}
 		root := defaultTranscriptRoot(record.Kind, configuredRoots...)
+		if root == "" {
+			return out, errors.New("transcript-root-unconfigured")
+		}
 		candidates, err := recentTranscriptCandidates(ctx, root, bounds)
 		for _, candidate := range candidates {
 			if len(out) >= maxAgentTokenSources {
@@ -1173,16 +1438,31 @@ func recentTranscriptCandidates(ctx context.Context, root string, bounds transcr
 	if bounds.maxFiles <= 0 || bounds.maxDirs <= 0 || bounds.maxBytes <= 0 {
 		return nil, errors.New("transcript-discovery-bound-invalid")
 	}
-	type pendingDir struct{ path string }
-	queue := []pendingDir{{filepath.Clean(root)}}
+	type pendingDir struct {
+		path    string
+		modTime time.Time
+	}
+	queue := []pendingDir{{path: filepath.Clean(root)}}
 	candidates := make([]transcriptCandidate, 0, bounds.maxFiles)
 	inspectedDirs, inspectedFiles := 0, 0
 	var inspectedBytes int64
+	byteBudgetExceeded := false
+	var discoveryErr error
+	sortCandidates := func() {
+		sort.Slice(candidates, func(i, j int) bool {
+			if !candidates[i].modTime.Equal(candidates[j].modTime) {
+				return candidates[i].modTime.After(candidates[j].modTime)
+			}
+			return candidates[i].path < candidates[j].path
+		})
+	}
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
+			sortCandidates()
 			return candidates, err
 		}
 		if inspectedDirs >= bounds.maxDirs {
+			sortCandidates()
 			return candidates, errors.New("transcript-discovery-directory-budget-exhausted")
 		}
 		dir := queue[0]
@@ -1193,48 +1473,78 @@ func recentTranscriptCandidates(ctx context.Context, root string, bounds transcr
 			if os.IsNotExist(err) {
 				continue
 			}
+			sortCandidates()
 			return candidates, err
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+		childDirs := make([]pendingDir, 0)
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
+				sortCandidates()
 				return candidates, err
 			}
 			path := filepath.Join(dir.path, entry.Name())
 			if entry.IsDir() {
-				if inspectedDirs+len(queue) >= bounds.maxDirs {
-					continue
+				info, statErr := entry.Info()
+				if statErr == nil {
+					childDirs = append(childDirs, pendingDir{path: path, modTime: info.ModTime()})
+				} else if discoveryErr == nil {
+					discoveryErr = statErr
 				}
-				queue = append(queue, pendingDir{path})
 				continue
 			}
 			if filepath.Ext(path) != ".jsonl" || inspectedFiles >= bounds.maxFiles {
 				if inspectedFiles >= bounds.maxFiles {
+					sortCandidates()
 					return candidates, errors.New("transcript-discovery-file-budget-exhausted")
 				}
 				continue
 			}
 			info, statErr := entry.Info()
 			if statErr != nil {
+				if discoveryErr == nil {
+					discoveryErr = statErr
+				}
 				continue
 			}
 			if info.Size() > bounds.maxBytes-inspectedBytes {
-				return candidates, errors.New("transcript-discovery-byte-budget-exhausted")
+				// Keep the newest candidate even when its historical size exceeds
+				// the discovery budget. ScanTranscript applies the per-cadence
+				// budget to a bounded tail, so rejecting this path would hide a
+				// source carrying current usage. Continue stat'ing other bounded
+				// candidates so filename order cannot hide a newer transcript.
+				inspectedFiles++
+				candidates = append(candidates, transcriptCandidate{path: path, modTime: info.ModTime()})
+				byteBudgetExceeded = true
+				continue
 			}
 			inspectedFiles++
 			inspectedBytes += info.Size()
 			candidates = append(candidates, transcriptCandidate{path: path, modTime: info.ModTime()})
 			if inspectedBytes >= bounds.maxBytes {
-				return candidates, errors.New("transcript-discovery-byte-budget-exhausted")
+				byteBudgetExceeded = true
 			}
 		}
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if !candidates[i].modTime.Equal(candidates[j].modTime) {
-			return candidates[i].modTime.After(candidates[j].modTime)
+		sort.Slice(childDirs, func(i, j int) bool {
+			if !childDirs[i].modTime.Equal(childDirs[j].modTime) {
+				return childDirs[i].modTime.After(childDirs[j].modTime)
+			}
+			return childDirs[i].path < childDirs[j].path
+		})
+		for _, child := range childDirs {
+			if inspectedDirs+len(queue) >= bounds.maxDirs {
+				break
+			}
+			queue = append(queue, child)
 		}
-		return candidates[i].path < candidates[j].path
-	})
+	}
+	sortCandidates()
+	if byteBudgetExceeded {
+		return candidates, errors.New("transcript-discovery-byte-budget-exhausted")
+	}
+	if discoveryErr != nil {
+		return candidates, discoveryErr
+	}
 	return candidates, nil
 }
 
@@ -1245,15 +1555,10 @@ func defaultTranscriptRoot(kind string, configuredRoots ...string) string {
 	if kind == "codex" && len(configuredRoots) > 1 && strings.TrimSpace(configuredRoots[1]) != "" {
 		return filepath.Clean(configuredRoots[1])
 	}
-	home := os.Getenv("HOME")
-	if kind == "claude" {
-		return filepath.Join(home, ".claude", "projects")
-	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	return filepath.Join(codexHome, "sessions")
+	// Production resolves and passes explicit roots from cmd/yolomux-go.  Do not
+	// fall back to HOME/CODEX_HOME here: a missing configuration must be a
+	// bounded unavailable source, never an accidental read of developer state.
+	return ""
 }
 
 func transcriptAgentID(record AgentRecord) string {

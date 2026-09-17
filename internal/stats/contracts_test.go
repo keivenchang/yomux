@@ -1,8 +1,10 @@
 package stats
 
 import (
+	"context"
 	"errors"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -115,5 +117,55 @@ func TestIdempotencyKeysUseDeclaredIdentities(t *testing.T) {
 	}
 	if !strings.HasPrefix(testTombstone().IdempotencyKey(), "tombstone:codex:thread-1:event-1") {
 		t.Fatal("tombstone key changed")
+	}
+}
+
+func TestCurrentFamilyValidationIsWriteOnlyAndCompatibilityAware(t *testing.T) {
+	valid := BuildCPUFacts(CPUSample{
+		Reason:  CPUValid,
+		Process: CPUMeasurement{Value: 3.25, Valid: true},
+		Host:    CPUMeasurement{Value: 12.5, Valid: true},
+	}, map[string]float64{"python": 3.25}, HostFactContext{
+		EpochID: "cpu", EpochStartedAt: 0, ObservedAt: 1, CadenceSeconds: 1, SourceID: "host",
+	})
+	malformed := valid
+	malformed.Observations = append([]Observation(nil), valid.Observations...)
+	malformed.Observations[0].Payload = map[string]any{"process_percent": 3.25}
+
+	legacyWriter, err := OpenWriter(context.Background(), filepath.Join(t.TempDir(), "legacy.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyWriter.AppendBatch(context.Background(), malformed); err != nil {
+		_ = legacyWriter.Close()
+		t.Fatalf("compatibility writer rejected sparse fixture: %v", err)
+	}
+	if err := legacyWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	currentWriter, err := OpenWriter(context.Background(), filepath.Join(t.TempDir(), "current.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentWriter.EnableCurrentFamilyValidation()
+	validBatches := []AppendBatch{
+		valid,
+		BuildGPUFacts([]GPUDevice{{SourceID: "gpu:0", Label: "GPU 0", Utilization: 50, MemoryUsedBytes: 100, MemoryTotalBytes: 200}}, HostFactContext{EpochID: "gpu", EpochStartedAt: 0, ObservedAt: 2, CadenceSeconds: 10, SourceID: "gpu:0"}),
+		BuildSystemMemoryFacts(MemoryCounters{UsedBytes: 100, CapacityBytes: 200}, nil, nil, HostFactContext{EpochID: "memory", EpochStartedAt: 0, ObservedAt: 3, CadenceSeconds: 60, SourceID: "host"}),
+		BuildAgentStatusFacts(map[string]any{"agent": "run"}, map[string]AgentStatus{"session": AgentStatusIdle}, 4, AgentStatusCounts{Total: 1, Running: 0}, []map[string]any{{"id": "agent", "kind": "codex", "state": "idle", "session": "work", "pane": "%1"}}, HostFactContext{EpochID: "agents", EpochStartedAt: 0, ObservedAt: 4, CadenceSeconds: 10, SourceID: "host"}),
+		{Observations: []Observation{{EventID: "service-load", Family: "service_load", SourceID: "statsd", ObservedAt: 5, EpochID: "service", Payload: map[string]any{"running": true, "cpu_percent": 2.0, "rss_bytes": nil}}}},
+		{Observations: []Observation{{EventID: "browser-api", Family: "browser", SourceID: "browser:a", ObservedAt: 6, EpochID: "browser", Payload: map[string]any{"kind": "api", "latency_ms": 2.0, "status": 200}}}},
+	}
+	for _, batch := range validBatches {
+		if _, err := currentWriter.AppendBatch(context.Background(), batch); err != nil {
+			t.Fatalf("current writer rejected Python-shaped payload: %v", err)
+		}
+	}
+	if _, err := currentWriter.AppendBatch(context.Background(), malformed); err == nil || !strings.Contains(err.Error(), "missing field") {
+		t.Fatalf("current writer accepted malformed current payload: %v", err)
+	}
+	if err := currentWriter.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

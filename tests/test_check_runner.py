@@ -3424,6 +3424,8 @@ def test_dockerfile_keeps_expensive_dependency_layers_above_go_source_copies():
     assert "npm ci --ignore-scripts" in text
     assert "ENV PATH=/opt/yolomux-agent-clients/node_modules/.bin:${PATH}" in text
     assert text.index("COPY go.mod go.sum /opt/yolomux-bazel-seed/") < source_copy
+    assert "GOPROXY=off GOSUMDB=off go mod download" in text
+    assert "builder will use its network" not in text
 
 
 def test_docker_test_dependency_lock_contains_only_exact_versions():
@@ -3530,6 +3532,71 @@ def test_docker_bazel_targets_share_complete_runtime_data_group():
         assert '"manual"' not in target_block, target
 
 
+def test_docker_bazel_data_exports_go_subpackage_sources_without_checkout_access(tmp_path):
+    """The Docker data group must carry Go package files through Bazel boundaries."""
+
+    cquery = ["bazel", "cquery", "//:docker_bazel_test_data", "--output=files"]
+    local_registry = Path("/opt/yolomux-bazel-registry")
+    if local_registry.is_dir():
+        cquery.append(f"--registry=file://{local_registry}")
+        local_cache = tmp_path / "bazel-repository-cache"
+        shutil.copytree("/opt/yolomux-bazel-repository-cache", local_cache)
+        for cached_path in local_cache.rglob("*"):
+            mode = cached_path.stat().st_mode
+            os.chmod(cached_path, mode | (0o700 if cached_path.is_dir() else 0o600))
+        cquery.append(f"--repository_cache={local_cache}")
+    completed = subprocess.run(
+        cquery,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    declared = set(completed.stdout.splitlines())
+    for relative in (
+        "cmd/fake-llm/BUILD.bazel",
+        "cmd/yolomux-go/BUILD.bazel",
+        "internal/capabilities/BUILD.bazel",
+        "internal/fakellm/BUILD.bazel",
+        "internal/finder/BUILD.bazel",
+        "internal/stats/BUILD.bazel",
+        "internal/testsupport/BUILD.bazel",
+        "internal/work/BUILD.bazel",
+        "pytest.ini",
+        "cmd/yolomux-go/main.go",
+        "cmd/yolomux-go/stats_runtime.go",
+        "internal/stats/service.go",
+        "internal/stats/materializer.go",
+    ):
+        assert relative in declared, relative
+
+    runfiles_root = tmp_path / "runfiles"
+    logical_root = runfiles_root / "__main__"
+    (logical_root / "docker").mkdir(parents=True)
+    (logical_root / "tools").mkdir()
+    (logical_root / "docker" / "Dockerfile.test").write_text("", encoding="utf-8")
+    script = logical_root / "tools" / "runner.sh"
+    script.write_text("", encoding="utf-8")
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"BUILD_WORKSPACE_DIRECTORY", "YOLOMUX_TEST_SOURCE_ROOT", "TEST_SRCDIR", "RUNFILES_DIR"}
+    }
+    environment["RUNFILES_DIR"] = str(runfiles_root)
+    environment["BUILD_WORKSPACE_DIRECTORY"] = str(tmp_path / "inaccessible-checkout")
+    resolved = subprocess.run(
+        ["bash", "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    assert Path(resolved.stdout.strip()) == logical_root
+
+
 def test_bazel_source_root_keeps_runfiles_path_before_resolving_symlinks(tmp_path):
     """A runfile symlink must not redirect E2E code to undeclared checkout files."""
 
@@ -3556,6 +3623,46 @@ def test_bazel_source_root_keeps_runfiles_path_before_resolving_symlinks(tmp_pat
     )
     assert completed.returncode == 0, completed.stderr
     assert Path(completed.stdout.strip()) == logical_root
+
+
+def test_bazel_source_root_materializes_symlinked_docker_context(tmp_path):
+    """A symlinked Dockerfile is copied into an action-owned context, never resolved to checkout."""
+
+    runfiles_root = tmp_path / "runfiles"
+    logical_root = runfiles_root / "__main__"
+    (logical_root / "docker").mkdir(parents=True)
+    (logical_root / "tools").mkdir()
+    (logical_root / "docker" / "Dockerfile.test").symlink_to(REPO_ROOT / "docker" / "Dockerfile.test")
+    (logical_root / "docker" / "run-tests.sh").symlink_to(REPO_ROOT / "docker" / "run-tests.sh")
+    script = logical_root / "tools" / "runner.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"BUILD_WORKSPACE_DIRECTORY", "YOLOMUX_TEST_SOURCE_ROOT", "TEST_SRCDIR", "RUNFILES_DIR"}
+    }
+    environment["RUNFILES_DIR"] = str(runfiles_root)
+    environment["TEST_TMPDIR"] = str(tmp_path / "test-tmp")
+    Path(environment["TEST_TMPDIR"]).mkdir()
+    completed = subprocess.run(
+        ["bash", "-c", ". tools/bazel_test_common.sh; bazel_test_source_root \"$1\"", "bash", str(script)],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    materialized = Path(completed.stdout.strip())
+    assert materialized != logical_root
+    assert materialized != REPO_ROOT
+    assert materialized.parent == Path(environment["TEST_TMPDIR"])
+    assert materialized.stat().st_mode & 0o755 == 0o755
+    assert (materialized / "docker" / "Dockerfile.test").is_file()
+    assert not (materialized / "docker" / "Dockerfile.test").is_symlink()
+    run_tests = materialized / "docker" / "run-tests.sh"
+    assert run_tests.is_file()
+    assert os.access(run_tests, os.X_OK)
 
 
 def test_go_stats_browser_cleanup_retires_page_before_listener():

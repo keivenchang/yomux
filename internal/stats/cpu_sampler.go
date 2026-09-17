@@ -67,6 +67,8 @@ type CPUDeltaSampler struct {
 	previous    *CPUSnapshot
 }
 
+const maxProcessCPUSeries = 4
+
 // NewCPUDeltaSampler retains the original API. The optional logical CPU count
 // is used for grouped binary percentages; one is the historical default.
 func NewCPUDeltaSampler(processKey string, groupKeys []string, logicalCPUs ...int) *CPUDeltaSampler {
@@ -227,11 +229,31 @@ func binaryPair(current, previous CPUSnapshot, binary string) (uint64, uint64, b
 }
 
 func groupedProcessPercent(current, previous CPUSnapshot, wall time.Duration, logicalCPUs int, binaries []string) map[string]float64 {
-	result := make(map[string]float64)
+	values := make(map[string]float64)
 	for _, binary := range binaries {
 		if a, b, ok := binaryPair(current, previous, binary); ok && a >= b {
-			result[binary] = cpuPercentage(a-b, wall, logicalCPUs, processCounterRate(current, previous))
+			values[binary] = cpuPercentage(a-b, wall, logicalCPUs, processCounterRate(current, previous))
 		}
+	}
+	// The Python collector keeps only the four largest binary series. Apply the
+	// same deterministic bound here so the current-family writer contract cannot
+	// reject an otherwise valid host sample on a busy machine with many binaries.
+	ranked := make([]string, 0, len(values))
+	for binary := range values {
+		ranked = append(ranked, binary)
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if values[ranked[i]] != values[ranked[j]] {
+			return values[ranked[i]] > values[ranked[j]]
+		}
+		return ranked[i] < ranked[j]
+	})
+	if len(ranked) > maxProcessCPUSeries {
+		ranked = ranked[:maxProcessCPUSeries]
+	}
+	result := make(map[string]float64, len(ranked))
+	for _, binary := range ranked {
+		result[binary] = math.Min(100, values[binary])
 	}
 	return result
 }

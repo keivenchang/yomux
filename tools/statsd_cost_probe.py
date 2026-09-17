@@ -112,6 +112,20 @@ def _observation(index: int, now: float) -> storage.Observation:
         if position < weight:
             break
         position -= weight
+    if family == "service_load":
+        payload = {"running": True, "cpu_percent": float(index % 100), "rss_bytes": float(1000 + index)}
+    elif family == "cpu":
+        payload = {"process_percent": float(index % 100), "system_percent": float(50 + index % 50)}
+    elif family == "browser":
+        payload = {"kind": "api", "latency_ms": float(1 + index % 10), "status": 200.0}
+    elif family == "gpu":
+        payload = {"util_percent": float(index % 100), "memory_used_bytes": float(1000 + index), "memory_capacity_bytes": 100000.0, "label": "synthetic-gpu"}
+    elif family == "system_memory":
+        payload = {"used_bytes": float(1_000_000 + index), "capacity_bytes": 2_000_000.0}
+    elif family == "agent_status":
+        payload = {"states": {"synthetic-agent": "run"}, "session_states": {"synthetic-session": "run"}, "snapshot_revision": float(index)}
+    else:  # pragma: no cover - FAMILY_MIX is deliberately closed above.
+        raise ValueError(f"unsupported cost-probe family: {family}")
     return storage.Observation(
         event_id=f"costprobe-{index}",
         family=family,
@@ -119,7 +133,7 @@ def _observation(index: int, now: float) -> storage.Observation:
         observed_at=now + index,
         epoch_id=f"costprobe-{family}",
         owner_generation=1,
-        payload={"value": float(index), "probe": "cost", "index": index},
+        payload=payload,
     )
 
 
@@ -238,8 +252,22 @@ def _coldstart_workload(database: Path) -> dict:
     started = time.perf_counter()
     reader = storage.Store.open_reader(database)
     try:
-        generation = materializer.build_generation(reader)
-        cells = len(getattr(generation, "cells", ()) or ())
+        snapshot = reader.read_snapshot()
+        observed_until = max(
+            (
+                *(item.observed_at for item in snapshot.observations),
+                *(item.observed_at for item in snapshot.usage_atoms),
+                PROBE_EPOCH,
+            )
+        )
+        generation = materializer.build_generation(
+            snapshot,
+            source_generation=snapshot.schema.source_generation,
+            cache_generation=1,
+            generated_at=observed_until,
+            observed_until=observed_until,
+        )
+        cells = sum(len(layer.buckets) for layer in generation.layers)
     finally:
         reader.close()
     elapsed = time.perf_counter() - started

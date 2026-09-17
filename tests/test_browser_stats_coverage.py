@@ -59,6 +59,107 @@ def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_
     assert observed["logsRendered"] is True, observed
 
 
+def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(browser, tmp_path):
+    """Stats-only boot must not probe routes outside the negotiated stats surface."""
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=debug&layout=left&tabs=left:__debug__",
+        sessions=("debug",),
+        terminal_only=True,
+        stats_only=True,
+    )
+    result = WebDriverWait(browser, 15, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
+            if (typeof jsDebugHistoryReadiness === 'undefined'
+                || jsDebugHistoryReadiness.phase !== 'ready') return false;
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const rect = graph?.getBoundingClientRect();
+            return graph && rect.width > 0 && rect.height > 0
+              ? {
+                  statsOnly: window.__fixtureStatsOnly === true,
+                  graphWidth: rect.width,
+                  graphHeight: rect.height,
+                  statsFetches: window.__bootFetches.filter(item => item.path.startsWith('/api/stats')).length,
+                  agentStatusFetches: window.__bootFetches.filter(item => item.path === '/api/stats-agent-status').length,
+                }
+              : false;
+            """
+        )
+    )
+    assert result["statsOnly"] is True, result
+    assert result["statsFetches"] > 0, result
+    assert result["agentStatusFetches"] > 0, result
+    detail = browser.execute_script(
+        """
+        const node = document.querySelector('[data-js-debug-agent-window-detail="activity"]');
+        return {text: node?.textContent?.trim() || '', state: node?.dataset?.jsDebugAgentWindowDetailState || null, body: document.body.innerText.slice(0, 1200)};
+        """
+    )
+    assert detail["state"] == "current" and "2 agent windows across 1 sessions" in detail["text"], {"result": result, "detail": detail}
+    non_stats_boot_fetches = browser.execute_script(
+        """
+        return window.__bootFetches.filter(item => !item.path.startsWith('/api/stats-'));
+        """
+    )
+    assert not non_stats_boot_fetches, non_stats_boot_fetches
+    boot_failures = browser.execute_script(
+        """
+        return (typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : []).filter(event => event.type === 'api');
+        """
+    )
+    assert not boot_failures, boot_failures
+    unrelated = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const paths = [
+          '/api/settings', '/api/session-metadata', '/api/background/status',
+          '/api/auto-approve', '/api/fs/index-status', '/api/watched-prs',
+          '/api/update-status', '/api/chat/bootstrap', '/api/transcripts',
+          '/api/activity', '/api/unrelated-boot-route',
+        ];
+        Promise.all(paths.map(path => fetch(path, {cache: 'no-store'}).then(response =>
+          response.json().then(body => ({path, status: response.status, body})))))
+          .then(results => done(results))
+          .catch(error => done({error: String(error)}));
+        """
+    )
+    assert isinstance(unrelated, list), unrelated
+    assert all(item["status"] == 404 and item["body"]["error"] == "stats-only fixture rejects unrelated route" for item in unrelated), unrelated
+    unknown = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        apiFetchJson('/api/unrelated-boot-route', {cache: 'no-store'})
+          .then(() => done({error: 'unexpected success'}))
+          .catch(error => done({message: String(error?.message || error), status: error?.status || null}));
+        """
+    )
+    assert unknown["status"] == 404, unknown
+    unknown_failures = browser.execute_script(
+        """
+        return (typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : [])
+          .filter(event => event.endpoint === '/api/unrelated-boot-route');
+        """
+    )
+    assert unknown_failures and unknown_failures[-1]["status"] == 404, unknown_failures
+    readiness_after_unrelated_404 = browser.execute_script(
+        """
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const rect = graph?.getBoundingClientRect();
+        return {
+          phase: typeof jsDebugHistoryReadiness !== 'undefined' ? jsDebugHistoryReadiness.phase : null,
+          graphWidth: rect?.width || 0,
+          graphHeight: rect?.height || 0,
+        };
+        """
+    )
+    assert readiness_after_unrelated_404["phase"] == "ready", readiness_after_unrelated_404
+    assert readiness_after_unrelated_404["graphWidth"] > 0 and readiness_after_unrelated_404["graphHeight"] > 0, readiness_after_unrelated_404
+    browser.execute_script("clearJsDebugEvents();")
+
+
 def _load_current_stats(browser, tmp_path, view="stats"):
     load_static_html_fixture(
         browser,

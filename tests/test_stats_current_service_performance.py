@@ -41,6 +41,18 @@ def test_service_sampling_skips_system_only_diagnostics():
     assert diagnostic_calls == []
 
 
+def test_cost_probe_coldstart_uses_the_current_materializer_contract(tmp_path):
+    """The synthetic cold-start probe must exercise a valid current-family store."""
+
+    database = tmp_path / storage.DATABASE_FILENAME
+    measure_cost(database, facts=64, batch_size=8)
+    report = measure_cost(database, mode="coldstart")
+
+    assert report["mode"] == "coldstart"
+    assert report["cells"] > 0
+    assert report["peak_kb"]["anon_plus_swap"] > 0
+
+
 # --- joint physical-cost gate -------------------------------------------------
 #
 # Pins bytes written per recorded fact, read syscalls per fact, and peak process

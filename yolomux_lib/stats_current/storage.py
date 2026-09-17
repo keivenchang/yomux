@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import json
 import math
 import os
 import sqlite3
+import threading
 import time
 import zlib
 from contextlib import contextmanager
@@ -92,6 +95,87 @@ PRUNE_STATE_FILENAME = f"stats-prune-v{SCHEMA_VERSION}.json"
 # the disagreement is what atomicity would have bought; hiding it is what a bare float would have
 # cost.
 VACUUM_BASELINE_FILENAME = f"stats-vacuum-v{SCHEMA_VERSION}.json"
+_WRITER_LEASES_LOCK = threading.Lock()
+_WRITER_LEASES: dict[str, tuple[int, int]] = {}
+_WRITER_LEASE_KEYS: dict[int, str] = {}
+
+
+def _writer_lock_path(path: Path) -> Path:
+    """Return the cross-language lease path for one database inode."""
+
+    return Path(f"{path.absolute()}.writer.lock")
+
+
+def _acquire_writer_lease(path: Path) -> int:
+    """Acquire the same non-blocking lease used by the Go writer."""
+
+    key = str(path.absolute())
+    with _WRITER_LEASES_LOCK:
+        existing = _WRITER_LEASES.get(key)
+        if existing is not None:
+            primary, references = existing
+            _WRITER_LEASES[key] = (primary, references + 1)
+            return primary
+        lock_path = _writer_lock_path(path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            os.close(descriptor)
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                raise StatsCurrentError("YO!stats writer is already owned") from error
+            raise StatsCurrentError("could not acquire YO!stats writer lease") from error
+        _WRITER_LEASES[key] = (descriptor, 1)
+        _WRITER_LEASE_KEYS[descriptor] = key
+        return descriptor
+
+
+def _release_writer_lease(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    with _WRITER_LEASES_LOCK:
+        key = _WRITER_LEASE_KEYS.get(descriptor)
+        if key is None:
+            os.close(descriptor)
+            return
+        primary, references = _WRITER_LEASES[key]
+        if references > 1:
+            _WRITER_LEASES[key] = (primary, references - 1)
+            return
+        del _WRITER_LEASES[key]
+        _WRITER_LEASE_KEYS.pop(descriptor, None)
+        try:
+            fcntl.flock(primary, fcntl.LOCK_UN)
+        finally:
+            os.close(primary)
+
+
+@contextmanager
+def writer_lease(path: str | Path) -> Iterator[None]:
+    """Hold the cross-language writer lease across a complete startup transaction.
+
+    Migration may inspect and atomically activate the current database before a
+    :class:`Store` exists.  Callers that own that transition must take the same
+    lease as ``Store.open`` before compatibility checks, migration, or fence
+    publication; otherwise a Go writer can pass its preflight while Python is
+    still replacing the database.  ``Store.open`` is re-entrant within this
+    process, so the eventual store can retain its nested reference while this
+    outer startup scope closes.
+    """
+
+    database_path = Path(path)
+    _validate_database_path(database_path)
+    # Match Store.open and the Go owner: aliases of the parent directory must
+    # contend on one lock file, while the database itself remains forbidden to
+    # symlink. This also keeps direct migration callers safe when they receive
+    # an aliased state root.
+    database_path = _canonical_database_path(database_path)
+    descriptor = _acquire_writer_lease(database_path)
+    try:
+        yield
+    finally:
+        _release_writer_lease(descriptor)
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -1477,6 +1561,12 @@ def _validate_database_path(path: Path) -> None:
         raise SchemaMismatchError("current stats database cannot be a symbolic link")
 
 
+def _canonical_database_path(path: Path) -> Path:
+    """Resolve parent-directory aliases so every writer names one lease file."""
+
+    return path.absolute().parent.resolve(strict=False) / path.name
+
+
 def _check_writer(header: _Header, writer_protocol: int, writer_build: int) -> None:
     if writer_protocol < header.minimum_writer_protocol or writer_build < header.minimum_writer_build:
         raise SchemaTooNewError(
@@ -2242,10 +2332,11 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
 class Store:
     """One fail-fast owner of the exact current schema and original facts."""
 
-    def __init__(self, path: Path, connection: sqlite3.Connection, *, read_only: bool = False) -> None:
+    def __init__(self, path: Path, connection: sqlite3.Connection, *, read_only: bool = False, writer_lease: int | None = None) -> None:
         self.path = path
         self._database: sqlite3.Connection | None = connection
         self.read_only = read_only
+        self._writer_lease = writer_lease
 
     @classmethod
     def open(
@@ -2262,23 +2353,36 @@ class Store:
         protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")
         build = _validate_nonnegative_integer(writer_build, "writer_build")
         _validate_database_path(database_path)
+        database_path = _canonical_database_path(database_path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        cls._preflight_fence(database_path, protocol, build)
-        if protocol < MIN_WRITER_PROTOCOL or build < MIN_WRITER_BUILD:
-            _check_writer(
-                _Header(APPLICATION_ID, SCHEMA_VERSION, MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, 0),
-                protocol,
-                build,
-            )
-        is_new = not database_path.exists() or database_path.stat().st_size == 0
-        if not is_new:
-            cls._preflight(database_path, protocol, build)
-        # Before the file is opened or created, not after: WAL is unsupported on a
-        # network filesystem, and a shared home puts two hosts on one inode.
-        preflight_mutable_roots(wal_databases=[database_path])
-        cls._publish_fence(database_path)
-        connection = sqlite3.connect(database_path, timeout=5.0, isolation_level=None)
+        # A fence that already rejects this writer can be rejected before creating the
+        # persistent lease sidecar. The check below is only a side-effect-free fast path;
+        # the authoritative fence check still runs after lease acquisition so a fence change
+        # cannot race the writer boundary.
+        fence_path = database_path.parent / WRITER_FENCE_FILENAME
+        if fence_path.exists() and not _writer_lock_path(database_path).exists():
+            cls._preflight_fence(database_path, protocol, build)
+        writer_lease = _acquire_writer_lease(database_path)
+        connection: sqlite3.Connection | None = None
         try:
+            # Fence and schema preflight are part of the ownership boundary. A competing
+            # process must not pass a read-only check and then mutate the same database before
+            # this writer publishes its fence or opens the connection.
+            cls._preflight_fence(database_path, protocol, build)
+            if protocol < MIN_WRITER_PROTOCOL or build < MIN_WRITER_BUILD:
+                _check_writer(
+                    _Header(APPLICATION_ID, SCHEMA_VERSION, MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, 0),
+                    protocol,
+                    build,
+                )
+            is_new = not database_path.exists() or database_path.stat().st_size == 0
+            if not is_new:
+                cls._preflight(database_path, protocol, build)
+            # Before the file is opened or created, not after: WAL is unsupported on a
+            # network filesystem, and a shared home puts two hosts on one inode.
+            preflight_mutable_roots(wal_databases=[database_path])
+            cls._publish_fence(database_path)
+            connection = sqlite3.connect(database_path, timeout=5.0, isolation_level=None)
             if is_new:
                 cls._initialize(connection)
             else:
@@ -2307,10 +2411,12 @@ class Store:
             # a prior large transaction left behind. The service singleton lock
             # makes this the safe startup boundary before worker readers exist.
             _truncate_wal(connection)
-        except (sqlite3.Error, StatsCurrentError):
-            connection.close()
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            _release_writer_lease(writer_lease)
             raise
-        return cls(database_path, connection)
+        return cls(database_path, connection, writer_lease=writer_lease)
 
     @classmethod
     def open_reader(
@@ -2327,6 +2433,7 @@ class Store:
         protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")
         build = _validate_nonnegative_integer(writer_build, "writer_build")
         _validate_database_path(database_path)
+        database_path = _canonical_database_path(database_path)
         cls._preflight_fence(database_path, protocol, build)
         cls._preflight(database_path, protocol, build)
         connection: sqlite3.Connection | None = None
@@ -2575,6 +2682,9 @@ class Store:
         if self._database is not None:
             self._database.close()
             self._database = None
+        if self._writer_lease is not None:
+            _release_writer_lease(self._writer_lease)
+            self._writer_lease = None
 
     def __enter__(self) -> Store:
         self._connection()
@@ -4168,6 +4278,7 @@ def require_compatible_writer(
     protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")
     build = _validate_nonnegative_integer(writer_build, "writer_build")
     _validate_database_path(database_path)
+    database_path = _canonical_database_path(database_path)
     Store._preflight_fence(database_path, protocol, build)
     if database_path.is_file() and database_path.stat().st_size:
         Store._preflight(database_path, protocol, build)

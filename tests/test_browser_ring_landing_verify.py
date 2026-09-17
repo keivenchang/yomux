@@ -45,6 +45,7 @@ from yolomux_lib.local_services.registry import inherited_python_path
 from yolomux_lib.stats_current import client as stats_client
 from yolomux_lib.stats_current import service as stats_service
 from yolomux_lib.stats_current import storage
+from tools.instance_isolation import synthetic_test_environment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -115,9 +116,67 @@ def _wait_http(browser_driver, port: int) -> None:
     WebDriverWait(browser_driver, 20, poll_frequency=0.1).until(serving)
 
 
-def _launch_server(port: int, session: str, log_path: Path, runtime_dir: Path) -> subprocess.Popen[bytes]:
+def _launch_server(
+    port: int,
+    session: str,
+    log_path: Path,
+    runtime_dir: Path,
+    tmux_socket: Path,
+) -> subprocess.Popen[bytes]:
     output = log_path.open("ab")
-    environment = dict(os.environ)
+    fixture_root = runtime_dir.parent
+    # Every child path is fixture-owned. Do not copy ambient values here: a host
+    # Codex root, temporary directory, or lock path could reintroduce real client
+    # state after synthetic_test_environment() scrubs the parent environment.
+    fixture_overrides = {
+        "HOME": str(fixture_root / "home"),
+        "TMPDIR": str(fixture_root / "tmp"),
+        "XDG_CONFIG_HOME": str(fixture_root / "xdg-config"),
+        "XDG_DATA_HOME": str(fixture_root / "xdg-data"),
+        "XDG_STATE_HOME": str(fixture_root / "xdg-state"),
+        "XDG_CACHE_HOME": str(fixture_root / "xdg-cache"),
+        "XDG_RUNTIME_DIR": str(fixture_root / "xdg-runtime"),
+        "CLAUDE_CONFIG_DIR": str(fixture_root / "claude-config"),
+        "YOLOMUX_CONFIG_DIR": str(fixture_root / "config"),
+        "YOLOMUX_STATE_DIR": str(fixture_root / "state"),
+        "YOLOMUX_CACHE_DIR": str(fixture_root / "cache"),
+        "YOLOMUX_CODEX_HOME": str(fixture_root / "codex-home"),
+        "CODEX_HOME": str(fixture_root / "codex-home"),
+        "YOLOMUX_START_LOCK_DIR": str(fixture_root / "start-lock"),
+        "YOLOMUX_TOOL_LOCK_PATH": str(fixture_root / "tool-lock"),
+        "YOLOMUX_CA_DIR": str(fixture_root / "ca"),
+        "YOLOMUX_LOG_DIR": str(fixture_root / "logs"),
+        "YOLOMUX_WORKSPACE_BASE": str(fixture_root / "workspace"),
+        "YOLOMUX_TMUX_SOCKET": str(tmux_socket),
+        "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(fixture_root / "claude-transcripts"),
+        "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(fixture_root / "codex-transcripts"),
+        "YOLOMUX_OPENCODE_DATABASE": str(fixture_root / "opencode.db"),
+    }
+    environment = synthetic_test_environment(fixture_overrides)
+    for path in (
+        environment["HOME"],
+        environment["TMPDIR"],
+        environment["XDG_CONFIG_HOME"],
+        environment["XDG_DATA_HOME"],
+        environment["XDG_STATE_HOME"],
+        environment["XDG_CACHE_HOME"],
+        environment["XDG_RUNTIME_DIR"],
+        environment["CLAUDE_CONFIG_DIR"],
+        environment["YOLOMUX_CONFIG_DIR"],
+        environment["YOLOMUX_STATE_DIR"],
+        environment["YOLOMUX_CACHE_DIR"],
+        environment["CODEX_HOME"],
+        environment["YOLOMUX_START_LOCK_DIR"],
+        environment["YOLOMUX_CA_DIR"],
+        environment["YOLOMUX_LOG_DIR"],
+        environment["YOLOMUX_WORKSPACE_BASE"],
+    ):
+        Path(path).mkdir(parents=True, exist_ok=True)
+    for path in (
+        environment["YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"],
+        environment["YOLOMUX_CODEX_TRANSCRIPT_ROOT"],
+    ):
+        Path(path).mkdir(parents=True, exist_ok=True)
     environment["YOLOMUX_START_LOAD_WAIT_SECONDS"] = "30"
     environment.pop("YOLOMUX_ROOT", None)
     environment["YOLOMUX_RUNTIME_DIR"] = str(runtime_dir)
@@ -144,6 +203,49 @@ def _launch_server(port: int, session: str, log_path: Path, runtime_dir: Path) -
     )
     output.close()
     return process
+
+
+def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path: Path) -> None:
+    """A hostile operator environment must not reach the ring fixture child."""
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def capture(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setenv("HOME", "/host/home")
+    monkeypatch.setenv("TMPDIR", "/host/tmp")
+    monkeypatch.setenv("YOLOMUX_CODEX_HOME", "/host/codex")
+    monkeypatch.setenv("YOLOMUX_OPENCODE_DATABASE", "/host/opencode.db")
+    monkeypatch.setattr(subprocess, "Popen", capture)
+
+    process = _launch_server(
+        7222,
+        "fixture-session",
+        tmp_path / "server.log",
+        runtime_dir,
+        tmp_path / "tmux.sock",
+    )
+
+    assert isinstance(process, FakeProcess)
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["HOME"] == str(tmp_path / "home")
+    assert environment["TMPDIR"] == str(tmp_path / "tmp")
+    assert environment["XDG_RUNTIME_DIR"] == str(tmp_path / "xdg-runtime")
+    assert environment["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-config")
+    assert environment["YOLOMUX_CODEX_HOME"] == str(tmp_path / "codex-home")
+    assert environment["YOLOMUX_OPENCODE_DATABASE"] == str(tmp_path / "opencode.db")
+    assert environment["YOLOMUX_TMUX_SOCKET"] == str(tmp_path / "tmux.sock")
+    assert all("/host/" not in value for value in environment.values())
 
 
 def _stop_server(process: subprocess.Popen[bytes]) -> None:
@@ -291,6 +393,29 @@ def _wait_ring_published(browser_driver, client: stats_client.StatsCurrentClient
         raise AssertionError({
             "expected_source_generation": source_generation,
             "status": client.status(),
+        }) from error
+
+
+def _wait_snapshot_ready(
+    browser_driver,
+    client: stats_client.StatsCurrentClient,
+    request: dict[str, object],
+) -> tuple[dict[str, object], bytes]:
+    """Wait for the cache to converge after a ring publication before reading it."""
+
+    def ready(_driver):
+        metadata, binary = client.snapshot(request)
+        if metadata.get("ok") is True and binary:
+            return metadata, binary
+        return False
+
+    try:
+        return WebDriverWait(browser_driver, 20, poll_frequency=0.1).until(ready)
+    except TimeoutException as error:
+        raise AssertionError({
+            "request": request,
+            "status": client.status(),
+            "resource_state": client.resource_state(),
         }) from error
 
 
@@ -841,7 +966,22 @@ def _prepare_ring_runtime(
 
     port = gate_http_port.release()
     service_runtime_dir = Path(tempfile.mkdtemp(prefix="ring-runtime-", dir=gate_runtime_paths.root))
-    runtime_environ = dict(os.environ)
+    runtime_environ = synthetic_test_environment({
+        "HOME": str(gate_runtime_paths.home_dir),
+        "TMPDIR": str(gate_runtime_paths.root / "tmp"),
+        "XDG_CONFIG_HOME": str(gate_runtime_paths.config_dir),
+        "XDG_DATA_HOME": str(gate_runtime_paths.root / "xdg-data"),
+        "XDG_STATE_HOME": str(gate_runtime_paths.state_dir),
+        "XDG_CACHE_HOME": str(gate_runtime_paths.cache_dir),
+        "XDG_RUNTIME_DIR": str(gate_runtime_paths.root / "xdg-runtime"),
+        "CLAUDE_CONFIG_DIR": str(gate_runtime_paths.root / "claude-config"),
+        "YOLOMUX_CODEX_HOME": str(gate_runtime_paths.root / "codex-home"),
+        "CODEX_HOME": str(gate_runtime_paths.root / "codex-home"),
+        "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(gate_runtime_paths.root / "claude-transcripts"),
+        "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(gate_runtime_paths.root / "codex-transcripts"),
+        "YOLOMUX_OPENCODE_DATABASE": str(gate_runtime_paths.root / "opencode.db"),
+        "YOLOMUX_TMUX_SOCKET": str(gate_tmux.socket_path),
+    })
     # This journey passes an explicit runtime directory to an external process. Do not let the
     # suite-wide YOLOMUX_ROOT reinterpret that path and prepend the long gate root a second time;
     # the resulting control socket can exceed Linux's sockaddr_un pathname limit before the server
@@ -889,7 +1029,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
     database_path = prepared.database_path
     requested_socket = prepared.requested_socket
     log_path = prepared.log_path
-    process = _launch_server(port, prepared.session, log_path, service_runtime_dir)
+    process = _launch_server(port, prepared.session, log_path, service_runtime_dir, gate_tmux.socket_path)
     latest_statsd_pid = 0
     try:
         _wait_http(browser, port)
@@ -928,7 +1068,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         _retire_ring_fixture_daemons(gate_runtime_paths)
 
         restart_started = time.monotonic()
-        process = _launch_server(port, str(gate_tmux.sessions[0]), log_path, service_runtime_dir)
+        process = _launch_server(port, str(gate_tmux.sessions[0]), log_path, service_runtime_dir, gate_tmux.socket_path)
         _wait_http(browser, port)
         server_ready_ms = round((time.monotonic() - restart_started) * 1000, 1)
         restarted_client, restarted_statsd = _production_stats_client(
@@ -1076,7 +1216,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         monkeypatch, gate_runtime_paths, gate_http_port, gate_tmux, gate_auth_credentials,
     )
     second_capacity = storage.stats_resolution.RING_CAPACITIES[1]
-    process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir)
+    process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir, gate_tmux.socket_path)
     latest_statsd_pid = 0
     try:
         _wait_http(browser, prepared.port)
@@ -1128,7 +1268,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         assert (1, left_edge) in owed, owed
         assert (60, rebuildable_start) in owed, owed
 
-        process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir)
+        process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir, gate_tmux.socket_path)
         _wait_http(browser, prepared.port)
         restarted_client, restarted_statsd = _production_stats_client(
             browser, prepared.database_path, prepared.requested_socket,
@@ -1162,22 +1302,11 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             > before["slots"][rebuildable_address]["published_at"]
         ), "the rebuildable owed cell was never republished"
 
-        snapshot_metadata, snapshot_binary = restarted_client.snapshot({
+        snapshot_metadata, snapshot_binary = _wait_snapshot_ready(browser, restarted_client, {
             "range_seconds": 3_600,
             "resolution": 60,
             "client_id": "ring-owed-pre-page",
         })
-        if snapshot_metadata.get("ok") is not True or not snapshot_binary:
-            status = restarted_client.status()
-            control = restarted_client.resource_state()
-            raise AssertionError(json.dumps({
-                "snapshot": snapshot_metadata,
-                "resource_state": control,
-                "status": {
-                    key: status.get(key)
-                    for key in ("generations", "warm", "queue", "materializer", "ring_writer")
-                },
-            }, sort_keys=True, default=str))
         pre_page_snapshot = json.loads(snapshot_binary)
         assert pre_page_snapshot["cost_report"]["total_tokens"] == 12, pre_page_snapshot
 

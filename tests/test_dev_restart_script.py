@@ -136,6 +136,14 @@ def test_boot_print_command_accepts_backend_go_alias():
     assert "--backend go" in printable_command_text(result.stdout)
 
 
+def test_boot_go_resolution_includes_current_bazel_rule_output():
+    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+    current = "bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go"
+    assert current in source
+    assert source.index("bazel-bin/yolomux-go") < source.index(current)
+    assert source.index(current) < source.index('repo_root/yolomux-go')
+
+
 def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command", "--log-dir", "relative-logs", "17775"],

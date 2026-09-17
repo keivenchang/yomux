@@ -370,6 +370,39 @@ def test_store_open_is_deferred_until_generic_runtime_owns_the_lock(tmp_path, mo
     assert service._next_vacuum_at == 3_610.0
 
 
+def test_startup_holds_the_database_lease_through_migration_and_store_open(tmp_path, monkeypatch):
+    """Migration and the first writer open share one cross-language ownership boundary."""
+
+    path = tmp_path / storage.DATABASE_FILENAME
+    store = FakeStore()
+    lease_states = []
+
+    def migrate_store(_inputs, active_database, *, completed_at):
+        lease_states.append(("migrate", str(Path(active_database).absolute()) in storage._WRITER_LEASES))
+        return migration.MigrationReport(active_database, "", 0, 0, 0, 0, (), 0, False)
+
+    def open_store(*args, **kwargs):
+        lease_states.append(("open", str(path.absolute()) in storage._WRITER_LEASES))
+        return store
+
+    def runtime(**kwargs):
+        kwargs["on_start"]()
+        kwargs["on_shutdown"]()
+        return 0
+
+    monkeypatch.setattr(service_module, "run_local_rpc_service", runtime)
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        path,
+        store_opener=open_store,
+        migration_runner=migrate_store,
+    )
+
+    assert service.run() == 0
+    assert lease_states == [("migrate", True), ("open", True)]
+    assert str(path.absolute()) not in storage._WRITER_LEASES
+
+
 def test_worker_publisher_open_failure_is_serialized_and_stops_the_listener(tmp_path):
     """The worker's mutating Store.open shares the listener's write owner."""
 

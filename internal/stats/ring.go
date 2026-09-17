@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
+	"time"
 )
 
 const (
@@ -21,6 +23,13 @@ const (
 )
 
 var ringCapacities = map[int]int{1: 300, 10: 180, 60: 480, 300: 288}
+
+// maxStartupReconciliationCells bounds the one-time scan used when a prior
+// owner advanced the publication watermark without recording the affected
+// ring cells. The limit is larger than the complete current ring, so a
+// healthy schema-9 store can reconcile every populated slot in one startup
+// without retaining source facts in memory.
+const maxStartupReconciliationCells = 2048
 
 type RingBucketWrite struct {
 	ResolutionSeconds int
@@ -54,6 +63,74 @@ type RingWindow struct {
 type InvalidationCell struct {
 	ResolutionSeconds             int
 	BucketStart, SourceGeneration int64
+}
+
+type ringInvalidationInterval struct {
+	start float64
+	end   *float64
+}
+
+func coverageChangeInterval(start float64, previousEnd sql.NullFloat64, previousGeneration uint64, current CoverageEpoch) ringInvalidationInterval {
+	currentEnd := current.EndedAt
+	if previousGeneration != current.OwnerGeneration {
+		if previousEnd.Valid && currentEnd != nil {
+			end := math.Max(previousEnd.Float64, *currentEnd)
+			return ringInvalidationInterval{start: start, end: &end}
+		}
+		return ringInvalidationInterval{start: start, end: nil}
+	}
+	if previousEnd.Valid == (currentEnd != nil) {
+		if !previousEnd.Valid {
+			return ringInvalidationInterval{start: start, end: nil}
+		}
+		if previousEnd.Float64 == *currentEnd {
+			return ringInvalidationInterval{start: start, end: currentEnd}
+		}
+		left, right := previousEnd.Float64, *currentEnd
+		if left > right {
+			left, right = right, left
+		}
+		return ringInvalidationInterval{start: left, end: &right}
+	}
+	if previousEnd.Valid {
+		// A closed epoch was reopened. The changed tail is unbounded.
+		return ringInvalidationInterval{start: previousEnd.Float64, end: nil}
+	}
+	// An open epoch was closed; only the retracted tail changed.
+	if currentEnd == nil {
+		return ringInvalidationInterval{start: start, end: nil}
+	}
+	return ringInvalidationInterval{start: *currentEnd, end: nil}
+}
+
+// NextWindowEnd returns the first bucket boundary strictly after the current
+// wall-clock second. Python's stats reader uses the same half-open window
+// convention, including when the clock is exactly on a boundary.
+func NextWindowEnd(now time.Time, resolutionSeconds int) int64 {
+	if resolutionSeconds <= 0 {
+		return 0
+	}
+	seconds := now.Unix()
+	remainder := seconds % int64(resolutionSeconds)
+	if remainder < 0 {
+		remainder += int64(resolutionSeconds)
+	}
+	return seconds - remainder + int64(resolutionSeconds)
+}
+
+// RingPublicationState returns the last durable publication metadata. The
+// lifecycle uses it to derive the language-neutral cache generation before
+// encoding the next batch of bucket payloads.
+func (w *Writer) RingPublicationState(ctx context.Context) (int64, float64, error) {
+	if w == nil || w.db == nil {
+		return 0, 0, fmt.Errorf("nil YO!stats writer")
+	}
+	var ringGeneration int64
+	var publishedAt float64
+	if err := w.db.QueryRowContext(ctx, "SELECT ring_generation,published_at FROM aggregate_publication WHERE singleton=1").Scan(&ringGeneration, &publishedAt); err != nil {
+		return 0, 0, err
+	}
+	return ringGeneration, publishedAt, nil
 }
 
 func RingCapacities() map[int]int {
@@ -166,6 +243,37 @@ func validateRingShape(ctx context.Context, db *sql.DB) error {
 		}
 		_ = rows.Close()
 	}
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('aggregate_publication','aggregate_rings','aggregate_ring_slots')")
+	if err != nil {
+		return err
+	}
+	triggers := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		triggers[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, table := range []string{"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"} {
+		for _, operation := range []string{"insert", "delete"} {
+			name := table + "_reject_" + operation
+			if !triggers[name] {
+				return &ValidationError{Reason: fmt.Sprintf("ring trigger %q is missing", name)}
+			}
+		}
+	}
+	if len(triggers) != 6 {
+		return &ValidationError{Reason: "ring trigger set is not exact"}
+	}
 	return nil
 }
 
@@ -183,6 +291,9 @@ func (w *Writer) PublishRingBuckets(ctx context.Context, buckets []RingBucketWri
 	if err = tx.QueryRowContext(ctx, "SELECT ring_generation,source_generation,published_at FROM aggregate_publication WHERE singleton=1").Scan(&oldRing, &oldSource, &oldPublished); err != nil {
 		return rollback(err)
 	}
+	// A builder publishes from one consistent read snapshot. Facts may commit
+	// while it folds; those newer generations remain represented by pending
+	// invalidations and must not make this valid partial publication fail.
 	if sourceGeneration < oldSource || publishedAt < oldPublished {
 		return rollback(fmt.Errorf("ring publication moves backwards"))
 	}
@@ -191,6 +302,10 @@ func (w *Writer) PublishRingBuckets(ctx context.Context, buckets []RingBucketWri
 	for _, bucket := range buckets {
 		slot, err := RingSlotIndex(bucket.ResolutionSeconds, bucket.BucketStart)
 		if err != nil {
+			return rollback(fmt.Errorf("ring bucket %d/%d: %w", bucket.ResolutionSeconds, bucket.BucketStart, err))
+		}
+		var displaced sql.NullInt64
+		if err := tx.QueryRowContext(ctx, "SELECT bucket_start FROM aggregate_ring_slots WHERE resolution_seconds=? AND slot_index=?", bucket.ResolutionSeconds, slot).Scan(&displaced); err != nil {
 			return rollback(err)
 		}
 		encoded, err := encodeRingBucket(bucket.BucketJSON)
@@ -204,6 +319,14 @@ func (w *Writer) PublishRingBuckets(ctx context.Context, buckets []RingBucketWri
 		affected, _ := result.RowsAffected()
 		if affected != 1 {
 			return rollback(fmt.Errorf("ring slot missing"))
+		}
+		if displaced.Valid && displaced.Int64 != bucket.BucketStart {
+			// A lapped slot can no longer be rebuilt for its old bucket. Remove
+			// only that displaced bucket's pending rows; the new occupant's
+			// invalidation is retired below in this same transaction.
+			if _, err := tx.ExecContext(ctx, "DELETE FROM ring_invalidations WHERE resolution_seconds=? AND bucket_start=? AND applied_at IS NULL", bucket.ResolutionSeconds, displaced.Int64); err != nil {
+				return rollback(err)
+			}
 		}
 		if bucket.BucketStart > newest[bucket.ResolutionSeconds] {
 			newest[bucket.ResolutionSeconds] = bucket.BucketStart
@@ -229,6 +352,7 @@ func (w *Writer) PublishRingBuckets(ctx context.Context, buckets []RingBucketWri
 	if err = tx.Commit(); err != nil {
 		return RingPublication{}, err
 	}
+	_ = w.refreshPendingCache(ctx)
 	return RingPublication{ringGeneration, sourceGeneration, publishedAt, len(buckets)}, nil
 }
 
@@ -242,18 +366,33 @@ func boolInt(value bool) int {
 func (w *Writer) PendingInvalidationCells(ctx context.Context) ([]InvalidationCell, error) {
 	rows, err := w.db.QueryContext(ctx, "SELECT resolution_seconds,bucket_start,source_generation FROM ring_invalidations WHERE applied_at IS NULL ORDER BY resolution_seconds,bucket_start")
 	if err != nil {
+		w.setPendingCacheUnavailable()
 		return nil, err
 	}
 	defer rows.Close()
 	result := []InvalidationCell{}
+	pending := make(map[[2]int64]int64)
 	for rows.Next() {
 		var cell InvalidationCell
 		if err := rows.Scan(&cell.ResolutionSeconds, &cell.BucketStart, &cell.SourceGeneration); err != nil {
+			w.setPendingCacheUnavailable()
 			return nil, err
 		}
 		result = append(result, cell)
+		key := [2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}
+		if cell.SourceGeneration > pending[key] {
+			pending[key] = cell.SourceGeneration
+		}
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		w.setPendingCacheUnavailable()
+		return nil, err
+	}
+	w.pendingMu.Lock()
+	w.pending = pending
+	w.pendingReady = true
+	w.pendingMu.Unlock()
+	return result, nil
 }
 
 func (w *Writer) ReadRingWindow(ctx context.Context, rangeSeconds, resolutionSeconds int, windowEnd int64) (RingWindow, error) {
@@ -315,42 +454,241 @@ func (w *Writer) ReadRingWindow(ctx context.Context, rangeSeconds, resolutionSec
 }
 
 func (w *Writer) Checkpoint(ctx context.Context) error {
-	_, err := w.db.ExecContext(ctx, fmt.Sprintf("PRAGMA wal_checkpoint(PASSIVE)"))
+	if w == nil || w.db == nil {
+		return fmt.Errorf("nil YO!stats writer")
+	}
+	_, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
 	return err
 }
 func (w *Writer) Vacuum(ctx context.Context, completedAt float64) error {
+	if w == nil || w.db == nil {
+		return fmt.Errorf("nil YO!stats writer")
+	}
+	if math.IsNaN(completedAt) || math.IsInf(completedAt, 0) || completedAt < 0 {
+		return fmt.Errorf("invalid vacuum completion time")
+	}
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
 	if _, err := w.db.ExecContext(ctx, "VACUUM"); err != nil {
 		return err
 	}
 	if _, err := w.db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
 		return err
 	}
-	_, err := w.db.ExecContext(ctx, "UPDATE schema_meta SET last_vacuumed_at=? WHERE singleton=1", completedAt)
-	return err
+	if _, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return err
+	}
+	if _, err := w.db.ExecContext(ctx, "UPDATE schema_meta SET last_vacuumed_at=? WHERE singleton=1", completedAt); err != nil {
+		return err
+	}
+	if _, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return err
+	}
+	ratio, err := w.ReclaimableRatio(ctx)
+	if err != nil {
+		return err
+	}
+	return w.recordVacuumBaseline(completedAt, ratio)
 }
 
 func invalidationBucket(resolution int, timestamp float64) int64 {
 	return int64(math.Floor(timestamp/float64(resolution))) * int64(resolution)
 }
 func recordFactInvalidations(ctx context.Context, tx *sql.Tx, generation int64, timestamps []float64, now float64) error {
+	return recordRingInvalidations(ctx, tx, generation, now, "fact_mutation", timestamps, nil)
+}
+
+// recordExternalGenerationInvalidations covers a legacy/direct writer that
+// advanced schema_meta without recording its dirty cells. The normal writer
+// path never needs this scan: accepted mutations already provide exact points
+// and intervals. Keeping the reconciliation inside the owner transaction lets
+// the request path fail closed before an old product can be served.
+func recordExternalGenerationInvalidations(ctx context.Context, tx *sql.Tx, generation int64, now float64) error {
+	cutoff := now - float64(RetentionSeconds)
+	timestamps := make([]float64, 0)
+	for _, table := range []string{"observations", "usage_atoms"} {
+		rows, err := tx.QueryContext(ctx, "SELECT observed_at FROM "+table+" WHERE observed_at >= ?", cutoff)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var timestamp float64
+			if err := rows.Scan(&timestamp); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			timestamps = append(timestamps, timestamp)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	intervals := make([]ringInvalidationInterval, 0)
+	for _, table := range []string{"coverage_epochs", "unavailable_spans"} {
+		rows, err := tx.QueryContext(ctx, "SELECT started_at,ended_at FROM "+table+" WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)", now, cutoff)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var start float64
+			var end sql.NullFloat64
+			if err := rows.Scan(&start, &end); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			interval := ringInvalidationInterval{start: math.Max(start, cutoff)}
+			if end.Valid {
+				clippedEnd := math.Min(end.Float64, now)
+				interval.end = &clippedEnd
+			}
+			intervals = append(intervals, interval)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return recordRingInvalidations(ctx, tx, generation, now, "external_generation_reconciliation", timestamps, intervals)
+}
+
+// recordStaleRingInvalidations repairs the case where an older/direct owner
+// advanced both source_generation and the publication watermark but omitted a
+// cell-level invalidation. It is intentionally bounded to populated slots and
+// runs only during writer startup; normal append paths already record exact
+// dirty cells. Rebuilding an older but still valid slot is safe because the
+// ring is only a cache of the original facts, while missing a contradicted
+// slot would expose stale data indefinitely after the next tail append.
+func recordStaleRingInvalidations(ctx context.Context, tx *sql.Tx, generation int64, now float64) error {
+	rows, err := tx.QueryContext(ctx, `SELECT resolution_seconds,bucket_start
+		FROM aggregate_ring_slots AS slots
+		WHERE slots.bucket_json IS NOT NULL AND slots.source_generation < ?
+		  AND (
+			EXISTS (SELECT 1 FROM observations
+				WHERE observed_at >= slots.bucket_start
+				  AND observed_at < slots.bucket_start + slots.resolution_seconds)
+			OR EXISTS (SELECT 1 FROM usage_atoms
+				WHERE observed_at >= slots.bucket_start
+				  AND observed_at < slots.bucket_start + slots.resolution_seconds)
+			OR EXISTS (SELECT 1 FROM coverage_epochs
+				WHERE started_at < slots.bucket_start + slots.resolution_seconds
+				  AND (ended_at IS NULL OR ended_at > slots.bucket_start))
+			OR EXISTS (SELECT 1 FROM unavailable_spans
+				WHERE started_at < slots.bucket_start + slots.resolution_seconds
+				  AND ended_at > slots.bucket_start)
+		  )
+		ORDER BY resolution_seconds ASC, bucket_start ASC
+		LIMIT ?`, generation, maxStartupReconciliationCells)
+	if err != nil {
+		return err
+	}
+	keys := make([][2]int64, 0, maxStartupReconciliationCells)
+	for rows.Next() {
+		var resolution, bucket int64
+		if err := rows.Scan(&resolution, &bucket); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		keys = append(keys, [2]int64{resolution, bucket})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ring_invalidations(
+			resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at)
+			VALUES(?,?,?,?,?,NULL)`, key[0], key[1], generation,
+			"external_generation_reconciliation", now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordRingInvalidations derives the one durable dirty-cell set for all fact
+// mutations. Point facts select their own bucket at every resolution; interval
+// changes intersect only currently populated half-open ring cells. The caller
+// owns the surrounding fact transaction, so a committed source generation can
+// never exist without the corresponding durable contradiction record.
+func recordRingInvalidations(ctx context.Context, tx *sql.Tx, generation int64, now float64, reason string, timestamps []float64, intervals []ringInvalidationInterval) error {
 	seen := map[[2]int64]bool{}
 	for _, timestamp := range timestamps {
-		if timestamp < 0 {
+		if timestamp < 0 || math.IsNaN(timestamp) || math.IsInf(timestamp, 0) {
 			continue
 		}
 		for resolution := range ringCapacities {
 			bucket := invalidationBucket(resolution, timestamp)
 			key := [2]int64{int64(resolution), bucket}
-			if seen[key] {
-				continue
-			}
 			seen[key] = true
-			if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at) SELECT ?,?,?,?,?,NULL WHERE EXISTS (SELECT 1 FROM aggregate_ring_slots WHERE resolution_seconds=? AND bucket_start=? AND bucket_json IS NOT NULL)", resolution, bucket, generation, "fact_mutation", timestamp, resolution, bucket); err != nil {
+		}
+	}
+	for _, interval := range intervals {
+		if math.IsNaN(interval.start) || math.IsInf(interval.start, 0) {
+			continue
+		}
+		start := math.Max(0, interval.start)
+		if interval.end != nil && (*interval.end <= start || math.IsNaN(*interval.end) || math.IsInf(*interval.end, 0)) {
+			continue
+		}
+		var rows *sql.Rows
+		var err error
+		if interval.end == nil {
+			rows, err = tx.QueryContext(ctx, `SELECT resolution_seconds,bucket_start
+				FROM aggregate_ring_slots
+				WHERE bucket_start IS NOT NULL AND bucket_json IS NOT NULL
+				  AND bucket_start + resolution_seconds > ?`, start)
+		} else {
+			rows, err = tx.QueryContext(ctx, `SELECT resolution_seconds,bucket_start
+				FROM aggregate_ring_slots
+				WHERE bucket_start IS NOT NULL AND bucket_json IS NOT NULL
+				  AND bucket_start + resolution_seconds > ? AND bucket_start < ?`, start, *interval.end)
+		}
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var resolution, bucket int64
+			if err := rows.Scan(&resolution, &bucket); err != nil {
+				_ = rows.Close()
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM ring_invalidations WHERE resolution_seconds=? AND bucket_start=? AND applied_at IS NULL AND source_generation<?", resolution, bucket, generation); err != nil {
-				return err
-			}
+			seen[[2]int64{resolution, bucket}] = true
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+	}
+	keys := make([][2]int64, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i][0] != keys[j][0] {
+			return keys[i][0] < keys[j][0]
+		}
+		return keys[i][1] < keys[j][1]
+	})
+	for _, key := range keys {
+		resolution, bucket := key[0], key[1]
+		// The primary key includes generation for retired history, but only
+		// the newest pending contradiction is actionable.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM ring_invalidations WHERE resolution_seconds=? AND bucket_start=? AND applied_at IS NULL AND source_generation<?", resolution, bucket, generation); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at) SELECT ?,?,?,?,?,NULL WHERE EXISTS (SELECT 1 FROM aggregate_ring_slots WHERE resolution_seconds=? AND bucket_start=? AND bucket_json IS NOT NULL)", resolution, bucket, generation, reason, now, resolution, bucket); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -92,7 +93,7 @@ func TestHostCollectorRunOnceWritesCapturedFactsAndUnavailable(t *testing.T) {
 	collector.RunOnce(ctx)
 
 	counters := collector.Counters()
-	if counters.Cycles != 3 || counters.AcceptedObservations != 4 || counters.UnavailableSpans != 1 || counters.Errors != 0 {
+	if counters.Cycles != 3 || counters.AcceptedObservations != 7 || counters.UnavailableSpans != 2 || counters.Errors != 0 {
 		t.Fatalf("counters = %+v", counters)
 	}
 	reader, err := OpenReadOnly(ctx, path)
@@ -104,21 +105,21 @@ func TestHostCollectorRunOnceWritesCapturedFactsAndUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 4 {
-		t.Fatalf("observations = %d, want 4", len(observations))
+	if len(observations) != 7 {
+		t.Fatalf("observations = %d, want 7", len(observations))
 	}
 	unavailable, err := reader.ReadUnavailableSpans(ctx, 0, 1000, MaxFactReadLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(unavailable) != 1 || unavailable[0].Family != "cpu" {
+	if len(unavailable) != 2 || unavailable[0].Family != "cpu" || unavailable[1].Family != "gpu" {
 		t.Fatalf("unavailable = %+v", unavailable)
 	}
 	seen := map[string]int{}
 	for _, observation := range observations {
 		seen[observation.Family]++
 	}
-	if seen["cpu"] != 2 || seen["system_memory"] != 1 || seen["gpu"] != 1 {
+	if seen["cpu"] != 2 || seen["system_memory"] != 3 || seen["gpu"] != 2 {
 		t.Fatalf("family rows = %#v", seen)
 	}
 }
@@ -164,7 +165,7 @@ func TestHostCollectorLifecyclePersistsMultipleCycles(t *testing.T) {
 	collector.RunOnce(ctx)
 	clock.advance(time.Second)
 	collector.RunOnce(ctx)
-	if counters := collector.Counters(); counters.Cycles != 2 || counters.AcceptedObservations != 3 || counters.UnavailableSpans != 1 || counters.Errors != 0 {
+	if counters := collector.Counters(); counters.Cycles != 2 || counters.AcceptedObservations != 5 || counters.UnavailableSpans != 1 || counters.Errors != 0 {
 		t.Fatalf("counters = %+v", counters)
 	}
 	reader, err := OpenReadOnly(ctx, path)
@@ -176,8 +177,8 @@ func TestHostCollectorLifecyclePersistsMultipleCycles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 3 {
-		t.Fatalf("persisted observations = %d, want 3", len(observations))
+	if len(observations) != 5 {
+		t.Fatalf("persisted observations = %d, want 5", len(observations))
 	}
 	seen := map[string]int{}
 	for _, observation := range observations {
@@ -186,7 +187,7 @@ func TestHostCollectorLifecyclePersistsMultipleCycles(t *testing.T) {
 			t.Fatalf("observation generation = %d, want 12", observation.OwnerGeneration)
 		}
 	}
-	if seen["cpu"] != 1 || seen["system_memory"] != 1 || seen["gpu"] != 1 {
+	if seen["cpu"] != 1 || seen["system_memory"] != 2 || seen["gpu"] != 2 {
 		t.Fatalf("family rows = %#v", seen)
 	}
 }
@@ -302,4 +303,84 @@ type countingWriter struct{}
 
 func (countingWriter) AppendBatch(_ context.Context, batch AppendBatch) (AppendResult, error) {
 	return AppendResult{ObservationsAccepted: len(batch.Observations), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
+}
+
+func TestWaitCollectorCadenceWakesWhenDemandArrivesDuringIdleWindow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var demanded atomic.Bool
+	result := make(chan bool, 1)
+	started := time.Now()
+	go func() {
+		result <- waitCollectorCadence(ctx, realHostCollectorClock{}, 10*time.Millisecond, 2*time.Second, demanded.Load)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	demanded.Store(true)
+	select {
+	case ok := <-result:
+		if !ok {
+			t.Fatal("idle cadence wait was cancelled")
+		}
+		if elapsed := time.Since(started); elapsed >= 2*time.Second {
+			t.Fatalf("demand wake arrived after idle deadline: %s", elapsed)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("idle cadence wait did not wake for demand")
+	}
+}
+
+func TestHostCollectorDoesNotPersistIdleCPUOrGPUGaps(t *testing.T) {
+	sources := &capturedHostSources{
+		cpu:    []CPUSnapshot{snapshot(10, 20, 2), snapshot(12, 22, 3), snapshot(14, 24, 4)},
+		memory: []MemoryCounters{{UsedBytes: 1, CapacityBytes: 2}},
+		gpu:    [][]GPUDevice{{{SourceID: "gpu:0", Label: "test"}}, {{SourceID: "gpu:0", Label: "test"}}},
+	}
+	writer := &recordingBatchWriter{}
+	var demanded atomic.Bool
+	collector := NewHostCollector(sources, writer, nil, HostCollectorConfig{
+		ActiveCadence: 10 * time.Millisecond, IdleCadence: 100 * time.Millisecond,
+		GPUActiveCadence: time.Hour, GPUIdleCadence: 100 * time.Millisecond,
+		MemoryCadence: time.Hour, SourceTimeout: time.Second, ActiveFunc: demanded.Load,
+		ProcessKey: "python", LogicalCPUs: 1,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := collector.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	demanded.Store(true)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if collector.Counters().Cycles > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	collector.Stop()
+	for _, batch := range writer.snapshot() {
+		for _, gap := range batch.UnavailableSpans {
+			if (gap.Family == "cpu" || gap.Family == "gpu") && gap.NativeCadenceSeconds > 0.02 {
+				t.Fatalf("idle gap persisted: %+v", gap)
+			}
+		}
+	}
+}
+
+type recordingBatchWriter struct {
+	mu      sync.Mutex
+	batches []AppendBatch
+}
+
+func (w *recordingBatchWriter) AppendBatch(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	w.mu.Lock()
+	w.batches = append(w.batches, batch)
+	w.mu.Unlock()
+	return AppendResult{ObservationsAccepted: len(batch.Observations), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
+}
+
+func (w *recordingBatchWriter) snapshot() []AppendBatch {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]AppendBatch(nil), w.batches...)
 }

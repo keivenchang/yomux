@@ -2900,6 +2900,80 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
   return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
+function debugGraphStatsAgentState(state) {
+  const key = String(state || '').trim().toLowerCase();
+  if (key === 'run' || key === 'working') return STATE_KEY.working;
+  if (key === 'ask' || key === 'approval' || key === 'needs-input') return 'attention';
+  if (key === 'transition' || key === 'cooldown') return 'cooldown';
+  if (key === 'error' || key === 'failed' || key === 'blocked') return 'blocked';
+  if (key === 'unavailable') return 'unavailable';
+  return STATE_KEY.idle;
+}
+
+function debugGraphStatsAgentWindowRows() {
+  const status = jsDebugStatsAgentStatusState.payload;
+  if (!status || status.available !== true) return {rows: [], revision: 0};
+  const statusPayload = status.payload && typeof status.payload === 'object' ? status.payload : {};
+  const revision = Math.max(
+    0,
+    Number(statusPayload.snapshot_revision || 0),
+    Number(jsDebugStatsAgentStatusState.revision || 0),
+  );
+  const rows = [];
+  const agents = Array.isArray(status.agents) ? status.agents : [];
+  for (const entry of agents) {
+    if (!entry || typeof entry !== 'object') continue;
+    const identity = String(entry.id || '').split('|');
+    const session = String(entry.session || identity[0] || '').trim();
+    const window = String(entry.window || entry.window_index || identity[1] || '').trim();
+    const pane = String(entry.pane || entry.pane_target || identity[2] || '').trim();
+    const kind = agentWindowKind(entry.kind);
+    if (!session || !kind || (!window && !pane)) continue;
+    const agent = {
+      ...entry,
+      kind,
+      state: debugGraphStatsAgentState(entry.state),
+      window,
+      window_index: window || null,
+      pane,
+      pane_target: pane,
+      window_label: agentWindowCanonicalLabel(window || null, kind, kind),
+    };
+    rows.push({session, agent, kind, revision});
+  }
+  return {rows, revision};
+}
+
+async function refreshDebugStatsAgentStatus() {
+  // Python's full application boot has no stats-agent-status route because it
+  // already owns /api/auto-approve. This supplementary stats projection is
+  // only needed for the negotiated Go stats-only surface.
+  if (typeof statsOnlyBootEnabled !== 'function' || !statsOnlyBootEnabled()) return null;
+  if (jsDebugStatsAgentStatusState.inFlight) return jsDebugStatsAgentStatusState.inFlight;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/stats-agent-status', {cache: 'no-store'});
+      jsDebugStatsAgentStatusState.payload = payload && typeof payload === 'object' ? payload : null;
+      jsDebugStatsAgentStatusState.revision = debugGraphStatsAgentWindowRows().revision;
+      jsDebugStatsAgentStatusState.updatedAtMs = Date.now();
+    } catch (error) {
+      // A typed unavailable response is still useful to the detail renderer; a
+      // transport error must not make the stats stream fail or invent a roster.
+      jsDebugStatsAgentStatusState.payload = error?.payload && typeof error.payload === 'object' ? error.payload : null;
+      jsDebugStatsAgentStatusState.revision = 0;
+      jsDebugStatsAgentStatusState.updatedAtMs = Date.now();
+    }
+    refreshDebugAgentWindowLiveDetails();
+    return jsDebugStatsAgentStatusState.payload;
+  })();
+  jsDebugStatsAgentStatusState.inFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (jsDebugStatsAgentStatusState.inFlight === request) jsDebugStatsAgentStatusState.inFlight = null;
+  }
+}
+
 function debugGraphLiveAgentWindowRows() {
   const rows = [];
   const seen = new Set();
@@ -2922,12 +2996,37 @@ function debugGraphLiveAgentWindowRows() {
   rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
     || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
     || left.kind.localeCompare(right.kind));
+  const statsRows = typeof debugGraphStatsAgentWindowRows === 'function'
+    ? debugGraphStatsAgentWindowRows()
+    : {rows: [], revision: 0};
+  for (const row of statsRows.rows) {
+    const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(row);
+    sessionRevisions.set(String(row.session), row.revision);
+    if (row.revision > 0) revisions.add(row.revision);
+  }
+  rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
+    || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
+    || left.kind.localeCompare(right.kind));
   return {rows, revisions, sessionRevisions};
 }
 
 function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   const chartRevision = Number(jsDebugStatsPollState.agentWindowSnapshotRevision) || 0;
   const {rows, revisions, sessionRevisions} = debugGraphLiveAgentWindowRows();
+  const statsOnly = typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled();
+  const statsStatus = typeof jsDebugStatsAgentStatusState !== 'undefined'
+    ? jsDebugStatsAgentStatusState.payload
+    : null;
+  if (statsOnly && statsStatus && statsStatus.available !== true) {
+    const reason = String(statsStatus.unavailable?.reason || 'agent-status-unavailable').trim();
+    return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="unavailable"><span>${esc(`Live status unavailable: ${reason}`)}</span></div>`;
+  }
+  if (statsOnly && statsStatus?.available === true && Number(statsStatus.counts?.total || 0) > 0 && !rows.length) {
+    return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="unavailable"><span>${esc('Live status roster unavailable')}</span></div>`;
+  }
   if (!chartRevision) {
     return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="changed">${esc('Live status is waiting for the chart snapshot')}</div>`;
   }
@@ -3027,8 +3126,12 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ? 'No memory samples in this time window'
       : 'Memory telemetry is not available on this host')
     : '';
-  const chartUnavailable = gpuUnavailable || memoryUnavailable;
-  const chartUnavailableText = gpuUnavailableText || memoryUnavailableText;
+  const tokenUnavailable = group.noDataWhenEmpty === true && groupSeries.length === 0;
+  const tokenUnavailableText = tokenUnavailable
+    ? debugGraphCostText('debug.graph.tokens.noData', 'No token samples')
+    : '';
+  const chartUnavailable = gpuUnavailable || memoryUnavailable || tokenUnavailable;
+  const chartUnavailableText = gpuUnavailableText || memoryUnavailableText || tokenUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
@@ -3852,6 +3955,13 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
 }
 
 function recordJsDebugCurrentStatsFailure(failure) {
+  // Authentication retirement is an expected terminal transition for this page. The
+  // client still rejects its start promise after claiming the shared signed-out state,
+  // but that rejection must not leave a release-blocking stats failure behind.
+  if (failure?.terminalAuthentication === true
+      || Number(failure?.status) === 401
+      || String(failure?.code || '').trim() === 'authentication_required'
+      || String(failure?.reason || '').trim() === 'authentication_required') return false;
   if (jsDebugCurrentStatsClientState.failureLatched) return false;
   jsDebugCurrentStatsClientState.failureLatched = true;
   const message = String(failure?.message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
@@ -4056,6 +4166,10 @@ function syncJsDebugCurrentStatsClient({select = false} = {}) {
     try {
       jsDebugCurrentStatsClientState.startPromise = Promise.resolve(client.start())
         .catch(error => {
+          if (error?.terminalAuthentication === true
+              || Number(error?.status) === 401
+              || String(error?.code || '').trim() === 'authentication_required'
+              || String(error?.reason || '').trim() === 'authentication_required') return;
           recordJsDebugCurrentStatsFailure({
             message: `YO!stats stream initialization unavailable: ${jsDebugErrorText(error)}`,
             source: '/api/stats-stream',
@@ -4063,6 +4177,10 @@ function syncJsDebugCurrentStatsClient({select = false} = {}) {
         })
         .finally(() => { jsDebugCurrentStatsClientState.startPromise = null; });
     } catch (error) {
+      if (error?.terminalAuthentication === true
+          || Number(error?.status) === 401
+          || String(error?.code || '').trim() === 'authentication_required'
+          || String(error?.reason || '').trim() === 'authentication_required') return true;
       recordJsDebugCurrentStatsFailure({
         message: `YO!stats stream initialization unavailable: ${jsDebugErrorText(error)}`,
         source: '/api/stats-stream',
@@ -4446,6 +4564,7 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
   debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
   jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
+  if (typeof refreshDebugStatsAgentStatus === 'function') void refreshDebugStatsAgentStatus();
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
   jsDebugStatsPollState.firstSampleReceived = true;

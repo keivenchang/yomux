@@ -82,3 +82,69 @@ func TestRingDuplicateAppendDoesNotCreateNewGeneration(t *testing.T) {
 		t.Fatalf("append generations = %+v then %+v", first, second)
 	}
 }
+
+func TestRingPublicationRetiresOnlyInvalidationsThroughBuiltGeneration(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "seed-generation", Family: "cpu", SourceID: "host", ObservedAt: 0,
+		EpochID: "epoch", OwnerGeneration: 1, Payload: map[string]any{"value": 0},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 0, BucketJSON: `{"value":1}`, Complete: true}}, 1, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "late-generation", Family: "cpu", SourceID: "host", ObservedAt: 1,
+		EpochID: "epoch", OwnerGeneration: 1, Payload: map[string]any{"value": 2},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingStarts(t, writer, 10); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("pending before publication = %v", got)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 0, BucketJSON: `{"value":2}`, Complete: true}}, 1, 2, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingStarts(t, writer, 10); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("older publication retired newer invalidation: %v", got)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 0, BucketJSON: `{"value":2}`, Complete: true}}, 2, 3, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingStarts(t, writer, 10); len(got) != 0 {
+		t.Fatalf("current publication left invalidation pending: %v", got)
+	}
+}
+
+func TestRingPublicationRemovesDisplacedSlotInvalidations(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 0, BucketJSON: `{"value":1}`, Complete: true}}, 1, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "displaced", Family: "cpu", SourceID: "host", ObservedAt: 1,
+		EpochID: "epoch", OwnerGeneration: 1, Payload: map[string]any{"value": 2},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingStarts(t, writer, 10); len(got) != 1 || got[0] != 0 {
+		t.Fatalf("pending before displacement = %v", got)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 1800, BucketJSON: `{"value":3}`, Complete: true}}, 2, 2, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingStarts(t, writer, 10); len(got) != 0 {
+		t.Fatalf("displaced invalidation survived slot wrap: %v", got)
+	}
+}

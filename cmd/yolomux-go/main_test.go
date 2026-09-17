@@ -23,6 +23,7 @@ import (
 
 	"github.com/keivenchang/yolomux/internal/capabilities"
 	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/testsupport"
 	"github.com/keivenchang/yolomux/internal/work"
 )
 
@@ -67,6 +68,29 @@ func TestDefaultConfigDirUsesExplicitConfig(t *testing.T) {
 	t.Setenv("YOLOMUX_ROOT", "/tmp/yolomux-test-root")
 	if got, want := defaultConfigDir(), "/tmp/yolomux-explicit-config"; got != want {
 		t.Fatalf("defaultConfigDir() = %q, want %q", got, want)
+	}
+}
+
+func TestExplicitCollectorPathsRequireAbsoluteSyntheticOrProductionInputs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "xdg-data"))
+	for _, name := range []string{"YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", "YOLOMUX_CODEX_TRANSCRIPT_ROOT", "YOLOMUX_OPENCODE_DATABASE"} {
+		t.Setenv(name, "")
+	}
+	if _, _, _, err := explicitCollectorPaths(); err == nil || !strings.Contains(err.Error(), "explicit YOLOMUX_CLAUDE_TRANSCRIPT_ROOT") {
+		t.Fatalf("missing collector roots error = %v", err)
+	}
+	t.Setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", "fixture/claude")
+	t.Setenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT", "/tmp/fixture/codex")
+	t.Setenv("YOLOMUX_OPENCODE_DATABASE", "/tmp/fixture/opencode.db")
+	if _, _, _, err := explicitCollectorPaths(); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("relative collector root error = %v", err)
+	}
+	t.Setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", "/tmp/fixture/claude")
+	claude, codex, opencode, err := explicitCollectorPaths()
+	if err != nil || claude != "/tmp/fixture/claude" || codex != "/tmp/fixture/codex" || opencode != "/tmp/fixture/opencode.db" {
+		t.Fatalf("explicit collector paths = %q %q %q err=%v", claude, codex, opencode, err)
 	}
 }
 
@@ -119,6 +143,47 @@ func TestPhase3ProtectedRoutes(t *testing.T) {
 	s.operationAck(r, httptest.NewRequest(http.MethodPost, "/api/operations/ack", bytes.NewBufferString(`{"acks":[{"id":"op-1","cursor":{"epoch":"e","seq":1}}]}`)))
 	if r.Code != http.StatusOK {
 		t.Fatalf("operation ack = %d %s", r.Code, r.Body.String())
+	}
+}
+
+func TestDiagnosticsPerformanceCapturesMarkedHTTPRequests(t *testing.T) {
+	s := &server{}
+	request := httptest.NewRequest(http.MethodGet, "/api/stats-snapshot", nil)
+	request.Header.Set("X-YOLOmux-Measurement", "capture-test-marker")
+	request.Header.Set("X-YOLOmux-Request-ID", "r-capture-test")
+	s.recordPerformance(request, http.StatusOK, 123, 2*time.Millisecond)
+	record := httptest.NewRecorder()
+	s.diagnosticsPerformance(record, httptest.NewRequest(http.MethodGet, "/api/diagnostics/performance?measurement_scope=capture", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("diagnostics performance status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	perf, ok := payload["perf"].(map[string]any)
+	if !ok {
+		t.Fatalf("diagnostics performance payload = %#v", payload)
+	}
+	recent, ok := perf["recent"].([]any)
+	if !ok || len(recent) != 1 {
+		t.Fatalf("diagnostics performance recent = %#v", perf["recent"])
+	}
+	entry, ok := recent[0].(map[string]any)
+	if !ok || entry["surface"] != "GET /api/stats-snapshot" {
+		t.Fatalf("diagnostics performance entry = %#v", recent[0])
+	}
+	details, ok := entry["details"].(map[string]any)
+	if !ok || details["transport_request_id"] != "r-capture-test" || details["measurement_request_id"] != "06df7f1729931f89" {
+		t.Fatalf("diagnostics performance details = %#v", entry["details"])
+	}
+}
+
+func TestJSONResponseSetsNoStoreForAPIRepresentations(t *testing.T) {
+	record := httptest.NewRecorder()
+	jsonResponse(record, http.StatusOK, map[string]any{"ok": true})
+	if got := record.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
 
@@ -338,6 +403,90 @@ func TestPhase45FinderHTTPRoutesUseReadAndMutationContracts(t *testing.T) {
 	}
 }
 
+func TestFastFinderListBypassesBusyFinderWorkers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "instant.txt"), []byte("fast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scheduler := newFinderJobScheduler()
+	defer scheduler.Close()
+	started := make(chan struct{}, finderJobWorkers)
+	for index := 0; index < finderJobWorkers; index++ {
+		if _, err := scheduler.Submit(context.Background(), fmt.Sprintf("busy-%d", index), func(ctx context.Context) (any, error) {
+			started <- struct{}{}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < finderJobWorkers; index++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("Finder workers did not become busy")
+		}
+	}
+
+	s := &server{root: root, finder: service, finderJobs: scheduler, events: newEventBroker()}
+	record := httptest.NewRecorder()
+	s.fsFastList(record, httptest.NewRequest(http.MethodGet, "/api/fs/fast/list?path="+url.QueryEscape(root), nil))
+	if record.Code != http.StatusOK || !bytes.Contains(record.Body.Bytes(), []byte(`"entries"`)) || bytes.Contains(record.Body.Bytes(), []byte(`"state":"accepted"`)) {
+		t.Fatalf("fast list waited for busy Finder workers: status=%d body=%s", record.Code, record.Body.String())
+	}
+}
+
+func TestPhase45ExpectedMtimeAsyncWriteCompletes(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.go")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scheduler := newFinderJobScheduler()
+	defer scheduler.Close()
+	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, operationsPath: filepath.Join(root, "ops.json"), operationsJournal: filepath.Join(root, "ops.jsonl"), finderJobs: scheduler}
+	info, ferr := service.Info(context.Background(), path)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	body := fmt.Sprintf(`{"path":%q,"content":"new\\n","expected_mtime":%d}`, path, info["mtime_ns"])
+	record := httptest.NewRecorder()
+	s.fsWrite(record, httptest.NewRequest(http.MethodPost, "/api/fs/write", strings.NewReader(body)))
+	if record.Code != http.StatusAccepted {
+		t.Fatalf("status=%d", record.Code)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	op := envelope["operation"].(map[string]any)["id"].(string)
+	deadline := time.After(2 * time.Second)
+	for {
+		current := s.operationRecord(op)
+		if current != nil && operationIsTerminal(current) {
+			if current.State != "ready" {
+				t.Fatalf("state=%s result=%#v", current.State, current.Result)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("operation remained pending: %#v", current)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func TestPhase45MalformedWatchRootsUsesFinderEnvelope(t *testing.T) {
 	s := &server{}
 	response := httptest.NewRecorder()
@@ -357,8 +506,139 @@ func TestProtectedRejectsUnavailableCapabilityBeforeRouteFallback(t *testing.T) 
 	request.SetBasicAuth("admin", "secret")
 	record := httptest.NewRecorder()
 	s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(record, request)
-	if record.Code != http.StatusNotImplemented || !bytes.Contains(record.Body.Bytes(), []byte(`"error":"feature_unavailable"`)) || !bytes.Contains(record.Body.Bytes(), []byte(`"capability":"pane.tabber.v1"`)) {
+	if record.Code != http.StatusNotImplemented || !bytes.Contains(record.Body.Bytes(), []byte(`"error":"feature_unavailable"`)) || !bytes.Contains(record.Body.Bytes(), []byte(`"capability":"finder.git.v1"`)) {
 		t.Fatalf("unavailable capability response = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := capabilities.New("go-test")
+	s := &server{config: config, port: 7221, capabilities: catalog}
+	cases := map[string]string{
+		"/api/settings":       "core.settings.v1",
+		"/api/update-status":  "core.integrations.v1",
+		"/api/watched-prs":    "core.integrations.v1",
+		"/api/auto-approve":   "terminal.status.v1",
+		"/api/chat/bootstrap": "pane.chat.v1",
+		"/api/transcripts":    "pane.tabber.v1",
+		"/api/activity":       "pane.tabber.v1",
+	}
+	for path, wantCapability := range cases {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.SetBasicAuth("admin", "secret")
+			record := httptest.NewRecorder()
+			s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(record, request)
+			if record.Code != http.StatusNotImplemented {
+				t.Fatalf("status = %d, want %d; body=%s", record.Code, http.StatusNotImplemented, record.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(record.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["error"] != "feature_unavailable" || body["capability"] != wantCapability {
+				t.Fatalf("unimplemented route envelope = %#v, want capability %q", body, wantCapability)
+			}
+		})
+	}
+}
+
+func TestSessionMetadataStartupRouteUsesAvailableBootstrapCapability(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := capabilities.New("go-test")
+	s := &server{config: config, port: 7221, capabilities: catalog}
+	request := httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil)
+	request.SetBasicAuth("admin", "secret")
+	record := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.sessionMetadata), "readonly").ServeHTTP(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["metadata_identity"]; !ok {
+		t.Fatalf("session metadata payload lacks identity: %#v", payload)
+	}
+	if got := capabilities.RouteCapability(http.MethodGet, "/api/session-metadata"); got != "core.bootstrap.v1" {
+		t.Fatalf("session metadata capability = %q, want core.bootstrap.v1", got)
+	}
+}
+
+func TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := capabilities.New("go-test")
+	catalog.Set("pane.stats.v1", capabilities.Entry{Available: true})
+	s := &server{root: testsupport.RepoRoot(t), config: config, port: 7221, capabilities: catalog}
+	page := httptest.NewRecorder()
+	s.index(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if page.Code != http.StatusOK {
+		t.Fatalf("stats-only root status = %d, body=%s", page.Code, page.Body.String())
+	}
+	const bootstrapPrefix = `<script id="yolomux-bootstrap" type="application/json">`
+	start := bytes.Index(page.Body.Bytes(), []byte(bootstrapPrefix))
+	if start < 0 {
+		t.Fatal("root page omitted the bootstrap payload")
+	}
+	start += len(bootstrapPrefix)
+	end := bytes.Index(page.Body.Bytes()[start:], []byte("</script>"))
+	if end < 0 {
+		t.Fatal("root page bootstrap payload has no closing script tag")
+	}
+	var bootstrap map[string]any
+	if err := json.Unmarshal(page.Body.Bytes()[start:start+end], &bootstrap); err != nil {
+		t.Fatalf("decode root bootstrap: %v", err)
+	}
+	if bootstrap["statsOnly"] != true {
+		t.Fatalf("root bootstrap statsOnly = %#v, want true", bootstrap["statsOnly"])
+	}
+	capabilityDocument, ok := bootstrap["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("root bootstrap capabilities = %#v", bootstrap["capabilities"])
+	}
+	capabilityEntries, ok := capabilityDocument["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("root bootstrap capability entries = %#v", capabilityDocument["capabilities"])
+	}
+	statsEntry, ok := capabilityEntries["pane.stats.v1"].(map[string]any)
+	if !ok || statsEntry["available"] != true {
+		t.Fatalf("root bootstrap stats capability = %#v", capabilityEntries["pane.stats.v1"])
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/transcripts", nil)
+	request.SetBasicAuth("admin", "secret")
+	response := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(response, request)
+	if response.Code != http.StatusNotImplemented || !bytes.Contains(response.Body.Bytes(), []byte(`"capability":"pane.tabber.v1"`)) {
+		t.Fatalf("stats-only unrelated route = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProtectedAdmitsStatsRoutesWhileMaterializationIsPending(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := capabilities.New("go-test")
+	catalog.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{}}})
+	s := &server{config: config, port: 7221, capabilities: catalog}
+	request := httptest.NewRequest(http.MethodGet, "/api/stats-capabilities", nil)
+	request.SetBasicAuth("admin", "secret")
+	record := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.statsCapabilities), "readonly").ServeHTTP(record, request)
+	if record.Code != http.StatusOK || bytes.Contains(record.Body.Bytes(), []byte(`"error":"feature_unavailable"`)) {
+		t.Fatalf("pending stats capability response = %d %s", record.Code, record.Body.String())
 	}
 }
 
@@ -571,6 +851,10 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	if history.Code != http.StatusOK || !bytes.Contains(history.Body.Bytes(), []byte(`"commits"`)) || !bytes.Contains(history.Body.Bytes(), []byte(`"subject":"initial"`)) {
 		t.Fatalf("readonly history route = %d %s", history.Code, history.Body.String())
 	}
+	historyStats := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1&stats=1")
+	if historyStats.Code != http.StatusOK || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"files":1`)) || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"added":1`)) || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"removed":0`)) {
+		t.Fatalf("readonly history stats route = %d %s", historyStats.Code, historyStats.Body.String())
+	}
 	headOutput, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -589,6 +873,10 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	readonlyBlame := serve("readonly", "readonly", http.MethodGet, "/api/batch/blame?path="+url.QueryEscape(path))
 	if readonlyBlame.Code != http.StatusForbidden || !bytes.Contains(readonlyBlame.Body.Bytes(), []byte(`"role":"readonly"`)) {
 		t.Fatalf("readonly blame route = %d %s", readonlyBlame.Code, readonlyBlame.Body.String())
+	}
+	missingBlamePath := serve("admin", "admin", http.MethodGet, "/api/batch/blame")
+	if missingBlamePath.Code != http.StatusBadRequest || !bytes.Contains(missingBlamePath.Body.Bytes(), []byte(`"key":"request.error.pathRequired"`)) {
+		t.Fatalf("missing blame path = %d %s", missingBlamePath.Code, missingBlamePath.Body.String())
 	}
 	unauthenticatedDiff := serve("", "", http.MethodGet, "/api/fs/diff?path="+url.QueryEscape(path))
 	if unauthenticatedDiff.Code != http.StatusUnauthorized || !bytes.Contains(unauthenticatedDiff.Body.Bytes(), []byte(`"key":"auth.error.authenticationRequired"`)) {
@@ -614,6 +902,257 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 		if disabled.Code != http.StatusNotImplemented || !bytes.Contains(disabled.Body.Bytes(), []byte(`"capability":"finder.git.v1"`)) {
 			t.Fatalf("disabled Git route %s = %d %s", route, disabled.Code, disabled.Body.String())
 		}
+	}
+}
+
+func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
+	root := t.TempDir()
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: readonly\n    password: readonly\n    role: readonly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "auth-cookie-secret"), []byte(strings.Repeat("22", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q", root},
+		{"-C", root, "config", "user.email", "test@example.invalid"},
+		{"-C", root, "config", "user.name", "Finder Test"},
+		{"-C", root, "add", "note.txt"},
+		{"-C", root, "commit", "-qm", "initial"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(path, []byte("working\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tmuxSocket := filepath.Join(t.TempDir(), "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
+	session := "go-phase8-session"
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+
+	service, err := finder.New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, config: config, finder: service, capabilities: capabilities.New("go-test")}
+	mux := http.NewServeMux()
+	s.registerFilesystemRoutes(mux)
+	serve := func(requestURL string) *httptest.ResponseRecorder {
+		record := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, requestURL, nil)
+		request.SetBasicAuth("readonly", "readonly")
+		mux.ServeHTTP(record, request)
+		return record
+	}
+	decode := func(record *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		if record.Code != http.StatusOK {
+			t.Fatalf("session-files route = %d %s", record.Code, record.Body.String())
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(record.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("session-files envelope: %v (%s)", err, record.Body.String())
+		}
+		if envelope["state"] != "ready" || envelope["ok"] != true || envelope["terminal"] != true {
+			t.Fatalf("session-files envelope = %#v", envelope)
+		}
+		return envelope
+	}
+
+	refs := url.QueryEscape(`{"` + root + `":{"from":"HEAD","to":"current"}}`)
+	single := decode(serve("/api/session-files?session=" + url.QueryEscape(session) + "&hours=7.5&from=HEAD&to=current&refs=" + refs))
+	data, ok := single["data"].(map[string]any)
+	if !ok || data["session"] != session || data["hours"] != 7.5 || data["from_ref"] != "HEAD" || data["to_ref"] != "current" {
+		t.Fatalf("single session-files data = %#v", single)
+	}
+	if files, ok := data["files"].([]any); !ok || len(files) != 1 {
+		t.Fatalf("single session-files files = %#v", data["files"])
+	}
+
+	batch := decode(serve("/api/session-files-batch?session=" + url.QueryEscape(session) + "&session=" + url.QueryEscape(session)))
+	batchData, ok := batch["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("batch session-files data = %#v", batch)
+	}
+	sessions, ok := batchData["sessions"].(map[string]any)
+	if !ok || len(sessions) != 1 {
+		t.Fatalf("batch sessions = %#v", batchData["sessions"])
+	}
+	statuses, ok := batchData["statuses"].(map[string]any)
+	if !ok || statuses[session] != float64(http.StatusOK) {
+		t.Fatalf("batch statuses = %#v", batchData["statuses"])
+	}
+
+	aggregate := decode(serve("/api/session-files?hours=7.5&from=HEAD&to=current"))
+	aggregateData, ok := aggregate["data"].(map[string]any)
+	if !ok || aggregateData["session"] != "" || aggregateData["hours"] != 7.5 || aggregateData["from_ref"] != "HEAD" || aggregateData["to_ref"] != "current" {
+		t.Fatalf("aggregate session-files data = %#v", aggregate)
+	}
+	if files, ok := aggregateData["files"].([]any); !ok || len(files) != 1 {
+		t.Fatalf("aggregate session-files files = %#v", aggregateData["files"])
+	}
+
+	cacheOnly := serve("/api/session-files?session=" + url.QueryEscape(session) + "&hours=7.5&cache_only=1&cache_view=" + strings.Repeat("0", 64))
+	if cacheOnly.Code != http.StatusAccepted {
+		t.Fatalf("cache-only missing view status = %d %s", cacheOnly.Code, cacheOnly.Body.String())
+	}
+	var cacheOnlyPayload map[string]any
+	if err := json.Unmarshal(cacheOnly.Body.Bytes(), &cacheOnlyPayload); err != nil {
+		t.Fatalf("cache-only missing view envelope: %v (%s)", err, cacheOnly.Body.String())
+	}
+	if cacheOnlyPayload["state"] != "queued" || cacheOnlyPayload["status"] != "pending" || cacheOnlyPayload["terminal"] != false {
+		t.Fatalf("cache-only missing view envelope = %#v", cacheOnlyPayload)
+	}
+}
+
+func TestPhase8CacheOnlySessionFilesReadSkipsSessionDiscovery(t *testing.T) {
+	s := &server{config: t.TempDir()}
+	record := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/session-files?session=missing&cache_only=1&cache_view=not-an-opaque-view", nil)
+	s.sessionFiles(record, request)
+	if record.Code != http.StatusAccepted {
+		t.Fatalf("cache-only response status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["state"] != "queued" || payload["status"] != "pending" || payload["terminal"] != false {
+		t.Fatalf("cache-only response = %#v", payload)
+	}
+}
+
+func TestPhase8SessionFilesCachePersistsAndRejectsMismatchedViews(t *testing.T) {
+	config := t.TempDir()
+	request := sessionFilesRequest{session: "session-1", hours: 24, fromRef: "HEAD", toRef: "current"}
+	descriptor := sessionFilesRequestDescriptor(request)
+	viewID := sessionFilesCacheViewID(descriptor)
+	payload := map[string]any{"session": request.session, "files": []any{"changed.py"}, "loaded": true}
+	writer := &server{config: config}
+	writer.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
+
+	reader := &server{config: config}
+	record, ok := reader.readSessionFilesCache(request, viewID)
+	if !ok || record.Payload["session"] != request.session {
+		t.Fatalf("persisted cache read = %#v, ok=%t", record, ok)
+	}
+	mismatched := request
+	mismatched.fromRef = "other"
+	if _, ok := reader.readSessionFilesCache(mismatched, viewID); ok {
+		t.Fatal("cache view was accepted for a mismatched request descriptor")
+	}
+}
+
+func TestPhase8SessionFilesStaleRefreshIsSingleFlight(t *testing.T) {
+	config := t.TempDir()
+	request := sessionFilesRequest{session: "session-1", hours: 24}
+	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(request))
+	server := &server{config: config, finderBackgroundJobs: newFinderBackgroundJobScheduler()}
+	defer server.finderBackgroundJobs.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	task := func(ctx context.Context) (map[string]any, *finder.Error) {
+		close(started)
+		select {
+		case <-release:
+			return map[string]any{"session": request.session, "files": []any{"new.py"}}, nil
+		case <-ctx.Done():
+			return nil, &finder.Error{Status: http.StatusServiceUnavailable, Code: "cancelled", Message: ctx.Err().Error()}
+		}
+	}
+	if !server.scheduleSessionFilesRefresh(request, viewID, task) {
+		t.Fatal("first stale refresh was not admitted")
+	}
+	<-started
+	if server.scheduleSessionFilesRefresh(request, viewID, task) {
+		t.Fatal("duplicate stale refresh was admitted")
+	}
+	close(release)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		record, ok := server.readSessionFilesCache(request, viewID)
+		if ok && len(record.Payload["files"].([]any)) == 1 && record.Payload["files"].([]any)[0] == "new.py" {
+			return
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatalf("stale refresh did not publish cache: %#v", record)
+		}
+	}
+}
+
+func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claude := filepath.Join(bin, "claude")
+	if err := os.Symlink("/bin/sleep", claude); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	tmuxSocket := filepath.Join(t.TempDir(), "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
+	session := "go-phase8-claude"
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", session, "-c", root, claude, "30").CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+
+	panePID := ""
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		output, err := exec.Command("tmux", "-S", tmuxSocket, "display-message", "-p", "-t", "="+session+":", "#{pane_pid}").Output()
+		if err == nil && strings.TrimSpace(string(output)) != "" {
+			panePID = strings.TrimSpace(string(output))
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if panePID == "" {
+		t.Fatal("tmux pane PID was not available")
+	}
+	transcript := filepath.Join(home, ".claude", "projects", "fixture", "claude-session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + filepath.Join(root, "changed.txt") + `"}}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(home, ".claude", "sessions", panePID+".json")
+	if err := os.MkdirAll(filepath.Dir(metadata), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte(`{"sessionId":"claude-session","cwd":"`+root+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &server{}
+	_, agents, finderErr := s.sessionFilesPaneInputs(session)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if len(agents) != 1 || agents[0].Kind != "claude" || agents[0].CWD != root {
+		t.Fatalf("Claude pane agent = %#v", agents)
+	}
+	if agents[0].SessionID != "claude-session" || agents[0].Transcript != transcript {
+		t.Fatalf("Claude pane transcript identity = %#v, want session=%q transcript=%q", agents[0], "claude-session", transcript)
 	}
 }
 

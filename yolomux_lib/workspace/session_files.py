@@ -2129,10 +2129,15 @@ def claude_usage_atoms_from_record(
     model = transcript_model_name(message.get("model"))
     effort = message.get("effort") or record.get("effort")
     bounded_thread_id = agent_thread_id or source
-    if len(bounded_thread_id.encode("utf-8")) > 160:
+    # Keep transcript identities within the same 192-byte component budget
+    # used by the stats storage contract.  A filesystem path just over the
+    # former 160-byte limit is still a valid, stable root identity; hashing it
+    # here would make Python and Go disagree on attribution without improving
+    # the actual storage bound.
+    if len(bounded_thread_id.encode("utf-8")) > 192:
         bounded_thread_id = f"claude-transcript:{hashlib.sha256(bounded_thread_id.encode('utf-8')).hexdigest()}"
     bounded_root_thread_id = root_thread_id or source
-    if len(bounded_root_thread_id.encode("utf-8")) > 160:
+    if len(bounded_root_thread_id.encode("utf-8")) > 192:
         bounded_root_thread_id = f"claude-transcript:{hashlib.sha256(bounded_root_thread_id.encode('utf-8')).hexdigest()}"
     return usage_component_atoms(
         source=source,

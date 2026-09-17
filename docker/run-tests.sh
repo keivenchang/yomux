@@ -96,7 +96,8 @@ if [ "$do_build" = 1 ] || [ "${YOLOMUX_TEST_IMAGE_REBUILD:-0}" = 1 ] || ! docker
   }
   trap go_mod_context_cleanup EXIT
   if ! python3 "$REPO_ROOT/tools/docker_image.py" --prepare-go-mod-cache "$go_mod_context"; then
-    echo "No complete local Go module cache is available; the Docker builder will use its network." >&2
+    echo "No complete local Go module cache is available; refusing a non-hermetic Docker build." >&2
+    exit 1
   fi
   build_context_args=(--build-context "go-mod-cache=$go_mod_context")
   if [ "$rootless_docker" = 0 ]; then

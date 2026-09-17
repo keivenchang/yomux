@@ -1534,29 +1534,34 @@ class StatsCurrentService:
         self._migration_state = "running"
         try:
             # run_local_rpc_service invokes _start only after winning the
-            # singleton lock. Preflight therefore precedes both migration and
-            # the first mutating SQLite open without racing another statsd.
-            try:
-                storage.require_compatible_writer(
+            # generic singleton lock.  Keep the database lease for the whole
+            # remaining startup transaction as well: preflight, migration,
+            # atomic activation, and the first mutating Store.open must be one
+            # ownership boundary shared with the Go writer.  Without this
+            # outer lease, a Go process could acquire the database between the
+            # read-only preflight and migration's cutover.
+            with storage.writer_lease(self.database_path):
+                try:
+                    storage.require_compatible_writer(
+                        self.database_path,
+                        writer_protocol=storage.MIN_WRITER_PROTOCOL,
+                        writer_build=storage.MIN_WRITER_BUILD,
+                    )
+                except storage.SchemaMismatchError:
+                    # Migration owns physical-corruption recovery. Passing an
+                    # unreadable file to that owner is not a successful preflight;
+                    # it either quarantines with a typed issue or fails closed.
+                    pass
+                report = self.migration_runner(
+                    migration.MigrationInputs(self.database_path.parent),
+                    active_database=self.database_path,
+                    completed_at=self.clock(),
+                )
+                self.writer = self.store_opener(
                     self.database_path,
                     writer_protocol=storage.MIN_WRITER_PROTOCOL,
                     writer_build=storage.MIN_WRITER_BUILD,
                 )
-            except storage.SchemaMismatchError:
-                # Migration owns physical-corruption recovery. Passing an
-                # unreadable file to that owner is not a successful preflight;
-                # it either quarantines with a typed issue or fails closed.
-                pass
-            report = self.migration_runner(
-                migration.MigrationInputs(self.database_path.parent),
-                active_database=self.database_path,
-                completed_at=self.clock(),
-            )
-            self.writer = self.store_opener(
-                self.database_path,
-                writer_protocol=storage.MIN_WRITER_PROTOCOL,
-                writer_build=storage.MIN_WRITER_BUILD,
-            )
         except (OSError, sqlite3.Error, storage.StatsCurrentError, migration.MigrationError) as error:
             self._migration_state = "failed"
             self._migration_failure = type(error).__name__[:64]
@@ -2554,6 +2559,16 @@ class StatsCurrentService:
                     candidate,
                     frozenset(write.resolution_seconds for write in writes),
                 )
+                # The publication itself is authoritative for every resolution it wrote, even
+                # when no public range has been requested yet. Keep only the per-resolution
+                # freshness floor here; `_publish_ring_views` remains demand-aware and does not
+                # manufacture a warm view for an undemanded range. A later request can therefore
+                # cold-read the exact persisted wire, while an older warm cache cannot silently
+                # win over a durable publication that already advanced that resolution.
+                with self.cache_lock:
+                    expected_cursor = (candidate.source_generation, candidate.cache_generation)
+                    for resolution_seconds in {write.resolution_seconds for write in writes}:
+                        self._ring_published_cursors[resolution_seconds] = expected_cursor
             self._clear_failure("ring_writer")
             return publication
 

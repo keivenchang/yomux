@@ -43,6 +43,8 @@ func New(backendBuild string) *Catalog {
 	for _, name := range []string{
 		"core.bootstrap.v1",
 		"core.diagnostics.v1",
+		"core.settings.v1",
+		"core.integrations.v1",
 		"terminal.websocket.v1",
 		"terminal.tmux.v1",
 		"session.roster.v1",
@@ -52,7 +54,6 @@ func New(backendBuild string) *Catalog {
 		"session.create.v1",
 		"session.kill.v1",
 		"session.rename.v1",
-		"terminal.status.v1",
 		"finder.write.v1",
 		"finder.search.v1",
 		"finder.batch.v1",
@@ -80,8 +81,8 @@ func New(backendBuild string) *Catalog {
 		"finder.batch.v1",
 		"finder.git.v1",
 		"finder.preview.v1",
+		"pane.differ.v1",
 		"pane.stats.v1",
-		"terminal.status.v1",
 		"session.create.v1",
 		"session.kill.v1",
 		"session.rename.v1",
@@ -194,8 +195,14 @@ func RouteCapability(method, rawPath string) string {
 	if parsed, err := url.Parse(rawPath); err == nil {
 		path = parsed.Path
 	}
-	if method == "GET" && (path == "/api/ping" || path == "/api/capabilities" || path == "/api/background/status" || path == "/api/system-status" || path == "/api/system-status/advanced" || path == "/api/logs" || path == "/api/client-events" || path == "/api/operations/ack") {
+	if method == "GET" && (path == "/api/ping" || path == "/api/capabilities" || path == "/api/background/status" || path == "/api/system-status" || path == "/api/system-status/advanced" || path == "/api/logs" || path == "/api/diagnostics/performance" || path == "/api/client-events" || path == "/api/operations/ack") {
 		return "core.diagnostics.v1"
+	}
+	if path == "/api/settings" {
+		return "core.settings.v1"
+	}
+	if path == "/api/update-status" || path == "/api/watched-prs" {
+		return "core.integrations.v1"
 	}
 	if path == "/ws" || path == "/api/tmux" || path == "/api/tmux-session-exists" {
 		return "terminal.websocket.v1"
@@ -209,8 +216,18 @@ func RouteCapability(method, rawPath string) string {
 	if path == "/api/rename-session" {
 		return "session.rename.v1"
 	}
-	if path == "/api/transcripts" || path == "/api/session-metadata" || path == "/api/activity" || path == "/api/activity-summary" || strings.HasPrefix(path, "/api/session-files") {
+	// Session metadata is a bootstrap identity probe, not the later Tabber product. The Go
+	// stats-only server implements this route so a full shell can establish its server epoch before
+	// opening other surfaces; gating it on the still-unimplemented Tabber capability would block the
+	// handler before it can return that identity.
+	if path == "/api/session-metadata" {
+		return "core.bootstrap.v1"
+	}
+	if path == "/api/transcripts" || path == "/api/activity" || path == "/api/activity-summary" {
 		return "pane.tabber.v1"
+	}
+	if strings.HasPrefix(path, "/api/session-files") {
+		return "finder.git.v1"
 	}
 	if strings.HasPrefix(path, "/api/tmux-") || path == "/api/auto-approve" || path == "/api/context-items" || path == "/api/events" {
 		return "terminal.status.v1"
