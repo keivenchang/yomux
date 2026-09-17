@@ -2,6 +2,8 @@
 
 This is an operator-run acceptance procedure for `yolomux_lib.infra.shared_config_lock` on one NFS export. It is not pytest evidence and is incomplete until a person runs it on two hosts. A same-host result does not establish this property: the exporter-local and NFS-client kernel lock paths can differ.
 
+Backend scope: this procedure validates the Python shared-configuration lock only. The Go preview does not use `yolomux_lib.infra.shared_config_lock`; its product-root lease and stats writer lock are separate owners and require their own fixture-owned tests. Neither backend may place live SQLite WAL state on a shared NFS path.
+
 ## Pass rule
 
 Use a disposable `auth.yaml`, never real configuration. PASS requires both lock directions, crash release, independent-key merge, same-key typed conflict, and complete parseable YAML throughout. Every lock scenario also requires event records proving the waiter called `fcntl.lockf(LOCK_EX)` while the other host still held its lock; a run without that overlap is INCONCLUSIVE, not PASS.

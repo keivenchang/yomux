@@ -1,8 +1,47 @@
 # Backend Architecture
 
-This document describes the backend that YOLOmux runs now. It does not retain rejected process folds or migration proposals. See [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) for verification requirements, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for operator commands and detailed contracts, and [`../DONE/`](../DONE/README.md) for migration history.
+This document describes both runtime backends in the current tree. Python is the default complete-feature backend and uses a web process plus local-service daemons. Go is experimental and uses one modular-monolith process with bounded in-process schedulers. Shared browser semantics do not imply shared process ownership. See [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) for verification requirements, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for commands, [`../../GO_MIGRATION.md`](../../GO_MIGRATION.md) for current Go route status, and [`../DONE/`](../DONE/README.md) for historical migrations.
 
-## Runtime topology
+## Go Runtime Topology
+
+```mermaid
+flowchart TB
+    browser[Browser]
+    go[One yolomux-go process]
+    tmux[tmux server and PTY children]
+    filesystem[Filesystem and Git repositories]
+    stats[(stats-v9.sqlite3)]
+    state[(Private config/state root)]
+    python[python3 HTML renderer]
+
+    browser -->|Authenticated HTTP and SSE| go
+    browser <-->|Terminal WebSocket| go
+    go <--> tmux
+    go --> filesystem
+    go <--> stats
+    go <--> state
+    go --> python
+
+    subgraph inprocess[Bounded in-process owners]
+        capabilities[Capability catalog]
+        events[Event broker and operation journal]
+        finder[Finder and Differ]
+        work[Interactive/background/bulk/stream schedulers]
+        collectors[Stats collectors and materializer]
+    end
+
+    go --> capabilities
+    go --> events
+    go --> finder
+    finder --> work
+    go --> collectors
+```
+
+`cmd/yolomux-go/main.go` owns listener, auth, tmux, routes, events, durable operation receipts, and lifecycle. `internal/finder` owns descriptor-bound filesystem/Git behavior; `internal/stats` owns the Go SQLite writer/readers, collectors, materialization, and rings; `internal/work` owns bounded queues. Go does not launch `indexd`, `statsd`, `batchd`, `statusd`, `watchd`, or `approvald`. It currently invokes Python only for the shared login/application HTML renderer.
+
+The Go process acquires one product-root lease, owns direct child cleanup, closes its schedulers/collectors/writer during shutdown, and uses its private config/state root for event and operation journals, session-file cache, and `stats-v9.sqlite3`. Its capability catalog is the browser admission boundary. An unregistered `/api/*` path ends at typed `501 feature_unavailable`; it must not be documented as present because a related capability family is available.
+
+## Python Runtime Topology
 
 ```mermaid
 flowchart TB
@@ -56,7 +95,7 @@ The web server is `TmuxWebtermHTTPServer`, a `ThreadingHTTPServer`. `http_routes
 
 Terminal bytes remain a direct browser-WebSocket-to-web-process-to-tmux path. Shared application and operation generations use authenticated HTTP and the `/api/client-events` SSE stream. Stats generations use `/api/stats-stream`, and development reload notifications use `/api/dev-reload`.
 
-## Local services
+## Python Local Services
 
 `LOCAL_SERVICE_INVENTORY` is the single six-service roster. Each row below is an independently launched process.
 
@@ -71,7 +110,13 @@ Terminal bytes remain a direct browser-WebSocket-to-web-process-to-tmux path. Sh
 
 Services may start on demand and retire after their lease/client/work idle condition is met. Expected demand-scoped absence is not itself a failure. The service's runtime row owns that distinction; health projection must not duplicate a second rule for it.
 
-## Lifetime ownership and root-coordination authority matrix
+## Go Lifetime Ownership
+
+The Go server has no local-service process tree. `acquireInstanceRootLease()` holds one product-root lease for the process lifetime; the server tracks direct child commands, closes the interactive/background/bulk/stream schedulers, collectors, stats writer, event broker, and tmux bridges during shutdown, then releases the lease. Finder and stats work remain bounded inside the one process through `internal/work` and the runtime collectors rather than through service records or Unix RPC.
+
+Go background coordination is a separate config-rooted implementation. `goBackgroundOwner` uses `go-background-owner.lock`, owner and generation JSON records, a 500 ms heartbeat, and a three-second stale threshold to elect one process for the named roles when multiple Go servers intentionally share a config root. It does not reuse Python `BackgroundOwnerRegistry`, service claims, service sockets, or `local_services/lifetime.py`.
+
+## Python Lifetime Ownership And Root-Coordination Authority Matrix
 
 Every backend/sidecar process and every coordination caller that can elect, reuse, signal, unlink, reclaim, or adopt appears in the table below exactly once. Each row carries seven facets, because a destructive action that is missing any one of them is a guess: the **root decision** (`caller-shared-root-retain`, where coordination is legitimate because the socket/port/record it guards must have exactly one owner even when a caller points two processes at the same root, or `private-root-remove`, where the root is auto-derived and private so no other caller could ever collide and no cross-root election, reuse, signal, unlink, reclaim, or adoption is performed at all); the **service record** that is the only authority to act on a process the acting owner did not just spawn; the **lock** that makes "exactly one owner" true rather than hoped for; the **claim** that survives the death of the process holding it; the **surviving supervisor** that answers "who is keeping this alive" by name rather than by silence; the **shutdown/reap owner**; and the exact **destructive dimensions** that must all still prove out before any signal or unlink. A row with no record and no claim has no authority and may only report.
 
@@ -93,7 +138,7 @@ Two rules are structural rather than per-row. First, a *future* event is never a
 | `acquire_server_port_lease` (`yolomux_lib/server_lease.py`) | The lease file, fenced by `HostIdentity` | `caller-shared-root-retain` (one TCP port is OS-shared even under a private root) | `server-leases/<host>/<port>.lock` | The lease file itself | None | The lease record's own identity | Released by the owning web process | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) |
 | `GroupOverloadWatchdog` (`local_services/watchdog.py`) | `lifetime.terminate_authorized_processes` under `SCOPE_TRACKED_PROCESS_GROUP` | `caller-shared-root-retain` | Reads the tracked group's service records and the port lease; never writes | None (read-only over records) | `watchdog_armed_tracked_group`, and `require_claim=True`, so an unnamed claim produces zero signals | The service record's `supervisor`, re-read from the record and vetoed on: a tracked service whose supervisor is not PROVABLY gone is `retained` — zero signals, zero unlinks, one row carrying `surviving_supervisor` | The shared owner: every leader SIGTERMed, ONE `GROUP_TERMINATION_GRACE_SECONDS` window, then SIGKILL to survivors within `GROUP_TERMINATION_FORCE_SECONDS` | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + namespace + group-authority kind + live process group + surviving supervisor (tracked services only) + claim. Spawn generation is reported `not_applicable_group_scoped`, not waived: the group is required in its place |
 | `preflight_port` (`local_services/preflight.py`, from `boot.sh`) | `lifetime.terminate_authorized_processes` under `SCOPE_TRACKED_PROCESS_GROUP` | `caller-shared-root-retain`, scoped to the exact tracked group of the port being started; never a broad sweep | Port lease record + the dead owner's service records | Port lease | `preflight_dead_owner_port_lease`, and `require_claim=True` | The dead owner's lease identity | The shared owner, on the same two budgets as the watchdog | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + namespace + group-authority kind + live process group + claim. Same generation substitution |
-| Web-process instance lease (`server_lease.py`) | `acquire_instance_root_lease` | `caller-shared-root-retain` for the resolved config/state/cache/runtime path tuple | One `instance.lock` beneath every resolved mutable path, held for the process lifetime | The lease file itself | None | The lease record's own identity | Released by the owning web process; `--force` may terminate only a verified current owner, then reacquire every path lease | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + exact path tuple |
+| Web-process background-owner election (`infra/background_owner.py`) | `BackgroundOwnerRegistry`, or `DisabledBackgroundOwner` | `private-root-remove` for a managed instance (election skipped entirely); `caller-shared-root-retain` for an explicit caller-set `YOLOMUX_ROOT` | Owner record + generation index, fenced by `process_fence` | `file_lock` on the generation index | None | The owner record itself | `stop()` unlinks its own record only when identity, generation id, and instance nonce all match; every index-write and unlink failure is published as `maintenance_failures` in `status_payload` | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + generation id + instance nonce |
 | tmux control client (`tmux/tmux_signals.py`) | The spawning web process through its live `Popen`, plus `PR_SET_PDEATHSIG` on Linux | `caller-shared-root-retain` | None | Claim file per client | `tmux-control-client` claim carrying host, boot, PID, process-start identity, kind, namespace, generation (session), supervisor, and root sharing | `surviving_supervisor` on the retained claim row | Own `Popen` teardown; a stranded client is reaped by `reap_unsupervised_tmux_control_clients` only when the claim's supervisor is provably gone | `host+boot` + `pid`/`process_start_identity` (zombie-excluded) + kind + namespace + supervisor |
 | Codex app-server session (`agent_comms/codex_app_server.py`) | The requesting thread; `send()` closes it in `finally` | `private-root-remove` (stdio pipe, no shared root) | **None** — a stdio child with no persisted record | The caller's `RLock` | None | The requesting thread, in-process | `close()` in the request's `finally`; the process is a direct child and dies with the server | None claimed, and none needed: no cross-restart authority is ever exercised |
 | batchd spawn workers (`infra/batchd.py`) | `PersistentJobBroker` through its `ProcessPoolExecutor` | `caller-shared-root-retain` (inherits batchd's row) | **None** — pool children covered by batchd's record and process group | The broker's lane executor | Inherits batchd's claim through the process group | batchd itself | Synchronous `terminate()` → 2 s join → `kill()` → 1 s join per worker | The live executor handle |
@@ -146,17 +191,19 @@ Demand is a *claim*, and a claim must name a live external client. A daemon may 
 
 When the last valid external claim disappears, `stop_event` is a request the listener may never honour: a stuck handler, a blocking shutdown hook, or a non-daemon thread at interpreter exit all leave the daemon up, and the only thing that used to force it was a future launcher start. `ServiceLifetimeOwner` bounds that exit inside the daemon itself, and publishes `<socket>.lifetime.json` beside the socket rather than behind the status RPC — because the moment "who retains this, and has it already been asked to stop?" matters most is exactly when the daemon is too wedged to answer an RPC.
 
-## Web-process coordination owners
+## Python Web-Process Coordination Owners
 
-Each YOLOmux server owns its recurring refresh coordination, watch-root intent consumption, metric-family collectors, warmer lifecycles, and local services. Startup claims the complete resolved config/state/cache/runtime path tuple with an exclusive instance lease, so two servers cannot share IDX/STATS/SESS state. A duplicate launch exits with an error; `--force` replaces only a verified owner. There is no web-process peer, takeover, or role-election path; each local service retains its own service lock and writer rules as defense-in-depth.
+Each YOLOmux server owns its recurring refresh coordination, watch-root intent consumption, metric-family collectors, warmer lifecycles, and local services. Startup claims the complete product root with an exclusive instance lease, so two servers cannot share IDX/STATS/SESS state. There is no web-process leader/follower election or takeover path; each local service retains its own service lock and writer rules as defense-in-depth.
 
 `BackendHealthObserver` runs inside each web process. It samples the six-service roster on a bounded cadence without demand-starting absent services and writes retained per-port history through `BackendHealthStore`. The web process's own metrics remain explicitly unobserved by that service probe instead of being fabricated.
 
-`/api/system-status` reads a pre-encoded immutable snapshot published by the local background snapshot worker. The request thread never rebuilds the status document. Before the first snapshot or after its freshness deadline, the route returns a typed unavailable or stale result.
+`/api/system-status` reads a pre-encoded immutable snapshot published by a background snapshot owner. The request thread never rebuilds the status document. Before the first snapshot or after its freshness deadline, the route returns a typed unavailable or stale result.
 
-## Filesystem boundaries
+## Filesystem Boundaries
 
-`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path. Human-interactive bounded reads stay under `/api/fs/...` and return directly; recursive or input-sized work is submitted through `/api/batch/...` and may return an operation receipt.
+The browser contract is shared, but the implementations are not. The detailed table and sequence below describe the default Python backend. In Go, `internal/finder.Service` owns descriptor-bound path validation, reads, mutations, Git operations, search, preview, and upload; the schedulers in `internal/work` and `cmd/yolomux-go/finder_jobs.go` bound interactive, background, bulk, and stream work in-process. Go does not call Python `batchd`, `indexd`, or `watchd`, and it accepts any absolute path allowed by OS permissions and its descriptor/protected-root checks instead of applying Python's configured-root and credential-name policy.
+
+In Python, `filesystem.list_directory()` is the shared listing owner. It validates the requested path through the one descriptor-bound authorization owner in `filesystem/paths.py`, filters secret or credential-blocked paths before child metadata is read, applies the entry bound, sorts the result, and can omit repository enrichment. Every listed child is authorized and opened relative to the pinned parent descriptor through `paths.safe_child()`; a blocked child, a symlink outside the allowed roots, or a child repointed to either is omitted with no metadata row. Recursive ZIP/count/search/index walks carry the requested and resolved roots beside the pinned directory descriptor, authorize each descendant before stat/open, and consume each accepted child through `safe_child()` rather than reopening an absolute path. Human-interactive bounded reads stay under `/api/fs/...` and return directly; recursive or input-sized work is submitted through `/api/batch/...` and may return an operation receipt.
 
 Git-backed filesystem consumers enter `git_ops.pinned_git_scope_from_handle()` from the already-authorized file, directory, or parent handle. The scope pins the repository marker, linked-worktree Git directory, common directory, and object directory; builds a bounded private view of config, HEAD, refs, packed refs, objects, and the index; passes only that view to `_run_pinned_git()`; and revalidates the live namespace when the consumer retires. Read metadata, path info, Finder repository enrichment, diff, and blame use this same scope. A tracked rename rewrites the old index entries to their new paths in the private index without reopening worktree content, performs the descriptor-relative filesystem rename, then publishes the private index through the pinned Git-directory descriptor and its owned `index.lock`. If the repository, object store, real index, or lock changes, the operation returns `fs.error.gitRepositoryChanged` and never runs against the replacement. Finder may defer optional repository badges when the bounded view exceeds its enrichment budget; the directory row remains usable.
 
@@ -199,13 +246,15 @@ sequenceDiagram
 
 Cold Finder Sync has no whole-tree render barrier. It awaits the fast root, paints it, and then fetches remembered descendant directories with bounded concurrency; each completed listing triggers another render. Git enrichment is independently scheduled after LIST publication, so a cold `batchd`, a queued product, or slow Git cannot delay names, types, sizes, or dates from the fast snapshot.
 
-Quick Open indexing is separate from Finder listing. `indexd` persists a breadth-first, directory-at-a-time frontier. It publishes a complete depth before advancing `published_depth`, retains the previous readable generation while replacement work proceeds, and resumes the shallowest pending directory after restart. Finder visibility and concrete watch/mutation paths promote or repair work through the shared index invalidation owner; they do not start a second crawl.
+Python Quick Open indexing is separate from Finder listing. `indexd` persists a breadth-first, directory-at-a-time frontier. It publishes a complete depth before advancing `published_depth`, retains the previous readable generation while replacement work proceeds, and resumes the shallowest pending directory after restart. Finder visibility and concrete watch/mutation paths promote or repair work through the shared index invalidation owner; they do not start a second crawl.
 
 ## State and durability
 
-`YOLOMUX_STATE_DIR` is durable-state scope. The instance lease covers the complete resolved config/state/cache/runtime path tuple, so a second web process using the same paths is refused before it can share IDX/STATS/SESS state. `YOLOMUX_RUNTIME_DIR` scopes service sockets and transient runtime data. Registry record placement follows the service and therefore may be runtime-rooted or state-rooted; selecting the same state root alone does not imply a shared service socket. Stateful families that must not cross hosts live below `STATE_DIR/hosts/<stable-host-id>/`. Live SQLite WAL files are not supported on a network filesystem.
+For Python, `YOLOMUX_STATE_DIR` is durable-state scope. Web processes that select the same state root share durable caches and host-partitioned databases. `YOLOMUX_RUNTIME_DIR` scopes background-owner coordination, service sockets, and transient runtime data; processes share election and local-service connectivity only when they select the same runtime root. Registry record placement follows the service owner and therefore may be runtime-rooted or state-rooted; selecting the same state root alone does not imply shared coordination or a shared service socket. Stateful families that must not cross hosts live below `STATE_DIR/hosts/<stable-host-id>/`. Live SQLite WAL files are not supported on a network filesystem.
 
-The primary port uses the durable default state root. Non-primary development ports are isolated under an ephemeral per-port `/tmp` root, so their retained health, caches, and service state do not survive a reboot or `/tmp` cleanup. The UI reports retained history from the actual selected root rather than assuming that every port is durable.
+For Go, `YOLOMUX_CONFIG_DIR` wins, then `YOLOMUX_ROOT/config`, then `~/.config/yolomux`. The event journal, operation snapshot/journal, auth files and cookie secret, settings, background-owner records, OpenCode cursor sidecar, and default `stats-v9.sqlite3` live there. `YOLOMUX_STATE_DIR` selects the session-files cache root and otherwise falls back to the config directory. `YOLOMUX_STATS_DATABASE` can move only the Go stats database. Go does not consume `YOLOMUX_RUNTIME_DIR` or `YOLOMUX_CACHE_DIR`, does not create Python service sockets, and does not inherit Python's host-partitioned state helpers merely because the environment variables have the same names.
+
+The managed launcher gives non-primary development ports an ephemeral per-port `/tmp` root, so retained Go and Python preview state does not survive reboot or `/tmp` cleanup. A direct Go launch must provide equivalent private local config/state paths itself; sharing a config directory also shares Go background-owner election and mutable journals.
 
 ## Extension rules
 
@@ -215,5 +264,6 @@ The primary port uses the durable default state root. Non-primary development po
 | Local-service runtime field | Add the field once to `LocalServiceRuntimeRow` and the shared projection; a service adapter supplies only its domain value. | Exercise runtime-row and backend-health projection tests and prove projection does not demand-start the service. |
 | HTTP route | Register route metadata in `http_routes.py`, then put filesystem or response-framing work in the relevant adapter. | Compare the route catalog and verify auth, role, body limit, headers, framing, and typed error behavior. |
 | Application domain behavior | Extend the composed domain owner that already owns its mutable state and teardown. | Characterize payload bytes, callbacks, lock order, replacement, stale completion, failure, and shutdown. |
+| Go route or domain behavior | Extend `cmd/yolomux-go` only for transport/lifecycle integration; put filesystem, stats, capability, or scheduling behavior in its existing `internal/*` owner. | Update capability admission and registered-route tests together; run Go unit/race/contract plus Dockerized Chromium coverage. |
 
-New backend work follows explicit composition behind stable facades. Do not add a generic service locator, a parallel cache for the same product, or a second copy of service inventories, filesystem policy, runtime-row fields, or response semantics.
+New backend work follows explicit composition behind stable facades. Do not add a generic service locator, a parallel cache for the same product, or a second copy of service inventories, filesystem policy, runtime-row fields, or response semantics. Do not copy Python daemon topology into Go merely to preserve class or process names; preserve the browser contract while extending the Go owner that already holds the state.

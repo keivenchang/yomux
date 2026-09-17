@@ -1,10 +1,12 @@
 # Backend Test Contract — cohorts, boundaries, and acceptance
 
-How backend process/browser work in YOLOmux is verified: resource ownership per test cohort, the first-failing-transition discipline, what may and may not count as acceptance, and when to stop. Extracted from the two-daemon migration queue on 2026-07-25.
+How backend process/browser work in YOLOmux is verified: resource ownership per test cohort, the first-failing-transition discipline, what may and may not count as acceptance, and when to stop. The lifecycle and no-retry rules apply to both backends. Python examples name local-service daemons; Go examples map the same ownership questions to one process, its bounded schedulers, direct SQLite writer, child processes, and fixture-owned Docker resources.
 
 These rules exist because specific failures cost real time: parallel-only failures traced to undeclared shared resources, and retries/reconnects masking lost first deliveries. Companion: [`BACKEND_ARCHITECTURE.md`](BACKEND_ARCHITECTURE.md).
 
-Implementation status: the fixture conventions below are in use, but no executable production/test symbol named `BackendCohortManifest` or shared `cohort_id` parent exists. Until that parent lands, the manifest block is a required review record rather than a type the gate can validate; the 0.7.7 discrepancy guide records the implementation gap.
+Implementation status: the Python fixture conventions below are in use, but no executable production/test symbol named `BackendCohortManifest` or shared `cohort_id` parent exists. Until that parent lands, the manifest block is a required review record rather than a type the Python gate can validate; the 0.7.7 discrepancy guide records that gap. Go's Bazel/Docker wrappers already enforce read-only source, private Bazel/Go writable roots, private HOME/XDG/TMP/tmux/browser/port state, fixture-owned listeners, and network-disabled test execution, but they do not create a production `BackendCohortManifest` type either.
+
+The canonical full gate is `python3 tools/check.py`; its default lanes include the Dockerized `bazel-go` suite. For focused Go validation, use `python3 tools/check.py --lane bazel-go` or `tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"`; the direct wrapper enters Docker and runs the declared Bazel unit, race, contract, runtime, Chromium, YO!stats, and agent-status targets. Do not run both forms against the same frozen tree merely to repeat the suite. A live operator port is not a test cohort.
 
 ### Mandatory Work-Unit Preflight
 
@@ -19,7 +21,7 @@ Every implementation or test slice must record the following before editing sour
 7. Define the acceptance action count before running the test: number of HTTP requests, product submissions, EventSource opens, reconnects, final reads, and expected events. A test may not increase those counts after it fails.
 8. Define the relevant lifecycle rows and final invariants before implementation. A narrow unit closes only its named row; a broad box closes only when every row in its matrix is current-source green.
 9. Define exact cleanup ownership for every child, socket, port reservation, profile, temporary directory, lock, and stream. Cleanup runs in `finally` and verifies absence; it does not search and kill by a broad command pattern.
-10. Select focused verification with `python3 -m pytest -n 2`; select the canonical parallel gate only for the conflict-group boundary. A serial pass, isolated rerun, or lowered worker count is never substitute evidence.
+10. Select focused verification for the changed owner: use `python3 -m pytest -n 2` for Python, Node/browser tests for shared frontend behavior, and `tools/run_bazel_tests.sh --target <label>` or `python3 tools/check.py --lane bazel-go` for Go. Select the canonical parallel full gate only for the conflict-group boundary. A serial pass, isolated rerun, retry, or lowered worker count is never substitute evidence.
 
 
 ### Terminal-State Publication Contract

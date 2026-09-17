@@ -1,8 +1,23 @@
 # YO!stats current API and storage contract
 
-This document is the normative contract for the current YO!stats pipeline. The current system has one durable schema, one writer, one materializer, one exact snapshot shape, and one exact live-delta shape. Retired schemas, derived retention buckets, request dialects, readers, and compatibility responses are not part of the current API.
+This document records the shared YO!stats browser wire target and the two current backend implementations. Each running backend has one writer for its own isolated database; Python and Go do not share a writer process, live database, or service socket. The detailed statsd cache/delta/rebuild rules below are the Python contract. Go implements the same route family and top-level snapshot schema through an in-process writer/read path, with the differences called out here and in [`../../GO_MIGRATION_YOSTATS.md`](../../GO_MIGRATION_YOSTATS.md).
 
-## Architecture and ownership
+## Backend Scope And Current Conformance
+
+| Contract area | Python backend | Experimental Go backend |
+| --- | --- | --- |
+| Process owner | Dedicated supervised `statsd`; web processes authenticate and forward | One `yolomux-go` process owns writer, readers, collectors, materializer, and HTTP/SSE |
+| Storage | Schema-versioned stats database behind statsd RPC | Direct `stats-v9.sqlite3`, schema 9, writer protocol 25/build 8, `.writer.lock` lease |
+| Snapshot | Pre-encoded retained exact cache; HTTP does no database aggregation | Opens a read-only database view and builds the requested snapshot in the handler path |
+| Delta | Retained bounded exact delta chain with bucket/no-data replacements and tombstones | Rebuilds the requested view when source generation changes and currently returns full bucket/no-data replacement with an empty tombstone list |
+| SSE | Resolution-cadenced retained snapshot chunks/deltas with missed-cursor repair | Sends one snapshot, then checks source generation on a 100 ms ticker and emits heartbeat or full replacement delta |
+| Cost report | Full dimensions, model/agent/evidence attribution, omission counts, and catalog revision | Preserves schema version 4 but currently places aggregate totals in `other`; model, agent, and evidence rows are empty |
+| Readiness | Projects statsd cache/materializer/ring/migration/resource state | Validates that the Go database opens and reports source generation; pending cells and ring failure are currently fixed ready values |
+| Agent status and collectors | Python elected collectors plus statusd/statsd ownership | `internal/stats` Linux-first agent inventory/status and host/token/OpenCode collectors in process |
+
+The shared frontend accepts the common Range/Resolution and top-level snapshot fields. It must not infer that an empty Go attribution array means Python-equivalent attribution was computed. Exact output parity, retained-delta behavior, cross-platform collection, and production-scale evidence remain migration gaps.
+
+## Python Architecture And Ownership
 
 ```mermaid
 flowchart LR
@@ -28,7 +43,15 @@ flowchart LR
 - Agent Status rows consume the shared statusd generation. The web collector does not rediscover tmux panes, classify screens, read transcript tails, or construct a second status roster.
 - The browser renders returned values, axes, geometry, hover, visibility, and zoom clipping. It does not bucket, merge, average, compute rates, sample-hold, interpolate, infer coverage, prefetch other ranges, combine generations, or choose another resolution.
 
-## Schema and writer fence
+## Go Architecture And Ownership
+
+The Go server opens one write-capable SQLite connection through `internal/stats.Writer` and separate bounded read-only/query-only views for serving. `cmd/yolomux-go/stats_runtime.go` owns route parsing, migration, collector lifecycle, snapshots, deltas, SSE, readiness, and pricing. Host, agent-status, and token collectors append originals through the same writer. There is no statsd RPC, web-process forwarder, or cross-port shared service.
+
+Go preserves original observations, coverage epochs, unavailable spans, usage atoms, source generation, schema/fence validation, four ring table families, range/resolution validation, and the browser's top-level protocol version 2/cost-report version 4 shapes. It does not yet preserve Python's retained pre-encoded view cache, chunked multi-frame snapshot assembly, exact cadence-based delta chain, attribution rows, service diagnostics, or full readiness semantics. Those differences are implementation gaps, not alternate meanings for the same fields.
+
+## Schema And Writer Fence
+
+The schema markers and fact model below are shared design. Socket-scoped statsd behavior, RPC fences, daemon replacement, and web-process forwarding apply only to Python. Go uses the database-side writer fence and `<database>.writer.lock` directly and never discovers or replaces a statsd process.
 
 - The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 9 stores metadata, observations, usage atoms, covered epochs, explicit unavailable spans, migration reconciliation, persisted aggregate rings, and the invalidation ledger that records owed ring cells.
 - Its active filename is schema-versioned (`stats-v<schema>.sqlite3`) and its daemon socket is protocol-and-schema scoped (`statsd.p<protocol>s<schema>.sock`). Mixed-version worktrees therefore use distinct writer locks, RPC sockets, and databases; neither can discover, fence, or replace the other's daemon. The retired `stats-history.sqlite3` path is never aliased.

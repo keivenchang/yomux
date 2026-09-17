@@ -1,12 +1,14 @@
 # Recovery and Lost Sessions
 
+Backend scope: tmux session survival and fixture-isolation principles apply to both backends. The detailed lost-session product plan and recovery matrices below are a historical v0.7.7-era Python design record; the recovery suite that supplied its `Covered` and `Partial` labels is not present on the current branch. Go currently provides terminal/session discovery, create/kill, PTY/WebSocket attach, events, and operation-journal repair, but it does not claim Python Tabber, transcript/activity, auto-approval, or full lost-session recovery parity.
+
 How YOLOmux decides which tmux sessions are worth saving, how it classifies a session's disappearance as clean or unclean, and what it may honestly claim to cover.
 
 Two constraints here exist nowhere else in the repo and are the reason this document does. First, the clean-versus-unclean classification table below: an interactive user can deliberately exit carrying the previous command's nonzero status, so exit status is not intent, and an unknown close is dismissed as intentional rather than silently deleted. Second, the discoverability boundary: a custom tmux socket created and destroyed before YOLOmux observed it cannot be reconstructed by any later process, so the UI and docs must say so rather than claim impossible coverage.
 
 Field-level tmux signals are in [TMUX.md](TMUX.md); the Lost Tabber surface is in [GUI.md](GUI.md).
 
-> **CURRENT TRACEABILITY: 17/48 covered, 22/48 partial, 9/48 uncovered.** These counts classify the evidence rows below; they do not assert that every cited test was rerun during this documentation audit. This document combines shipped recovery behavior with the remaining acceptance contract and is not evidence that all E01-E48 journeys or the release decision have passed. The unresolved rows are summarized for future 0.7.7 queue planning in [`V0.7.7_IMPLEMENTATION_DISCREPANCIES.md`](V0.7.7_IMPLEMENTATION_DISCREPANCIES.md).
+> **HISTORICAL TRACEABILITY: 17/48 covered, 22/48 partial, 9/48 uncovered on the abandoned recovery work.** The current tree contains none of the 46 unique test nodes named in the matrix, so those labels do not establish current Python or Go coverage. Treat every E01-E48 journey as unverified until current source owners and executable tests are mapped again. The old unresolved rows remain summarized in [`V0.7.7_IMPLEMENTATION_DISCREPANCIES.md`](V0.7.7_IMPLEMENTATION_DISCREPANCIES.md).
 
 ## Recovery Product Plan
 
@@ -128,9 +130,9 @@ Every row is required unless it explicitly says operator-only. Each row must pro
 | E47 | Install hooks, stop every YOLOmux web process, then create/rename/exit sessions on the still-running registered tmux server; restart two YOLOmux servers. | The owner-only hook journal preserves lifecycle events while the web UI is absent, restart reconciles them once, clean exits stay absent, and unclean/unknown exits appear red on both servers. |
 | E48 | In an automatically adopted multi-pane session, exit one pane zero, one pane nonzero, keep one live, then close the last live pane zero. | Pane-level evidence remains attached to the right incarnation, the live session/topology is not duplicated, only the failed pane is recoverable while the session lives, and final clean session closure does not erase the earlier unresolved failure. |
 
-### Automated scenario traceability
+### Historical automated scenario traceability
 
-This table is deliberately conservative. `Partial` means the named test proves only the stated subset; `Uncovered` means no direct test was found in the recovery browser, database, observer-process, or tmux-recovery modules. Do not promote a row to covered from a similarly named unit test or a source inspection.
+This table preserves the abandoned recovery work's classification and test names so the design record remains searchable. The named tests are absent from the current tree; `Covered` and `Partial` below mean only what that historical branch claimed, while `Uncovered` records a gap already known then. Do not promote any row to current coverage from this table, a similarly named unit test, or source inspection.
 
 | ID | Automated evidence | Status |
 | --- | --- | --- |

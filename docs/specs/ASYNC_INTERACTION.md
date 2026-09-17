@@ -1,12 +1,12 @@
 # Async interaction contract
 
-This document is the normative contract for every browser request whose result is owned by a YOLOmux daemon. A route is conforming only when its server behavior, browser behavior, failure states, telemetry, and reconnect behavior satisfy this document.
+This document is the normative contract for every browser request whose result is produced asynchronously. A route is conforming only when its server behavior, browser behavior, failure states, telemetry, and reconnect behavior satisfy this document. In Python, the producer is usually a local-service daemon. In Go, the producer is an admitted task on an in-process bounded scheduler. The receipt and browser convergence contract is the same even though the process boundary differs.
 
 ## Core rule
 
-The web process authenticates and authorizes the request, validates bounded metadata, and asks the owning daemon for an already-retained value or confirmed acceptance. The web process never waits for daemon production, polls from an HTTP handler, sleeps in an HTTP handler, or materializes a daemon-owned product as Python objects.
+The HTTP owner authenticates and authorizes the request, validates bounded metadata, and asks the owning producer for an already-retained value or confirmed acceptance. A Python web process never waits for daemon production, polls from an HTTP handler, sleeps in an HTTP handler, or materializes a daemon-owned product as Python objects. A Go handler follows the same non-blocking acceptance rule when it submits to `internal/work`; immediate bounded filesystem reads may use the route-specific synchronous shape only where the route contract and tests classify them as immediate work.
 
-Daemon acceptance is a bounded control-plane round trip, not permission to perform the operation synchronously. Acceptance confirmation is required: returning a receipt before the daemon accepts would turn a daemon that is not running into an abandoned promise. The accept exchange may validate bounded metadata and enqueue work; it may not wait for the product.
+Producer acceptance is a bounded control-plane transition, not permission to perform the operation synchronously. Acceptance confirmation is required: returning a receipt before a Python daemon or Go scheduler accepts would create an abandoned promise. The accept exchange may validate bounded metadata and enqueue work; it may not wait for the product.
 
 A request returns a usable value now when the daemon already retains the exact matching product and can relay it without performing work. The daemon decides whether the product is warm; a web-process cache must not become a parallel product owner. A warm relay may return `200`. If the answer must be scanned, assembled, refreshed, selected by running a subprocess, or otherwise produced, the daemon accepts it and HTTP returns `202` even when that work happens to take only 5 ms. The test is whether the request waited for work, not elapsed time.
 

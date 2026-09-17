@@ -1,5 +1,7 @@
 # Self-update, restart, and the worktree deployment model
 
+Backend scope: this is the current Python self-update/restart contract. The experimental Go backend does not register the Python self-update routes and must return typed `501 feature_unavailable` for them. Go preview updates are operator-driven: rebuild the Bazel binary, rerun the Dockerized Go gate, and restart the selected preview port through `boot.sh --golang`.
+
 How YOLOmux updates its own running code, when it auto-restarts vs asks for a manual restart, and the multi-worktree checkout model those rules depend on. Written after a session that landed a batch of lifecycle fixes and hit every one of these conditions.
 
 ## The worktree model (what "this checkout" means)

@@ -4,13 +4,13 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-205 entries, 2026-06-02 to 2026-09-01.
+203 entries, 2026-06-02 to 2026-09-01.
 
 | month | entries |
 | --- | ---: |
 | [2026-09](2026-09/) | 2 |
-| [2026-08](2026-08/) | 47 |
-| [2026-07](2026-07/) | 55 |
+| [2026-08](2026-08/) | 45 |
+| [2026-07](2026-07/) | 54 |
 | [2026-06](2026-06/) | 102 |
 
 ## 2026-09
@@ -25,13 +25,29 @@ This is a historical record, not the current architecture or API contract: a lat
 | date | completed work |
 | --- | --- |
 | 2026-08-28 | [v0.7.22 P0 release decision](2026-08/DONE.v0.7.22-p0-release-decision.md) |
-| 2026-08-27 | [E5 instant file open and bounded jobd](2026-08/DOIT.p0.e5.instant-file-open-and-bounded-jobd.md) |
 | 2026-08-23 | [Statsd ring-invalidation storm fix](2026-08/DONE.statsd-ring-invalidation-storm.md) |
 | 2026-08-23 | [v0.7.12 exact tmux target revalidation](2026-08/DONE.0-7-12-tmux-exact-session-target.md) |
 | 2026-08-20 | [macOS boot/tmux environment isolation](2026-08/DONE.merge-macos-boot-tmux-env.md) |
+| 2026-08-19 | [Finder working-tree diff ownership](2026-08/DONE.finder-working-tree-diff.md) |
 | 2026-08-19 | [v0.7.9 exact tmux session targeting](2026-08/DONE.0-7-9-tmux-exact-session-target.md) |
 | 2026-08-19 | [v0.7.9 unread-body HTTP response framing](2026-08/DONE.0-7-9-request-uri-too-long-attribution.md) |
+| 2026-08-18 | [NFS configuration-lock two-host acceptance](2026-08/DONE.nfs-configuration-lock-acceptance.md) |
+| 2026-08-18 | [Orphaned local-service daemon evidence](2026-08/DONE.orphaned-local-service-daemons.md) |
+| 2026-08-18 | [Stats snapshot 401 backoff defect](2026-08/DONE.stats-snapshot-401-no-backoff.md) |
+| 2026-08-18 | [Statsd retention and coverage churn](2026-08/DONE.statsd-retention-coverage-churn.md) |
+| 2026-08-18 | [Transcript prune/stat race](2026-08/DONE.transcript-prune-stat-race.md) |
+| 2026-08-18 | [v0.7.8 Cost moved into YO!stats](2026-08/DONE.0-7-8-cost-in-stats-subtab.md) |
+| 2026-08-18 | [v0.7.8 Daemons load Min/Avg/Max](2026-08/DONE.0-7-8-daemon-load-min-max-average.md) |
+| 2026-08-18 | [v0.7.8 Markdown task-list continuity](2026-08/DONE.0-7-8-markdown-task-list-continuity.md) |
+| 2026-08-18 | [v0.7.8 Statsd WAL, retention, and CPU](2026-08/DONE.0-7-8-statsd-wal-retention-cpu.md) |
+| 2026-08-18 | [v0.7.8 Working/footer detector](2026-08/DONE.0-7-8-working-detector-footer-fragility.md) |
 | 2026-08-17 | [Finder Git Diff Viewer](2026-08/DONE.git-diff.md) |
+| 2026-08-17 | [v0.7.8 responsive mobile layout](2026-08/DONE.0-7-8-responsive-mobile-layout.md) |
+| 2026-08-16 | [v0.7.8 license-history remote finalization](2026-08/DONE.0-7-8-license-history-remote-finalization.md) |
+| 2026-08-16 | [v0.7.8 macOS aliases, xterm teardown, and Quick Open exclusions](2026-08/DONE.0-7-8-macos-alias-xterm-quick-open-exclusions.md) |
+| 2026-08-16 | [v0.7.8 product-root safety](2026-08/DONE.0-7-8-product-root-safety.md) |
+| 2026-08-16 | [v0.7.8 refresh fan-out and background CPU](2026-08/DONE.0-7-8-refresh-fanout-background-cpu.md) |
+| 2026-08-15 | [v0.7.8 multi-machine connector decision](2026-08/DONE.0-7-8-multi-machine-connector-decision.md) |
 | 2026-08-15 | [v0.7.7 active-queue reconciliation](2026-08/DONE.0-7-7-active-queue-reconciliation.md) |
 | 2026-08-14 | [v0.7.6 performance release](2026-08/DONE.0-7-6-performance-release.md) |
 | 2026-08-14 | [v0.7.5 first-launch agent auth and setup brand](2026-08/DONE.0-7-5-first-launch-auth.md) |
@@ -92,7 +108,6 @@ This is a historical record, not the current architecture or API contract: a lat
 | 2026-07-19 | [Companion CLIs under tools](2026-07/DONE.companion-clis-under-tools.md) |
 | 2026-07-19 | [Coherent Agent-status chart snapshots](2026-07/DONE.coherent-agent-status-chart-snapshots.md) |
 | 2026-07-19 | [Agent-window status integrity](2026-07/DONE.agent-window-status-integrity.md) |
-| 2026-07-18 | [Offload web refreshers to jobd](2026-07/DONE.offload-web-refreshers-jobd.md) |
 | 2026-07-18 | [Faster isolated test architecture](2026-07/DONE.faster-isolated-test-architecture.md) |
 | 2026-07-17 | [YO!stats legacy migration crash-loop recovery ()](2026-07/DONE.yo-stats-legacy-migration-crash-loop-recovery.md) |
 | 2026-07-17 | [Touch interaction and YO!cost attribution](2026-07/DONE.touch-interaction-yo-cost-attribution.md) |

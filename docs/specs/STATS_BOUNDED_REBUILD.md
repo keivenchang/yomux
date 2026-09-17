@@ -1,6 +1,6 @@
 # Bounded exact rebuild — specification
 
-Status: specification only, nothing here is implemented. Written for `YOLO-V0717-E3-REBUILD-28` against `3d1fe4da8`.
+Status: historical Python statsd design and measurement record, written for `YOLO-V0717-E3-REBUILD-28` against `3d1fe4da8`. The current Python backend has a bounded persisted-ring/invalidation lifecycle described in [`STATS_API.md`](STATS_API.md); do not use this file as a current implementation checklist. The Go backend has a separate in-process `internal/stats` lifecycle and does not run this Python rebuild worker design.
 
 ## What this fixes, in one paragraph
 

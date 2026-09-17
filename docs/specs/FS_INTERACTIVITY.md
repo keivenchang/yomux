@@ -1,5 +1,7 @@
 # Filesystem indexing interactivity target
 
+Backend scope: the user outcome and scheduling priorities apply to both backends. Python Quick Open persistence/frontier ownership belongs to `indexd` and `batchd`. Go Finder uses `internal/finder` plus bounded in-process interactive, background, bulk, and stream schedulers; it does not launch those daemons and does not currently claim the same persistent SQLite frontier. Go's `/api/fs/fast/list` is the first-paint path, and repository/status enrichment follows separately so names appear before Git work completes.
+
 > **SHIPPED IN 0.7.3.** The breadth-first Quick Open lifecycle, frontier, hot-path cadence, safety refresh, and status projection described here are implemented in `yolomux_lib/search/bfs_index.py`, `file_index.py` (`INDEX_FORMAT_VERSION=6`), `search_indexer.py`, `filesystem/search.py`, and `app.py`. The focused, gate, and release evidence is retained in [`../DONE/2026-08/DONE.fs-interactivity.md`](../DONE/2026-08/DONE.fs-interactivity.md). Two implementation caveats remain recorded inline below: a batchd-executed mutation reaching `indexd` in a multi-server topology, and the read-path connect timeout. [`SEARCH_INDEXER.md`](SEARCH_INDEXER.md) describes the same single-writer SQLite architecture.
 
 ## User outcome

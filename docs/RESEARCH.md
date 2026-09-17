@@ -1,6 +1,6 @@
 # Product Research and Peer Landscape
 
-This document records product and architecture research that can inform YOLOmux. It is not a commitment to adopt a peer's design or replace the current tmux substrate. Update it when a comparison changes a product or technical decision.
+This document records product and architecture research that can inform YOLOmux. It is not a commitment to adopt a peer's design, replace the current tmux substrate, or make the experimental Go backend match a peer's process model. Update it when a comparison changes a product or technical decision.
 
 YOLOmux is a lightweight, powerful AI-work workspace: it combines AI management, editing and viewing, collaboration, file and Git context, and observability. Existing tmux sessions are one useful integration surface, not the product's defining theme. See the [runtime architecture](../README.md#runtime-architecture).
 

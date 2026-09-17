@@ -2,6 +2,19 @@
 
 > **STATUS 2026-08-12: HISTORICAL.** This inventory was taken against the `phase2-infrastructure` baseline, which landed on 2026-08-01. Path ownership has since moved through the 0.7.3 root-isolation work and the 0.7.4 package split; `yolomux_lib/infra/root_paths.py` is the current resolver. The runtime-root corrections below record the current path family; use the remaining table for migration history rather than as a complete path catalog.
 
+The experimental Go backend does not use Python's six local-service path families. Its current mutable owners are:
+
+| Go path | Owner |
+| --- | --- |
+| `<checkout>/instance.lock` | `cmd/yolomux-go/main.go` product-root lease; one live Go server owns a checkout root |
+| `<config>/go-events.jsonl` and `<config>/event-log.jsonl` | Go event broker and bounded event log |
+| `<config>/go-operations.json` and `<config>/go-operations.jsonl` | Go durable operation state and journal |
+| `<config>/stats-v9.sqlite3`, `-wal`, `-shm`, and `.writer.lock` | `internal/stats` sole writer/readers and SQLite fence |
+| `<config>/opencode-token-cursors.json` | Go OpenCode token cursor sidecar |
+| `<state>/session-files-cache/*.json` | Go Differ/session-files cache |
+
+`YOLOMUX_ROOT` and explicit config/state overrides must remain private and host-local for both backends. Go tests place every mutable path under disposable Docker roots; they do not reuse operator state or ports.
+
 This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE_DIR` currently conflates runtime, durable state, and cache data; matrix classifications below are migration targets, not claims that the current layout already meets them.
 
 | Matrix row | Current path | Owner and writer | Evidence |

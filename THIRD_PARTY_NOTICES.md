@@ -8,6 +8,10 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 
 - PyYAML - YAML parser/emitter dependency declared in `pyproject.toml`; package metadata reports MIT license.
 
+## Runtime Go Dependency
+
+- `github.com/mattn/go-sqlite3` 1.14.24 - SQLite driver used by the experimental Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
+
 ## Vendored Browser Assets
 
 - Dockview Core 6.6.1 - `static/vendor/dockview-core.noStyle.js` and `static/vendor/dockview.css`; upstream package metadata and bundle headers report MIT license.
@@ -22,3 +26,4 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 
 - `pytest-xdist` is declared in the `dev` extra in `pyproject.toml` for local test parallelism.
 - Optional managed-agent SDK packages are declared in the `yoagent` extra in `pyproject.toml`; their upstream licenses remain separate from the YOLOmux project license.
+- Bazel `rules_go` 0.50.1 and Gazelle 0.36.0 are repository build dependencies declared in `MODULE.bazel`; both carry Apache License 2.0 upstream licenses.

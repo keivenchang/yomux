@@ -1,5 +1,7 @@
 # Cross-Host Views
 
+Backend scope: this product decision applies to both Python and Go. Neither backend currently combines live data from multiple hosts. Any future implementation must use an authenticated source-owned API or immutable snapshot boundary; it must not open either backend's live SQLite database over NFS.
+
 ## Decision
 
 YOLOmux should not build a general cross-host view yet. The user has not asked for one, two browser tabs already preserve a clear machine boundary, and combining hosts creates authentication, availability, clock, schema, retention, and conflict behavior that the product would have to expose honestly. Host independence is a valid finished product, not a temporary limitation.

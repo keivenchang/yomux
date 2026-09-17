@@ -1,5 +1,9 @@
 # Persisted ring-buffer aggregates
 
+> **STATUS: HISTORICAL SCHEMA-V8 DESIGN.** This file preserves the proposal, capacity calculations, migration sequence, and red-test contract that preceded the current schema-9 implementation. Its `stats-v8.sqlite3` filename, v7-to-v8 migration, proposed APIs, ten-second write-behind, and "no implementation measurement yet" statements are not current runtime claims. [`specs/STATS_API.md`](specs/STATS_API.md) is the current Python and Go storage/wire contract; [`../GO_MIGRATION_YOSTATS.md`](../GO_MIGRATION_YOSTATS.md) records the Go in-process differences.
+
+Backend scope of the historical design: it was written for Python statsd. Go now has its own schema-9 ring implementation under `internal/stats`, but it did not follow this Python daemon/cache migration sequence and must not be evaluated from the proposal below.
+
 ## Staleness rule
 
 Every persisted slot carries the exact epoch-aligned `bucket_start` that produced its payload. The slot address is `((bucket_start // resolution_seconds) % slot_count)`, but a read accepts that slot only when the stored `bucket_start` equals the exact bucket start requested for that position in the window. Modulo addressing finds a candidate; the timestamp equality decides whether the candidate is data.
