@@ -603,6 +603,71 @@ def test_markdown_preview_prosemirror_pure_view_is_visible(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, tmp_path):
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    diagrams = re.findall(r"```mermaid\s*\n(.*?)\n```", readme, flags=re.DOTALL)
+    assert len(diagrams) == 3
+    source = "# README diagrams\n\n" + "\n\n".join(f"```mermaid\n{diagram}\n```" for diagram in diagrams)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const source = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/README.md';
+            const item = fileEditorItemFor(path);
+            const calls = [];
+            window.mermaid = {
+              initialize() {},
+              async render(id, diagramSource) {
+                calls.push(diagramSource);
+                return {svg: '<svg viewBox="0 0 120 40"><text>README Mermaid</text></svg>'};
+              },
+            };
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img.mermaid-preview-image').length === 3, {
+              timeoutMs: 12000,
+              description: 'README Mermaid ViewEdit renders',
+            });
+            const root = panel._pmView?.dom;
+            done({
+              mode: editorViewModeFor(path, item),
+              prosemirror: Boolean(panel._pmView),
+              hosts: root?.querySelectorAll('.mermaid-preview-host').length || 0,
+              images: root?.querySelectorAll('img.mermaid-preview-image').length || 0,
+              mermaidSourceBlocks: root?.querySelectorAll('pre code.language-mermaid').length || 0,
+              failure: root?.querySelector('.mermaid-preview-error')?.textContent || '',
+              calls,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """,
+        source,
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["mode"] == "preview", metrics
+    assert metrics["prosemirror"] is True, metrics
+    assert metrics["failure"] == "", metrics
+    assert metrics["hosts"] == 3 and metrics["images"] == 3, metrics
+    assert metrics["mermaidSourceBlocks"] == 0, metrics
+    assert len(metrics["calls"]) == 3, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_view_editor_search_is_read_only_and_counts_matches(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
@@ -2565,10 +2630,17 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
             if (preview?._previewAsync) await preview._previewAsync;
             await frame();
             await frame();
+            setFileEditorViewMode(path, 'edit', item);
+            const modeAfterEditRequest = editorViewModeFor(path, item);
+            setFileEditorViewMode(path, 'split', item);
+            const modeAfterSplitRequest = editorViewModeFor(path, item);
             done({
               item,
               mode: editorViewModeFor(path, item),
               previewHidden: preview?.hidden === true,
+              modeControlHidden: panel?.querySelector('.file-editor-mode-control-panel')?.hidden === true,
+              modeAfterEditRequest,
+              modeAfterSplitRequest,
               imageExists: Boolean(preview?.querySelector('img.mermaid-preview-image')),
               imageSrcPrefix: String(preview?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
               calls: mermaidCalls,
@@ -2585,6 +2657,9 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert "error" not in metrics, metrics
     assert metrics["mode"] == "preview", metrics
     assert metrics["previewHidden"] is False, metrics
+    assert metrics["modeControlHidden"] is True, metrics
+    assert metrics["modeAfterEditRequest"] == "preview", metrics
+    assert metrics["modeAfterSplitRequest"] == "preview", metrics
     assert metrics["imageExists"] is True, metrics
     assert metrics["imageSrcPrefix"] in ("blob:", "data:"), metrics
     assert metrics["calls"], metrics

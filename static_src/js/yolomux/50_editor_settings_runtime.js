@@ -9,6 +9,7 @@ function editorViewModeFor(path, item = null) {
   const state = fileEditorStateForItem(path, item);
   if (state?.historical === true && mode !== 'preview') return 'diff';
   if (!editorPreviewModeAvailable(path, state)) return 'edit';
+  if (previewRendererForPath(path, state)?.previewOnly === true) return 'preview';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -22,6 +23,7 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   const state = fileEditorStateForItem(path, item);
   if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (state?.historical !== true && mode !== 'diff' && previewRendererForPath(path, state)?.previewOnly === true) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
   const previousMode = editorViewModeFor(path, item);
   if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
@@ -39,7 +41,8 @@ function setFileEditorViewMode(path, mode, item = null) {
 function updateEditorModeControl(control, path, state, item = null) {
   if (!control) return;
   const visible = Boolean(state?.kind) && editorPreviewModeAvailable(path, state);
-  control.hidden = !visible;
+  const previewOnly = previewRendererForPath(path, state)?.previewOnly === true;
+  control.hidden = !visible || previewOnly;
   if (!visible) return;
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {

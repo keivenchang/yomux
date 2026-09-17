@@ -1083,6 +1083,9 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   const view = new api.EditorView(container, {
     state: editorState,
     nodeViews: {
+      // Mermaid fences render as isolated images; ViewEdit never exposes the diagram source as a
+      // contentDOM, so changing it remains a TextEdit operation.
+      code_block: node => prosemirrorCodeBlockNodeView(node, panel, path),
       details: prosemirrorDetailsNodeView,
       image: node => prosemirrorImageNodeView(node, panel, path),
       list_item: () => {
