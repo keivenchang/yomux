@@ -1923,12 +1923,7 @@ function invalidateMarkdownPreviewArtifacts(container) {
   if (container) container._markdownPreviewGeneration = generation;
   releaseRawFileMediaSources(container);
   for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
-    host.dataset.mermaidRenderSeq = `stale-${generation}`;
-    if (typeof disconnectPreviewZoomSurface === 'function') {
-      disconnectPreviewZoomSurface(host, {resetClasses: true});
-    }
-    const source = host.querySelector?.('img.mermaid-preview-image')?.getAttribute?.('src') || '';
-    if (source.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(source);
+    disposeMermaidPreviewHost(host);
   }
   return generation;
 }

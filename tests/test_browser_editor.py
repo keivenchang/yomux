@@ -607,24 +607,35 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     diagrams = re.findall(r"```mermaid\s*\n(.*?)\n```", readme, flags=re.DOTALL)
     assert len(diagrams) == 3
-    source = "# README diagrams\n\n" + "\n\n".join(f"```mermaid\n{diagram}\n```" for diagram in diagrams)
+    assert len(re.findall(r"```(?:bash|yaml)\s*\n", readme)) >= 10
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
-    metrics = browser.execute_async_script(
-        """
+    mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
+    browser.set_script_timeout(15)
+    try:
+        metrics = browser.execute_async_script(
+            """
         const source = arguments[0];
+        const mermaidUri = arguments[1];
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
             const path = '/home/test/yolomux.dev/README.md';
             const item = fileEditorItemFor(path);
-            const calls = [];
-            window.mermaid = {
-              initialize() {},
-              async render(id, diagramSource) {
-                calls.push(diagramSource);
-                return {svg: '<svg viewBox="0 0 120 40"><text>README Mermaid</text></svg>'};
-              },
-            };
+            await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = mermaidUri;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error('failed to load Mermaid'));
+              document.head.append(script);
+            });
+            const started = performance.now();
+            let heartbeat = performance.now();
+            let maxHeartbeatGap = 0;
+            const heartbeatTimer = setInterval(() => {
+              const now = performance.now();
+              maxHeartbeatGap = Math.max(maxHeartbeatGap, now - heartbeat);
+              heartbeat = now;
+            }, 25);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'preview', item);
             addFileEditorTabItem(path, item);
@@ -637,17 +648,42 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
             renderFileEditorPanel(panel, item);
             await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img.mermaid-preview-image').length === 3, {
               timeoutMs: 12000,
-              description: 'README Mermaid ViewEdit renders',
+              description: 'full README Mermaid ViewEdit renders',
             });
+            await new Promise(resolve => setTimeout(resolve, 100));
+            clearInterval(heartbeatTimer);
             const root = panel._pmView?.dom;
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const wheelViewport = root?.querySelector('.file-editor-preview-zoom-viewport');
+            const wheelShell = wheelViewport?.closest('.file-editor-preview-zoom-shell');
+            wheelShell?.querySelector('[data-preview-zoom-action="actual"]')?.click();
+            for (let index = 0; index < 5; index += 1) {
+              wheelShell?.querySelector('[data-preview-zoom-action="in"]:not(:disabled)')?.click();
+            }
+            await window.__yolomuxTestHelpers.frame();
+            await window.__yolomuxTestHelpers.frame();
+            if (wheelViewport) {
+              wheelViewport.dataset.prosemirrorMermaidWheelProbe = '1';
+              const wheelStage = wheelViewport.querySelector('.file-editor-preview-zoom-stage');
+              if (wheelStage) wheelStage.style.height = `${wheelViewport.clientHeight + 400}px`;
+              const innerMax = Math.max(0, wheelViewport.scrollHeight - wheelViewport.clientHeight);
+              wheelViewport.scrollTop = innerMax / 2;
+            }
+            if (preview && wheelViewport) {
+              wheelViewport.scrollIntoView({block: 'center'});
+              preview.scrollTop = Math.max(0, Math.min(preview.scrollTop, preview.scrollHeight - preview.clientHeight - 300));
+            }
             done({
               mode: editorViewModeFor(path, item),
               prosemirror: Boolean(panel._pmView),
               hosts: root?.querySelectorAll('.mermaid-preview-host').length || 0,
               images: root?.querySelectorAll('img.mermaid-preview-image').length || 0,
               mermaidSourceBlocks: root?.querySelectorAll('pre code.language-mermaid').length || 0,
+              ordinaryCodeBlocks: root?.querySelectorAll('pre code').length || 0,
               failure: root?.querySelector('.mermaid-preview-error')?.textContent || '',
-              calls,
+              elapsedMs: performance.now() - started,
+              maxHeartbeatGap,
+              wheelReady: Boolean(wheelViewport && preview && preview.scrollHeight > preview.clientHeight),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -655,8 +691,26 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
             done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
-        """,
-        source,
+            """,
+            readme,
+            mermaid_uri,
+        )
+    finally:
+        browser.set_script_timeout(30)
+    wheel_probe = browser.find_element(By.CSS_SELECTOR, '[data-prosemirror-mermaid-wheel-probe="1"]')
+    wheel_before = browser.execute_script(
+        """const viewport = arguments[0]; const outer = viewport.closest('.file-editor-preview-pane-panel');
+        return {outerTop: outer.scrollTop, outerHeight: outer.scrollHeight, outerClient: outer.clientHeight,
+          viewportTop: viewport.scrollTop, viewportHeight: viewport.scrollHeight, viewportClient: viewport.clientHeight,
+          viewportOverflow: getComputedStyle(viewport).overflow};""",
+        wheel_probe,
+    )
+    ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(wheel_probe), 0, 220).perform()
+    browser.execute_async_script("requestAnimationFrame(() => requestAnimationFrame(arguments[arguments.length - 1]));")
+    wheel_after = browser.execute_script(
+        """const viewport = arguments[0]; const outer = viewport.closest('.file-editor-preview-pane-panel');
+        return {outerTop: outer.scrollTop, viewportTop: viewport.scrollTop};""",
+        wheel_probe,
     )
     assert "error" not in metrics, metrics
     assert metrics["mode"] == "preview", metrics
@@ -664,7 +718,16 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
     assert metrics["failure"] == "", metrics
     assert metrics["hosts"] == 3 and metrics["images"] == 3, metrics
     assert metrics["mermaidSourceBlocks"] == 0, metrics
-    assert len(metrics["calls"]) == 3, metrics
+    assert metrics["ordinaryCodeBlocks"] >= 10, metrics
+    assert metrics["elapsedMs"] < 12000, metrics
+    assert metrics["maxHeartbeatGap"] < 5000, metrics
+    assert metrics["wheelReady"] is True, metrics
+    assert wheel_before["outerHeight"] > wheel_before["outerClient"], wheel_before
+    assert wheel_before["viewportOverflow"] == "hidden", wheel_before
+    assert wheel_before["viewportHeight"] > wheel_before["viewportClient"], wheel_before
+    assert 0 < wheel_before["viewportTop"] < wheel_before["viewportHeight"] - wheel_before["viewportClient"], wheel_before
+    assert wheel_after["outerTop"] > wheel_before["outerTop"], {"before": wheel_before, "after": wheel_after}
+    assert wheel_after["viewportTop"] == wheel_before["viewportTop"], {"before": wheel_before, "after": wheel_after}
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

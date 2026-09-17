@@ -14778,6 +14778,9 @@ body.editor-theme-light .file-editor-image-panel {
   overflow: auto;
   overscroll-behavior: contain;
 }
+.file-editor-preview-zoom-shell[data-preview-zoom-wheel-parent="1"] > .file-editor-preview-zoom-viewport {
+  overflow: hidden;
+}
 .file-editor-preview-zoom-shell[data-preview-zoom-pan="1"] .file-editor-preview-zoom-viewport {
   cursor: grab;
   user-select: none;

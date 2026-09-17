@@ -469,37 +469,25 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
 
 function prosemirrorCodeBlockNodeView(node, panel, markdownPath) {
   const language = String(node.attrs.params || '').trim().split(/\s+/, 1)[0].toLowerCase();
-  if (!isMermaidFenceLanguage(language)) {
-    const pre = document.createElement('pre');
-    const code = document.createElement('code');
-    if (language) {
-      pre.dataset.params = language;
-      code.className = `language-${language}`;
-    }
-    pre.appendChild(code);
-    let observer = null;
-    const highlight = () => {
-      if (!code.isConnected || !code.textContent) return;
-      observer?.disconnect();
-      observer = null;
-      applyMarkdownFenceHighlight(code);
-    };
-    if (typeof MutationObserver === 'function') {
-      observer = new MutationObserver(highlight);
-      observer.observe(code, {childList: true, subtree: true, characterData: true});
-    }
-    requestAnimationFrame(highlight);
-    return {dom: pre, contentDOM: code, destroy() { observer?.disconnect(); }};
-  }
+  if (!isMermaidFenceLanguage(language)) return null;
   const host = document.createElement('div');
   host.className = 'mermaid-preview-host';
+  let active = true;
   panel._pmMediaPromises ||= [];
   panel._pmMediaPromises.push(renderMermaidSourceInto(host, node.textContent || '', {
     full: false,
     path: markdownPath,
     zoomKey: 'mermaid',
+    wheelScrollParent: true,
+    isCurrent: () => active,
   }));
-  return {dom: host};
+  return {
+    dom: host,
+    destroy() {
+      active = false;
+      disposeMermaidPreviewHost(host);
+    },
+  };
 }
 
 function hydrateProseMirrorExternalImages(panel, path) {

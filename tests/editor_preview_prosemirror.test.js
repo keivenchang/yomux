@@ -61,6 +61,8 @@ assert.match(adapter, /details\(state, node\)/);
 assert.match(adapter, /function prosemirrorDetailsNodeView/);
 assert.match(adapter, /function prosemirrorImageNodeView/);
 assert.match(adapter, /code_block:\s*node => prosemirrorCodeBlockNodeView/);
+assert.match(adapter, /if \(!isMermaidFenceLanguage\(language\)\) return null/);
+assert.doesNotMatch(adapter, /function prosemirrorCodeBlockNodeView[\s\S]*?new MutationObserver[\s\S]*?function hydrateProseMirrorExternalImages/);
 assert.doesNotMatch(adapter, /image\.src = rawFileUrl\(target\.path\)/);
 assert.match(adapter, /image\.dataset\.resolvedPath = target\.path/);
 assert.match(adapter, /prosemirrorPreviewImageSource\(image, markdownPath\)/);
