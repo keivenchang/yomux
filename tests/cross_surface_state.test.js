@@ -87,6 +87,8 @@ async function runCrossSurfaceStateSuite() {
     const directoryItem = api.gitDiffItemFor(directoryPath);
     assert.equal(api.gitDiffItemPath(directoryItem), directoryPath, 'gitdiff path encoding round-trips hostile URL characters');
     assert.equal(api.tabTypeForItem(directoryItem)?.key, 'git-diff', 'gitdiff items use one dedicated directory descriptor');
+    const initialRootItem = api.gitDiffItemFor('/repo/space and % value');
+    assert.equal(api.itemLabel(initialRootItem), 'Δspace and % value', 'initial Diff tabs use their encoded repository path before history loads');
     api.setGitDiffTabStateForTest(directoryItem, {repo: '/repo/space and % value', relativePath: 'src'});
     assert.equal(api.itemLabel(directoryItem), 'Δspace and % value;src');
     assert.equal(api.panePlacementForItem(directoryItem), api.panePlacementGenericOnly, 'repository history is Generic-Pane only');

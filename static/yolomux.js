@@ -64808,7 +64808,10 @@ registerDebugRuntimeFacade('panel', {
 function gitDiffTabLabel(item) {
   const path = gitDiffItemPath(item);
   const state = gitDiffTabState.get(item);
-  const repo = normalizeDirectoryPath(state?.repo || '');
+  // normalizeDirectoryPath('/') is '/', so normalizing an empty async repo first would
+  // incorrectly hide the item's already-known repository path behind the filesystem root.
+  const rawRepo = String(state?.repo || '').trim();
+  const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
   const name = basenameOf(repo || path);
   const relativePath = String(state?.relativePath || '');
   return name ? `Δ${name}${relativePath ? `;${relativePath}` : ''}` : 'Δ';

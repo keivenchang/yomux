@@ -1157,10 +1157,11 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
           diffButton.click();
           const item = gitDiffItemFor(repo);
           const loading = await waitFor(() => panelNodes.get(item)?.querySelector('.git-diff-state-loading[role="status"]') || null);
+          const immediateLabel = itemLabel(item);
           if (batchResolvers.length !== 1 || historyResolvers.length !== 1) throw new Error('expected one context-menu metadata refresh and one tab history request');
           batchResolvers.shift()();
           historyResolvers.shift()();
-          done({nativeSuppressed: event.defaultPrevented, item, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), infoRequestsBeforeClick, infoRequestsAfterClick: requests.filter(request => request.startsWith('/api/fs/batch')).length, historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')).length, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          done({nativeSuppressed: event.defaultPrevented, item, immediateLabel, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), infoRequestsBeforeClick, infoRequestsAfterClick: requests.filter(request => request.startsWith('/api/fs/batch')).length, historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')).length, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
         """,
         repo,
@@ -1168,6 +1169,7 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
     )
     assert not metrics.get("error"), metrics
     assert metrics["nativeSuppressed"] is True and metrics["item"] == f"gitdiff:{quote(repo, safe='')}", metrics
+    assert metrics["immediateLabel"] == "Δnotes", metrics
     assert metrics["active"] is True and metrics["loadingText"] == "loading..." and metrics["movingEllipsis"] is True, metrics
     assert metrics["infoRequestsBeforeClick"] == metrics["infoRequestsAfterClick"] == 1, metrics
     assert metrics["historyRequests"] == 1, metrics
