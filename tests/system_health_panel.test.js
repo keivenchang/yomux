@@ -236,6 +236,7 @@ function localServices(overrides = {}, serviceOverrides = {}) {
     schema_version: 5,
     inventory: ['statsd'],
     services: [serviceRow('statsd', overrides.serviceExtra || {}, serviceOverrides)],
+    totals: {processes: 1, cpu_percent: 2, rss_bytes: 48 * 1024 * 1024},
     health: healthSnapshot(overrides.health || {}),
   };
 }
@@ -1999,6 +2000,17 @@ const ADVANCED_RENDER_SOURCE = [
   slice(source, 'function debugSystemRegionHtml(', '\n// The last HTML written into each region'),
 ].join('\n');
 
+test('scheduler role rows use status and do not resurrect the legacy owner flag', () => {
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${ADVANCED_RENDER_SOURCE}`, context);
+  const legacy = vm.runInContext('debugSystemRolesHtml({scheduler: {owner: true}});', context);
+  const local = vm.runInContext('debugSystemRolesHtml({scheduler: {status: "local"}});', context);
+  assert.ok(legacy.includes('<td>unavailable</td>'));
+  assert.ok(!legacy.includes('<td>local</td>'));
+  assert.ok(local.includes('<td>local</td>'));
+  assert.ok(!local.includes('Stale reads'));
+});
+
 // One harness for the poll owner. Every request the panel makes lands in `requests`, and every
 // re-arm of the ONE `debug-system` timer lands in `intervals`, so a test names the exact URL that
 // should not have been asked for and the exact delay the next poll was scheduled at.
@@ -2040,7 +2052,6 @@ const CORE_BODY = payloadFor(localServices());
 const ADVANCED_BODY = {
   ok: true,
   generated_at: 1902,
-  owner: {debug: {generation_count: 41}, control: {}},
   refresh: {
     local_refreshing: {},
     coalescing: {recent_pending_count: 0},
@@ -2163,7 +2174,7 @@ test('the Advanced cards read the advanced body, never the core keys that moved 
   // and reading nothing would render an empty table where six cards used to be.
   const html = renderAdvanced({
     payload: payloadFor(localServices(), {
-      owner: {status: 'owner', owner: true, current_owner: {port: 7999, pid: 5150}, search_index: {mode: 'live'}, debug: {generation_count: 999}},
+      scheduler: {status: 'local', process: {port: 7999, scope: 'local'}, search_index: {mode: 'live'}},
       top_endpoints: [{surface: '/api/decoy-from-the-core-body', count: 1, compute_ms_max: 1, payload_bytes_total: 1}],
       refresh: {counters: {coalesced_refresh_requests: 999}},
     }),
@@ -2173,7 +2184,8 @@ test('the Advanced cards read the advanced body, never the core keys that moved 
   assert.doesNotMatch(html, /decoy-from-the-core-body/, 'the retired core keys are not a fallback source');
   assert.match(html, /index-scan/, 'Top background work comes from the advanced body too');
   assert.match(html, /Refresh coordination/);
-  assert.match(html, /<dt>Generations<\/dt><dd[^>]*>41</, 'owner.debug now arrives on the advanced route');
+  assert.match(html, /<dt>Processes<\/dt><dd[^>]*>1</, 'the advanced refresh card reports local service processes');
+  assert.doesNotMatch(html, /Generations|owner\.debug|distributed-owner|follower/, 'the retired distributed-owner diagnostics are absent');
   assert.doesNotMatch(html, />999</, 'no advanced fact may be read out of the core payload');
 });
 

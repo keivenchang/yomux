@@ -92,6 +92,11 @@ function t(key, params) {
   return i18nInterpolate(value == null ? i18nMissingKey(key) : value, params);
 }
 
+function localizedLabel(key, fallback, params) {
+  const translated = t(key, params);
+  return translated === key ? fallback : translated;
+}
+
 // Plural form via Intl.PluralRules. Catalog keys are `${key}.${category}` (e.g. files.changed.one /
 // files.changed.other); `count` is always available as a {count} token.
 function tPlural(key, count, params) {

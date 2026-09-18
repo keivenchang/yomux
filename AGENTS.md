@@ -6,6 +6,8 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 
 - [`README.md`](README.md): end-user and operator guide.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): development workflow, build/test commands, source layout, restart workflow, production sync, API notes, version bump rules, timing constants, and responsive UI conventions.
+- [`GO_MIGRATION.md`](GO_MIGRATION.md): current Go capability, route, architecture, rollout, and parity status.
+- [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md): current Go YO!stats ownership, compatibility, gaps, and validation status.
 - [`docs/specs/GUI.md`](docs/specs/GUI.md): GUI behavior contract and test coverage map.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md): dated peer research, including actionable lessons and non-goals.
 - [`docs/YOAGENT.md`](docs/YOAGENT.md): YO!agent product behavior, skill/context files, sends, watches, and handoffs.
@@ -14,7 +16,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 
 ## Development Workflow
 
-- Use [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) as the source of truth for local checks. The canonical local gate is `python3 tools/check.py`, which runs independent lanes in parallel by default.
+- Use [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) as the source of truth for local checks. The canonical full gate is `python3 tools/check.py`, which runs independent lanes in parallel by default and includes the Dockerized `bazel-go` lane. During Go iteration, use `python3 tools/check.py --lane bazel-go` or the equivalent direct `tools/run_bazel_tests.sh` wrapper; do not run the full gate and then repeat the same complete Go suite.
 - When `AGENTS.md` and `docs/DEVELOPMENT.md` disagree on a build/test/development command, update `docs/DEVELOPMENT.md` and keep only a reference here.
 - Before an implementation edit: search for existing behavior owners; name the existing parent or explain the new shared parent; reproduce the bug; migrate every equivalent copy; run a negative search for the retired path; then report the parent checked, searches used, and net non-generated lines added/deleted. Every DOIT DONE note and handoff carries that evidence.
 

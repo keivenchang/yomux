@@ -16,7 +16,8 @@ function editorViewModeFor(path, item = null) {
 }
 
 function fileEditorWrapForPath(path, state = null) {
-  return fileEditorWrapEnabled;
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -98,7 +99,7 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (mode === fileEditorThemeMode && fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
+  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
@@ -249,11 +250,7 @@ function applyEditorThemeMode(options = {}) {
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
-  document.querySelectorAll('.file-editor-theme-panel').forEach(button => {
-    const panel = button.closest('.file-editor-panel');
-    const state = panel ? fileEditorPanelState(panel) : null;
-    updateEditorThemeButton(button, {includeVanilla: !panel || state?.kind === 'text'});
-  });
+  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
@@ -275,8 +272,8 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const previewState = editorPreviewThemeState();
   const includeVanilla = options.includeVanilla !== false;
+  const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
     return;
@@ -383,14 +380,6 @@ function previewFindSetReadOnly(host = null, readOnly = false) {
   if (!view) return;
   host._pmSearchReadOnly = readOnly === true;
   view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
-  view.dom.setAttribute('contenteditable', String(host._pmSearchReadOnly !== true));
-}
-
-function previewFindSetDomObserver(host = null, running = true) {
-  const observer = host?._pmView?.domObserver;
-  if (!observer) return;
-  if (running) observer.start?.();
-  else observer.stop?.();
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -448,6 +437,10 @@ function previewFindSelectMatch(host = null, index = 0) {
     const range = state.matches[state.index];
     const element = range.startContainer.parentElement;
     element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else if (host?._pmView?.dom) {
+    const range = state.matches[state.index];
+    range.getBoundingClientRect?.();
+    range.startContainer?.parentElement?.scrollIntoView?.({block: 'center', inline: 'nearest'});
   } else {
     state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
     state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
@@ -472,7 +465,8 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
   state.index = -1;
   const needle = state.query.toLocaleLowerCase();
   if (needle) {
-    const root = previewFindUsesTextHighlights(host) ? host._pmView.dom : preview;
+    const prosemirrorRoot = host?._pmView?.dom || null;
+    const root = prosemirrorRoot || preview;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
@@ -487,7 +481,7 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       let from = 0;
       let index = folded.indexOf(needle, from);
       if (index < 0) continue;
-      if (previewFindUsesTextHighlights(host)) {
+      if (prosemirrorRoot) {
         for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
           const range = document.createRange();
           range.setStart(node, matchIndex);
@@ -527,7 +521,6 @@ function openPreviewFind(host = null) {
   const state = previewFindStateForHost(host, true);
   state.open = true;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   const input = panel.querySelector('input');
   previewFindApplyQuery(host, input?.value || '');
   input?.focus();
@@ -540,7 +533,6 @@ function closePreviewFind(host = null) {
   if (!panel) return false;
   previewFindClearMatches(host);
   previewFindSetReadOnly(host, false);
-  previewFindSetDomObserver(host, true);
   const state = previewFindStateForHost(host, true);
   state.open = false;
   state.matches = [];
@@ -561,7 +553,6 @@ function restorePreviewFindAfterRender(host = null) {
   if (!panel || !state || state.open !== true) return;
   panel.hidden = false;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
 }
 
@@ -653,7 +644,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
-  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state, force: true});
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -1006,7 +997,7 @@ function badConnectionTerminalCursorColor() {
 }
 
 function terminalCursorBlinkEnabled() {
-  return !badConnectionCursorStateActive();
+  return true;
 }
 
 function terminalThemeWithBadConnectionCursor(theme) {
@@ -1288,7 +1279,10 @@ function refreshMetaButtonChrome() {
 function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
-  if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
+  // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
+  // must never let an older/equal payload roll back the accepted settings values.
+  if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
@@ -1380,6 +1374,7 @@ function applySettingsPayload(payload, options = {}) {
 }
 
 function scheduleDeferredSettingsMetadataRefresh() {
+  if (typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled()) return null;
   if (!clientSettingsMetadataDeferred) return null;
   if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
   if (clientSettingsMetadataRefreshTimer) return null;
@@ -1428,7 +1423,7 @@ const runtimeIntervalCatalog = Object.freeze({
   'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
   'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
   'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
-  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['fallback']), source: 'Index lifecycle events are authoritative while SSE is connected; visible Finder/search uses this status repair path only after transport loss.'}),
   'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
   'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
   'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
@@ -1555,11 +1550,7 @@ function installRuntimeIntervals() {
   } else {
     clearRuntimeInterval('tabber-activity-fallback');
   }
-  if (fileExplorerIndexRefreshSeconds > 0) {
-    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
-  } else {
-    clearRuntimeInterval('file-index-refresh');
-  }
+  syncFileIndexStatusPollInterval();
 }
 
 function yolomuxFontSpecsForCurrentSettings() {

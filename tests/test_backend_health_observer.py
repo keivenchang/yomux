@@ -188,7 +188,7 @@ def test_batchd_absence_is_an_outage_only_while_this_process_owns_scheduling(tmp
     batchd is NOT demand-scoped -- `start_for_scheduler()` pins the broker with a registry lease
     and the broker refuses to idle out while any lease is held. So a scheduling owner that
     cannot see batchd is looking at a real outage and must alarm. The mirror case is the reason
-    the typed field exists: before this process wins the election, or when it never does,
+    the typed field exists: before this process starts its local scheduler, or when it never does,
     nothing here is scheduling and batchd's absence is expected rather than broken.
     """
 
@@ -226,11 +226,11 @@ def test_statsd_declares_neither_excuse_because_a_loop_keeps_it_hot():
     "row",
     [
         {"pid": 0, "demand_started": True, "last_failure": "statusd exited (1)"},
-        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "batchd exited (1)"},
+        {"pid": 0, "absence_expected_reason": "scheduler_inactive", "last_failure": "batchd exited (1)"},
         {"pid": 0, "demand_started": True, "terminal_failure": True},
-        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "terminal_failure": True},
+        {"pid": 0, "absence_expected_reason": "scheduler_inactive", "terminal_failure": True},
         {"pid": 0, "demand_started": True, "transport_reason": "connection refused"},
-        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "transport_reason": "connection refused"},
+        {"pid": 0, "absence_expected_reason": "scheduler_inactive", "transport_reason": "connection refused"},
     ],
 )
 def test_neither_absence_excuse_can_silence_a_recorded_failure(row: dict[str, Any]):
@@ -253,13 +253,13 @@ def test_a_row_claiming_both_absence_excuses_is_refused():
     real keep-hot owner is exactly how a monitored service goes quiet, so the conflict has to be
     louder than either claim, not quieter.
     """
-    conflicted = {"pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_not_owned"}
+    conflicted = {"pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_inactive"}
     assert observed_health(conflicted) == ("down", "absence_contract_conflict")
 
 
 @pytest.mark.parametrize(
     "value",
-    ["Scheduler Not Owned", "scheduler not owned", "9lives", "x" * 49, 1, True, ["scheduler_not_owned"]],
+    ["Scheduler Inactive", "scheduler inactive", "9lives", "x" * 49, 1, True, ["scheduler_inactive"]],
 )
 def test_an_unreadable_absence_reason_cannot_excuse_an_absence(value: Any):
     """A token the retained store would reject must not be able to silence the indicator."""
@@ -278,7 +278,7 @@ def _idle_machine(harness: Harness) -> None:
 
     statsd is up because a background loop keeps it hot. indexd, watchd, statusd and approvald
     are absent because nothing has asked for them. batchd is absent because this process has not
-    won the background-owner election. None of that is a failure and none of it may alarm.
+    started its local scheduler lease. None of that is a failure and none of it may alarm.
     """
     for name in ("indexd", "watchd", "statusd", "approvald"):
         harness.services[name].absent()
@@ -287,7 +287,7 @@ def _idle_machine(harness: Harness) -> None:
     batchd = harness.services["batchd"]
     batchd.absent()
     batchd.row.pop("demand_started")
-    batchd.row["absence_expected_reason"] = "scheduler_not_owned"
+    batchd.row["absence_expected_reason"] = "scheduler_inactive"
 
 
 def test_an_idle_machine_raises_no_alarm_at_all(harness: Harness):
@@ -1105,29 +1105,26 @@ def test_cli_starts_the_observer_after_the_port_lease_and_stops_it_before_client
     retained history file is port-scoped, so the lease is what makes the observer a single
     writer, and the observer must be stopped before the backend clients it probes are torn down.
 
-    The `start < owner` half is GONE, and deliberately, not because it became inconvenient.
-    Arming before `start_background_owner()` returned meant the first cycle raced this process's
+    The observer remains outside the scheduler's internal worker list, but it is started only after
+    `start_background_scheduler()` succeeds. Arming before that returned meant the first cycle raced this process's
     own statsd pin and published a false `down` for statsd at every boot -- 4.025-4.033s on four
     isolated starts, an 8ms spread. The order is reversed now, and that reversal is frozen below.
 
-    What the old assertion was really defending -- "the observer is not gated on winning the
-    background-owner election" -- is not a source-order property at all, and source order was
-    only ever a proxy for it. It is proven directly and behaviourally by
-    `tests/test_app.py::test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning`,
-    which drives `cli.main()` through BOTH election outcomes and asserts the observer is armed
-    and stopped either way. That test is asserted to exist here, so the proof cannot be deleted
-    while this file goes on claiming it. The structural half of the same property -- the arming
-    is not nested under a conditional, and the election's outcome is discarded rather than
-    branched on -- is checked here by AST, where source order cannot fake it.
+    The return value is part of the lifecycle contract: a leased process must not bind HTTP when
+    its local scheduler did not start. That behavior is proven directly and behaviorally by
+    `tests/test_app.py::test_the_health_observer_is_armed_after_local_scheduler_start`,
+    which drives `cli.main()` through local scheduler startup and asserts the observer is armed
+    and stopped. The structural half -- the observer is reached only after the scheduler-start
+    guard and is not nested under any unrelated branch -- is checked here by AST.
     """
     source = CLI_SOURCE.read_text(encoding="utf-8")
     anchors = (
-        "lease = acquire_server_port_lease(args.port)",
+        "root_lease, lease = acquire_instance_and_port_leases(",
         "backend_health = start_backend_health_observer(args.port, app)",
         "backend_health.stop()",
         "app.stop_auto_approve_all()",
         "server.server_close()",
-        "app.start_background_owner(",
+        "app.start_background_scheduler(",
     )
     # `str.index` returns the FIRST hit, so an ordering built on it is only as strong as the
     # anchors being unique. A second occurrence -- one comment, one docstring line, one `pass  #
@@ -1141,21 +1138,20 @@ def test_cli_starts_the_observer_after_the_port_lease_and_stops_it_before_client
     auto_approve = source.index(anchors[3])
     server_close = source.index(anchors[4])
     assert lease < start < stop < auto_approve < server_close
-    # The measured M7 reorder: the election is decided before the first cycle can read a row.
-    owner = source.index(anchors[5])
-    assert owner < start, "arming before the election republishes the measured 4.03s false `down`"
+    # The measured M7 reorder: local scheduler startup completes before the first cycle can read a row.
+    scheduler_start = source.index(anchors[5])
+    assert scheduler_start < start, "arming before the local scheduler starts republishes the measured boot flash"
 
-    election, arming = _cli_main_statements(
-        "app.start_background_owner", "start_backend_health_observer"
+    scheduler, arming = _cli_main_statements(
+        "app.start_background_scheduler", "start_backend_health_observer"
     )
-    # Not gated: neither statement is nested under any conditional, and both sit in the SAME
-    # block, so no branch can reach one without the other.
-    assert election.enclosing_conditionals == [], election.enclosing_conditionals
+    # The local scheduler must succeed before the observer can start; this is a startup-failure
+    # guard, not distributed ownership. The helper binds a call used as an ``if`` test to that If node.
+    assert isinstance(scheduler.statement, ast.If), ast.dump(scheduler.statement)
+    assert "not app.start_background_scheduler" in ast.unparse(scheduler.statement.test)
+    assert scheduler.enclosing_conditionals == [], scheduler.enclosing_conditionals
     assert arming.enclosing_conditionals == [], arming.enclosing_conditionals
-    assert election.block is arming.block
-    # The election's outcome is discarded at the call site, so nothing in `main` can branch on
-    # it. A `won = app.start_background_owner(...)` would be the first step toward gating.
-    assert isinstance(election.statement, ast.Expr), ast.dump(election.statement)
+    assert scheduler.block is arming.block
 
 # -- helpers -----------------------------------------------------------------------------
 

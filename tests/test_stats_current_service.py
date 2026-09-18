@@ -370,6 +370,39 @@ def test_store_open_is_deferred_until_generic_runtime_owns_the_lock(tmp_path, mo
     assert service._next_vacuum_at == 3_610.0
 
 
+def test_startup_holds_the_database_lease_through_migration_and_store_open(tmp_path, monkeypatch):
+    """Migration and the first writer open share one cross-language ownership boundary."""
+
+    path = tmp_path / storage.DATABASE_FILENAME
+    store = FakeStore()
+    lease_states = []
+
+    def migrate_store(_inputs, active_database, *, completed_at):
+        lease_states.append(("migrate", str(Path(active_database).absolute()) in storage._WRITER_LEASES))
+        return migration.MigrationReport(active_database, "", 0, 0, 0, 0, (), 0, False)
+
+    def open_store(*args, **kwargs):
+        lease_states.append(("open", str(path.absolute()) in storage._WRITER_LEASES))
+        return store
+
+    def runtime(**kwargs):
+        kwargs["on_start"]()
+        kwargs["on_shutdown"]()
+        return 0
+
+    monkeypatch.setattr(service_module, "run_local_rpc_service", runtime)
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        path,
+        store_opener=open_store,
+        migration_runner=migrate_store,
+    )
+
+    assert service.run() == 0
+    assert lease_states == [("migrate", True), ("open", True)]
+    assert str(path.absolute()) not in storage._WRITER_LEASES
+
+
 def test_worker_publisher_open_failure_is_serialized_and_stops_the_listener(tmp_path):
     """The worker's mutating Store.open shares the listener's write owner."""
 
@@ -2594,8 +2627,9 @@ def test_a_rejected_process_memory_push_is_counted_separately_from_cpu_absence(
 # On both live dev servers the web process's own CPU/memory read "never measured" for the life
 # of the process, and there was no evidence anywhere saying why: `_web_push_target` returned a
 # bare `None` about once a second, the push was skipped without a counter, and `failures` stayed 0
-# because a skipped push never raises. A managed instance runs `DisabledBackgroundOwner`, so no
-# `owner.json` is ever written and the skip is permanent -- the exact case these cover.
+# because a skipped push never raises. A managed instance uses the process-local
+# `BackgroundScheduler`, so no peer record supplies the address and the skip would be permanent --
+# the exact case these cover.
 
 
 def test_a_skipped_cpu_push_is_counted_with_the_gate_that_stopped_it(tmp_path, monkeypatch):
@@ -2610,7 +2644,7 @@ def test_a_skipped_cpu_push_is_counted_with_the_gate_that_stopped_it(tmp_path, m
             return {"time": 100.0, "pid": pid, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
 
     service._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
     monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: pytest.fail("no owner means no push"))
 
     service._collect_host_facts_if_due(publisher)
@@ -2619,7 +2653,7 @@ def test_a_skipped_cpu_push_is_counted_with_the_gate_that_stopped_it(tmp_path, m
     assert push["attempted"] == 1
     assert push["delivered"] == 0
     assert push["skipped"] == 1
-    assert push["last_reason"] == "web_owner_no_control_socket"
+    assert push["last_reason"] == "web_instance_no_control_socket"
     assert push["last_reason_at"] > 0.0
     # The exception counter is NOT the evidence for this: a skipped push never raises.
     assert service._status()["host_collectors"]["failures"] == 0
@@ -2675,22 +2709,8 @@ def test_a_delivered_cpu_push_clears_the_reason_and_records_when(tmp_path, monke
     assert push["last_delivered_at"] > 0.0
 
 
-def test_a_managed_instance_with_no_election_record_still_delivers_its_cpu_sample(tmp_path, monkeypatch):
-    """THE managed-instance regression.
-
-    This is the exact shape that failed on the live dev servers. A managed instance gets a
-    private root before the app is imported, so `start_background_owner` installs
-    `DisabledBackgroundOwner`, which runs no election and never writes
-    `<root>/runtime/background-owner/owner.json`. The old delivery path re-discovered the web
-    process's address from that file, so it resolved nothing, skipped the push silently, and the
-    Daemons web row read "never measured" for the entire life of the process.
-
-    The background-owner directory is asserted ABSENT here on purpose: a test that passes
-    because a record happens to exist would prove nothing about the path that was broken.
-    """
-
-    owner_dir = tmp_path / "runtime" / "background-owner"
-    assert not owner_dir.exists(), "the managed path has no election record; do not create one"
+def test_a_managed_instance_delivers_its_cpu_sample_from_the_handshake(tmp_path, monkeypatch):
+    """A managed instance delivers samples through its explicit collector handshake."""
 
     service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
     publisher = FakeStore()
@@ -2772,16 +2792,12 @@ def test_re_addressing_alone_does_not_reset_host_coverage_epochs(tmp_path):
 
 
 def test_the_web_push_target_resolves_the_address_from_the_handshake(tmp_path):
-    """The address comes from the context, not from the background-owner ELECTION record.
-
-    A managed instance runs `DisabledBackgroundOwner`, holds no election and writes no
-    `owner.json`, so the old lookup returned nothing forever and every sample was dropped.
-    """
+    """The address comes from the collector context, not a peer-server record."""
 
     service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
 
     # Nothing registered yet: no address, and it says so.
-    assert service._web_push_target() == (None, "web_owner_no_control_socket")
+    assert service._web_push_target() == (None, "web_instance_no_control_socket")
 
     service.collector_control_socket = "/tmp/web.sock"
     assert service._web_push_target() == ({"control_socket": "/tmp/web.sock"}, "")
@@ -2850,7 +2866,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
     publisher = RecordingStore()
     service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     service._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
     monkeypatch.setattr(service_module.host_collectors, "gpu_devices", gpu_devices)
 
     service._collect_host_facts_if_due(publisher)
@@ -2916,7 +2932,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
     restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     restarted._host_cpu_sampler = CpuSampler()
     restarted._next_host_gpu_at = float("inf")
-    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
     wall_now[0] = monotonic_now[0] = 140.0
     restarted._collect_host_facts_if_due(publisher)
     restarted_cpu = publisher.batches[-1]["coverage_epochs"][0]
@@ -3017,7 +3033,7 @@ def test_statsd_restart_rotates_only_gpu_missing_from_initial_roster(tmp_path, m
     )
     initial.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     initial._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(initial, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(initial, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
     initial._collect_host_facts_if_due(publisher)
 
     restarted = service_module.StatsCurrentService(
@@ -3026,7 +3042,7 @@ def test_statsd_restart_rotates_only_gpu_missing_from_initial_roster(tmp_path, m
     )
     restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     restarted._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
     wall_now[0] = monotonic_now[0] = 110.0
     restarted._collect_host_facts_if_due(publisher)
     wall_now[0] = monotonic_now[0] = 120.0
@@ -5184,17 +5200,17 @@ def test_the_startup_ring_cursor_floor_alone_refuses_an_otherwise_servable_snaps
 
     Both arms below are byte-identical in every way that the readiness item blamed -- same
     store, same cold build, and `_pending_ring_dirty` holding the WHOLE ring in both. The only
-    difference is one entry in `_ring_published_cursors`, which on a real restart is written by
-    `_repair_startup_owed_slots` -> `_publish_ring_views`.
+    difference is one manually injected entry in `_ring_published_cursors`. A real restart must
+    not create that entry for a view that was never demanded; `_publish_ring_views` now only
+    installs a freshness floor for active public views.
 
-    `_publish_ring_views` sets that cursor for every PUBLISHED RESOLUTION (`service.py:3510`,
-    unconditional), but populates `_ring_views` only for DEMANDED views, because
-    `_ring_view_keys` filters on `_view_demanded`. At startup nothing has been demanded yet, so
-    the floor is installed for a view that was never built, and `_published_snapshot_owner`
-    hands back `shared_entry` -- None -- instead of the perfectly current warm entry.
+    `_ring_view_keys` filters on `_view_demanded`, so an injected floor still models the invalid
+    state this test guards: the floor is present for a view with no ring owner and
+    `_published_snapshot_owner` hands back `shared_entry` -- None -- instead of the perfectly
+    current warm entry.
 
-    So draining the ring before readiness cannot fix this and would publish MORE resolutions,
-    installing MORE floors against views that still do not exist.
+    Draining the ring before readiness is therefore safe only when it does not install floors for
+    undemanded views.
     """
     clock = 100_000.0
 
@@ -5240,3 +5256,22 @@ def test_the_startup_ring_cursor_floor_alone_refuses_an_otherwise_servable_snaps
     assert refused_metadata["status"] == "pending"
     assert refused_metadata["retry_after_seconds"] == 1
     assert refused_binary == b""
+
+
+def test_ring_publication_does_not_install_a_floor_for_undemanded_views(tmp_path):
+    """A restart repair must not strand retained warm entries behind a nonexistent ring owner."""
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    candidate = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), ()),
+        source_generation=7,
+        cache_generation=8,
+        generated_at=100_000.0,
+        observed_until=100_000.0,
+    )
+
+    service._publish_ring_views(object(), candidate, frozenset({60}))
+
+    assert service._ring_published_cursors == {}
+    assert service._ring_views == {}

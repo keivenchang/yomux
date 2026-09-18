@@ -26,7 +26,8 @@ from ..infra.atomic_file import atomic_write_text
 from ..infra.common import STATE_DIR
 
 
-DEFAULT_DATABASE_PATH = Path("~/.local/share/opencode/opencode.db").expanduser()
+_XDG_DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+DEFAULT_DATABASE_PATH = _XDG_DATA_HOME / "opencode" / "opencode.db"
 DEFAULT_MAX_SESSIONS = 64
 DEFAULT_MAX_PARTS = 2_048
 MAX_IDENTIFIER_BYTES = 256

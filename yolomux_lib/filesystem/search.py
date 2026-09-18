@@ -164,8 +164,8 @@ def _snapshot_freshness(
 ) -> file_index.SnapshotFreshness:
     """Adapt this module's policy dict to the one freshness owner in `file_index`.
 
-    Every `index_state`, `index_coverage`, `ready_elsewhere` and
-    `refreshing_elsewhere` value below is derived from the record this returns.
+    Every `index_state` and `index_coverage` value below is derived from the
+    record this returns.
     No freshness rule is re-implemented here; a second copy of that judgement is
     exactly how a snapshot came to be reported ready while its producer was dead.
     """
@@ -177,7 +177,10 @@ def _snapshot_freshness(
     )
 
 
-def _progressive_payload_fields(root: Path) -> dict[str, Any]:
+def _progressive_payload_fields(
+    root: Path,
+    freshness: file_index.SnapshotFreshness | None = None,
+) -> dict[str, Any]:
     """The measured breadth-first coverage attached to a full-tree Quick Open response (item 5).
 
     Reuses the ONE coverage owner (`file_index.read_index_coverage`) so the search payload, the
@@ -194,7 +197,7 @@ def _progressive_payload_fields(root: Path) -> dict[str, Any]:
     frontier_size = int(coverage.get("frontier_size") or 0)
     full = bool(coverage.get("full_coverage"))
     if full:
-        snapshot_state = "current"
+        snapshot_state = "current" if freshness is None or freshness.authoritative else "stale"
     elif published_depth > 0:
         snapshot_state = "partial"
     else:
@@ -209,10 +212,11 @@ def _progressive_payload_fields(root: Path) -> dict[str, Any]:
 def _promote_user_visible_scope(root: Path) -> None:
     """Asynchronously promote a not-yet-covered Quick Open scope's frontier (item 5).
 
-    Fire-and-forget through `file_index.request_user_visible_promotion`: it dispatches on a daemon
-    thread and debounces per root, so a partial/warming/stale query bumps that root's frontier
-    priority without the query waiting on `batchd`, the crawler, or the RPC, and without launching a
-    second crawl. Only call this when coverage is incomplete.
+    Fire-and-forget through `file_index.request_user_visible_promotion`: the application-owned
+    requester queues the advisory operation on the local scheduler and debounces per root, so a
+    partial/warming/stale query bumps that root's frontier priority without waiting on `batchd`, the
+    crawler, or the RPC, and without launching a second crawl. Only call this when coverage is
+    incomplete.
     """
     file_index.request_user_visible_promotion(str(root))
 
@@ -225,7 +229,7 @@ def promote_visible_path(raw_path: str) -> list[str]:
     the SAME user-visible-demand promotion owner Quick Open uses (`request_user_visible_promotion`),
     which dispatches on a daemon thread and debounces per root -- so a directory listing or diff on
     the interactive worker never blocks on the crawler or the RPC, and never launches a second crawl.
-    Returns the roots for which a promotion was dispatched (empty when none was, e.g. debounced or the
+    Returns the roots for which a promotion was queued (empty when none was, e.g. debounced or the
     path is under no indexed root).
     """
     try:
@@ -699,7 +703,8 @@ def _search_files_from_safe_root(
         authorized_root_identity = file_index.parse_root_identity(
             file_index.root_identity(os.fstat(access_descriptor))
         )
-        can_build_index = file_index.background_owner_can_build()
+        can_build_index = file_index.build_authorized()
+        refresh_accepted = False
         if tokens:
             _match = _make_search_match(tokens)
 
@@ -730,7 +735,7 @@ def _search_files_from_safe_root(
                     expected_root_identity=authorized_root_identity,
                     include_metadata=not minimal,
                 )
-                indexed_payload_state = "follower-ready" if indexed is not None else ""
+                indexed_payload_state = "indexed" if indexed is not None else ""
             if indexed is not None:
                 indexed_results, indexed_truncated = indexed
                 admitted_results = []
@@ -751,23 +756,21 @@ def _search_files_from_safe_root(
                     "index_state": "too_large" if index.too_large else "ready",
                     "index_coverage": "partial" if index.too_large else "full",
                     "files": indexed_results,
-                    **_progressive_payload_fields(root),
-                    **freshness.payload_fields(),
+                    **_progressive_payload_fields(root, freshness),
+                    **freshness.payload_fields,
                 }
                 if indexed_payload_state:
-                    # A follower serves the snapshot either way, but may only call it
-                    # ready/full when the freshness record vouches for it.
-                    payload["index_state"] = "follower-ready" if freshness.authoritative else "follower-stale"
+                    payload["index_state"] = "ready" if freshness.authoritative else "stale"
                     if not freshness.authoritative:
                         payload["index_coverage"] = "unverified"
-                        # Item 5: a stale/unverified follower read promotes the owner's frontier for
-                        # this scope without blocking, so the served matches stay while the owner
+                        # Item 5: a stale/unverified reader read promotes the indexer's frontier for
+                        # this scope without blocking, so the served matches stay while the indexer
                         # advances coverage.
                         _promote_user_visible_scope(root)
                 return payload
             if not index.ready and not can_build_index:
-                # A follower can always read a persisted snapshot.  Ask the
-                # writer only when that snapshot is missing; rolling worktrees
+                # The web process can always read a persisted snapshot. Ask the
+                # indexer only when that snapshot is missing; rolling worktrees
                 # can otherwise use different local-RPC framing and turn an
                 # exact filename lookup into a socket retry storm.
                 fallback_indexed = file_index.search_disk_index(
@@ -795,33 +798,29 @@ def _search_files_from_safe_root(
                         "query": str(query or ""),
                         "limit": max_results,
                         "truncated": fallback_truncated,
-                        "index_state": "follower-ready" if freshness.authoritative else "follower-stale",
+                        "index_state": "ready" if freshness.authoritative else "stale",
                         "index_coverage": "full" if freshness.authoritative else "unverified",
                         "files": fallback_results,
-                        **freshness.payload_fields(),
+                        **freshness.payload_fields,
                     }
-                persistent_response = file_index.request_background_index_search({
+                # A cold read must not synchronously ask the persistent indexer for a result. That
+                # RPC can wait behind startup or an overloaded indexer, violating the search
+                # response budget and making the first Quick Open keystroke feel hung. The shared
+                # refresh requester below owns the one local scheduler admission and returns the
+                # same warming state whether the indexer is already running or still starting.
+                refresh_result = file_index.request_background_refresh({
                     "root": str(root),
                     "query": str(query or ""),
-                    "limit": max_results,
-                    paths.FS_ACCESS_POLICY_FIELD: paths.active_access_policy().descriptor(),
-                    file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index.root_identity(os.fstat(access_descriptor)),
+                    "reason": "search-index-missing",
+                    "advisory": True,
                 })
-                persistent_payload = persistent_response.get("payload")
-                if persistent_response.get("ok") and isinstance(persistent_payload, dict):
-                    return persistent_payload
-                if persistent_response.get("status") == "unavailable":
-                    raise FilesystemError(
-                        "search index service unavailable",
-                        status=HTTPStatus.FAILED_DEPENDENCY,
-                        message_key="common.requestFailed",
-                        diagnostic=persistent_response.get("reason"),
-                    )
-                refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
-                if not refresh_result.get("fallback"):
-                    # `fallback` being false does NOT mean an owner took the work: with
-                    # no requester wired at all the result is neither accepted nor a
-                    # fallback. The freshness record carries the acceptance itself.
+                refresh_outcome = RefreshOutcome.from_result(refresh_result)
+                refresh_accepted = refresh_outcome.accepted
+                refresh_queued = refresh_outcome.accepted or refresh_outcome.pending
+                if refresh_queued:
+                    # A queued local request is enough to report warming, but not to claim that
+                    # indexd has accepted the RPC.  The scheduler records that stronger state only
+                    # after its off-thread request receives an acceptance from indexd.
                     freshness = _snapshot_freshness(index, root, index_policy)
                     return {
                         "root": str(root),
@@ -830,8 +829,9 @@ def _search_files_from_safe_root(
                         "limit": max_results,
                         "truncated": False,
                         "files": [],
-                        "index_state": "follower",
-                        **freshness.payload_fields(),
+                        "index_state": "warming",
+                        **freshness.payload_fields,
+                        "refresh_requested": True,
                     }
             if indexed_only:
                 freshness = _snapshot_freshness(index, root, index_policy)
@@ -842,9 +842,9 @@ def _search_files_from_safe_root(
                     "limit": max_results,
                     "truncated": False,
                     "files": [],
-                    "index_state": "warming",
+                    "index_state": "warming" if can_build_index or refresh_accepted else "fallback-skipped",
                     "index_coverage": "pending",
-                    **freshness.payload_fields(),
+                    **freshness.payload_fields,
                 }
             if not index.ready and can_build_index:
                 # The first query for a large root must not return an empty
@@ -861,7 +861,7 @@ def _search_files_from_safe_root(
                 child_truncated = False
                 # The breadth-first builder commits this root's layer-1 rows to its own SQLite as
                 # soon as the root listing finishes, long before the whole crawl drains. Serve those
-                # committed rows through the same SQLite read owner the follower uses, so Quick Open
+                # committed rows through the same SQLite read path, so Quick Open
                 # returns direct files while the deeper crawl is still running instead of falling
                 # through to the synchronous full-tree walk this feature exists to remove.
                 own_indexed = file_index.search_disk_index(
@@ -934,8 +934,8 @@ def _search_files_from_safe_root(
                         "index_state": "warming",
                         "index_coverage": "partial",
                         "files": unique_rows,
-                        **_progressive_payload_fields(root),
-                        **freshness.payload_fields(),
+                        **_progressive_payload_fields(root, freshness),
+                        **freshness.payload_fields,
                     }
         if indexed_only and not index.ready:
             freshness = _snapshot_freshness(index, root, index_policy)
@@ -948,8 +948,8 @@ def _search_files_from_safe_root(
                 "files": [],
                 "index_state": "warming",
                 "index_coverage": "pending",
-                **_progressive_payload_fields(root),
-                **freshness.payload_fields(),
+                **_progressive_payload_fields(root, freshness),
+                **freshness.payload_fields,
             }
         if not tokens:
             # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
@@ -977,7 +977,7 @@ def _search_files_from_safe_root(
                     _recent,
                     expected_root_identity=authorized_root_identity,
                 )
-                recent_payload_state = "follower-ready"
+                recent_payload_state = "ready"
             if recent is not None:
                 recent_results, recent_truncated = recent
                 recent_results = [
@@ -986,8 +986,8 @@ def _search_files_from_safe_root(
                     if _annotate_search_dedupe_fields(entry, root=root, root_descriptor=access_descriptor)
                 ]
                 freshness = _snapshot_freshness(index, root, index_policy)
-                if recent_payload_state == "follower-ready" and not freshness.authoritative:
-                    recent_payload_state = "follower-stale"
+                if recent_payload_state == "ready" and not freshness.authoritative:
+                    recent_payload_state = "stale"
                 return {
                     "root": str(root),
                     "root_realpath": str(root),
@@ -996,7 +996,7 @@ def _search_files_from_safe_root(
                     "truncated": recent_truncated,
                     "files": recent_results,
                     "index_state": recent_payload_state,
-                    **freshness.payload_fields(),
+                    **freshness.payload_fields,
                 }
             if not index.ready and not can_build_index:
                 freshness = _snapshot_freshness(index, root, index_policy)
@@ -1007,8 +1007,8 @@ def _search_files_from_safe_root(
                     "limit": max_results,
                     "truncated": False,
                     "files": [],
-                    "index_state": "follower-fallback-skipped",
-                    **freshness.payload_fields(),
+                    "index_state": "fallback-skipped",
+                    **freshness.payload_fields,
                 }
             return {
                 "root": str(root),
@@ -1156,7 +1156,7 @@ def _search_files_from_safe_root(
             "query": str(query or ""),
             "limit": max_results,
             "truncated": True,
-            "index_state": "warming",
+            "index_state": "warming" if can_build_index or refresh_accepted else "fallback-skipped",
             "index_coverage": "pending",
             "files": [],
         }
@@ -1169,7 +1169,7 @@ def _search_files_from_safe_root(
         "files": results,
     }
     if full_tree:
-        payload["index_state"] = "warming"
+        payload["index_state"] = "warming" if can_build_index or refresh_accepted else "fallback-skipped"
         payload["index_coverage"] = "pending"
     return payload
 
@@ -1290,7 +1290,7 @@ def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -
     # explicit Quick Open demand, so queue the persistent indexer when no
     # committed snapshot exists yet.
     if not index.ready and not index.disk_metadata_ready:
-        file_index.request_background_owner_refresh({"root": str(root), "reason": "index-status"})
+        file_index.request_background_refresh({"root": str(root), "reason": "index-status"})
     with index.lock:
         ready = bool(index.ready)
         building = bool(index.building)
@@ -1315,11 +1315,9 @@ def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -
     # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
     # (which made the badge flicker). `state` is the single field the UI keys on.
     state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else ("error" if last_error else "missing")))
-    if not ready and not building and not file_index.background_owner_can_build():
-        state = "follower"
-    # `state` is a role/build predicate. Whether another process is refreshing,
-    # and whether this snapshot may be called ready, are freshness questions and
-    # come from the one freshness record - not from "I am not the owner".
+    # `state` is a role/build predicate. Whether the persistent index service is
+    # refreshing, and whether this snapshot may be called ready, are freshness
+    # questions from the one freshness record - not role inference.
     freshness = _snapshot_freshness(index, root, policy)
     return {
         "root": str(root),
@@ -1351,12 +1349,11 @@ def _index_status_from_safe_root(raw_root: str, *, root_fd: int | None = None) -
         "persist_max_bytes": policy["persist_max_bytes"],
         "excluded_paths": policy["excluded_paths"],
         "state": state,
-        "ready_elsewhere": state == "follower" and metadata_ready and freshness.authoritative,
         # Item 8: the measured breadth-first coverage for this root (published depth, frontier
         # depth/size, generations, snapshot age, full-coverage). Empty until the progressive
         # builder has published a manifest; nested so it cannot collide with freshness fields.
         "progressive_coverage": file_index.read_index_coverage(root) or {},
-        **freshness.payload_fields(),
+        **freshness.payload_fields,
     }
 
 
@@ -1369,22 +1366,18 @@ def index_status(raw_root: str) -> dict[str, Any]:
 def _unindex_safe_root(raw_root: str) -> dict[str, Any]:
     """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
     root = Path(raw_root)
-    if file_index.background_owner_can_build():
+    if file_index.build_authorized():
         file_index.unindex(root)
         return {"root": str(root), "ok": True}
-    result = file_index.request_background_owner_refresh({
+    result = file_index.request_background_refresh({
         "root": str(root),
         "operation": "unindex",
         "reason": "unindex",
     })
-    # This branch runs only when THIS process cannot build, so any acceptance is a
-    # remote owner's -- derive both fields from the one control-outcome verdict
-    # rather than reading the raw `accepted` boolean twice.
     outcome = RefreshOutcome.from_result(result)
     return {
         "root": str(root),
         "ok": outcome.accepted,
-        "refreshing_elsewhere": outcome.refreshing_elsewhere,
     }
 
 
@@ -1462,7 +1455,7 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
         policy = _root_policy(root)
         return not _index_path_is_excluded(root, path, policy["skip_dirs"], policy["exclude_path"])
 
-    owner_can_build = file_index.background_owner_can_build()
+    build_authorized = file_index.build_authorized()
 
     def prepare_root(root: Path) -> None:
         if root.is_dir():
@@ -1471,9 +1464,9 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
     roots_by_path = file_index.mark_paths_dirty(
         normalized_paths,
         include_root=include_root,
-        prepare_root=prepare_root if owner_can_build else None,
+        prepare_root=prepare_root if build_authorized else None,
     )
-    if owner_can_build:
+    if build_authorized:
         # Item 6, promote branch: for a root whose breadth-first crawl has NOT yet reached the
         # changed subtree, raise that root's pending durable frontier to `hot-change` priority so the
         # crawl reaches the changed area ahead of ordinary breadth work, instead of enqueuing a
@@ -1489,7 +1482,7 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
         file_index.schedule_refreshes()
     else:
         for root, changed_paths in roots_by_path.items():
-            file_index.request_background_owner_refresh({
+            file_index.request_background_refresh({
                 "root": str(root),
                 "paths": [str(path) for path in sorted(changed_paths, key=str)],
                 "path": str(sorted(changed_paths, key=str)[0]),

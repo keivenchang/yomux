@@ -173,7 +173,7 @@ def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
     for key in ("YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR"):
         env.pop(key, None)
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parents[1] / "yolomux.py"), "--print-background-owner"],
+        [sys.executable, str(Path(__file__).parents[1] / "yolomux.py"), "--print-runtime-report"],
         env=env,
         text=True,
         capture_output=True,

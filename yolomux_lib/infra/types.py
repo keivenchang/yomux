@@ -62,7 +62,6 @@ class SessionFilesPayload(TypedDict, total=False):
     refs_by_repo: dict[str, list[dict[str, Any]]]
     cache: dict[str, Any]
     error: str
-    refreshing_elsewhere: bool
 
 
 class AutoApproveState(TypedDict, total=False):

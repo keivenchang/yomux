@@ -51,6 +51,7 @@ from yolomux_lib.stats_current import storage  # noqa: E402
 from yolomux_lib.stats_current.client import SERVICE_NAME  # noqa: E402
 from yolomux_lib.stats_current.client import _append_payload  # noqa: E402
 from yolomux_lib.stats_current.client import _wire_rpc  # noqa: E402
+from tools.instance_isolation import synthetic_test_environment  # noqa: E402
 
 DATABASE_FILENAME = storage.DATABASE_FILENAME
 # Poll cadences. These bound the resolution of a reported transition; they are
@@ -402,7 +403,7 @@ def _launch_daemon(master: Path, root: Path, label: str) -> dict:
     sock = root / "runtime" / f"statsd-{label}.sock"
     log = scratch / "daemon.log"
 
-    env = dict(os.environ)
+    env = synthetic_test_environment()
     env["YOLOMUX_ROOT"] = str(root)
     env["YOLOMUX_CONFIG_DIR"] = str(root / "config")
     env["YOLOMUX_STATE_DIR"] = str(root / "state")

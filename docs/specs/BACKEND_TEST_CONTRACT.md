@@ -1,10 +1,12 @@
 # Backend Test Contract — cohorts, boundaries, and acceptance
 
-How backend process/browser work in YOLOmux is verified: resource ownership per test cohort, the first-failing-transition discipline, what may and may not count as acceptance, and when to stop. Extracted from the two-daemon migration queue on 2026-07-25.
+How backend process/browser work in YOLOmux is verified: resource ownership per test cohort, the first-failing-transition discipline, what may and may not count as acceptance, and when to stop. The lifecycle and no-retry rules apply to both backends. Python examples name local-service daemons; Go examples map the same ownership questions to one process, its bounded schedulers, direct SQLite writer, child processes, and fixture-owned Docker resources.
 
 These rules exist because specific failures cost real time: parallel-only failures traced to undeclared shared resources, and retries/reconnects masking lost first deliveries. Companion: [`BACKEND_ARCHITECTURE.md`](BACKEND_ARCHITECTURE.md).
 
-Implementation status: the fixture conventions below are in use, but no executable production/test symbol named `BackendCohortManifest` or shared `cohort_id` parent exists. Until that parent lands, the manifest block is a required review record rather than a type the gate can validate; the 0.7.7 discrepancy guide records the implementation gap.
+Implementation status: the Python fixture conventions below are in use, but no executable production/test symbol named `BackendCohortManifest` or shared `cohort_id` parent exists. Until that parent lands, the manifest block is a required review record rather than a type the Python gate can validate; the 0.7.7 discrepancy guide records that gap. Go's Bazel/Docker wrappers already enforce read-only source, private Bazel/Go writable roots, private HOME/XDG/TMP/tmux/browser/port state, fixture-owned listeners, and network-disabled test execution, but they do not create a production `BackendCohortManifest` type either.
+
+The canonical full gate is `python3 tools/check.py`; its default lanes include the Dockerized `bazel-go` suite. For focused Go validation, use `python3 tools/check.py --lane bazel-go` or `tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"`; the direct wrapper enters Docker and runs the declared Bazel unit, race, contract, runtime, Chromium, YO!stats, and agent-status targets. Do not run both forms against the same frozen tree merely to repeat the suite. A live operator port is not a test cohort.
 
 ### Mandatory Work-Unit Preflight
 
@@ -19,7 +21,7 @@ Every implementation or test slice must record the following before editing sour
 7. Define the acceptance action count before running the test: number of HTTP requests, product submissions, EventSource opens, reconnects, final reads, and expected events. A test may not increase those counts after it fails.
 8. Define the relevant lifecycle rows and final invariants before implementation. A narrow unit closes only its named row; a broad box closes only when every row in its matrix is current-source green.
 9. Define exact cleanup ownership for every child, socket, port reservation, profile, temporary directory, lock, and stream. Cleanup runs in `finally` and verifies absence; it does not search and kill by a broad command pattern.
-10. Select focused verification with `python3 -m pytest -n 2`; select the canonical parallel gate only for the conflict-group boundary. A serial pass, isolated rerun, or lowered worker count is never substitute evidence.
+10. Select focused verification for the changed owner: use `python3 -m pytest -n 2` for Python, Node/browser tests for shared frontend behavior, and `tools/run_bazel_tests.sh --target <label>` or `python3 tools/check.py --lane bazel-go` for Go. Select the canonical parallel full gate only for the conflict-group boundary. A serial pass, isolated rerun, retry, or lowered worker count is never substitute evidence.
 
 
 ### Terminal-State Publication Contract
@@ -95,7 +97,7 @@ Every diagnosis records one row per crossed boundary. Production STATUS exposes 
 | Product state | The reply is exactly READY, QUEUED, or typed unavailable with the expected source identity and one ticket. | Product/precondition/coalescing defect. | Reproduce at the product adapter. Do not retry the HTTP route or reconnect transport. |
 | Service completion | The exact current ticket/source generation is accepted once and advances the retained published generation or is explicitly fenced as stale. | Completion/fence/ownership defect. | Test the owning service state machine directly before SSE/browser work. |
 | Mux generation delivery and ACK | The subscribed exact client receives the exact event once with monotonic delivery generation and ACKs it; an unacknowledged event remains replayable. | Delivery, subscription, connection binding, or ACK defect. | Test first delivery on the original stream; do not reopen it. |
-| SSE publication | The web follower forwards the same ticket/key/generation once on the already-open client-events stream. | Web event-adapter/broker defect. | Test the follower publisher directly; do not refetch the product. |
+| SSE publication | The local web event adapter forwards the same ticket/key/generation once on the already-open client-events stream. | Web event-adapter/broker defect. | Test the event adapter directly; do not refetch the product. |
 | Browser pending/accepted transaction | Only the exact pending completion triggers one final read; accepted LKG/DOM/terminal/socket/focus remain until a newer valid payload commits. | Browser transaction/classifier/rekey defect. | Test state transaction then real browser; do not accept timer refresh or destructive loading data. |
 
 Use this record shape in test failure messages and handoffs:
@@ -142,7 +144,7 @@ The rule forbids using a second attempt to hide a failed first attempt. It does 
 
 The canonical queued-product first-delivery sequence is exact:
 
-1. Start fixture-owned service and follower resources and wait only for their distinct readiness signals.
+1. Start fixture-owned service and event-adapter resources and wait only for their distinct readiness signals.
 2. Open and verify the one subject SSE stream before issuing the subject request.
 3. Issue the subject HTTP request exactly once and require the expected bounded immediate response, normally one 202/QUEUED ticket or one READY LKG with a pending ticket.
 4. Complete the exact service work once and require the owning service to accept that ticket/source generation once.
@@ -174,9 +176,9 @@ Before implementing a broad box, list every required row. Mark a row evidenced o
 | Service replacement | Current LKG in service state and old service deliberately stopped. | Web remains bounded. | New exact-identity service republishes/finishes once. | LKG preserved; old child/socket gone; no duplicate owner. |
 | Durable-state replacement | Durable namespace/checkpoint exists and old owner is deliberately stopped. | Clients get bounded unavailable/upgrade-required during the named window. | One exact replacement restores its durability contract. | No web/service SQLite fallback; stale client cannot clobber new state. |
 | SSE disconnect | Pending or accepted generation exists before one deliberate disconnect. | UI preserves accepted state. | One replacement stream repairs exact generation then one final read. | No timer/poll/request retry; one reconnect only. |
-| Web-only restart | Shared current children and retained service state remain. | New follower joins exact cohort and reads LKG/current state. | Subscriptions restore once. | Children are not duplicated/replaced; no web-owned background work. |
+| Web-only restart | Shared current children and retained service state remain. | New server starts with its own exclusive instance lease and reads LKG/current state. | Subscriptions restore once. | Children are not duplicated/replaced; no second server shares the product-root state. |
 | Source supersession | Older work remains pending when a newer generation arrives. | Contract explicitly retains, cancels, or supersedes the older ticket. | Only the accepted current generation becomes authoritative. | Stale completion cannot overwrite; delivery sequence remains monotonic. |
-| Malformed/old protocol | Invalid fields or incompatible protocol/fingerprint. | Typed invalid/upgrade-required within deadline. | Replacement/takeover only through the lifecycle owner. | No partial mutation, fallback database, hidden traceback, or socket-gap data loss. |
+| Malformed/old protocol | Invalid fields or incompatible protocol/fingerprint. | Typed invalid/upgrade-required within deadline. | Replacement only through the lifecycle owner. | No partial mutation, fallback database, hidden traceback, or socket-gap data loss. |
 
 Every broad-box evidence note uses this compact schema:
 
@@ -209,7 +211,7 @@ Did two parallel runs share a mutable resource?
                           yes -> did the original subscribed mux client receive and ACK it?
                                   no  -> delivery/subscription/connection-binding regression.
                                   yes -> did the already-open SSE stream forward the exact event?
-                                          no  -> follower event-broker regression.
+                                          no  -> event-broker regression.
                                           yes -> did the exact browser pending transaction commit once?
                                                   no  -> browser transaction/rekey regression.
                                                   yes -> the reported symptom is downstream; add that boundary without reopening earlier owners.

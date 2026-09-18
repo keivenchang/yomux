@@ -46,6 +46,7 @@ from .storage import UsageAtom
 from .storage import WRITER_FENCE_FILENAME
 from .storage import require_compatible_writer
 from .storage import normalize_unavailable_spans
+from .storage import writer_lease
 from .usage import UsageValidationError
 from .usage import normalize_usage_atom
 
@@ -293,6 +294,25 @@ def _v7_migration_source(state_dir: Path) -> Path | None:
 
 
 def migrate(
+    inputs: MigrationInputs,
+    active_database: Path | None = None,
+    *,
+    completed_at: float | None = None,
+) -> MigrationReport:
+    """Run migration while holding the cross-language database writer lease.
+
+    The service normally owns this lease for the whole startup transaction, but
+    migration is also a public helper used by repair tools and tests. Keeping
+    the lease at this boundary prevents a direct caller from racing a Go writer
+    between compatibility preflight, source retirement, and activation.
+    """
+
+    target = Path(active_database or Path(inputs.state_dir) / DATABASE_FILENAME)
+    with writer_lease(target):
+        return _migrate_unlocked(inputs, active_database=active_database, completed_at=completed_at)
+
+
+def _migrate_unlocked(
     inputs: MigrationInputs,
     active_database: Path | None = None,
     *,

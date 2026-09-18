@@ -1,5 +1,7 @@
 # API response contract
 
+Backend scope: this is the shared target contract for Python and Go. Python routes are migrating through the shared response parent. Go implements the contract for its registered operation/Finder paths through ready, queued, and failed envelopes plus its durable operation journal; unsupported Go routes return typed HTTP `501 feature_unavailable`. The target diagnostics aggregation and complete route-derived conformance guard described below are not fully implemented in either backend, so target language must not be read as a claim that every current route conforms.
+
 > **STATUS: PARTIALLY IMPLEMENTED CONTRACT.** `QueuedDeliveryLedger` now persists accepted operations, `GET /api/operations/{id}` and `POST /api/operations/ack` provide status/acknowledgment, the shared `/api/client-events` stream publishes and replays `operation_terminal`, and session/filesystem product paths use that machinery. The route catalog does not yet enforce this envelope for every JSON route: forced session metadata still builds synchronously, `Route.normal_session_local_service` remains a test-inventory marker, and the legacy activity-summary route is disabled with typed `503 feature_disabled` until its asynchronous replacement lands. Qualified browser observations are durably uploaded through `POST /api/stats-observations`, but the aggregated failure-query endpoint below does not exist. Treat the envelope, route-wide timing bound, and diagnostic query as target contract, not evidence of global conformance; current gaps are inventoried in [`V0.7.7_IMPLEMENTATION_DISCREPANCIES.md`](V0.7.7_IMPLEMENTATION_DISCREPANCIES.md).
 
 ## Why this exists
@@ -8,7 +10,7 @@ Six distinct user-visible failures on 2026-08-02 share one root: **a response th
 
 | Incident | What the API returned | What was true |
 |---|---|---|
-| Differ hung on `loading…` forever | `200 OK` carrying `refreshing_elsewhere: true` | not ready; still refreshing elsewhere |
+| Differ hung on `loading…` forever | `200 OK` carrying a non-terminal refresh marker | not ready; the refresh had not completed |
 | `/api/session-files` while `batchd` was a zombie | `202 QUEUED` | the job could never be scheduled |
 | 24h stats repeat selection | bare `409` with no body the browser could read | a repair was required and possible |
 | `/api/auto-approve` under lock contention | bare `503` | a valid retained snapshot existed |
@@ -67,7 +69,7 @@ Terminal states are published even when the producer crashes: the supervisor con
 
 ### 4. Never encode failure inside success
 
-`state: "ready"` means the data is present and correct. Nothing else. A field like `refreshing_elsewhere` is a `queued` state; a partial result is `queued` with `progress`; an empty result that means "unknown" is `failed`, not an empty `data`.
+`state: "ready"` means the data is present and correct. Nothing else. An in-progress refresh is a `queued` state; a partial result is `queued` with `progress`; an empty result that means "unknown" is `failed`, not an empty `data`.
 
 > An empty success is indistinguishable from a real empty answer. `$0` for an unpriced model and an empty file list for a vanished root are the same defect: a value that cannot be told apart from a measurement.
 

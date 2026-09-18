@@ -4,7 +4,8 @@
 // readable size): the CodeMirror panel lifecycle, extensions, theming, and diff/preview rendering.
 // Concatenated immediately after 90 by tools/static_build.py, so it shares the same bundle scope.
 
-function destroyCodeMirrorPanel(panel) {
+function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
+  if (panel && invalidateEnsure) panel._cmGeneration = Number(panel._cmGeneration || 0) + 1;
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
   panel?._diffOverviewViewportCleanup?.();
@@ -32,6 +33,11 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmMode = '';
     panel._cmPlainFallback = false;
   }
+}
+
+function destroyFileEditorPanel(panel) {
+  destroyCodeMirrorPanel(panel);
+  destroyProseMirrorPanel(panel);
 }
 
 function codeMirrorPanelContent(panel) {
@@ -145,71 +151,83 @@ function codeMirrorSplitSyncExtension(api, panel, path) {
 
 function codeMirrorContextMenuSelectionExtension(api) {
   return safeCodeMirrorExtension('context menu selection', () => {
-    let pending = null;
-    let clearTimer = null;
-    const handlers = api.EditorView.domEventHandlers({
-      mousedown(event, view) {
-        if (event.button !== 2) return false;
-        pending = {selection: view.state.selection};
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => { pending = null; }, 250);
-        return false;
-      },
-      contextmenu(event, view) {
-        // Chrome may collapse contenteditable's native DOM selection before opening its context menu.
-        // CodeMirror then observes that DOM change and replaces its own selection, which is especially
-        // visible in unified diffs where folded/deleted rows make the native selection discontinuous.
-        const selection = pending?.selection || view.state.selection;
-        const position = view.posAtCoords({x: event.clientX, y: event.clientY});
-        const panel = view.dom.closest('.file-editor-panel');
-        const isDiff = panel?._cmMode === 'diff';
-        const clickedSelection = isDiff || selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to);
-        if (!clickedSelection) return false;
-        const path = panel?.dataset?.filePath || '';
-        if (previewKindForPath(path) === 'markdown') {
-          const range = selection.main;
-          const line = view.state.doc.lineAt(range.from);
-          const selectedText = view.state.sliceDoc(range.from, range.to);
-          if (selectedText.trim()) {
-            event.preventDefault();
-            event.stopPropagation();
-            markdownEditorContextMenu(view, panel, path, event, {
-              selectedText,
-              sourceLine: line.number,
-            });
-            return true;
+    if (!api.ViewPlugin) return [];
+    return api.ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.view = view;
+        this.pending = null;
+        this.clearTimer = 0;
+        this.captureSelectionAtRightMouseDown = event => {
+          if (event.button !== 2 || !this.view.dom.contains(event.target)) return;
+          const selection = this.view.state.selection;
+          const position = this.view.posAtCoords({x: event.clientX, y: event.clientY});
+          if (!Number.isFinite(position) || !selection.ranges.some(range => !range.empty && position >= range.from && position <= range.to)) return;
+          // Capture the selection before CodeMirror/contenteditable processes the native right
+          // mousedown. The later contextmenu coordinates can map to the collapsed cursor, so the
+          // captured in-selection decision is the authoritative gesture state.
+          this.pending = {selection, position};
+          clearTimeout(this.clearTimer);
+          this.clearTimer = setTimeout(() => {
+            if (this.pending?.selection === selection) this.pending = null;
+          }, 250);
+        };
+        this.handleContextMenu = event => {
+          if (!this.view.dom.contains(event.target)) return;
+          // Capture-phase listeners run before CodeMirror's own contextmenu handling. Chrome can
+          // otherwise collapse contenteditable's selection before CodeMirror observes the event.
+          const captured = this.pending;
+          this.pending = null;
+          clearTimeout(this.clearTimer);
+          this.clearTimer = 0;
+          const selection = captured?.selection || this.view.state.selection;
+          const clickedSelection = captured !== null && captured !== undefined
+            || selection.ranges.some(range => !range.empty);
+          if (!clickedSelection) return;
+          const panel = this.view.dom.closest('.file-editor-panel');
+          const path = panel?.dataset?.filePath || '';
+          // Restore before opening any editor menu. The native right-click transaction may have
+          // collapsed the selection, and the Markdown menu reads the live CodeMirror selection
+          // when its formatting actions are invoked.
+          const restoreSelection = () => {
+            if (!this.view.dom?.isConnected || this.view.state.selection.eq(selection)) return;
+            this.view.dispatch({selection});
+            updateCodeMirrorCursorStatus(panel);
+          };
+          restoreSelection();
+          queueMicrotask(restoreSelection);
+          requestAnimationFrame(restoreSelection);
+          if (previewKindForPath(path) === 'markdown') {
+            const range = selection.main;
+            const line = this.view.state.doc.lineAt(range.from);
+            const selectedText = this.view.state.sliceDoc(range.from, range.to);
+            if (selectedText.trim()) {
+              event.preventDefault();
+              event.stopPropagation();
+              markdownEditorContextMenu(this.view, panel, path, event, {
+                selectedText,
+                sourceLine: line.number,
+              });
+              return;
+            }
           }
-        }
-        const captured = {selection};
-        pending = captured;
-        clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => {
-          if (pending === captured) pending = null;
-        }, 250);
-        requestAnimationFrame(() => {
-          if (pending !== captured || !view.dom?.isConnected) return;
-          if (!view.state.selection.eq(captured.selection)) {
-            view.dispatch({selection: captured.selection});
-            updateCodeMirrorCursorStatus(view.dom.closest('.file-editor-panel'));
-          }
-          pending = null;
-          clearTimeout(clearTimer);
-        });
-        return false;
-      },
+          // Restore synchronously while handling contextmenu. Waiting for an update listener loses the
+          // race when the native right-mousedown does not produce a CodeMirror selection transaction.
+        };
+        // The W3C pointer path used by Chromium/Selenium can deliver pointerdown before the
+        // synthesized mousedown has a chance to run; both events must feed the same capture owner.
+        document.addEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.addEventListener('contextmenu', this.handleContextMenu, true);
+      }
+
+      destroy() {
+        document.removeEventListener('pointerdown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('mousedown', this.captureSelectionAtRightMouseDown, true);
+        document.removeEventListener('contextmenu', this.handleContextMenu, true);
+        clearTimeout(this.clearTimer);
+        this.pending = null;
+      }
     });
-    const restore = api.EditorView.updateListener.of(update => {
-      const captured = pending;
-      if (!captured || !update.selectionSet || update.state.selection.eq(captured.selection)) return;
-      pending = null;
-      clearTimeout(clearTimer);
-      queueMicrotask(() => {
-        if (!update.view.dom?.isConnected) return;
-        update.view.dispatch({selection: captured.selection});
-        updateCodeMirrorCursorStatus(update.view.dom.closest('.file-editor-panel'));
-      });
-    });
-    return [handlers, restore];
   });
 }
 
@@ -231,7 +249,8 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
   if (options.cleanOnly && (options.state || fileState.get(options.path))?.dirty) return;
-  const selection = view.state.selection;
+  const selection = options.preserveSelection === false ? null : view.state.selection;
+  const cursorAtEndBeforeFinalNewline = options.selection === 'end-before-final-newline';
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
@@ -244,7 +263,11 @@ function syncCodeMirrorDocument(view, text, options = {}) {
         ...(preservedSelection ? {selection: preservedSelection} : {}),
         ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
       });
-    }, {preserveSelection: selectionFits});
+    }, {preserveSelection: cursorAtEndBeforeFinalNewline ? false : selectionFits});
+    if (cursorAtEndBeforeFinalNewline) {
+      const position = next.endsWith('\n') ? Math.max(0, next.length - 1) : next.length;
+      view.dispatch({selection: {anchor: position, head: position}});
+    }
   } finally {
     if (panel) panel._cmSyncing = false;
   }
@@ -424,11 +447,7 @@ function reconfigureCodeMirrorPanelEditorOptions(panel) {
   const compartment = panel?._cmEditorOptionCompartment;
   const views = Array.isArray(panel?._cmViews) ? panel._cmViews : [];
   if (!api || !compartment || !views.length) return false;
-  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, {
-    ...(panel._cmEditorOptionConfig || {}),
-    path: panel._cmPath,
-    state: fileState.get(panel._cmPath),
-  }));
+  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
@@ -973,7 +992,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       return true;
     }
     captureFileEditorPanelViewState(item, panel);
-    destroyCodeMirrorPanel(panel);
+    destroyCodeMirrorPanel(panel, {invalidateEnsure: false});
     container.replaceChildren();
     panel._cmDiffLayout = layout;
     installCodeMirrorDiffResizeObserver(panel, item, path, container);
@@ -1111,7 +1130,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
     captureFileEditorPanelViewState(item, panel);
-    destroyCodeMirrorPanel(panel);
+    destroyCodeMirrorPanel(panel, {invalidateEnsure: false});
     container.textContent = t('editor.codemirrorLoading');
   }
   try {
@@ -1425,8 +1444,12 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-    else renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state, force: true});
+    if (prosemirrorSupportedSource(path, state)) {
+      renderProseMirrorPreviewMode(panel, item, path, state, parts);
+    } else {
+      destroyProseMirrorPanel(panel);
+      renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview', state});
+    }
   }
 }
 
@@ -1441,8 +1464,12 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
     if (mode === 'split') {
-      if (prosemirrorSupportedSource(path, state)) renderProseMirrorPreviewMode(panel, item, path, state, parts);
-      else renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: mode, state, force: true});
+      if (prosemirrorSupportedSource(path, state)) {
+        renderProseMirrorPreviewMode(panel, item, path, state, parts);
+      } else {
+        destroyProseMirrorPanel(panel);
+        renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split', state});
+      }
     }
   }
   panel.classList.remove('syntax-highlighted');
@@ -1477,14 +1504,10 @@ function renderFileEditorPanel(panel, item, options = {}) {
   const shouldUpdateActiveFile = options.updateActiveFile !== false
     && (!dockviewLayoutActive() || focusedPanelItem === item || options.forceActiveFile === true);
   if (shouldUpdateActiveFile) {
+    const previousActiveFile = activeFile;
     activeFile = path;
-    if (fileExplorerRootModeValue?.() === 'sync') {
-      requestAnimationFrame(() => {
-        syncFileExplorerRootToActiveFile(path, {force: true}).catch(error => {
-          console.warn('Finder active file sync failed', error);
-        });
-      });
-    } else scheduleFileExplorerActiveFileReveal(path);
+    if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+    else updateFileExplorerCurrentFileHighlight();
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }
@@ -2561,7 +2584,7 @@ async function performFileEditorSave(path, panel, options = {}) {
   const state = fileEditorStateForItem(statePath, item);
   if (!state || state.kind !== 'text' || state.historical === true) return false;
   const contentPanel = panel || state.contentOwnerPanel || null;
-  flushProseMirrorSource(contentPanel, statePath);
+  flushProseMirrorSource(contentPanel, statePath, {preserveTerminalNewline: true});
   syncOpenFileContentFromPanels(statePath, contentPanel);
   if (!options.force && ((state.externalChanged && !fileEditorSelfWritePending(path)) || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});

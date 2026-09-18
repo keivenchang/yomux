@@ -11,6 +11,10 @@ const source = [
   'static_src/js/yolomux/84_debug_observation.js',
   'static_src/js/yolomux/85_debug_panel.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+const graphDefaultsSource = source.slice(
+  source.indexOf('const jsDebugGraphDefaultHiddenChartKeys ='),
+  source.indexOf('\nconst jsDebugGraphMovingAverageSamples', source.indexOf('const jsDebugGraphDefaultHiddenChartKeys =')),
+);
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
@@ -20,6 +24,11 @@ const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'u
 const lifecycleScopeSource = coreSource.slice(
   coreSource.indexOf('function createLifecycleScope('),
   coreSource.indexOf('\nfunction createLatestResource(', coreSource.indexOf('function createLifecycleScope(')),
+);
+
+const capabilityRequestSource = bootstrapSource.slice(
+  bootstrapSource.indexOf('function capabilityNameForRequest('),
+  bootstrapSource.indexOf('\nconst statsWriterFence', bootstrapSource.indexOf('function capabilityNameForRequest(')),
 );
 const terminalSource = [
   'static_src/js/yolomux/99_terminal_boot.js',
@@ -31,6 +40,15 @@ const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'
 let passed = 0;
 let failed = 0;
 const pending = [];
+
+test('session metadata uses the bootstrap capability while Tabber routes stay Tabber-owned', () => {
+  const context = {URL, globalThis: {location: {href: 'https://example.test/'}}};
+  vm.runInNewContext(`${capabilityRequestSource}\nresult = [
+    capabilityNameForRequest('/api/session-metadata?force=1'),
+    capabilityNameForRequest('/api/transcripts?session=1'),
+  ];`, context);
+  assert.deepEqual([...context.result], ['core.bootstrap.v1', 'core.bootstrap.v1']);
+});
 
 function test(name, body) {
   try {
@@ -742,6 +760,89 @@ test('model output chart is fixed to generated output without a dimension picker
   assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
 });
 
+test('fresh Graphs defaults show Agents, Session tokens/min, and system/process memory without Daemons', () => {
+  assert.match(source, /\{key: 'activity',[^\n]+series: jsDebugAgentStatusSeriesKeys/);
+  assert.match(source, /\{key: 'agentTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'agentTokens'/);
+  assert.match(source, /\{key: 'modelTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'modelTokens'/);
+  assert.match(source, /\{key: 'memory',[^\n]+hostMetric: 'memory'/);
+  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['serversLoad', 'gpuUtil', 'gpuMemory'\]\)/);
+  const context = {
+    result: null,
+    Date,
+    Object,
+    Set,
+    String,
+    Number,
+    Math,
+    window: {localStorage: {getItem: () => null}},
+    jsDebugGraphChartGroups: [
+      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'}, {key: 'serversLoad'},
+    ],
+    jsDebugStatsUiPreferencesStorageKey: 'stats',
+    legacyYoCostMigrationRequested: false,
+    jsDebugLogLevels: ['warning', 'error'],
+    jsDebugLogDefaultLevels: ['warning', 'error'],
+    jsDebugLogsState: {levels: new Set()},
+    safeJsonParse: value => JSON.parse(value),
+    normalizedJsDebugSubTab: value => value || 'graph',
+    normalizedJsDebugGraphRange: value => value || 900,
+    normalizedDebugGraphServiceLoadPreference: value => value || 'auto',
+    syncDebugGraphResolutionOverride: () => {},
+    saveJsDebugStatsUiPreferences: () => {},
+  };
+  const runtimeSource = debugRuntimeSource.slice(
+    debugRuntimeSource.indexOf('const debugRuntimeState ='),
+    debugRuntimeSource.indexOf('\nfunction jsDebugGraphRangeOptionIndex('),
+  );
+  vm.runInNewContext(`
+    ${graphDefaultsSource}
+    ${runtimeSource}
+    const jsDebugGraphDefaultRangeSeconds = 900;
+    function debugGraphAvailableRangeOptions() { return [{seconds: 900}]; }
+    loadJsDebugStatsUiPreferences();
+    result = jsDebugGraphChartGroups.filter(group => debugGraphChartVisible(group.key)).map(group => group.key);
+  `, context);
+  assert.deepEqual([...context.result], ['activity', 'agentTokens', 'memory']);
+  assert.equal(context.result.includes('serversLoad'), false, 'Daemons is not required by the default Graphs view');
+});
+
+test('saved Graphs visibility preferences override defaults instead of being backfilled', () => {
+  const context = {
+    result: null,
+    Date,
+    Object,
+    Set,
+    String,
+    Number,
+    Math,
+    window: {localStorage: {getItem: () => JSON.stringify({hiddenCharts: ['activity'], visibleCharts: ['serversLoad']})}},
+    jsDebugStatsUiPreferencesStorageKey: 'stats',
+    legacyYoCostMigrationRequested: false,
+    jsDebugLogLevels: ['warning', 'error'],
+    jsDebugLogDefaultLevels: ['warning', 'error'],
+    jsDebugLogsState: {levels: new Set()},
+    safeJsonParse: value => JSON.parse(value),
+    normalizedJsDebugSubTab: value => value || 'graph',
+    normalizedJsDebugGraphRange: value => value || 900,
+    normalizedDebugGraphServiceLoadPreference: value => value || 'auto',
+    syncDebugGraphResolutionOverride: () => {},
+    saveJsDebugStatsUiPreferences: () => {},
+  };
+  const runtimeSource = debugRuntimeSource.slice(
+    debugRuntimeSource.indexOf('const debugRuntimeState ='),
+    debugRuntimeSource.indexOf('\nfunction jsDebugGraphRangeOptionIndex('),
+  );
+  vm.runInNewContext(`
+    ${graphDefaultsSource}
+    ${runtimeSource}
+    const jsDebugGraphDefaultRangeSeconds = 900;
+    function debugGraphAvailableRangeOptions() { return [{seconds: 900}]; }
+    loadJsDebugStatsUiPreferences();
+    result = ['activity', 'agentTokens', 'modelTokens', 'memory', 'serversLoad'].filter(debugGraphChartVisible);
+  `, context);
+  assert.deepEqual([...context.result], ['agentTokens', 'memory', 'serversLoad']);
+});
+
 test('AUTO resolution label reports the coarsest resolution actually rendered by token charts', () => {
   assert.match(sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml'), /debugGraphRenderedResolutionSeconds\(nowMs\)/);
   assert.match(sourceFunction('debugGraphRenderedResolutionSeconds', 'debugGraphHoverBucketIndex'), /group\?\.key === 'agentTokens' \|\| group\?\.key === 'modelTokens'/);
@@ -1060,6 +1161,80 @@ test('Agent-window live detail joins current sessions, diagnoses stale sessions,
   vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
   assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="changed"/);
   assert.match(context.result, /waiting for the chart snapshot/);
+});
+
+test('Agents detail consumes the stats-owner roster when auto-approve is unavailable', () => {
+  const detailStart = source.indexOf('function debugGraphStatsAgentState');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  assert.notEqual(detailStart, -1, 'stats-owner roster adapter exists');
+  assert.notEqual(detailEnd, -1, 'stats-owner roster adapter has a bounded source region');
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    STATE_KEY: {working: 'working', idle: 'idle'},
+    autoApproveStates: new Map(),
+    jsDebugStatsAgentStatusState: {
+      payload: {
+        available: true,
+        payload: {snapshot_revision: 7},
+        agents: [
+          {id: 'debug|0|%debug-0|codex', kind: 'codex', state: 'run', session: 'debug', pane: '%debug-0'},
+          {id: 'debug|1|%debug-1|claude', kind: 'claude', state: 'idle', session: 'debug', pane: '%debug-1'},
+        ],
+      },
+      revision: 7,
+    },
+    jsDebugStatsPollState: {agentWindowSnapshotRevision: 7},
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => ['claude', 'codex', 'opencode'].includes(String(kind || '').toLowerCase()) ? String(kind).toLowerCase() : '',
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
+    agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
+    agentWindowCanonicalLabel: (index, kind) => index === null ? kind : `${index}:${kind}`,
+    agentWindowStateKey: state => String(state || 'idle'),
+    esc: value => String(value),
+    document: {querySelectorAll: () => []},
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /2 agent windows across 1 sessions/);
+  assert.match(context.result, /debug → 0:codex → codex → working/);
+  assert.match(context.result, /debug → 1:claude → claude → idle/);
+  assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
+});
+
+test('Agents detail reports typed stats-owner unavailability instead of fabricated zero windows', () => {
+  const detailStart = source.indexOf('function debugGraphStatsAgentState');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    STATE_KEY: {working: 'working', idle: 'idle'},
+    autoApproveStates: new Map(),
+    jsDebugStatsAgentStatusState: {payload: {available: false, unavailable: {reason: 'pane-capture-unavailable'}}, revision: 0},
+    jsDebugStatsPollState: {agentWindowSnapshotRevision: 7},
+    statsOnlyBootEnabled: () => true,
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || ''),
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || ''),
+    agentWindowIndex: agent => Number(agent?.window_index),
+    agentWindowCanonicalLabel: (_index, kind) => kind,
+    agentWindowStateKey: state => String(state || 'idle'),
+    esc: value => String(value),
+    document: {querySelectorAll: () => []},
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /data-js-debug-agent-window-detail-state="unavailable"/);
+  assert.match(context.result, /pane-capture-unavailable/);
+  assert.doesNotMatch(context.result, /0 agent windows across 0 sessions/);
 });
 
 test('YO!stats puts Charts before Size, Range, and Resolution without changing YO!cost ordering', () => {
@@ -2322,6 +2497,20 @@ test('the established renderer consumes the protocol-v2 exact stream', () => {
   const initializeSource = sourceFunction('initializeJsDebugStatsBeforeStreams', 'jsDebugTextForClipboard');
   assert.match(initializeSource, /syncJsDebugCurrentStatsClient\(\)/);
   assert.doesNotMatch(initializeSource, /await jsDebugCurrentStatsClientState\.startPromise/, 'hidden stats startup cannot delay normal page boot');
+});
+
+test('YO!stats startup begins before locale boot can delay the app shell', () => {
+  const boot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const statsStart = boot.indexOf('initializeJsDebugStatsBeforeStreams');
+  const localeWait = boot.indexOf('await applyLocale(resolveLocalePref');
+  assert.ok(statsStart >= 0 && localeWait >= 0 && statsStart < localeWait);
+});
+
+test('stats-only boot does not schedule unrelated deferred settings metadata', () => {
+  assert.match(
+    editorSettingsSource,
+    /function scheduleDeferredSettingsMetadataRefresh\(\)[\s\S]*?statsOnlyBootEnabled\(\)[\s\S]*?if \(!clientSettingsMetadataDeferred\)/,
+  );
 });
 
 test('a complete snapshot replaces graph data once and resolves readiness', () => {

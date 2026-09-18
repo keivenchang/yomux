@@ -203,7 +203,13 @@ def static_asset_url(asset: str) -> str:
     return f"/static/{asset}?v={static_asset_version(asset)}"
 
 
-def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None, version_metadata: tuple[str, list[str]] | None = None) -> str:
+def brand_html(
+    class_name: str = "brand-title",
+    tag: str = "span",
+    locale: str | None = None,
+    version_metadata: tuple[str, list[str]] | None = None,
+    backend_label: str = "",
+) -> str:
     active_locale = normalize_locale(locale)
     commit_count = yolomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
@@ -303,10 +309,15 @@ def html_page(
     accept_language: str = "",
     auth_username: str = "",
     recent_sessions: list[str] | None = None,
+    terminal_only: bool = False,
+    capability_snapshot: dict | None = None,
+    stats_only: bool = False,
+    backend_label: str = "",
 ) -> str:
     settings_data = settings_payload()
     locale = bootstrap_locale(settings_data, accept_language)
     version_metadata = yolomux_version_metadata()
+    backend_label = backend_label.strip()
     bootstrap = {
         "sessions": sessions,
         "recentSessions": recent_sessions if isinstance(recent_sessions, list) else sessions,
@@ -315,8 +326,17 @@ def html_page(
         # Full-access agent launch controls are deliberately available only when the server operator
         # explicitly opted in with --dangerously-yolo.
         "dangerouslyYolo": dangerously_yolo,
-        "availableAgents": available_agent_commands(),
-        "terminalCommands": available_terminal_commands(),
+        "terminalOnly": terminal_only,
+        # A partial Go server can serve the stats surface without owning every
+        # legacy application route. The client uses this explicit bit to keep
+        # unrelated boot 404s from masking stats readiness.
+        "statsOnly": stats_only,
+        # Optional backend-owned negotiation document. Python leaves this absent for compatibility;
+        # an opt-in backend can use the same page renderer without teaching the UI its language.
+        "capabilities": capability_snapshot,
+        "sessionMutationsAllowed": access_role == "admin",
+        "availableAgents": ["term"] if terminal_only else available_agent_commands(),
+        "terminalCommands": ["bash"] if terminal_only else available_terminal_commands(),
         # The new-session menu exposes both explicit launch modes. Keep the command source server-owned
         # so the UI describes the exact flags the selected Claude/Codex session will receive.
         "agentLaunchCommands": {
@@ -324,11 +344,11 @@ def html_page(
                 "normal": agent_command(agent, False),
                 "full_access": agent_command(agent, True),
             }
-            for agent in ("claude", "codex", "term")
+            for agent in (("term",) if terminal_only else ("claude", "codex", "term"))
         },
         # per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
-        "agentAuth": bootstrap_agent_auth_status(),
+        "agentAuth": {} if terminal_only else bootstrap_agent_auth_status(),
         "accessRole": access_role,
         "authUsername": auth_username,
         "homePath": str(Path.home()),
@@ -350,6 +370,7 @@ def html_page(
         "backend": YOLOMUX_BACKEND,
         "version": YOLOMUX_VERSION,
         "versionStatus": version_metadata[0],
+        "backendLabel": backend_label,
         "postReleaseCommits": version_metadata[1],
         "clientRevision": yolomux_client_revision(),
         "devBundleRevision": yolomux_dev_bundle_revision(),
@@ -406,7 +427,7 @@ def html_page(
 <div id="appRoot" class="app-root">
 <header class="topbar">
   <div class="brand-cell">
-    {brand_html("brand brand-title title", "div", locale=locale, version_metadata=version_metadata)}
+    {brand_html("brand brand-title title", "div", locale=locale, version_metadata=version_metadata, backend_label=backend_label)}
     <span id="httpsWarning" class="transport-warning" hidden aria-label="{html.escape(server_string(locale, "app.noHttps"), quote=True)}"></span>
   </div>
   <div id="sessionButtons" class="app-menu-area" aria-label="{html.escape(server_string(locale, "app.menusAria"), quote=True)}"></div>

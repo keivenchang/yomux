@@ -187,7 +187,7 @@ HOST_CPU_UNWATCHED_AFTER_SECONDS = 5.0
 #
 # It is deliberately LONGER than `HOST_CPU_SAMPLE_STALE_AFTER_SECONDS`, so while unwatched the
 # web process publishes its CPU sample as ABSENT rather than frozen at a stale value. That is
-# the existing staleness owner's own rule -- past the stale window a number "is no longer a
+# the existing staleness indexer's own rule -- past the stale window a number "is no longer a
 # measurement of the present and must be published as absent" -- and absence costs nothing when
 # nobody is reading. A watcher returning resumes the one-second cadence before its next frame.
 HOST_CPU_UNWATCHED_CADENCE_SECONDS = 10.0
@@ -294,7 +294,7 @@ CONTROL_FIELDS = {
     "browser_upload": FENCE_FIELDS | {"authenticated_username"},
     "lease": FENCE_FIELDS | {"client_pid", "lease_id"},
     "release": FENCE_FIELDS | {"lease_id"},
-    # The elected web owner may identify the process it owns, but statsd must
+    # The serving web instance identifies the process it owns, but statsd must
     # resolve roster, paths, pricing, and all measured facts itself.
     "collector_context": FENCE_FIELDS | {"pid", "port", "owner_generation", "control_socket"},
     "usage_atom_backfill": FENCE_FIELDS | {"state", "sources", "missing", "scan"},
@@ -1534,29 +1534,34 @@ class StatsCurrentService:
         self._migration_state = "running"
         try:
             # run_local_rpc_service invokes _start only after winning the
-            # singleton lock. Preflight therefore precedes both migration and
-            # the first mutating SQLite open without racing another statsd.
-            try:
-                storage.require_compatible_writer(
+            # generic singleton lock.  Keep the database lease for the whole
+            # remaining startup transaction as well: preflight, migration,
+            # atomic activation, and the first mutating Store.open must be one
+            # ownership boundary shared with the Go writer.  Without this
+            # outer lease, a Go process could acquire the database between the
+            # read-only preflight and migration's cutover.
+            with storage.writer_lease(self.database_path):
+                try:
+                    storage.require_compatible_writer(
+                        self.database_path,
+                        writer_protocol=storage.MIN_WRITER_PROTOCOL,
+                        writer_build=storage.MIN_WRITER_BUILD,
+                    )
+                except storage.SchemaMismatchError:
+                    # Migration owns physical-corruption recovery. Passing an
+                    # unreadable file to that owner is not a successful preflight;
+                    # it either quarantines with a typed issue or fails closed.
+                    pass
+                report = self.migration_runner(
+                    migration.MigrationInputs(self.database_path.parent),
+                    active_database=self.database_path,
+                    completed_at=self.clock(),
+                )
+                self.writer = self.store_opener(
                     self.database_path,
                     writer_protocol=storage.MIN_WRITER_PROTOCOL,
                     writer_build=storage.MIN_WRITER_BUILD,
                 )
-            except storage.SchemaMismatchError:
-                # Migration owns physical-corruption recovery. Passing an
-                # unreadable file to that owner is not a successful preflight;
-                # it either quarantines with a typed issue or fails closed.
-                pass
-            report = self.migration_runner(
-                migration.MigrationInputs(self.database_path.parent),
-                active_database=self.database_path,
-                completed_at=self.clock(),
-            )
-            self.writer = self.store_opener(
-                self.database_path,
-                writer_protocol=storage.MIN_WRITER_PROTOCOL,
-                writer_build=storage.MIN_WRITER_BUILD,
-            )
         except (OSError, sqlite3.Error, storage.StatsCurrentError, migration.MigrationError) as error:
             self._migration_state = "failed"
             self._migration_failure = type(error).__name__[:64]
@@ -2554,6 +2559,16 @@ class StatsCurrentService:
                     candidate,
                     frozenset(write.resolution_seconds for write in writes),
                 )
+                # The publication itself is authoritative for every resolution it wrote, even
+                # when no public range has been requested yet. Keep only the per-resolution
+                # freshness floor here; `_publish_ring_views` remains demand-aware and does not
+                # manufacture a warm view for an undemanded range. A later request can therefore
+                # cold-read the exact persisted wire, while an older warm cache cannot silently
+                # win over a durable publication that already advanced that resolution.
+                with self.cache_lock:
+                    expected_cursor = (candidate.source_generation, candidate.cache_generation)
+                    for resolution_seconds in {write.resolution_seconds for write in writes}:
+                        self._ring_published_cursors[resolution_seconds] = expected_cursor
             self._clear_failure("ring_writer")
             return publication
 
@@ -2568,7 +2583,7 @@ class StatsCurrentService:
                 include_browser_diagnostics=False,
             )
             # sqlite3 connections are thread-owned. This connection belongs to
-            # the elected statsd worker; work_lock still serializes it with the
+            # the statsd writer worker; work_lock still serializes it with the
             # listener thread's append/prune connection.
             with self.work_lock:
                 publisher = self.store_opener(
@@ -2758,15 +2773,12 @@ class StatsCurrentService:
         return self._agent_token_scanner.status()
 
     def _web_push_target(self) -> tuple[dict[str, object] | None, str]:
-        """Resolve where to push this process's CPU sample, and say WHY when there is nowhere.
+        """Resolve this process's CPU-sample destination and explain an absent destination.
 
         The address comes from the `collector_context` handshake -- the web process tells this
         statsd, over this statsd's own control channel, both which process it serves and where
-        to reach it. It used to be re-discovered from `BACKGROUND_OWNER_DIR/owner.json`, which
-        is the distributed-ELECTION record and answers a different question. A managed instance
-        runs `DisabledBackgroundOwner` and holds no election, so no record was ever written and
-        the push was skipped forever: the whole reason the Daemons web row read "never measured"
-        for the life of the process.
+        to reach it. The handshake is the sole delivery address, so the push cannot disappear
+        when a local scheduler starts.
 
         This does not weaken who may receive a sample. The address is no longer read from a
         shared mutable file any co-rooted server can write; it is stated by the target process
@@ -2777,7 +2789,7 @@ class StatsCurrentService:
         """
 
         if not self.collector_control_socket:
-            return None, "web_owner_no_control_socket"
+            return None, "web_instance_no_control_socket"
         return {"control_socket": self.collector_control_socket}, ""
 
     def _record_host_push(self, kind: str, reason: str) -> None:
@@ -3866,10 +3878,12 @@ class StatsCurrentService:
                 entries[key] = ring_read.entry
 
         expected_cursor = (candidate.source_generation, candidate.cache_generation)
+        demanded_resolutions = {key[1] for key in keys}
         with self.cache_lock:
             self._ring_published_cursors.update({
                 resolution_seconds: expected_cursor
                 for resolution_seconds in resolutions
+                if resolution_seconds in demanded_resolutions
             })
             for key, entry in entries.items():
                 if self._entry_cursor(entry) != expected_cursor:
@@ -4925,7 +4939,7 @@ class StatsCurrentService:
         # delete while the observer's next sample waits on the same writer lock.
         #
         # Stamps last_rpc_at (RPC traffic), never last_client_at (the shared
-        # owner's claim clock) -- a bare status/ping/snapshot request must
+        # indexer's claim clock) -- a bare status/ping/snapshot request must
         # never count as demand. Only claim_gated_idle_due (via _idle) may
         # move last_client_at.
         now = self.monotonic()

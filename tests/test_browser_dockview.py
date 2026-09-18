@@ -4216,8 +4216,8 @@ def test_dockview_rename_preserves_yostats_in_existing_vertical_side_pane(browse
     assert after["mainTabs"] == ["Yi Qin"], metrics
 
 
-def test_dockview_forced_metadata_that_never_arrives_reports_one_owned_diagnostic(browser, tmp_path):
-    """A forced post-mutation refresh whose named build never lands must stay release-blocking.
+def test_dockview_renamed_metadata_that_never_arrives_reports_one_owned_diagnostic(browser, tmp_path):
+    """An explicit rename's forced refresh must stay release-blocking when its build never lands.
 
     This is the counterpart to the six stale-roster journeys above. Those keep stale roster and
     socket state but still receive the build the forced refresh was promised, so they converge and
@@ -4232,11 +4232,11 @@ def test_dockview_forced_metadata_that_never_arrives_reports_one_owned_diagnosti
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=1&layout=left&tabs=left:1",
-        sessions=["1"],
+        "?sessions=5,6&layout=left&tabs=left:5,6",
+        sessions=["5", "6"],
         available_agents=["term"],
     )
-    wait_for_dockview(browser, min_tabs=1)
+    wait_for_dockview(browser, min_tabs=2)
     baseline = browser.execute_script(
         """
         window.__fixtureMetadata.withholdPendingBuild = true;
@@ -4254,8 +4254,7 @@ def test_dockview_forced_metadata_that_never_arrives_reports_one_owned_diagnosti
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              window.__fixtureNextCreatedSession = '2';
-              await createNextSession('term');
+                  await renameTmuxSession('5', '55');
               done({
                 tabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
                 convergence: statusEl.dataset.metadataConvergence || '',
@@ -4271,9 +4270,10 @@ def test_dockview_forced_metadata_that_never_arrives_reports_one_owned_diagnosti
         browser.set_script_timeout(30)
 
     assert metrics.get("error") is None, metrics
-    # The mutation is committed and kept: a broken convergence promise never rolls back a session.
-    assert "2" in metrics["tabs"], metrics
-    assert "created 2" in metrics["status"], metrics
+    # The mutation is committed and kept: a broken convergence promise never rolls back a rename.
+    assert "55" in metrics["tabs"], metrics
+    assert "5" not in metrics["tabs"], metrics
+    assert "renamed" in metrics["status"], metrics
     assert metrics["convergence"] == "forced_generation_never_arrived", metrics
     assert metrics["failures"] == [
         {

@@ -2,6 +2,19 @@
 
 > **STATUS 2026-08-12: HISTORICAL.** This inventory was taken against the `phase2-infrastructure` baseline, which landed on 2026-08-01. Path ownership has since moved through the 0.7.3 root-isolation work and the 0.7.4 package split; `yolomux_lib/infra/root_paths.py` is the current resolver. The runtime-root corrections below record the current path family; use the remaining table for migration history rather than as a complete path catalog.
 
+The experimental Go backend does not use Python's six local-service path families. Its current mutable owners are:
+
+| Go path | Owner |
+| --- | --- |
+| `<checkout>/instance.lock` | `cmd/yolomux-go/main.go` product-root lease; one live Go server owns a checkout root |
+| `<config>/go-events.jsonl` and `<config>/event-log.jsonl` | Go event broker and bounded event log |
+| `<config>/go-operations.json` and `<config>/go-operations.jsonl` | Go durable operation state and journal |
+| `<config>/stats-v9.sqlite3`, `-wal`, `-shm`, and `.writer.lock` | `internal/stats` sole writer/readers and SQLite fence |
+| `<config>/opencode-token-cursors.json` | Go OpenCode token cursor sidecar |
+| `<state>/session-files-cache/*.json` | Go Differ/session-files cache |
+
+`YOLOMUX_ROOT` and explicit config/state overrides must remain private and host-local for both backends. Go tests place every mutable path under disposable Docker roots; they do not reuse operator state or ports.
+
 This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE_DIR` currently conflates runtime, durable state, and cache data; matrix classifications below are migration targets, not claims that the current layout already meets them.
 
 | Matrix row | Current path | Owner and writer | Evidence |
@@ -12,7 +25,6 @@ This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE
 | shared config | `~/.config/yolomux/state.json` | event preference state | `yolomux_lib/infra/common.py:69`, `yolomux_lib/observability/events.py:36-51` |
 | host-local runtime | `RUNTIME_DIR/server-leases/<host>/<port>.lock` | port lease/flock record | `yolomux_lib/server_lease.py`, `yolomux_lib/infra/common.py` |
 | host-local runtime | `RUNTIME_DIR/services/*.sock`, locks, aliases | local RPC runtime | `yolomux_lib/local_services/runtime.py`, `yolomux_lib/local_services/registry.py` |
-| host-local runtime | `RUNTIME_DIR/background-owner/` | generation/owner records and lock | `yolomux_lib/infra/background_owner.py` |
 | host-local runtime | `RUNTIME_DIR/locks/auto-approve-*.lock` | approval target lock | `yolomux_lib/infra/common.py`, `yolomux_lib/approval/auto_approve_worker.py` |
 | host-local runtime | `RUNTIME_DIR/control/` | local Unix control endpoint | `yolomux_lib/infra/common.py` |
 | host-local runtime | `/tmp/yolomux.<user>/uploads/<session>/` | upload reservation and retention sweep | `yolomux_lib/workspace/uploads.py:22`, `:45-61`, `:81-128` |
@@ -27,7 +39,7 @@ This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE
 | host-local cache | `YOLOMUX_CACHE_DIR/model-pricing/pricing.sqlite3` | pricing catalog refresh | `yolomux_lib/infra/common.py:65-67`, `yolomux_lib/observability/pricing_catalog.py:292-298` |
 | host-local cache | `STATE_DIR/hosts/<stable-host-id>/transcript-scan-cache-v*` | transcript scan cache; legacy unpartitioned cursors are retained and never adopted by a fresh partition | `yolomux_lib/workspace/session_files.py:561-567` |
 | host-local cache | `STATE_DIR/hosts/<stable-host-id>/session-files-repository-snapshots/*.json` | repository snapshot cache; legacy shared cache is retained and never adopted | `yolomux_lib/workspace/session_files.py:repository_snapshot_cache_path`, `:2480` |
-| host-local cache | `STATE_DIR/hosts/<stable-host-id>/{session-files-cache,activity-cache,background-owner/client-events.json}` | session-files/tabber caches and per-server client events; no cross-server leader/follower replay | `yolomux_lib/app.py:default_session_files_cache_dir`, `:default_tabber_activity_cache_dir`, `:default_background_client_events_path` |
+| host-local cache | `STATE_DIR/hosts/<stable-host-id>/{session-files-cache,activity-cache}` | session-files/tabber caches; each exclusive server consumes only its own local events | `yolomux_lib/app.py:default_session_files_cache_dir`, `:default_tabber_activity_cache_dir` |
 | host-local cache | `STATE_DIR/search_index` lock/metadata | search index coordination | `yolomux_lib/search/file_index.py:260-267` |
 | shared read-only | `~/.claude/{sessions,projects}`, `~/.codex/sessions` | transcript readers; no writer established here | `yolomux_lib/tmux/sessions.py:479-480`, `:698-721` |
 | shared read-only | repository/source trees | readers and Git metadata discovery; builds must be single-writer | `yolomux_lib/workspace/session_files.py:2337`, `yolomux_lib/workspace/metadata.py:148-187` |

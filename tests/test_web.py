@@ -114,6 +114,11 @@ def test_html_page_bootstraps_backend_identity_and_brand_hover(monkeypatch):
     assert bootstrap["backend"] == common.YOLOMUX_BACKEND
     assert page.count(f'title="0.8.8(7) [{common.YOLOMUX_BACKEND}]') == 2
 
+def test_html_page_can_explicitly_advertise_stats_only_boot():
+    bootstrap = json.loads(_bootstrap_json(web.html_page([], stats_only=True)))
+    assert bootstrap["statsOnly"] is True
+    assert json.loads(_bootstrap_json(web.html_page([])))["statsOnly"] is False
+
 
 def test_html_page_bootstraps_host_cpu_topology(monkeypatch):
     monkeypatch.setattr(web, "cpu_topology", lambda: {"logical_cpus": 32, "physical_cores": 24})

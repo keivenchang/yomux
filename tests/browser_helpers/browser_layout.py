@@ -47,6 +47,7 @@ from tests.browser_helpers.browser_console import assert_browser_console_error_f
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
+from tests.browser_helpers.browser_console import stats_only_expected_boot_404
 from tests.browser_helpers.webdriver_lease import WebDriverLease
 from tests.browser_helpers.webdriver_lease import retire_all
 from tests.helpers.fixture_content_root import FixtureContentRoot
@@ -90,6 +91,7 @@ pytest.importorskip("selenium")
 webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
+ChromeService = pytest.importorskip("selenium.webdriver.chrome.service").Service
 TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
 WebDriverException = pytest.importorskip("selenium.common.exceptions").WebDriverException
 SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
@@ -292,6 +294,35 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/fs/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/home/test"])[-1]
+            body = json.dumps({"path": requested_path, "entries": []}, separators=(",", ":")).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/fast/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
+            if requested_path == "/missing":
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                body = b"File not found\n"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            payload = {"path": requested_path, "entries": []}
+            if requested_path == "/":
+                payload["parent"] = None
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/fs/raw":
             requested_path = parse_qs(parsed.query).get("path", [""])[-1]
             suffix = Path(requested_path).suffix.lower()
@@ -316,24 +347,37 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if parsed.path == "/api/fs/fast/list":
-            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
-            if requested_path != "/":
-                self.send_response(HTTPStatus.NOT_FOUND)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                body = b"File not found\n"
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            body = json.dumps({"path": "/", "parent": None, "entries": []}).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         super().do_GET()
+
+    def do_POST(self):  # noqa: N802 - inherited HTTP handler API
+        parsed = urlsplit(self.path)
+        if parsed.path != "/api/fs/batch":
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
+            return
+        content_length = int(self.headers.get("Content-Length", "0"))
+        request_body = json.loads(self.rfile.read(content_length) or b"{}")
+        requests = request_body.get("requests", [])
+        responses = []
+        for index, request in enumerate(requests):
+            path = request.get("path", "/home/test")
+            responses.append(
+                {
+                    "id": request.get("id", index),
+                    "ok": True,
+                    "status": HTTPStatus.OK,
+                    "payload": {
+                        "path": path,
+                        "name": Path(path).name or "/",
+                        "kind": "file",
+                    },
+                }
+            )
+        body = json.dumps({"responses": responses}, separators=(",", ":")).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *args):  # keep the pytest output clean
         pass
@@ -393,18 +437,25 @@ def remove_browser_test_new_document_scripts(driver):
 
 
 def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profile_dir: Path | None = None):
-    # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
-    # the Linux lookup first, then use the canonical executable inside either
-    # common macOS bundle so browser regressions do not silently skip there.
-    chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or next((str(path) for path in (
-            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ) if path.is_file()), None)
-    )
+    configured_chrome = os.environ.get("CHROME_BIN", "").strip()
+    if configured_chrome:
+        chrome_path = Path(configured_chrome)
+        if not chrome_path.is_file() or not os.access(chrome_path, os.X_OK):
+            raise RuntimeError(f"CHROME_BIN is not an executable file: {configured_chrome}")
+        chrome = str(chrome_path)
+    else:
+        # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
+        # the Linux lookup first, then use the canonical executable inside either
+        # common macOS bundle so browser regressions do not silently skip there.
+        chrome = (
+            shutil.which("google-chrome")
+            or shutil.which("chromium")
+            or shutil.which("chromium-browser")
+            or next((str(path) for path in (
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+            ) if path.is_file()), None)
+        )
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
     options = Options()
@@ -412,13 +463,22 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.set_capability("acceptInsecureCerts", True)
     requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
     window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
     options.add_argument(f"--window-size={window_size_arg}")
     if profile_dir is not None:
         profile_dir.mkdir(parents=True, exist_ok=True)
         options.add_argument(f"--user-data-dir={profile_dir}")
-    driver = webdriver.Chrome(options=options)
+    configured_driver = os.environ.get("CHROMEDRIVER_BIN", "").strip()
+    if configured_driver:
+        driver_path = Path(configured_driver)
+        if not driver_path.is_file() or not os.access(driver_path, os.X_OK):
+            raise RuntimeError(f"CHROMEDRIVER_BIN is not an executable file: {configured_driver}")
+        driver = webdriver.Chrome(service=ChromeService(executable_path=str(driver_path)), options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
     driver._yolomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
@@ -800,7 +860,7 @@ def stop_isolated_browser_app(runtime):
     FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
 
 
-def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
+def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -816,7 +876,7 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
             # Browser fixtures also serve small HTTP-only app doubles.  Pin batchd only when the
             # app actually owns that scheduler seam; otherwise the fixture has no producer to
             # protect and must not manufacture a batchd dependency.
-            pin_batchd_scheduler=hasattr(app, "job_client"),
+            pin_batchd_scheduler=(hasattr(app, "job_client") if pin_batchd_scheduler is None else pin_batchd_scheduler),
         ),
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
@@ -1062,6 +1122,9 @@ def reset_reused_browser_after_test(request):
 
     lease = request.node.funcargs.get("browser")
     if lease is None:
+        return
+    if getattr(request.node, "_yolomux_skip_reused_browser_diagnostic", False):
+        _reset_reused_browser_state(lease, retired_origin=lease.execute_script("return location.origin;"))
         return
     try:
         retired_origin = lease.execute_script("return location.origin;")
@@ -2002,7 +2065,7 @@ def codemirror_wrap_toggle_fixture_html():
       <body class="theme-dark editor-theme-dark">
         <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="wrap-regression-mount"></div>
-        <script>try {{ localStorage.removeItem('yolomux.editorWrap'); }} catch (_) {{}}</script>
+        <script>try {{ localStorage.setItem('yolomux.editorWrap', '0'); }} catch (_) {{}}</script>
         <script>
           window.__wrapRegressionErrors = [];
           window.addEventListener('error', event => {{
@@ -2317,6 +2380,10 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "accessRole": scenario.access_role,
         "authUsername": scenario.auth_username,
         "dangerouslyYolo": scenario.dangerously_yolo,
+        "terminalOnly": scenario.terminal_only,
+        "statsOnly": scenario.stats_only,
+        "capabilities": None,
+        "sessionMutationsAllowed": scenario.session_mutations_allowed,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
@@ -2399,8 +2466,8 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     auto_approve_payload = dict(scenario.auto_approve_payload) if scenario.auto_approve_payload is not None else None
     wrap_app_root = scenario.wrap_app_root
     yoagent_chat_mode = scenario.yoagent_chat_mode
-    background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
     hold_auto_approve = scenario.hold_auto_approve
+    stats_only = scenario.stats_only
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
     script_uri = scenario.runtime_script_uri or fixture_asset_url("static", "yolomux.js")
@@ -2616,7 +2683,12 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         return {
           start,
           duration,
-          series: {'cpu_percent:fixture': {value: 0, source_count: 1, first_timestamp: start, last_timestamp: start}},
+          series: {
+            'cpu_percent:fixture': {value: 0, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'run_agents': {value: 1, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'idle_agents': {value: 1, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'agent_window_snapshot_revision': {value: 7, source_count: 1, first_timestamp: start, last_timestamp: start},
+          },
           source: {first_timestamp: start, last_timestamp: start, count: 1},
           open,
         };
@@ -2759,6 +2831,18 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         const allowedMethods = window.__fixtureRouteMethods[url.pathname];
         if (allowedMethods && !allowedMethods.includes(method)) {
           return jsonResponse({error: 'fixture method not allowed'}, 405);
+        }
+        // Stats-only mode intentionally models the partial Go boot: every known non-stats API
+        // route is absent. Keep this before the normal handlers so the test proves that unrelated
+        // 404s cannot change stats readiness, rather than accidentally exercising fixture 200s.
+        const statsOnlyUnavailableRoutes = new Set([
+          ...Object.keys(window.__fixtureRouteMethods || {}),
+          '/api/fs/fast/list', '/api/watched-prs', '/api/update-status',
+        ]);
+        if (window.__fixtureStatsOnly === true
+            && statsOnlyUnavailableRoutes.has(url.pathname)
+            && !url.pathname.startsWith('/api/stats-')) {
+          return jsonResponse({error: 'stats-only fixture rejects unrelated route'}, 404);
         }
         if (url.pathname === '/api/chat/bootstrap') {
           if (window.__fixtureHoldChatBootstrap) {
@@ -3045,17 +3129,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           });
         }
         if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
-        if (url.pathname === '/api/background/status') return jsonResponse(window.__fixtureBackgroundStatusPayload || {
-          owner: true,
-          status: 'disabled',
-          generation: {},
-          current_owner: {},
-          roles: {
-            'search-index': {role: 'search-index', owner: true, status: 'disabled'},
-            'stats-sampler': {role: 'stats-sampler', owner: true, status: 'disabled'},
-          },
-          search_index: {role: 'search-index', owner: true, mode: 'indexing-server', current_server: {}, owner_server: {}, status: 'disabled'},
-        });
         if (url.pathname === '/api/session-files') {
           const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
@@ -3085,6 +3158,9 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
           return jsonResponse(fixtureStatsSnapshot(model, requestedResolution === 'AUTO' ? 'AUTO' : resolutionSeconds));
         }
+        if (url.pathname === '/api/stats-agent-status') {
+          return jsonResponse(window.__fixtureStatsAgentStatus);
+        }
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
         if (url.pathname === '/api/events') return jsonResponse({events: []});
@@ -3106,7 +3182,9 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           });
           return jsonResponse({responses});
         }
-        return jsonResponse({});
+        return window.__fixtureStatsOnly
+          ? jsonResponse({error: 'stats-only fixture rejects unrelated route'}, 404)
+          : jsonResponse({});
       };
     """
     stub_script = stub_script.replace(
@@ -3181,10 +3259,21 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
           window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
+          window.__fixtureStatsOnly = {json.dumps(bool(stats_only))};
           window.__fixtureReleaseAutoApprove = null;
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
-          window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
           window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
+          window.__fixtureStatsAgentStatus = {json.dumps({
+              "available": True,
+              "source_generation": 1,
+              "payload": {"snapshot_revision": 7},
+              "counts": {"total": 2, "running": 1, "red": 0, "yellow": 0},
+              "agents": [
+                  {"id": "debug|0|%debug-0|codex", "kind": "codex", "state": "run", "session": "debug", "pane": "%debug-0"},
+                  {"id": "debug|1|%debug-1|claude", "kind": "claude", "state": "idle", "session": "debug", "pane": "%debug-1"},
+              ],
+              "token_rates": {"window_seconds": 60, "input_per_second": 0, "output_per_second": 0, "cache_per_second": 0, "total_per_second": 0},
+          }, separators=(",", ":"))};
         </script>
         <script>{file_explorer_intent_script}</script>
         <script>{stub_script}</script>
@@ -3196,7 +3285,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     """)
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", session_mutations_allowed=None, terminal_only=False, auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False, stats_only=False):
     """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
 
     return render_browser_boot_scenario(BrowserBootScenario(
@@ -3214,15 +3303,17 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         file_explorer_open_intent=file_explorer_open_intent,
         auto_approve_payload=auto_approve_payload,
         access_role=access_role,
+        session_mutations_allowed=access_role == "admin" if session_mutations_allowed is None else session_mutations_allowed,
+        terminal_only=terminal_only,
         auth_username=auth_username,
         wrap_app_root=wrap_app_root,
         yoagent_chat_mode=yoagent_chat_mode,
         available_agents=tuple(available_agents) if available_agents is not None else None,
         agent_auth=agent_auth,
-        background_status_payload=background_status_payload,
         runtime_script_uri=runtime_script_uri,
         dangerously_yolo=dangerously_yolo,
         hold_auto_approve=hold_auto_approve,
+        stats_only=stats_only,
     ))
 
 
@@ -3389,7 +3480,7 @@ def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redire
     # An explicitly allowed redirect has left the app realm, so there is no client-event transport to own on the destination page.
     if urlsplit(ready_state.get("url", "")).path in frozenset(expected_redirect_paths):
         return
-    wait_for_fixture_client_event_demand(browser, expected_enabled=True)
+    wait_for_fixture_client_event_demand(browser, expected_enabled=not bool(fixture_kwargs.get("stats_only", False)))
 
 
 def live_runtime_bundle_state(browser):
@@ -3403,6 +3494,7 @@ def live_runtime_bundle_state(browser):
           grid: document.getElementById('grid') !== null,
           appRoot: document.getElementById('appRoot') !== null,
           lateFunction: typeof {LIVE_RUNTIME_LATE_FUNCTION} === 'function',
+          statsOnly: window.__fixtureStatsOnly === true,
           url: location.href,
           errors: failures.errors,
           rejections: failures.rejections,
@@ -3412,7 +3504,11 @@ def live_runtime_bundle_state(browser):
 
 
 def live_runtime_bundle_ready_state(state, expected_path="", expected_redirect_paths=()):
-    failures = [*state.get("errors", []), *state.get("rejections", [])]
+    stats_only = state.get("statsOnly") is True
+    failures = [
+        event for event in [*state.get("errors", []), *state.get("rejections", [])]
+        if not stats_only_expected_boot_404(event, stats_only=stats_only)
+    ]
     if failures:
         raise AssertionError(f"live runtime bundle failed before readiness: {failures}")
     current_path = urlsplit(state.get("url", "")).path

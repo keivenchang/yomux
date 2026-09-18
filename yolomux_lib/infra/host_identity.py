@@ -531,7 +531,7 @@ class LocalProcessDiagnostic:
         status RPC used to brick a service permanently.
 
         This is deliberately NOT folded into `may_remove_stale_record`.  That
-        property authorizes callers (preflight, background owner, server lease)
+        property authorizes callers (preflight, local scheduler, server lease)
         that go on to act on the record's other process fields -- a poisoned
         record still carries a real `pgid` -- so its authority must stay
         limited to records whose PID was proven dead or reused.

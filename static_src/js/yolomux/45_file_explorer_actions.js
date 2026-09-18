@@ -2010,7 +2010,7 @@ function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   const replacementSlots = setOpenFileOwner(path, item, options);
   syncFileLayoutItems();
-  scheduleFileExplorerActiveFileReveal(path);
+  scheduleFileExplorerActiveFileReveal(path, {explicit: options.userInitiated === true});
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return openFileEditorPane(path, {...options, item});
 }
@@ -2976,7 +2976,13 @@ function transcriptPreviewPaneIsActive(session) {
 function transcriptContextWatchRequests() {
   return activeSessions
     .filter(transcriptPreviewPaneIsActive)
-    .map(session => ({session, messages: transcriptPreviewMessages}));
+    .map(session => ({
+      session,
+      messages: transcriptPreviewMessages,
+      pane_target: typeof terminalContextMenuPaneTargetForSession === 'function'
+        ? terminalContextMenuPaneTargetForSession(session)
+        : '',
+    }));
 }
 
 function clientServerWatchState() {
@@ -3053,6 +3059,7 @@ function serverWatchRootsForceRequestCompleted(signature, options = {}) {
 }
 
 function syncServerWatchRootsNow(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
@@ -3106,6 +3113,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
   if (readOnlyMode || !fileExplorerTreePaneIsVisible() || fileExplorerFilesystemWatchToken) {
     return Boolean(fileExplorerFilesystemWatchToken);
   }
+  if (serverWatchRootsState.watchBaselinePromise) return serverWatchRootsState.watchBaselinePromise;
   if (!serverWatchRootsState.registered) {
     syncServerWatchRoots({immediate: true});
     return false;
@@ -3114,10 +3122,20 @@ function ensureFileExplorerFilesystemWatchBaseline() {
     await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
     return Boolean(fileExplorerFilesystemWatchToken);
   })();
+  serverWatchRootsState.watchBaselinePromise = baseline;
+  baseline.then(
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+  );
   return baseline;
 }
 
 function syncServerWatchRoots(options = {}) {
+  if (serverWatchRootsState.retired) return null;
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
   const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);
@@ -4420,9 +4438,7 @@ function renameOpenFilePath(oldPath, newPath) {
     viewModes.delete(oldPath);
   }
   for (const item of panelItems) {
-    const panel = panelNodes.get(item);
-    if (panel) panel.remove();
-    panelNodes.delete(item);
+    removePanelForItem(item);
   }
   if (activeFile === oldPath) activeFile = newPath;
   syncFileLayoutItems();

@@ -450,7 +450,7 @@ def test_operation_terminal_and_ack_append_failures_keep_live_transitions_retrya
     assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]; assert QueuedDeliveryLedger(state_path=path)._operations[operation_id]["delivery_acknowledged"] is True; assert all(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
 
 
-def test_terminalization_follower_takes_over_failure_and_rollback_failure_is_not_retried(monkeypatch, tmp_path):
+def test_terminalization_competing_attempt_takes_over_failure_and_rollback_failure_is_not_retried(monkeypatch, tmp_path):
     path = tmp_path / "takeover.json"; ledger = QueuedDeliveryLedger(state_path=path); operation_id = accept_queued_operation(ledger, "takeover")["operation"]["id"]
     original_append = queued_delivery_module.append_fsync_text; started = threading_module.Event(); release = threading_module.Event(); attempts = [0]; results = []; errors = []
     def fail_first_owner(target, text, mode=None):
@@ -461,7 +461,7 @@ def test_terminalization_follower_takes_over_failure_and_rollback_failure_is_not
     def terminalize_owner():
         try: results.append(ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK))
         except OSError as error: errors.append(error)
-    owner = threading_module.Thread(target=terminalize_owner); follower = threading_module.Thread(target=terminalize_owner); owner.start(); assert started.wait(2); follower.start(); release.set(); owner.join(2); follower.join(2)
+    first_attempt = threading_module.Thread(target=terminalize_owner); second_attempt = threading_module.Thread(target=terminalize_owner); first_attempt.start(); assert started.wait(2); second_attempt.start(); release.set(); first_attempt.join(2); second_attempt.join(2)
     assert len(errors) == 1; assert len(results) == 1 and results[0] is not None; assert ledger.operation_status(operation_id) == ({"state": "ready"}, HTTPStatus.OK)
     bad_path = tmp_path / "rollback.json"; bad = QueuedDeliveryLedger(state_path=bad_path); bad_id = accept_queued_operation(bad, "rollback")["operation"]["id"]; writes = [0]; real_write = atomic_file.os.write
     def partial_then_fail(descriptor, data):

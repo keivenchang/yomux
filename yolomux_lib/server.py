@@ -3626,10 +3626,15 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "persistent_request_stop"):
             self.persistent_request_stop.set()
-        if hasattr(self, "app") and hasattr(self.app, "stop_batchd_operation_service"):
-            self.app.stop_batchd_operation_service()
         if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
+        if hasattr(self, "app") and hasattr(self.app, "stop_auto_approve_all"):
+            self.app.stop_auto_approve_all()
+        else:
+            if hasattr(self, "app") and hasattr(self.app, "stop_background_scheduler"):
+                self.app.stop_background_scheduler()
+            if hasattr(self, "app") and hasattr(self.app, "stop_batchd_operation_service"):
+                self.app.stop_batchd_operation_service()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):
             self.app.stop_input_heartbeat_worker()
         if hasattr(self, "app") and hasattr(self.app, "stop_system_status_snapshot_owner"):

@@ -1,5 +1,7 @@
 # Self-update, restart, and the worktree deployment model
 
+Backend scope: this is the current Python self-update/restart contract. The experimental Go backend does not register the Python self-update routes and must return typed `501 feature_unavailable` for them. Go preview updates are operator-driven: rebuild the Bazel binary, rerun the Dockerized Go gate, and restart the selected preview port through `boot.sh --golang`.
+
 How YOLOmux updates its own running code, when it auto-restarts vs asks for a manual restart, and the multi-worktree checkout model those rules depend on. Written after a session that landed a batch of lifecycle fixes and hit every one of these conditions.
 
 ## The worktree model (what "this checkout" means)
@@ -63,4 +65,4 @@ These are hard requirements when landing changes, learned by hitting them:
 - **`tools/check.py` owns the current lane graph and exclusive latency certification.** The default command runs its independent functional lanes in parallel, then performs one exclusive certification phase; use `--lane <name>` for focused iteration and `--serial` only to diagnose ordering or load. `tools/check.py` does not accept `-n auto`.
 - **No `clean-commit.sh` here.** That is a vortex-only tool; yolomux commits do not run it.
 
-The commit/land workflow itself (LOCAL vs ORIGIN cps) is an operator workflow kept outside the repo. In short: LOCAL `cps` = rebase + fast-forward to local `main`, no version bump, no push; ORIGIN `cps` = rebase onto `origin/main`, bump `YOLOMUX_VERSION` in `yolomux_lib/infra/common.py`, then push. The version bump belongs only to the ORIGIN/publish path, never to local integration.
+The commit/land workflow itself (LOCAL vs ORIGIN cps) is an operator workflow kept outside the repo. In short: LOCAL `cps` = rebase + fast-forward to local `main`, no version bump, no push; ORIGIN `cps` = rebase onto `origin/main`, bump `YOLOMUX_VERSION` in `yolomux_lib/version.py`, then push. The version bump belongs only to the ORIGIN/publish path, never to local integration.

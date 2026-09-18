@@ -59,6 +59,107 @@ def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_
     assert observed["logsRendered"] is True, observed
 
 
+def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(browser, tmp_path):
+    """Stats-only boot must not probe routes outside the negotiated stats surface."""
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=debug&layout=left&tabs=left:__debug__",
+        sessions=("debug",),
+        terminal_only=True,
+        stats_only=True,
+    )
+    result = WebDriverWait(browser, 15, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
+            if (typeof jsDebugHistoryReadiness === 'undefined'
+                || jsDebugHistoryReadiness.phase !== 'ready') return false;
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const rect = graph?.getBoundingClientRect();
+            return graph && rect.width > 0 && rect.height > 0
+              ? {
+                  statsOnly: window.__fixtureStatsOnly === true,
+                  graphWidth: rect.width,
+                  graphHeight: rect.height,
+                  statsFetches: window.__bootFetches.filter(item => item.path.startsWith('/api/stats')).length,
+                  agentStatusFetches: window.__bootFetches.filter(item => item.path === '/api/stats-agent-status').length,
+                }
+              : false;
+            """
+        )
+    )
+    assert result["statsOnly"] is True, result
+    assert result["statsFetches"] > 0, result
+    assert result["agentStatusFetches"] > 0, result
+    detail = browser.execute_script(
+        """
+        const node = document.querySelector('[data-js-debug-agent-window-detail="activity"]');
+        return {text: node?.textContent?.trim() || '', state: node?.dataset?.jsDebugAgentWindowDetailState || null, body: document.body.innerText.slice(0, 1200)};
+        """
+    )
+    assert detail["state"] == "current" and "2 agent windows across 1 sessions" in detail["text"], {"result": result, "detail": detail}
+    non_stats_boot_fetches = browser.execute_script(
+        """
+        return window.__bootFetches.filter(item => !item.path.startsWith('/api/stats-'));
+        """
+    )
+    assert not non_stats_boot_fetches, non_stats_boot_fetches
+    boot_failures = browser.execute_script(
+        """
+        return (typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : []).filter(event => event.type === 'api');
+        """
+    )
+    assert not boot_failures, boot_failures
+    unrelated = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const paths = [
+          '/api/settings', '/api/session-metadata', '/api/background/status',
+          '/api/auto-approve', '/api/fs/index-status', '/api/watched-prs',
+          '/api/update-status', '/api/chat/bootstrap', '/api/transcripts',
+          '/api/activity', '/api/unrelated-boot-route',
+        ];
+        Promise.all(paths.map(path => fetch(path, {cache: 'no-store'}).then(response =>
+          response.json().then(body => ({path, status: response.status, body})))))
+          .then(results => done(results))
+          .catch(error => done({error: String(error)}));
+        """
+    )
+    assert isinstance(unrelated, list), unrelated
+    assert all(item["status"] == 404 and item["body"]["error"] == "stats-only fixture rejects unrelated route" for item in unrelated), unrelated
+    unknown = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        apiFetchJson('/api/unrelated-boot-route', {cache: 'no-store'})
+          .then(() => done({error: 'unexpected success'}))
+          .catch(error => done({message: String(error?.message || error), status: error?.status || null}));
+        """
+    )
+    assert unknown["status"] == 404, unknown
+    unknown_failures = browser.execute_script(
+        """
+        return (typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : [])
+          .filter(event => event.endpoint === '/api/unrelated-boot-route');
+        """
+    )
+    assert unknown_failures and unknown_failures[-1]["status"] == 404, unknown_failures
+    readiness_after_unrelated_404 = browser.execute_script(
+        """
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const rect = graph?.getBoundingClientRect();
+        return {
+          phase: typeof jsDebugHistoryReadiness !== 'undefined' ? jsDebugHistoryReadiness.phase : null,
+          graphWidth: rect?.width || 0,
+          graphHeight: rect?.height || 0,
+        };
+        """
+    )
+    assert readiness_after_unrelated_404["phase"] == "ready", readiness_after_unrelated_404
+    assert readiness_after_unrelated_404["graphWidth"] > 0 and readiness_after_unrelated_404["graphHeight"] > 0, readiness_after_unrelated_404
+    browser.execute_script("clearJsDebugEvents();")
+
+
 def _load_current_stats(browser, tmp_path, view="stats"):
     load_static_html_fixture(
         browser,
@@ -137,7 +238,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
     )
     service_thread = threading.Thread(target=service.run, daemon=True)
     service_thread.start()
-    http_server = http_thread = follower_server = follower_thread = None
+    http_server = http_thread = second_server = second_thread = None
     try:
         assert service.cache_ready_event.wait(5), service._status()
         client = stats_client.StatsCurrentClient(socket_path, database)
@@ -245,37 +346,37 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
         )
         assert status["requests"]["snapshot"] >= expected_requests
 
-        follower_client = stats_client.StatsCurrentClient(socket_path, database)
+        second_client = stats_client.StatsCurrentClient(socket_path, database)
         exact_request = {
             "range_seconds": 300,
             "resolution": 1,
             "client_id": "browser-current-fixture",
         }
-        owner_metadata, owner_body = client.snapshot(exact_request)
-        follower_metadata, follower_body = follower_client.snapshot(exact_request)
-        assert owner_metadata["cache_generation"] == follower_metadata["cache_generation"]
-        assert owner_metadata["source_generation"] == follower_metadata["source_generation"]
-        assert owner_body == follower_body
+        first_metadata, first_body = client.snapshot(exact_request)
+        second_metadata, second_body = second_client.snapshot(exact_request)
+        assert first_metadata["cache_generation"] == second_metadata["cache_generation"]
+        assert first_metadata["source_generation"] == second_metadata["source_generation"]
+        assert first_body == second_body
 
-        follower_app = SimpleNamespace(
+        second_app = SimpleNamespace(
             sessions=[],
             dangerously_yolo=False,
             stats_current_http=stats_http.StatsHttpForwarder(
-                follower_client,
+                second_client,
                 client_binding_secret=b"stats-e2e-client-binding-secret",
             ),
         )
-        follower_server, follower_thread = start_browser_server(
+        second_server, second_thread = start_browser_server(
             monkeypatch,
             tmp_path,
-            follower_app,
+            second_app,
             auth_bypass=True,
         )
         query = (
             "/api/stats-snapshot?range_seconds=300&resolution=1&"
             "client_id=browser-current-fixture"
         )
-        request_headers = {"X-YOLOmux-Request-ID": "r-stats-owner-follower-check"}
+        request_headers = {"X-YOLOmux-Request-ID": "r-stats-reader-check"}
         with urlopen(
             Request(
                 f"http://127.0.0.1:{http_server.server_address[1]}{query}",
@@ -283,23 +384,23 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             ),
             timeout=3,
         ) as response:
-            owner_http_body = response.read()
+            first_http_body = response.read()
         with urlopen(
             Request(
-                f"http://127.0.0.1:{follower_server.server_address[1]}{query}",
+            f"http://127.0.0.1:{second_server.server_address[1]}{query}",
                 headers=request_headers,
             ),
             timeout=3,
         ) as response:
-            follower_http_body = response.read()
-        assert owner_http_body == follower_http_body, {
-            "owner": json.loads(owner_http_body),
-            "follower": json.loads(follower_http_body),
+            second_http_body = response.read()
+        assert first_http_body == second_http_body, {
+            "first": json.loads(first_http_body),
+            "second": json.loads(second_http_body),
         }
-        assert json.loads(owner_http_body)["cache_generation"] == owner_metadata["cache_generation"]
+        assert json.loads(first_http_body)["cache_generation"] == first_metadata["cache_generation"]
     finally:
-        if follower_server is not None and follower_thread is not None:
-            stop_browser_server(follower_server, follower_thread)
+        if second_server is not None and second_thread is not None:
+            stop_browser_server(second_server, second_thread)
         if http_server is not None and http_thread is not None:
             stop_browser_server(http_server, http_thread, browser=browser)
         service.stop_event.set()

@@ -69,7 +69,7 @@ def owner_for(core: Any, advanced: Any, clock: FakeClock, **kwargs: Any) -> syst
 
 
 # ---------------------------------------------------------------------------------------------
-# Box 1: one background owner publishes; the route is an O(1) read that assembles nothing.
+# Box 1: one local scheduler publishes; the route is an O(1) read that assembles nothing.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -241,8 +241,8 @@ def test_the_core_payload_carries_no_advanced_diagnostics(make_tmux_webterm_app)
     for key in system_status_snapshot.SYSTEM_STATUS_ADVANCED_KEYS:
         assert key not in core, f"{key} is advanced-only and must not ride the 5 s poll"
         assert key in advanced, f"{key} must be produced by the advanced producer"
-    assert "debug" not in core["owner"], "owner.debug is an Advanced card input"
-    assert "debug" in advanced["owner"]
+    assert "debug" not in core["scheduler"], "scheduler debug is an Advanced card input"
+    assert "debug" in advanced["scheduler_diagnostics"]
     # The roster the panel scans - not the disclosure it opens - stays in the cheap body.
     for key in ("local_services", "server", "cpu_budget", "host", "stats_current", "generated_at"):
         assert key in core
@@ -444,7 +444,7 @@ def test_the_served_bodies_split_the_roster_from_the_advanced_diagnostics(
     advanced = _poll_until_published(runtime, "/api/system-status/advanced", headers)
     for key in system_status_snapshot.SYSTEM_STATUS_ADVANCED_KEYS:
         assert key in advanced, f"{key} must be served by the advanced route"
-    assert "debug" in advanced["owner"]
+    assert "debug" in advanced["scheduler_diagnostics"]
 
     status = runtime.app.system_status_snapshot.status()
     assert status["slots"]["core"]["builds"] >= 1

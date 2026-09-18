@@ -1032,7 +1032,7 @@ class PricingRefreshCoordinator:
             return {"ok": True, "coalesced": False, **self._state}
 
     def start_periodic(self) -> None:
-        """Start only on the elected background owner; never blocks startup."""
+        """Start only from the local scheduler; never blocks startup."""
         with self._lock:
             if self._periodic:
                 return

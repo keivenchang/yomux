@@ -514,7 +514,7 @@ def _reindex_after_mutation(mutated_paths: list[Any], reason: str) -> list[str]:
     the same `search.reindex_roots_for_paths` owner watchd and the persistent indexer already use --
     which coalesces by indexed root and either promotes the pending frontier or runs one bounded
     subtree repair -- so `write`/`delete`/`mkdir`/upload stop bypassing the index. In an HTTP or batchd
-    process (not the elected owner) this only marks paths dirty and dispatches a bounded RPC; the
+    process (not the indexer) this only marks paths dirty and dispatches a bounded RPC; the
     crawl runs in indexd, never on batchd's single interactive worker.
     """
     candidates = [str(path) for path in mutated_paths if path]

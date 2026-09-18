@@ -1,5 +1,63 @@
 const pageLoadBundleEvalStartedAt = Number(globalThis.performance?.now?.()) || 0;
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
+function statsOnlyBootEnabled() {
+  return bootstrap.statsOnly === true;
+}
+const capabilityDocument = (() => {
+  const value = bootstrap.capabilities;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const contract = value.contract && typeof value.contract === 'object' ? value.contract : {};
+  const entries = value.capabilities && typeof value.capabilities === 'object' && !Array.isArray(value.capabilities)
+    ? value.capabilities
+    : {};
+  return Object.freeze({
+    contract: Object.freeze({...contract}),
+    capabilities: Object.freeze({...entries}),
+  });
+})();
+function capabilityEntry(name) {
+  if (!capabilityDocument) return null;
+  const entry = capabilityDocument.capabilities[String(name || '')];
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : null;
+}
+function capabilityAvailable(name) {
+  const entry = capabilityEntry(name);
+  // A page without a negotiated document is the Python/full-feature path. A negotiated page is
+  // conservative: omission is unavailable, so a stale or incomplete catalog cannot probe routes.
+  return capabilityDocument ? entry?.available === true : true;
+}
+function capabilityReason(name) {
+  const entry = capabilityEntry(name);
+  return entry?.reason && typeof entry.reason === 'object' ? entry.reason : null;
+}
+function capabilityNameForRequest(url, options = {}) {
+  let pathname = '';
+  try { pathname = new URL(String(url || ''), globalThis.location?.href || 'http://localhost/').pathname; } catch (_) { pathname = String(url || '').split(/[?#]/, 1)[0]; }
+  if (pathname === '/api/capabilities' || pathname === '/api/ping' || pathname === '/api/background/status' || pathname === '/api/system-status' || pathname === '/api/system-status/advanced' || pathname === '/api/logs' || pathname === '/api/client-events') return 'core.diagnostics.v1';
+  if (pathname === '/api/settings') return 'core.settings.v1';
+  if (pathname === '/api/update-status' || pathname === '/api/watched-prs') return 'core.integrations.v1';
+  if (pathname === '/ws' || pathname === '/api/tmux' || pathname === '/api/tmux-session-exists') return 'terminal.websocket.v1';
+  if (pathname === '/api/ensure-session' || pathname === '/api/create-session-plan' || pathname === '/api/create-session') return 'session.create.v1';
+  if (pathname === '/api/kill-session') return 'session.kill.v1';
+  if (pathname === '/api/rename-session') return 'session.rename.v1';
+  if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
+  if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
+  if (pathname === '/api/activity' || pathname === '/api/activity-summary') return 'pane.tabber.v1';
+  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
+	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
+		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
+		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';
+		if (['/api/fs/search', '/api/fs/search-stream', '/api/fs/index-status', '/api/fs/unindex', '/api/batch/search'].includes(pathname)) return 'finder.search.v1';
+		if (['/api/watch/roots', '/api/fs/watch-diff'].includes(pathname)) return 'finder.watch.v1';
+    if (['/api/batch/zip', '/api/batch/html-preview'].includes(pathname)) return 'finder.preview.v1';
+    if (['/api/fs/batch', '/api/batch/count'].includes(pathname)) return 'finder.batch.v1';
+    return 'finder.read.v1';
+  }
+  if (pathname.startsWith('/api/stats') || pathname === '/api/pricing-catalog' || pathname === '/api/pricing-catalog/refresh') return 'pane.stats.v1';
+  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth') return 'pane.agent.v1';
+  if (pathname.startsWith('/api/chat/')) return 'pane.chat.v1';
+  return '';
+}
 const statsWriterFence = (() => {
   const value = bootstrap.statsWriterFence;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -95,6 +153,8 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerExpanded = new Set();
 const fileExplorerPendingExpansions = new Set();
+// Keep the public pending-path set, but identify the coalesced request allowed to settle it.
+const fileExplorerPendingExpansionOwners = new Map();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
@@ -743,6 +803,7 @@ let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
 const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
+  retired: false,
   inFlight: false,
   request: null,
   activeKey: '',
@@ -752,6 +813,7 @@ const serverWatchRootsState = {
   registered: false,
   syncedAt: 0,
   watchDiffPromise: null,
+  watchBaselinePromise: null,
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
@@ -889,6 +951,19 @@ function isFileExplorerItem(item) {
   return fileExplorerItemIds.includes(item);
 }
 const isFileSurfaceItem = isFileExplorerItem;
+function capabilityForPaneItem(item) {
+  if (item === finderItemId) return 'pane.finder.v1';
+  if (item === differItemId) return 'pane.differ.v1';
+  if (item === tabberItemId) return 'pane.tabber.v1';
+  if (item === chatItemId) return 'pane.chat.v1';
+  if (item === yoagentItemId) return 'pane.agent.v1';
+  if (item === debugPaneItemId) return 'core.diagnostics.v1';
+  return '';
+}
+function paneItemCapabilityAvailable(item) {
+  const capability = capabilityForPaneItem(item);
+  return !capability || capabilityAvailable(capability);
+}
 function fileExplorerItemLabel(item) {
   const view = fileExplorerViewForItem(item);
   if (view === 'differ') return t('brand.tab.changes');
@@ -1228,6 +1303,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    cleanup: (_item, panel) => destroyFileEditorPanel(panel),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       if (isHistoricalFileEditorItem(item)) return false;
@@ -1815,10 +1891,21 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  retireBackgroundProducers() {
+    serverWatchRootsState.retired = true;
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.debounceStartedAt = null;
+    serverWatchRootsState.scheduledKey = '';
+    serverWatchRootsState.pendingOptions = {};
+    serverWatchRootsState.watchDiffTrailing = null;
+    return this.operationState();
+  },
   async awaitPendingOperationReceipts() {
     while (true) {
       const pending = Array.from(apiOperationState.pending.values());
-      const baseline = serverWatchRootsState.watchDiffPromise;
+      const baseline = serverWatchRootsState.watchBaselinePromise;
       await Promise.all([
         ...pending.map(record => record.completionPromise || Promise.resolve()),
         ...(baseline ? [Promise.resolve(baseline)] : []),
@@ -1833,7 +1920,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsTimerPending = Boolean(serverWatchRootsState.timer);
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
-    const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    const watchRootsBaselinePending = serverWatchRootsState.watchBaselinePromise !== null;
     // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
     // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
     // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
@@ -1889,18 +1976,11 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
       watchRootsInFlight,
       watchRootsBaselinePending,
       finderVisible,
+      watchRootsRetired: serverWatchRootsState.retired === true,
       finderWatchReady: !finderVisible || Boolean(fileExplorerFilesystemWatchToken),
     };
   },
 });
-const backgroundOwnerStatusState = {
-  payload: null,
-  loading: false,
-  error: '',
-  request: null,
-  updatedAt: 0,
-  resource: null,
-};
 const yoagentStartupState = {
   activityPayload: null,
   prewarming: false,
@@ -2080,7 +2160,6 @@ const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
-const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;

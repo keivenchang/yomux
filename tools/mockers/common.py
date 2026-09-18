@@ -426,6 +426,18 @@ def print_startup(state: dict[str, str] | None = None) -> None:
         print()
 
 
+def publish_mock_input_ready() -> None:
+    """Publish the test-only input handshake after startup output has been flushed."""
+    ready_file = os.environ.get("YOLOMUX_MOCK_INPUT_READY_FILE", "").strip()
+    if not ready_file:
+        return
+    destination = Path(ready_file)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"pid={os.getpid()}\ninput_surface=ready\n", encoding="utf-8")
+    os.replace(temporary, destination)
+
+
 def ellipsize_plain(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -4635,6 +4647,7 @@ def main() -> None:
     setup_history()
     state: dict[str, str] = {}
     print_startup(state)
+    publish_mock_input_ready()
     while True:
         try:
             if state.get("pending") == "permission" and sys.stdin.isatty():

@@ -543,7 +543,18 @@ function markdownPreviewCopySelectionWithStyle(context) {
   const range = context?.range || selection.getRangeAt(0);
   const wrapper = document.createElement('div');
   wrapper.append(range.cloneContents());
-  const images = [...wrapper.querySelectorAll('img[src]')];
+  let images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+  const block = context?.block;
+  if (!images.length && block?.querySelector?.('img') && typeof Range !== 'undefined') {
+    const blockRange = document.createRange();
+    blockRange.selectNodeContents(block);
+    const wholeBlockSelected = range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0
+      && range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
+    if (wholeBlockSelected) {
+      wrapper.replaceChildren(block.cloneNode(true));
+      images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+    }
+  }
   // Let the browser serialize ordinary selections. Image selections need explicit data URLs:
   // Google Docs cannot fetch this app's authenticated raw-file URLs from clipboard HTML.
   if (!images.length && document.execCommand?.('copy') === true) {
@@ -554,8 +565,7 @@ function markdownPreviewCopySelectionWithStyle(context) {
   if (!wrapper.innerHTML || (!text && !images.length)) return false;
   const clipboard = globalThis.navigator?.clipboard;
   if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
-    const imageData = images.map(image => fetch(image.currentSrc || image.src, {credentials: 'same-origin'})
-      .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
+    const imageData = images.map(image => clipboardImageBlobFor(image)
       .then(blob => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve({blob, dataUrl: String(reader.result)});
@@ -1203,12 +1213,17 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
-function prosemirrorPreviewImageSource(image, path) {
+function prosemirrorPreviewImageSource(image, path, options = {}) {
   if (!image || !path) return Promise.resolve(false);
   const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
   if (!target || target.external) return Promise.resolve(false);
   return installRawFileMediaSource(image, target.path, {
+    isCurrent: options.isCurrent,
     onFailure: error => {
+      image.classList.add('prosemirror-image-error');
+      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+    },
+    onDecodeFailure: error => {
       image.classList.add('prosemirror-image-error');
       image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
     },
@@ -1356,17 +1371,12 @@ function markdownFormattingContextMenu(event, context, options = {}) {
     appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
     appendContextMenuSeparator(menu);
   } else if (context.selectedText && typeof options.addUrl === 'function') {
-    const label = t('contextmenu.addUrl');
-    appendContextMenuButton(menu, label === 'contextmenu.addUrl' ? 'Add URL' : label, options.addUrl, closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.addUrl', 'Add URL'), options.addUrl, closeMenu);
     appendContextMenuSeparator(menu);
   }
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
-  appendContextMenuButton(menu, label('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyText', 'Copy text'), () => markdownPreviewCopySelection(context.selectedText), closeMenu, {disabled: !context.selectedText});
   const hasRichContent = Boolean(context.selectedText || context.block?.querySelector?.('img'));
-  appendContextMenuButton(menu, label('contextmenu.copyWithStyle', 'Copy with style'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyWithStyle', 'Copy with format'), () => markdownPreviewCopySelectionWithStyle(context), closeMenu, {disabled: !hasRichContent});
   appendContextMenuButton(menu, 'Paste', () => options.paste?.(context), closeMenu, {disabled: typeof options.paste !== 'function'});
   appendContextMenuSeparator(menu);
   const action = (label, command, disabled = false, checked = undefined) => {
@@ -1493,7 +1503,7 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       if (path && panel) void saveFileEditor(path, panel);
     });
     scope.ownEvent('input', container, 'input', event => {
-      if (event.target?.closest?.('.ProseMirror') && !event.target?.closest?.('[data-markdown-preview-editable="true"]')) return;
+      if (event.target?.closest?.('.ProseMirror')) return;
       const block = event.target?.closest?.('[data-markdown-preview-editable="true"]')
         || container._markdownPreviewActiveBlock
         || markdownPreviewSelectionContext(container)?.block;
@@ -1949,7 +1959,12 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   for (const img of Array.from(container.querySelectorAll?.('img')) || []) {
     const rawPath = String(img.dataset.markdownRawPath || '');
     if (!rawPath) continue;
-    if (img.isConnected) {
+    if (options.snapshot === true) {
+      // A snapshot is copied into another document. Blob URLs belong to the source document's
+      // origin/URL store and become unusable there, so retain the authenticated same-origin URL
+      // for the destination document to request with its own cookie context.
+      img.src = rawFileUrl(rawPath);
+    } else if (img.isConnected) {
       localImagePromises.push(installRawFileMediaSource(img, rawPath, {
         isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
         onFailure: error => {
@@ -1982,9 +1997,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
       scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
     ));
   }
-  container.querySelectorAll('pre code').forEach(block => {
-    applyMarkdownFenceHighlight(block);
-  });
+  refreshMarkdownFenceHighlights(container);
 }
 
 function markdownFenceLanguage(block) {
@@ -1999,13 +2012,22 @@ function markdownFenceLanguage(block) {
 
 function applyMarkdownFenceHighlight(block) {
   if (!block) return;
+  if (block.classList?.contains('editor-highlight-code')) return;
   const language = markdownFenceLanguage(block);
   if (language && !Array.from(block.classList).some(className => /^(?:language|lang)-/.test(className))) {
     block.classList.add(`language-${language}`);
   }
   if (fileEditorPreviewDisplayMode === 'vanilla') return;
   if (typeof window.hljs !== 'undefined') {
-    try { window.hljs.highlightElement(block); } catch (_) {}
+    // Marked can leave literal HTML in a fence's DOM. Highlight.js treats that as already
+    // trusted markup and warns; code fences are text, so normalize through textContent before
+    // handing the block to the highlighter. This also keeps the warning-free path shared by
+    // Markdown preview, Differ, and the editor's vanilla code surface.
+    try {
+      const source = block.textContent || '';
+      block.textContent = source;
+      window.hljs.highlightElement(block);
+    } catch (_) {}
   }
   applyMarkdownFenceFallbackHighlight(block);
 }

@@ -160,8 +160,8 @@ def wired(tmp_path: Path):
 def idle_machine(harness: RecoveryHarness) -> None:
     """Shape all six rows the way a quiet, correctly-running host shapes them.
 
-    Four demand-started services resting absent, batchd absent because another process won the
-    background-owner election, and statsd absent inside its bounded pin window. Every reason is
+    Four demand-started services resting absent, batchd absent because this process has not started
+    its local scheduler, and statsd absent inside its bounded pin window. Every reason is
     read from the production constant that spells it, so a renamed token fails here.
     """
 
@@ -304,7 +304,7 @@ def test_one_retry_per_backoff_boundary_through_the_real_control(wired: Recovery
 def test_an_idle_machine_issues_zero_retries(wired: RecoveryHarness):
     """Constraint 3, measured: recovery wired, idle host, ZERO services touched.
 
-    Four demand-started services resting, batchd's lost election and statsd's pin window are all
+    Four demand-started services resting, batchd's inactive scheduler and statsd's pin window are all
     fenced by the row itself, and the arming fence is off, so this zero is the row fence and not
     the boot window. The positive control at the end is what makes it a measurement: the same
     harness, one recorded failure, exactly one retry.

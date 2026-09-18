@@ -80,11 +80,11 @@ def test_terminal_state_contract_catalog_has_exit_proofs():
 def test_terminal_state_assertion_rejects_pending_without_terminal():
     with pytest.raises(
         AssertionError,
-        match="differ-refreshing-elsewhere: pending state never reached a terminal state",
+        match="differ-pending-producer: pending state never reached a terminal state",
     ):
         assert_terminal_transition(
-            contract_id="differ-refreshing-elsewhere",
+            contract_id="differ-pending-producer",
             pending_observed=True,
             terminal_observed=False,
-            evidence={"refreshing_elsewhere": True, "loading": True},
+            evidence={"refreshing": True, "loading": True},
         )

@@ -583,6 +583,22 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     if (!terminalAuthenticationRequestIsBackground(url, options, route)) redirectToLoginUrl(authRedirectStarted.loginUrl);
     throw authRedirectStarted.terminalError;
   }
+  const capabilityName = typeof capabilityNameForRequest === 'function'
+    ? capabilityNameForRequest(url, options)
+    : '';
+  if (capabilityName && typeof capabilityAvailable === 'function' && !capabilityAvailable(capabilityName)) {
+    const reason = typeof capabilityReason === 'function' ? capabilityReason(capabilityName) : null;
+    const payload = {
+      error: 'feature_unavailable',
+      error_code: 'feature_unavailable',
+      capability: capabilityName,
+      reason: reason || {code: 'not_implemented', messageKey: 'capabilityUnavailable', messageParams: {}},
+    };
+    return new Response(JSON.stringify(payload), {
+      status: 501,
+      headers: {'Content-Type': 'application/json', 'X-YOLOmux-Capability-Gated': capabilityName},
+    });
+  }
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
@@ -876,11 +892,12 @@ function completeApiOperationRecord(record, payload) {
   if (!record || record.phase !== 'accepted' || !apiOperationTerminalMatchesRecord(record, payload)) return false;
   const result = payload.result;
   record.phase = 'terminal';
-  record.cursor = {...payload.operation.cursor};
-  if (typeof currentClientEventTransportLifecycleScope === 'function') {
-    currentClientEventTransportLifecycleScope().release(`operation-replay:${record.id}`, record.source);
+  if (record.statusPollTimer !== null) {
+    clearTimeout(record.statusPollTimer);
+    record.statusPollTimer = null;
   }
-  if (record.source) record.source.close?.();
+  record.cursor = {...payload.operation.cursor};
+  record.source?.close?.();
   record.source = null;
   apiOperationState.pending.delete(record.id);
   settleApiOperationWaiters(record.id, payload);
@@ -894,11 +911,35 @@ function completeApiOperationRecord(record, payload) {
   }
   window.dispatchEvent(new CustomEvent('yolomux:operation-terminal', {detail: payload}));
   enqueueOperationTerminalAck(record.id, record.cursor);
-  if (typeof record.resolveCompletion === 'function') {
-    const resolveCompletion = record.resolveCompletion;
-    record.resolveCompletion = null;
-    resolveCompletion({id: record.id, state: 'terminal'});
-  }
+  return true;
+}
+
+function scheduleApiOperationStatusPoll(record, delayMs = 250) {
+  if (!record || record.phase !== 'accepted' || !record.statusUrl || record.statusPollTimer !== null) return false;
+  record.statusPollTimer = setTimeout(async () => {
+    record.statusPollTimer = null;
+    if (record.phase !== 'accepted' || !apiOperationState.waiters.has(record.id)) return;
+    try {
+      const response = await apiFetch(record.statusUrl, {cache: 'no-store'}, {recordDebug: false});
+      const payload = await response.json().catch(() => ({}));
+      const state = String(payload?.state || '').toLowerCase();
+      if (state === 'ready' || state === 'failed' || state === 'cancelled') {
+        // GET /api/operations/{id} returns the terminal result without the operation cursor. The
+        // accepted receipt starts at seq 0 and terminalization advances it once, so restore the
+        // canonical envelope locally before passing through the shared terminal owner.
+        applyApiOperationTerminal({
+          operation: {id: record.id, cursor: {epoch: record.cursor.epoch, seq: record.cursor.seq + 1}},
+          result: payload,
+          status: response.status,
+        });
+        return;
+      }
+    } catch (_) {
+      // SSE remains the primary delivery path; a transient status poll failure must not terminate
+      // the operation waiter or hide a later event-stream repair.
+    }
+    scheduleApiOperationStatusPoll(record);
+  }, Math.max(1, Number(delayMs) || 250));
   return true;
 }
 
@@ -1043,6 +1084,7 @@ function waitForApiOperationResult(pending, expected = {}) {
     }
     const raced = apiOperationState.terminal.get(record.id);
     if (raced && record.phase === 'accepted') completeApiOperationRecord(record, raced);
+    scheduleApiOperationStatusPoll(record);
   }).catch(error => {
     recordApiOperationTerminalFailure(record, error, expected);
     throw error;
@@ -1055,8 +1097,8 @@ function startApiOperationTransport(record) {
   // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
   // cover a terminal published before the server subscribes it.
   if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
-  if (typeof repairClientEventOperationTerminalResource === 'function') {
-    repairClientEventOperationTerminalResource(`operation_terminal:${record?.id || ''}`, {pendingOnly: true});
+  if (apiOperationState.repairs.has(record?.id) && typeof repairClientEventOperationTerminalResource === 'function') {
+    repairClientEventOperationTerminalResource(`operation_terminal:${record.id}`);
   }
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
@@ -1069,10 +1111,6 @@ function registerApiOperationReceipt(pending) {
   const existing = apiOperationState.records.get(operationId);
   if (existing) return existing;
   const context = operation.context && typeof operation.context === 'object' ? {...operation.context} : {};
-  let resolveCompletion;
-  const completionPromise = new Promise(resolve => {
-    resolveCompletion = resolve;
-  });
   const record = {
     id: operationId,
     request: {...(pending.request || {})},
@@ -1082,12 +1120,11 @@ function registerApiOperationReceipt(pending) {
     eventsUrl: String(operation.events_url || ''),
     cursor: {...(operation.cursor || {})},
     source: null,
+    statusPollTimer: null,
     acceptedAt: performanceNow(),
     journeyId: newClientJourneyId('operation'),
     handlerInvocations: 0,
     phase: 'accepted',
-    completionPromise,
-    resolveCompletion,
     sessionLifecycleToken: context.session && typeof tmuxSessionLifecycleToken === 'function'
       ? tmuxSessionLifecycleToken(context.session)
       : null,
@@ -1096,7 +1133,6 @@ function registerApiOperationReceipt(pending) {
   apiOperationState.pending.set(operationId, record);
   const terminal = apiOperationState.terminal.get(operationId);
   if (terminal && apiOperationTerminalMatchesRecord(record, terminal)) {
-    apiOperationState.repairs.delete(operationId);
     apiOperationState.terminal.delete(operationId);
     apiOperationState.terminal.set(operationId, terminal);
     completeApiOperationRecord(record, terminal);
@@ -3335,7 +3371,7 @@ function writeStoredInfoSubTab(value) {
 }
 
 function readStoredEditorWrap() {
-  return storageGet(fileEditorWrapStorageKey) === '1';
+  return storageGet(fileEditorWrapStorageKey) !== '0';
 }
 
 function writeStoredEditorWrap(value) {
@@ -4107,7 +4143,7 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
-    scheduleFileExplorerActiveFileReveal(activeFile);
+    scheduleFileExplorerActiveFileReveal(activeFile, {explicit: true});
   }
   const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
@@ -5082,7 +5118,10 @@ function terminalLineLinks(lineText, y) {
       end: {x: endIndex, y},
     };
     Object.defineProperty(range, 'segments', {
-      value: [{start: {...range.start}, end: {...range.end}}],
+      value: [{
+        start: {x: startIndex + 1, y},
+        end: {x: endIndex, y},
+      }],
       enumerable: false,
     });
     return range;
@@ -6136,6 +6175,22 @@ function copyTextToClipboardViaCopyEvent(text) {
   }
 }
 
+function clipboardImageBlobFor(image) {
+  const path = String(image?.dataset?.resolvedPath || '');
+  const url = String(image?.currentSrc || image?.src || '');
+  if (path && typeof fetchRawFileBlob === 'function') {
+    return fetchRawFileBlob(path).then(result => {
+      if (!result?.ok || !result.blob) throw result?.error || new Error(`Unable to read image: ${path}`);
+      return result.blob;
+    });
+  }
+  if (!url) return Promise.reject(new Error('Image source is unavailable'));
+  return fetch(url, {credentials: 'same-origin'}).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  });
+}
+
 // ONE clipboard-write chain for terminal-initiated copies (shortcut copy AND the OSC 52
 // bridge): synchronous copy-event first — it stays inside any live user activation — then the async
 // navigator.clipboard path as fallback. Status text reports success/failure either way.
@@ -6686,22 +6741,18 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   const url = String(href || '');
   if (!url) return false;
   const selectedText = String(options.selectionText || '');
-  const label = (key, fallback) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-  };
   const action = (reason, handler) => (
     options.term || options.container
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  appendContextMenuButton(menu, label('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
-  appendContextMenuButton(menu, label('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  appendContextMenuButton(menu, localizedLabel('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
   }
   if (typeof options.removeUrl === 'function') {
-    appendContextMenuButton(menu, label('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
+    appendContextMenuButton(menu, localizedLabel('contextmenu.removeUrl', 'Remove URL'), action('remove-url', options.removeUrl), closeMenu);
   }
   if (options.includeSelectedText && selectedText && selectedText !== url) {
     appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', button => copyTextWithFeedback(selectedText, {button})), closeMenu);
@@ -6709,16 +6760,22 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   return true;
 }
 
+function clipboardImageSourceUrl(image) {
+  const direct = String(image?.currentSrc || image?.src || '').trim();
+  if (direct) return direct;
+  const resolvedPath = String(image?.dataset?.resolvedPath || '').trim();
+  if (resolvedPath && typeof rawFileUrl === 'function') return rawFileUrl(resolvedPath);
+  return String(image?.dataset?.originalSrc || '').trim();
+}
+
 async function copyMarkdownPreviewImageToClipboard(image, button) {
-  const url = String(image?.currentSrc || image?.src || '');
-  if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+  const url = clipboardImageSourceUrl(image);
+  const path = String(image?.dataset?.resolvedPath || '');
+  if ((!url && !path) || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
     return;
   }
-  const imageBlob = fetch(url, {credentials: 'same-origin'}).then(response => {
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.blob();
-  });
+  const imageBlob = clipboardImageBlobFor(image);
   const dataUrl = imageBlob.then(blob => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -6736,7 +6793,7 @@ async function copyMarkdownPreviewImageToClipboard(image, button) {
     })]);
     showCopyFeedback({button, statusText: t('status.copiedImage', {name: image?.alt || 'image'})});
   } catch (error) {
-    await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
+    await copyTextWithFeedback(image?.dataset?.originalSrc || url || path, {button});
   }
 }
 
@@ -7489,9 +7546,7 @@ function showTabContextMenu(item, x, y, options = {}) {
   const appendDescription = () => {
     const info = transcriptMetadataState.payload.sessions?.[item];
     const tab = itemLabel(item);
-    const rawDescription = isTmuxSession(item)
-      ? sessionTabDescription(item, info)
-      : tabMenuDetailText(item, info);
+    const rawDescription = tabMenuDetailText(item, info);
     const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
     const text = t('tab.actions.moreDescription', {tab, description});
     const line = makeButton({
@@ -7510,8 +7565,8 @@ function showTabContextMenu(item, x, y, options = {}) {
   const renderActions = () => {
     menu.replaceChildren();
     const sourceSlot = options.sourceSlot || slotForItem(item);
+    if (options.tab) appendTabSplitCommands(menu, item, options);
     if (!slotIsSidePane(sourceSlot)) appendDescription();
-    appendTabSplitCommands(menu, item, options);
     if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
       appendContextMenuButton(
         menu,

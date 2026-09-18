@@ -698,7 +698,7 @@ class ProgressiveBuild:
         # in `finally` (item 5). `_connect_sqlite_index` as a bare `with` target commits but never
         # closes, leaking a descriptor per directory that the post-build unlink turns into a
         # `(deleted)` FD; `_sqlite_index_connection` closes it regardless of outcome. Every call site
-        # here either commits explicitly or runs its own `BEGIN IMMEDIATE ... COMMIT`, so the owner's
+        # here either commits explicitly or runs its own `BEGIN IMMEDIATE ... COMMIT`, so the indexer's
         # trailing commit is a harmless no-op.
         return file_index._sqlite_index_connection(self.root)
 
@@ -760,7 +760,7 @@ class ProgressiveBuild:
         base["active_generation"] = str(self.generation)
         base.setdefault("published_generation", existing.get("published_generation", "0"))
         base.setdefault("built_at", existing.get("built_at", repr(0.0)))
-        # Protocol #2: stamp the frozen tombstone identity so a follower reading THIS generation's
+        # Protocol #2: stamp the frozen tombstone identity so a reader reading THIS generation's
         # metadata accepts the snapshot only against the exact unindex this build superseded.
         base["tombstone_identity"] = self.tombstone_identity
         file_index._replace_sqlite_metadata(conn, base)
@@ -873,7 +873,7 @@ class ProgressiveBuild:
         if scan.truncated:
             self.truncated = True
         # Step 5: the transaction committed a new journal revision -> emit the redacted, coalesced
-        # progress signal so a follower web process knows to pull committed deltas by cursor. Emitted
+        # progress signal so a web process knows to pull committed deltas by cursor. Emitted
         # AFTER commit (never inside the transaction) so a rolled-back publication signals nothing.
         self._emit_progress_signal(committed_revision)
 
@@ -1027,7 +1027,7 @@ class ProgressiveBuild:
             "full_coverage": "1" if full_coverage else "0",
             "last_progress_at": repr(float(wall)),
             # Protocol #2: every published directory carries the frozen tombstone identity, so a
-            # follower reading a partial mid-crawl fails closed on the identity rule, not by time.
+            # reader reading a partial mid-crawl fails closed on the identity rule, not by time.
             "tombstone_identity": self.tombstone_identity,
         }
         file_index._replace_sqlite_metadata(conn, metadata)
@@ -1143,7 +1143,7 @@ def build_root_into_index(
     This is the cutover adapter registered through ``file_index.set_bfs_full_build_runner``: the
     persistent indexer's full build for a configured root reaches the directory-at-a-time frontier
     here instead of the DFS ``_walk_root_with_metrics``. It publishes each directory's rows to the
-    same per-root SQLite the reader already opens, so a follower search sees layer 1 as soon as the
+    same per-root SQLite the reader already opens, so a reader search sees layer 1 as soon as the
     root listing commits, without waiting for deep descendants. Returns ``True`` when the crawl
     finished, ``False`` when a stop signal cancelled it (the published rows remain readable).
     """

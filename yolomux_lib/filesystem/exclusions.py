@@ -64,7 +64,7 @@ def _canonical_text_tuple(value: Any) -> tuple[str, ...] | None:
     survivors become a quietly different, more permissive policy -- that is what a chain of
     per-field type checks does, and it is how ``{"skip_dir_names": [123]}`` previously produced
     an empty policy that admitted `.cache` and `node_modules`.  Dropping one member is worse
-    than rejecting the payload: the worker would then judge by a policy the web owner never
+    than rejecting the payload: the worker would then judge by a policy the requesting server never
     signed, so its answer and its cache identity would disagree.
 
     A string is itself a sequence, so it is refused explicitly rather than iterated into

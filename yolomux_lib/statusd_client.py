@@ -126,7 +126,7 @@ class StatusClient(LocalServiceClient):
         after which statusd retires itself on STATUSD_DEFAULT_IDLE_SECONDS.
 
         The recurring `agent_status`/`agent_tokens` collectors use the same registry lease
-        mechanism while the elected owner has sessions, so their 60-second idle cadence cannot
+        mechanism while this instance has sessions, so their 60-second idle cadence cannot
         collide with statusd's 60-second idle timeout. With no sessions, no collector lease is
         acquired and a browser-less machine legitimately runs without statusd.
 

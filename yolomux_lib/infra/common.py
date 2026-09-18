@@ -47,6 +47,7 @@ from .root_paths import resolve_yolomux_roots as _resolve_root_paths
 from .root_paths import resolved_path
 from .root_paths import resolved_product_path
 from tools.instance_isolation import rooted_socket_candidates
+from ..version import YOLOMUX_VERSION
 from .filesystem_preflight import FilesystemClassification
 from .filesystem_preflight import preflight_mutable_roots
 from ..workspace.locales import user_message_payload
@@ -64,7 +65,6 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.8.8"
 # The implementation/runtime identity is shown by the top-left version hover.
 YOLOMUX_BACKEND = f"Python {platform.python_version()}"
 # Persistent state is versioned independently from the release string.  A
@@ -860,6 +860,28 @@ def yolomux_commit_count() -> int:
     return _YOLOMUX_COMMIT_COUNT
 
 
+def _version_status_has_tracked_changes(status_output: str) -> bool:
+    """Return whether Git reports a change to something already in ``HEAD``."""
+
+    for line in status_output.splitlines():
+        if not line:
+            continue
+        if line.startswith(("? ", "! ")):
+            continue
+        if line.startswith("1 "):
+            fields = line.split(maxsplit=8)
+            if len(fields) >= 9 and set(fields[6]) == {"0"}:
+                continue
+            return True
+        if line.startswith(("2 ", "u ")):
+            return True
+        status_code = line[:2]
+        if status_code in {"??", "!!"} or "A" in status_code:
+            continue
+        return True
+    return False
+
+
 def yolomux_version_metadata() -> tuple[str, list[str]]:
     """Return one consistent release status and post-release commit list for a page render."""
     version = YOLOMUX_VERSION
@@ -879,19 +901,23 @@ def yolomux_version_metadata() -> tuple[str, list[str]]:
             commit_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             commits.append(f"{commit_time.astimezone(PACIFIC_TIME).strftime('%Y-%m-%d %H:%M:%S PT')} {subject}")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
-        return f"{version}*", []
+        # A missing tag or unavailable log only removes the post-release count. Git status is an
+        # independent probe and must still decide whether an existing tracked file is dirty.
+        commits = []
     try:
         status = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain=v1", "--untracked-files=all"],
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain=v2", "--untracked-files=all"],
             capture_output=True,
             check=True,
             text=True,
             timeout=1.0,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return f"{version}{f'({len(commits)})' if commits else ''}*", commits
+        # A failed status probe is unknown, not evidence that a committed file changed.
+        return f"{version}{f'({len(commits)})' if commits else ''}", commits
     suffix = f"({len(commits)})" if commits else ""
-    return f"{version}{suffix}{'*' if status.stdout else ''}", commits
+    tracked_changes = _version_status_has_tracked_changes(status.stdout)
+    return f"{version}{suffix}{'*' if tracked_changes else ''}", commits
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -1095,13 +1121,14 @@ def update_notify_level_allows(change_level: Any, notify_level: Any) -> bool:
 
 
 def git_yolomux_version_at_ref(cwd: str, ref: str) -> tuple[str | None, str | None]:
-    result = git(["show", f"{ref}:yolomux_lib/common.py"], cwd)
+    source_path = "yolomux_lib/version.py"
+    result = git(["show", f"{ref}:{source_path}"], cwd)
     if result.returncode != 0:
-        return None, (result.stderr or f"git show {ref}:yolomux_lib/common.py failed").strip()[:300]
+        return None, (result.stderr or f"git show {ref}:{source_path} failed").strip()[:300]
     version = parse_yolomux_version_source(result.stdout or "")
-    if not version:
-        return None, f"YOLOMUX_VERSION not found in {ref}:yolomux_lib/common.py"
-    return version, None
+    if version:
+        return version, None
+    return None, f"YOLOMUX_VERSION not found in {ref}:{source_path}"
 
 
 def yolomux_version_parts(version: str) -> tuple[int, ...] | None:
@@ -1125,7 +1152,7 @@ def yolomux_version_is_newer(target: str, current: str) -> bool:
 def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fetch: bool = True) -> dict[str, Any]:
     """Whether `origin/<branch>` has a newer YOLOMUX_VERSION than the running checkout.
 
-    Reads `yolomux_lib/common.py` from the remote ref via git on the local checkout (reusing its
+    Reads `yolomux_lib/version.py` from the remote ref via git on the local checkout (reusing its
     existing credentials, so this works for private repos with no GitHub token). SHA and ahead/behind
     counts stay in the payload for diagnostics only; they do not decide whether to notify.
     """

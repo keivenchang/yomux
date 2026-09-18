@@ -11,7 +11,7 @@ import {MarkdownParser, MarkdownSerializer, defaultMarkdownParser, defaultMarkdo
 import {DOMParser, DOMSerializer, Schema} from 'prosemirror-model';
 import {EditorState, Plugin, Selection, TextSelection, Transaction} from 'prosemirror-state';
 import {baseKeymap, setBlockType, toggleMark} from 'prosemirror-commands';
-import {EditorView} from 'prosemirror-view';
+import {Decoration, DecorationSet, EditorView} from 'prosemirror-view';
 import {keymap} from 'prosemirror-keymap';
 import {history, redo, undo} from 'prosemirror-history';
 import {addListNodes, bulletList, listItem, orderedList, wrapInList} from 'prosemirror-schema-list';
@@ -20,6 +20,8 @@ import MarkdownIt from 'markdown-it';
 window.YOLOmuxProseMirror = {
   DOMParser,
   DOMSerializer,
+  Decoration,
+  DecorationSet,
   EditorState,
   EditorView,
   MarkdownParser,

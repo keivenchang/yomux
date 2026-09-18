@@ -175,7 +175,7 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
     env.pop("YOLOMUX_ROOT", None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yolomux.py"), "--print-background-owner"],
+        [sys.executable, str(ROOT / "yolomux.py"), "--print-runtime-report"],
         cwd=cwd,
         env=env,
         text=True,
@@ -282,7 +282,7 @@ def test_cli_refuses_relative_home_before_default_roots_write_to_cwd(tmp_path: P
         env.pop(key, None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yolomux.py"), "--print-background-owner"],
+        [sys.executable, str(ROOT / "yolomux.py"), "--print-runtime-report"],
         cwd=cwd,
         env=env,
         text=True,

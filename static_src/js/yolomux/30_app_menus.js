@@ -798,7 +798,8 @@ function fileSurfaceMenuItems() {
   const finder = typeof finderItemId !== 'undefined' ? finderItemId : fileExplorerItemId;
   const differ = typeof differItemId !== 'undefined' ? differItemId : '';
   const tabber = typeof tabberItemId !== 'undefined' ? tabberItemId : '';
-  const items = Array.isArray(fileSurfaceItems) ? fileSurfaceItems : [finder];
+  const items = (Array.isArray(fileSurfaceItems) ? fileSurfaceItems : [finder])
+    .filter(item => typeof paneItemCapabilityAvailable !== 'function' || paneItemCapabilityAvailable(item));
   const detailFor = item => {
     if (item === finder) return t('menu.file.browseFiles');
     if (item === differ) return t('changes.show');
@@ -817,7 +818,8 @@ function fileSurfaceMenuItems() {
 
 function fileMenuPanelCommands() {
   const virtualCommands = FILE_MENU_PANEL_DEFINITIONS
-    .filter(({itemId}) => itemId !== fileExplorerItemId)
+  .filter(({itemId}) => itemId !== fileExplorerItemId)
+    .filter(({itemId}) => typeof paneItemCapabilityAvailable !== 'function' || paneItemCapabilityAvailable(itemId))
     .map(({itemId}) => fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || ''));
   const fileSurfaces = fileSurfaceMenuItems();
   if (fileSurfaces.length) {
@@ -856,6 +858,9 @@ function appMenuTree() {
       targetItem: prefsItemId,
     }),
   ]);
+  if (bootstrap.terminalOnly === true) {
+    fileDestinationCommands.forEach(command => { command.disabled = true; });
+  }
   return [
     {
       id: 'file',
@@ -959,7 +964,6 @@ let topbarPackingIsApplying = false;
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
-  'hide-owner',
   'compact-search',
   'compact-activity',
   'hide-latency',
@@ -977,7 +981,6 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-search',
   '.topbar-language-menu',
   '#backendHealthIndicator',
-  '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
 ]);
@@ -1257,7 +1260,6 @@ function renderSessionButtonsMeasured(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarRightTools());
-  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   installTopbarNavigationFitObserver();
@@ -1375,9 +1377,9 @@ function createTopbarRightTools() {
   // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
   // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
-  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  // Order contract (#257) for the switchers follows: Language, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
   return group;
 }
 

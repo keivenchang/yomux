@@ -1217,6 +1217,255 @@ def prepare_idle_yostats_workload(driver: webdriver.Chrome) -> dict[str, object]
     )
 
 
+def capture_live_stats_acceptance(driver: webdriver.Chrome, timeout: int = 30) -> dict[str, object]:
+    """Capture the rendered stats contract and reject blank or failed charts.
+
+    API success is not enough for the operator contract: the selected graph
+    must reach ``ready`` and every required visible family must either render
+    a data primitive or paint an explicit no-data/unavailable explanation.
+    """
+    wait = WebDriverWait(driver, timeout)
+    try:
+        wait.until(
+            lambda current: current.execute_script(
+                """
+                const graph = document.querySelector('[data-js-debug-graph]');
+                if (!graph
+                    || graph.getAttribute('data-js-debug-history-state') !== 'ready'
+                    || graph.getAttribute('aria-busy') !== 'false') return false;
+                const required = new Set(['cpu', 'memory', 'activity', 'agentTokens']);
+                const charts = new Map([...graph.querySelectorAll('[data-js-debug-chart]')]
+                  .map(chart => [String(chart.dataset.jsDebugChart || ''), chart]));
+                for (const key of required) {
+                  const chart = charts.get(key);
+                  if (!chart) return false;
+                  const plotted = chart.querySelectorAll(
+                    '[data-js-debug-area-series], [data-js-debug-series], '
+                    + '[data-js-debug-bar-series], [data-js-debug-moving-average]'
+                  ).length;
+                  const noData = chart.querySelectorAll(
+                    '[data-js-debug-no-data-range], [data-js-debug-history-no-data-range], '
+                    + '[data-js-debug-agent-status-no-data-range]'
+                  ).length;
+                  const unavailable = String(chart.querySelector('.js-debug-chart-unavailable')?.textContent || '').trim();
+                  if (!(plotted > 0 || noData > 0 || unavailable)) return false;
+                }
+                return true;
+                """
+            )
+        )
+    except TimeoutException as error:
+        diagnostic = driver.execute_script(
+            """
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const charts = [...(graph?.querySelectorAll('[data-js-debug-chart]') || [])].map(chart => ({
+              key: String(chart.dataset.jsDebugChart || ''),
+              historyState: String(graph?.getAttribute('data-js-debug-history-state') || ''),
+              busy: String(graph?.getAttribute('aria-busy') || ''),
+              plotted: chart.querySelectorAll(
+                '[data-js-debug-area-series], [data-js-debug-series], '
+                + '[data-js-debug-bar-series], [data-js-debug-moving-average]'
+              ).length,
+              noData: chart.querySelectorAll(
+                '[data-js-debug-no-data-range], [data-js-debug-history-no-data-range], '
+                + '[data-js-debug-agent-status-no-data-range]'
+              ).length,
+              unavailable: String(chart.querySelector('.js-debug-chart-unavailable')?.textContent || '').trim().slice(0, 160),
+              text: String(chart.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 200),
+            }));
+            return {
+              readiness: typeof jsDebugHistoryReadinessSnapshot === 'function'
+                ? jsDebugHistoryReadinessSnapshot() : null,
+              charts,
+              stream: typeof jsDebugCurrentStatsStreamEvidence === 'function'
+                ? jsDebugCurrentStatsStreamEvidence() : null,
+              body: String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 1200),
+            };
+            """
+        )
+        raise RuntimeError(f"live stats acceptance timed out: {diagnostic}") from error
+    evidence = driver.execute_script(
+        """
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const charts = [...(graph?.querySelectorAll('[data-js-debug-chart]') || [])].map(chart => ({
+          key: String(chart.dataset.jsDebugChart || ''),
+          title: String(chart.querySelector('.js-debug-chart-title')?.textContent || '').trim(),
+          plotted: chart.querySelectorAll(
+            '[data-js-debug-area-series], [data-js-debug-series], '
+            + '[data-js-debug-bar-series], [data-js-debug-moving-average]'
+          ).length,
+          noData: chart.querySelectorAll(
+            '[data-js-debug-no-data-range], [data-js-debug-history-no-data-range], '
+            + '[data-js-debug-agent-status-no-data-range]'
+          ).length,
+          unavailable: String(chart.querySelector('.js-debug-chart-unavailable')?.textContent || '').trim(),
+          text: String(chart.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 240),
+        }));
+        const readiness = typeof jsDebugHistoryReadiness === 'object' && jsDebugHistoryReadiness
+          ? {
+              phase: String(jsDebugHistoryReadiness.phase || ''),
+              reason: String(jsDebugHistoryReadiness.reason || ''),
+              overlayVisible: jsDebugHistoryReadiness.overlayVisible === true,
+            }
+          : {phase: '', reason: 'readiness state unavailable', overlayVisible: true};
+        return {
+          state: graph?.getAttribute('data-js-debug-history-state') || '',
+          busy: graph?.getAttribute('aria-busy') || '',
+          readiness,
+          charts,
+          url: location.href,
+        };
+        """
+    )
+    if not isinstance(evidence, dict):
+        raise RuntimeError("live stats acceptance evidence is malformed")
+    readiness = evidence.get("readiness")
+    if (
+        not isinstance(readiness, dict)
+        or readiness.get("phase") != "ready"
+        or readiness.get("reason")
+        or readiness.get("overlayVisible") is True
+    ):
+        raise RuntimeError(f"live stats readiness is not clean: {readiness}")
+    charts = evidence.get("charts")
+    if not isinstance(charts, list):
+        raise RuntimeError("live stats chart evidence is malformed")
+    by_key = {str(chart.get("key")): chart for chart in charts if isinstance(chart, dict)}
+    required = ("cpu", "memory", "activity", "agentTokens")
+    missing = [key for key in required if key not in by_key]
+    if missing:
+        raise RuntimeError(f"live stats required charts are missing: {missing}")
+    blank = [
+        key
+        for key in required
+        if not (
+            int(by_key[key].get("plotted") or 0) > 0
+            or int(by_key[key].get("noData") or 0) > 0
+            or str(by_key[key].get("unavailable") or "").strip()
+        )
+    ]
+    if blank:
+        # Keep the first failing transition actionable.  The server may have sent
+        # valid CPU buckets while the client discarded them, projected no samples,
+        # or painted an empty path; the aggregate chart count cannot distinguish
+        # those cases.  These are bounded scalars and names only, so a failed
+        # capture never emits transcript contents or an unbounded snapshot body.
+        diagnostic = driver.execute_script(
+            """
+            const nowMs = Date.now();
+            const rangeSeconds = Number(globalThis.debugRuntimeState?.graphRangeSeconds || 300);
+            let buckets = [];
+            let series = [];
+            try {
+              buckets = typeof debugGraphDisplayBuckets === 'function'
+                ? debugGraphDisplayBuckets(nowMs, {rangeSeconds})
+                : [];
+              series = typeof debugGraphSeriesData === 'function' ? debugGraphSeriesData(buckets) : [];
+            } catch (error) {
+              return {error: String(error?.stack || error)};
+            }
+            const cpuBuckets = buckets.filter(bucket =>
+              Number(bucket?.systemCpuCount || 0) > 0
+              || (bucket?.servers instanceof Map && [...bucket.servers.values()].some(item => Number(item?.cpuCount || 0) > 0))
+            );
+            const cpuSeries = series.filter(item =>
+              item?.key === 'systemCpu' || item?.processCpu === true || item?.cpuBinary === true
+            ).map(item => ({
+              key: String(item.key || ''),
+              samples: Number(item.samples || 0),
+              displaySamples: Number(item.displaySamples || 0),
+              max: Number(item.max || 0),
+              values: Array.isArray(item.values) ? item.values.slice(-8) : [],
+              hasDataValues: Array.isArray(item.hasDataValues) ? item.hasDataValues.slice(-8) : [],
+            }));
+            const chart = document.querySelector('[data-js-debug-chart="cpu"]');
+            const paths = [...(chart?.querySelectorAll('polyline, path[data-js-debug-area-series]') || [])]
+              .map(node => ({
+                key: String(node.dataset.jsDebugSeries || node.dataset.jsDebugAreaSeries || ''),
+                pointsLength: String(node.getAttribute('points') || '').length,
+                pathLength: String(node.getAttribute('d') || '').length,
+              }));
+            return {
+              rangeSeconds,
+              bucketCount: buckets.length,
+              cpuBucketCount: cpuBuckets.length,
+              cpuBucketTail: cpuBuckets.slice(-4).map(bucket => ({
+                startMs: Number(bucket.startMs || 0),
+                durationMs: Number(bucket.durationMs || 0),
+                systemCpuCount: Number(bucket.systemCpuCount || 0),
+                systemCpuTotalPercent: Number(bucket.systemCpuTotalPercent || 0),
+                serverCpu: bucket.servers instanceof Map
+                  ? [...bucket.servers.entries()].map(([key, item]) => ({key, count: Number(item?.cpuCount || 0), total: Number(item?.cpuTotalPercent || 0)}))
+                  : [],
+              })),
+              cpuSeries,
+              paths,
+              stream: typeof jsDebugCurrentStatsStreamEvidence === 'function'
+                ? jsDebugCurrentStatsStreamEvidence()
+                : null,
+            };
+            """
+        )
+        evidence["diagnostic"] = diagnostic
+        raise RuntimeError(f"live stats required charts are blank: {blank}; evidence={evidence}")
+    raw_evidence = driver.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const clientId = typeof jsDebugStatsClientIdForRequest === 'function'
+            ? String(jsDebugStatsClientIdForRequest())
+            : `capture-${Date.now()}`;
+          const snapshotUrl = `/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=${encodeURIComponent(clientId)}`;
+          const snapshotResponse = await fetch(snapshotUrl, {credentials: 'same-origin', cache: 'no-store'});
+          const snapshotText = await snapshotResponse.text();
+          let snapshotBody;
+          try { snapshotBody = JSON.parse(snapshotText); } catch (_) { snapshotBody = snapshotText.slice(0, 120000); }
+          const streamClientId = `${clientId}-capture`;
+          const streamUrl = `/api/stats-stream?range_seconds=300&resolution=AUTO&client_id=${encodeURIComponent(streamClientId)}`;
+          const streamEvents = [];
+          const source = new EventSource(streamUrl);
+          const eventNames = ['ack', 'snapshot', 'ready', 'delta', 'repair', 'unavailable', 'error'];
+          const record = name => event => {
+            streamEvents.push({
+              event: name,
+              id: String(event?.lastEventId || '').slice(0, 160),
+              data: String(event?.data || '').slice(0, 1000000),
+            });
+            if (streamEvents.length >= 8) source.close();
+          };
+          for (const name of eventNames) source.addEventListener(name, record(name));
+          await new Promise(resolve => {
+            const timer = setTimeout(resolve, 3000);
+            source.addEventListener('ready', () => {
+              clearTimeout(timer);
+              setTimeout(resolve, 250);
+            }, {once: true});
+            source.onerror = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          source.close();
+          done({
+            snapshot: {
+              url: snapshotUrl,
+              status: snapshotResponse.status,
+              contentType: snapshotResponse.headers.get('content-type') || '',
+              body: snapshotBody,
+            },
+            sse: {url: streamUrl, events: streamEvents.slice(0, 8)},
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    if not isinstance(raw_evidence, dict) or raw_evidence.get("error"):
+        raise RuntimeError(f"live stats raw protocol evidence is unavailable: {raw_evidence}")
+    evidence["raw_protocol"] = raw_evidence
+    evidence["required_chart_keys"] = list(required)
+    evidence["required_charts_valid"] = True
+    return evidence
+
+
 def install_ticker_callback_counter(driver: webdriver.Chrome) -> None:
     """Count only the live-graph scheduler callbacks, never unrelated browser timers."""
     driver.execute_script(
@@ -1966,6 +2215,7 @@ def main() -> int:
             if args.workload == "deterministic-fanout"
             else capture_measurement_metrics(driver)
         )
+        stats_acceptance = capture_live_stats_acceptance(driver)
         measurement_run = validate_capture_request_join(measurement_marker, issued_requests, measurement_after)
         renderer_after = chrome_renderer_cpu_snapshot(chromedriver_pid)
         renderer_delta = max(0.0, float(renderer_after["cpu_seconds"]) - float(renderer_before["cpu_seconds"]))
@@ -1993,7 +2243,7 @@ def main() -> int:
                 performance_before=measurement_before,
             )
             deterministic["final_acceptance"] = final_acceptance
-        args.output.write_text(json.dumps({"version": 6, "base_url": base_url, "duration_seconds": args.duration, "workload_mode": args.workload, "workload": workload, "ticker_callbacks": ticker_callbacks, "browser": browser, "renderer": renderer, "measurement": {"before": measurement_before, "after": measurement_after, "run": measurement_run}, "deterministic": deterministic, "contention": str(benchmark_output)}, sort_keys=True) + "\n", encoding="utf-8")
+        args.output.write_text(json.dumps({"version": 6, "base_url": base_url, "duration_seconds": args.duration, "workload_mode": args.workload, "workload": workload, "ticker_callbacks": ticker_callbacks, "browser": browser, "renderer": renderer, "stats": stats_acceptance, "measurement": {"before": measurement_before, "after": measurement_after, "run": measurement_run}, "deterministic": deterministic, "contention": str(benchmark_output)}, sort_keys=True) + "\n", encoding="utf-8")
         print(f"wrote {args.output}")
         return 0
     finally:

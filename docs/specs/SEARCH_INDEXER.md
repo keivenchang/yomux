@@ -1,5 +1,7 @@
 # Persistent Quick Open indexer
 
+Backend scope: this document specifies the Python `indexd` implementation. The experimental Go backend implements bounded direct/streamed search and index-status/unindex route compatibility inside `internal/finder`, but it does not run Python `indexd` or claim this persisted breadth-first SQLite frontier. Shared UI code must use capabilities and the actual route response instead of assuming the Python service exists.
+
 ## Goal
 
 Quick Open indexing is a durable local-database service, not request-server work. A YOLOmux HTTP/WebSocket server must never walk a large tree, sort a full index, or write the SQLite index after a filesystem event.
@@ -60,7 +62,7 @@ File changes use one upsert/delete. A single-file hot repair updates or deletes 
 
 ## Breadth-first lifecycle, hot path, and safety refresh
 
-The startup layer-1 publication order, breadth-first frontier priorities (`startup-depth-1`, `hot-change`, `user-visible-demand`, `breadth-expansion`, `full-safety-refresh`), the one hot-path change-evidence owner, the lowest-priority `file_explorer.index_refresh_seconds` safety reconciliation (default 300 seconds, lease-driven and independent of queries), and the truthful `progressive_coverage`/`snapshot_state` status contract are specified in [`FS_INTERACTIVITY.md`](FS_INTERACTIVITY.md), shipped in 0.7.3. Only explicitly configured indexed roots are scheduled; `~/` is never implicit. Each server owns its indexer within an exclusive product root; there is no multi-server/follower producer topology. and the bounded read path reuses the existing 30-second SQLite connect timeout. Indexed-search metadata is no longer a caveat: the scan opens every child relative to its pinned parent descriptor through `paths.safe_child()`, and `SafePathHandle.descriptor_path()` returns only a per-descriptor magic path or fails closed.
+The startup layer-1 publication order, breadth-first frontier priorities (`startup-depth-1`, `hot-change`, `user-visible-demand`, `breadth-expansion`, `full-safety-refresh`), the one hot-path change-evidence owner, the lowest-priority `file_explorer.index_refresh_seconds` safety reconciliation (default 300 seconds, lease-driven and independent of queries), and the truthful `progressive_coverage`/`snapshot_state` status contract are specified in [`FS_INTERACTIVITY.md`](FS_INTERACTIVITY.md), shipped in 0.7.3. Only explicitly configured indexed roots are scheduled; `~/` is never implicit. Each exclusive product root owns one indexer producer; there is no follower producer for that root. The bounded read path reuses the existing 30-second SQLite connect timeout. Indexed-search metadata is no longer a caveat: the scan opens every child relative to its pinned parent descriptor through `paths.safe_child()`, and `SafePathHandle.descriptor_path()` returns only a per-descriptor magic path or fails closed.
 
 ## Verification
 

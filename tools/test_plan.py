@@ -100,6 +100,7 @@ class StepId(StrEnum):
     NODE_YOLOMUX_SYNTAX = "node-yolomux-syntax"
     NODE_WALL_SYNTAX = "node-wall-syntax"
     NODE_LAYOUT = "node-layout"
+    BAZEL_GO = "bazel-go"
     PYTEST_NONBROWSER = "pytest-nonbrowser"
     PYTEST_GATE_SERIAL = "pytest-gate-serial"
     PYTEST_BOOT = "pytest-boot"
@@ -118,6 +119,7 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
     StepId.NODE_YOLOMUX_SYNTAX: (),
     StepId.NODE_WALL_SYNTAX: (),
     StepId.NODE_LAYOUT: (),
+    StepId.BAZEL_GO: (),
     StepId.PYTEST_NONBROWSER: ("nonbrowser",),
     StepId.PYTEST_GATE_SERIAL: ("gate_serial",),
     StepId.PYTEST_BOOT: ("boot",),
@@ -133,6 +135,7 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec("static", "static source checks", (StepId.STATIC_BUILD, StepId.TEXTSHAPE, StepId.ARCHITECTURE_BUDGETS, StepId.LOCAL_SERVICE_TYPES), True),
     LaneSpec("node-syntax", "node syntax", (StepId.NODE_YOLOMUX_SYNTAX, StepId.NODE_WALL_SYNTAX), True),
     LaneSpec("node-layout", "node layout suite", (StepId.NODE_LAYOUT,), True, worker_class="node"),
+    LaneSpec("bazel-go", "Bazel Go and Docker tests", (StepId.BAZEL_GO,), True, worker_class="bazel"),
     LaneSpec("pytest", "pytest non-browser", (StepId.PYTEST_NONBROWSER,), True, phases=("nonbrowser",), worker_class="pytest-xdist"),
     LaneSpec("pytest-boot", "pytest boot smoke", (StepId.PYTEST_BOOT,), phases=("boot",), worker_class="pytest-serial"),
     LaneSpec(

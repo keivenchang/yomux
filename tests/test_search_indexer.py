@@ -117,7 +117,7 @@ def test_persistent_indexer_serves_its_ready_snapshot_to_read_only_servers(tmp_p
 
 def test_indexer_search_action_threads_the_opaque_delta_cursor(tmp_path, monkeypatch):
     # Step 4: a delta request carries an opaque cursor; the indexer read path must forward it so the
-    # follower gets fenced committed journal deltas, not a fresh snapshot.
+    # A reader gets fenced committed journal deltas, not a fresh snapshot.
     root = tmp_path / "repo"
     root.mkdir()
     policy = _access_policy(root)
@@ -232,7 +232,7 @@ def test_index_search_authority_survives_the_path_only_app_adapter(tmp_path, mon
     monkeypatch.setattr(file_index, "_BACKGROUND_INDEX_SEARCH_REQUESTER", path_only_adapter)
 
     assert file_index.request_background_index_search(authority) == {"ok": True}
-    assert sent == [({**authority}, search_indexer.INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)]
+    assert sent == [({**authority}, search_indexer.INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS)]
 
 
 def test_http_search_descriptor_threads_cursor_through_the_batchd_executor(monkeypatch):
@@ -272,7 +272,50 @@ def test_search_client_deadline_is_typed_and_uses_the_bounded_search_timeout(tmp
         "error_code": "deadline_expired",
         "reason": "forced indexd deadline",
     }
-    assert observed_timeouts == [(search_indexer.INDEXER_SEARCH_RPC_TIMEOUT_SECONDS, True)]
+    assert observed_timeouts == [(search_indexer.INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS, True)]
+
+
+def test_refresh_mutations_use_the_bounded_interactive_rpc_timeout(tmp_path, monkeypatch):
+    client = search_indexer.SearchIndexerClient(tmp_path / "indexer.sock")
+    calls = []
+    monkeypatch.setattr(client, "ensure_started", lambda: True)
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda payload, timeout=0.5: calls.append((payload, timeout)) or {"ok": True},
+    )
+
+    assert client.enqueue("/repo", ["/repo/file.md"], "watchd")["accepted"] is True
+    assert client.unindex("/repo")["accepted"] is True
+    assert client.promote_user_visible("/repo", "/repo")["accepted"] is True
+
+    assert [timeout for _payload, timeout in calls] == [
+        search_indexer.INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS,
+        search_indexer.INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS,
+        search_indexer.INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS,
+    ]
+
+
+def test_configured_root_reconcile_does_not_enqueue_without_a_scheduler_lease(tmp_path, monkeypatch):
+    client = search_indexer.SearchIndexerClient(tmp_path / "indexer.sock")
+    calls = []
+    monkeypatch.setattr(client, "ensure_started", lambda: True)
+
+    def request(payload, timeout=0.5):
+        del timeout
+        calls.append(payload)
+        if payload.get("action") == "lease":
+            return {"ok": False, "error": "lease rejected"}
+        pytest.fail(f"unexpected indexer request after lease rejection: {payload}")
+
+    monkeypatch.setattr(client, "request", request)
+
+    result = client.lease_configured_roots([str(tmp_path / "repo")])
+
+    assert result["ok"] is False
+    assert result["leased"] is False
+    assert result["enqueued"] == []
+    assert [payload["action"] for payload in calls] == ["lease"]
 
 
 def test_search_client_replaces_legacy_peer_that_lacks_search_capability(tmp_path, monkeypatch):

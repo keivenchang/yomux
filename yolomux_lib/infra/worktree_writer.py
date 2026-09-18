@@ -132,6 +132,10 @@ def _path_is_inside(path: Path, parent: Path) -> bool:
 def worktree_declaration_slot(worktree_root: Path) -> Path:
     """Return this physical worktree's shared marker slot without invoking Git."""
 
+    override = os.environ.get("YOLOMUX_WORKTREE_WRITER_SLOT", "").strip()
+    if override:
+        return _resolved(Path(override))
+
     root = _resolved(worktree_root)
     git_entry = root / ".git"
     if git_entry.is_dir():

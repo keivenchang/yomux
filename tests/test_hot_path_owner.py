@@ -292,7 +292,7 @@ def test_change_promotes_a_pending_frontier_to_hot_change_priority(tmp_path, mon
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
     promotions: list[tuple[str, int, str]] = []
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "schedule_refreshes", lambda: 0)
     monkeypatch.setattr(file_index, "promote_frontier", lambda root, to_priority=0, to_reason="": promotions.append((str(root), to_priority, to_reason)) or 0)
     monkeypatch.setattr(filesystem.search, "_ensure_search_index", lambda _root, operation="": (index, {}))
@@ -329,7 +329,7 @@ def test_empty_config_reindex_short_circuits_before_any_work(tmp_path, monkeypat
     monkeypatch.setattr(file_index, "mark_paths_dirty", _forbidden("mark_paths_dirty"))
     monkeypatch.setattr(file_index, "promote_frontier", _forbidden("promote_frontier"))
     monkeypatch.setattr(file_index, "schedule_refreshes", _forbidden("schedule_refreshes"))
-    monkeypatch.setattr(file_index, "request_background_owner_refresh", _forbidden("request_background_owner_refresh"))
+    monkeypatch.setattr(file_index, "request_background_refresh", _forbidden("request_background_refresh"))
 
     result = filesystem.reindex_roots_for_paths(
         [str(tmp_path / "root" / "a.txt"), str(tmp_path / "root" / "b.txt")], reason="watchd"
@@ -395,7 +395,7 @@ def test_all_ignored_batch_with_configured_root_does_zero_work(tmp_path, monkeyp
     monkeypatch.setattr(file_index, "mark_paths_dirty", _forbidden("mark_paths_dirty"))
     monkeypatch.setattr(file_index, "promote_frontier", _forbidden("promote_frontier"))
     monkeypatch.setattr(file_index, "schedule_refreshes", _forbidden("schedule_refreshes"))
-    monkeypatch.setattr(file_index, "request_background_owner_refresh", _forbidden("request_background_owner_refresh"))
+    monkeypatch.setattr(file_index, "request_background_refresh", _forbidden("request_background_refresh"))
 
     result = filesystem.reindex_roots_for_paths(
         [str(root / ".git" / "index"), str(root / ".git" / "refs" / "heads" / "main")], reason="watchd"
@@ -409,7 +409,7 @@ def test_all_ignored_batch_with_configured_root_does_zero_work(tmp_path, monkeyp
 
 
 def test_clear_memory_indexes_stops_the_bfs_worker_before_closing_its_root_fd(tmp_path):
-    """Codex item-10 lifecycle blocker: `clear_memory_indexes` (called by `demote_background_owner`)
+    """Codex item-10 lifecycle blocker: `clear_memory_indexes` (called by `stop_background_scheduler`)
     must SIGNAL the BFS worker to stop and JOIN it before closing the root fd. A worker left running
     against a closed fd raised sqlite 'unable to open database file'. Fails against the pre-fix owner
     (stop never signalled, fd closed under the live worker)."""
@@ -842,7 +842,7 @@ def test_concurrent_ensure_and_retire_do_not_deadlock(tmp_path, monkeypatch):
 def test_retiring_is_terminal_start_build_refuses_and_never_calls_the_runner(tmp_path, monkeypatch):
     # P0-3: a scheduler that captured a RootIndex before it was retired must NOT be able to revive it.
     # `_start_build` refuses on a retired object, on an object that lost registry ownership, and when
-    # the background owner cannot build -- returning False and never spawning the runner, so a cleared
+    # this process is not authorized to build -- returning False and never spawning the runner, so a cleared
     # object can never run the crawl once and report itself ready.
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _clear_registry()
@@ -873,13 +873,13 @@ def test_retiring_is_terminal_start_build_refuses_and_never_calls_the_runner(tmp
         assert runner_calls == []
         other.close_root_fd()
 
-        # Subcase 3: a demoted background owner cannot build.
+        # Subcase 3: a process without build authority cannot build.
         fresh = file_index.ensure_index(root, set())  # registers a legitimate owner
         _await_no_build(fresh)
         with fresh.lock:
             fresh.building = False
             fresh.ready = False
-        monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+        monkeypatch.setattr(file_index, "build_authorized", lambda: False)
         assert file_index._start_build(fresh, set()) is False
     finally:
         _clear_registry()
@@ -1078,7 +1078,7 @@ def test_ensure_revalidates_ownership_atomically_when_installing_root_fd(tmp_pat
     # lands after the ownership gate must NOT leave an fd on an object absent from _REGISTRY and _RETIRING.
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: False)
     root = tmp_path / "root"
     root.mkdir()
     checked = threading.Event()
@@ -1126,7 +1126,7 @@ def test_final_ownership_failure_leaves_assignment_for_finalizer(tmp_path, monke
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_next_bfs_generation", lambda _root: 1)
     root = tmp_path / "root"
     root.mkdir()
@@ -1180,9 +1180,9 @@ def test_failed_thread_start_after_retirement_finalizes_installed_assignment(tmp
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_next_bfs_generation", lambda _root: 1)
-    monkeypatch.setattr(file_index, "notify_background_owner_done", lambda _payload: None)
+    monkeypatch.setattr(file_index, "notify_background_done", lambda _payload: None)
     monkeypatch.setattr(file_index, "touch_producer_heartbeat", lambda *_args, **_kwargs: None)
     root = tmp_path / "root"
     root.mkdir()
@@ -1258,7 +1258,7 @@ def test_successful_bfs_publication_supersedes_a_pending_drop(tmp_path, monkeypa
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", bfs_index.build_root_into_index)
     root = tmp_path / "root"
     root.mkdir()
@@ -1328,7 +1328,7 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", None)
     root = tmp_path / "root"
     root.mkdir()

@@ -423,24 +423,6 @@ button.topbar-status-surface:focus-visible {
   color: var(--muted);
   background: transparent;
 }
-.topbar-owner-status {
-  gap: var(--space-6);
-  padding: 0 var(--space-8);
-}
-.topbar-owner-status-key {
-  color: var(--text-muted-cool);
-  font-weight: 700;
-}
-.topbar-owner-status-part[data-owner-role="leader"] .topbar-owner-status-value {
-  color: var(--brand-green);
-  font-weight: 700;
-}
-.topbar-owner-status-part[data-owner-role="follower"] .topbar-owner-status-value,
-.topbar-owner-status-part[data-owner-role="loading"] .topbar-owner-status-value,
-.topbar-owner-status-part[data-owner-role="error"] .topbar-owner-status-value {
-  color: var(--accent-gold);
-  font-weight: 700;
-}
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
   gap: var(--space-4);
@@ -548,7 +530,6 @@ body.topbar-pack-hide-logout #logoutButton,
 body.topbar-pack-hide-notify #notifyToggle,
 body.topbar-pack-hide-notify #tabMetaToggle,
 body.topbar-pack-hide-language .topbar-language,
-body.topbar-pack-hide-owner .topbar-owner-status,
 body.topbar-pack-hide-nav .topbar-nav {
   display: none;
 }

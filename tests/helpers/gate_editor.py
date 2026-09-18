@@ -292,18 +292,29 @@ def _publish_file_change(gate_browser_runtime, target):
 def _type_dirty_text(gate_browser_runtime, target, text):
     browser = gate_browser_runtime.browser
     panel_selector = f'.file-editor-panel[data-file-path="{str(target)}"]'
-    autosave = browser.execute_script(
+    autosave = browser.execute_async_script(
         """
         const path = arguments[0];
-        fileEditorAutosaveEnabled = false;
-        rescheduleAllFileAutosaves();
-        return {
-          enabled: fileEditorAutosaveEnabled,
-          pending: fileEditorAutosaveTimers.has(path),
-        };
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const response = await fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({settings: {editor: {autosave: false}}}),
+          });
+          if (!response.ok) throw new Error(`settings update failed: ${response.status}`);
+          const payload = await response.json();
+          applySettingsPayload(payload, {force: true});
+          rescheduleAllFileAutosaves();
+          done({
+            enabled: fileEditorAutosaveEnabled,
+            pending: fileEditorAutosaveTimers.has(path),
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
         """,
         str(target),
     )
+    assert not autosave.get("error"), autosave
     assert autosave == {"enabled": False, "pending": False}, autosave
     content = browser.find_element("css selector", f"{panel_selector} .cm-content")
     content.click()
@@ -330,7 +341,7 @@ def _type_dirty_text(gate_browser_runtime, target, text):
             autosaveEnabled: fileEditorAutosaveEnabled,
             autosavePending: fileEditorAutosaveTimers.has(path),
           });
-        }, error => done({error: String(error?.stack || error)}));
+            }, error => done({error: String(error?.stack || error)}));
         """,
         str(target),
         text,

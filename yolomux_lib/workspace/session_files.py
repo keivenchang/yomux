@@ -2129,10 +2129,15 @@ def claude_usage_atoms_from_record(
     model = transcript_model_name(message.get("model"))
     effort = message.get("effort") or record.get("effort")
     bounded_thread_id = agent_thread_id or source
-    if len(bounded_thread_id.encode("utf-8")) > 160:
+    # Keep transcript identities within the same 192-byte component budget
+    # used by the stats storage contract.  A filesystem path just over the
+    # former 160-byte limit is still a valid, stable root identity; hashing it
+    # here would make Python and Go disagree on attribution without improving
+    # the actual storage bound.
+    if len(bounded_thread_id.encode("utf-8")) > 192:
         bounded_thread_id = f"claude-transcript:{hashlib.sha256(bounded_thread_id.encode('utf-8')).hexdigest()}"
     bounded_root_thread_id = root_thread_id or source
-    if len(bounded_root_thread_id.encode("utf-8")) > 160:
+    if len(bounded_root_thread_id.encode("utf-8")) > 192:
         bounded_root_thread_id = f"claude-transcript:{hashlib.sha256(bounded_root_thread_id.encode('utf-8')).hexdigest()}"
     return usage_component_atoms(
         source=source,
@@ -4444,7 +4449,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     raw_repo_refs = payload.get("repo_refs")
     repo_refs = canonical_repository_refs(raw_repo_refs if isinstance(raw_repo_refs, dict) else None)
     include_cross = bool(payload.get("include_cross_session_attribution", not bool(session)))
-    # The worker has no settings access and looks nothing up: the policy the web owner signed the
+    # The worker has no settings access and looks nothing up: the policy the requesting server signed the
     # cache identity with is the policy this task judges by, or the answer could disagree with its
     # own key.  When it did not arrive, fall back to the shipped defaults -- never to an empty
     # policy, which would admit everything -- and say so in the product so the fallback is

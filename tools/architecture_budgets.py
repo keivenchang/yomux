@@ -42,7 +42,7 @@ CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
     ("yolomux_lib/watchd.py", "PersistentWatchService"),
     ("yolomux_lib/infra/batchd.py", "PersistentJobBroker"),
     ("yolomux_lib/infra/batchd.py", "JobProductStore"),
-    ("yolomux_lib/infra/background_owner.py", "BackgroundOwnerRegistry"),
+    ("yolomux_lib/infra/background_scheduler.py", "BackgroundScheduler"),
     ("yolomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
 )
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
@@ -103,6 +103,13 @@ RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
     ".git", ".claude", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
 RETIRED_SHARE_SKIPPED_SUFFIXES: Final[tuple[str, ...]] = (".agent-edit.lock",)
+RETIRED_SHARE_SKIPPED_FILENAMES: Final[frozenset[str]] = frozenset(("instance.lock",))
+
+
+def _is_core_dump_filename(filename: str) -> bool:
+    """Keep the source scan from loading a process core dump into memory."""
+
+    return filename == "core" or (filename.startswith("core.") and filename[5:].isdigit())
 
 
 @dataclass(frozen=True)
@@ -355,7 +362,14 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             and not directory.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
         )
         for filename in sorted(filenames):
+            if _is_core_dump_filename(filename) or filename in RETIRED_SHARE_SKIPPED_FILENAMES:
+                continue
             path = Path(parent) / filename
+            if path.is_symlink():
+                # Bazel places output-tree symlinks at the repository root. They are generated
+                # artifacts, and a container may see their targets as dangling even though the
+                # host build can resolve them; neither view is source to ratchet.
+                continue
             relative = path.relative_to(root).as_posix()
             parts = Path(relative).parts
             if any(
@@ -500,6 +514,10 @@ def write_current_manifest(manifest: Path, current: dict[str, Any]) -> None:
         temporary.write(json.dumps(current, indent=2, sort_keys=True))
         temporary.write("\n")
         temporary_path = Path(temporary.name)
+    # The manifest is a checked-in read-only source input for the non-root Docker test runner.
+    # NamedTemporaryFile creates 0600 files by default; preserve the repository-readable contract
+    # across the atomic replacement rather than making the next container unable to read its gate.
+    temporary_path.chmod(0o644)
     temporary_path.replace(manifest)
 
 

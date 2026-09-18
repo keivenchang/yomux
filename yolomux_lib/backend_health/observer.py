@@ -71,14 +71,14 @@ Eligibility is an ALLOWLIST, not a denylist: only ``down`` with ``service_absent
 or ``probe_failed`` is retried. Every other cause performs zero mutations and publishes its own
 bounded ``retry_blocked_<cause>`` token, so ``upgrade_required``, ``terminal_failure``,
 ``identity_mismatch``, ``revision_mismatch``, a demand-started service that is legitimately
-absent, and batchd's ``scheduler_not_owned`` stay six distinguishable facts rather than one
+absent, and batchd's ``scheduler_inactive`` stay six distinguishable facts rather than one
 "blocked" string. Collapsing them is the exact defect the health contract names.
 
 THE STARTUP FLASH, AND WHY THE FIRST BOUNDARY IS NOT THE FENCE
 --------------------------------------------------------------
 The observer arms at boot before statsd is serving, so statsd used to read a verified ``down``
 at every start. MEASURED on a real isolated start, port 17781 (the timeline recorded at
-``app.STATSD_ABSENT_WHILE_PIN_PENDING``): the election was decided at +0.632s, the first
+``app.STATSD_ABSENT_WHILE_PIN_PENDING``): scheduler startup began at +0.632s, the first
 completed observation published ``down``/``service_absent`` at +0.635s, statsd was spawned at
 +1.136s, began serving at +1.622s, and published ``ready`` at +4.696s. The flash was 4.06s.
 
@@ -212,9 +212,8 @@ _FENCED_TRANSPORT_REASONS = frozenset({REASON_IDENTITY_MISMATCH, REASON_REVISION
 #   Declared by indexd, watchd, statusd and approvald.
 #
 # `absence_expected_reason: "<token>"` is the DYNAMIC fact that this service IS pinned up by a
-#   named owner in this process, and that owner is not engaged right now. Declared by batchd,
-#   whose broker is pinned by the scheduler lease `BatchClient.start_for_scheduler()` holds while
-#   this process owns background scheduling (`infra/batchd.py:1364-1372`, `app.py:2962`).
+#   local scheduler in this process, and that scheduler is not engaged right now. Declared by
+#   batchd, whose broker is pinned by the scheduler lease `BatchClient.start_for_scheduler()`.
 #
 # The distinction is the whole point. A service a background loop keeps hot is NOT demand-scoped
 # even though it is lazily created, and flagging it `demand_started` would make a real outage
@@ -421,9 +420,9 @@ def recovery_row_fence(fields: Mapping[str, Any]) -> str:
 
     * ``absence_expected_reason`` blocks UNCONDITIONALLY while the service is absent. It means a
       named owner in this process is not engaging the service right now -- batchd's
-      ``scheduler_not_owned`` is the background-owner election this process lost. Starting batchd
-      to "recover" it would fight the winner, and a recorded failure beside it does not change
-      who owns scheduling.
+      ``scheduler_inactive`` means this process has not engaged its local scheduler. Starting
+      batchd to "recover" it would violate the service lifecycle contract, and a recorded failure
+      beside it does not change that expected absence.
     * ``demand_started`` blocks only when the row records NO failure. That is exactly the
       DOIT's "demand-started and LEGITIMATELY absent": a resting statusd is not an outage, but a
       demand-started service that ran and exited is verified down and its own reduced state says
@@ -481,8 +480,8 @@ def recovery_blocked_cause(state: str, reason_code: str) -> str:
             # statusd, approvald, indexd and watchd on an idle machine every 15 seconds.
             return BLOCKED_DEMAND_STARTED_ABSENT
         if reason_code and reason_code != REASON_NONE:
-            # An `absence_expected_reason` token, e.g. batchd's `scheduler_not_owned`. Retrying it
-            # would fight the background-owner election this process lost.
+            # An `absence_expected_reason` token, e.g. batchd's `scheduler_inactive`. Retrying it
+            # would start an intentionally inactive service instead of repairing an outage.
             return reason_code
     return ""
 

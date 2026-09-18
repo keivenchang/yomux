@@ -90,29 +90,20 @@ def test_repository_snapshot_cache_is_not_observed_by_another_host(tmp_path, mon
     assert a.read_text(encoding="utf-8") == '{"host":"a"}\n'
 
 
-def test_app_caches_stay_host_local_but_share_one_host_leader_follower_state(tmp_path, monkeypatch):
+def test_app_caches_stay_host_local(tmp_path, monkeypatch):
     state_dir = tmp_path / "state"
     host_a = _host("host-a")
     host_b = _host("host-b")
-    for directory in ("session-files-cache", "activity-cache", "background-owner"):
+    for directory in ("session-files-cache", "activity-cache"):
         (state_dir / directory).mkdir(parents=True, exist_ok=True)
-    (state_dir / "background-owner" / "client-events.json").write_text('{"events":["legacy"]}\n', encoding="utf-8")
     a = _for_host(monkeypatch, host_a, lambda: (
         app_module.default_session_files_cache_dir(state_dir),
         app_module.default_tabber_activity_cache_dir(state_dir),
-        app_module.default_background_client_events_path(state_dir),
     ))
-    assert not a[0].exists() and not a[1].exists() and not a[2].exists()
-    a[2].parent.mkdir(parents=True)
-    a[2].write_text('{"events":["host-a"]}\n', encoding="utf-8")
-    same_host = _for_host(monkeypatch, host_a, lambda: app_module.default_background_client_events_path(state_dir))
+    assert not a[0].exists() and not a[1].exists()
     b = _for_host(monkeypatch, host_b, lambda: (
         app_module.default_session_files_cache_dir(state_dir),
         app_module.default_tabber_activity_cache_dir(state_dir),
-        app_module.default_background_client_events_path(state_dir),
     ))
 
-    assert a[0] != b[0] and a[1] != b[1] and a[2] != b[2]
-    assert same_host == a[2]
-    assert not b[2].exists()
-    assert a[2].read_text(encoding="utf-8") == '{"events":["host-a"]}\n'
+    assert a[0] != b[0] and a[1] != b[1]

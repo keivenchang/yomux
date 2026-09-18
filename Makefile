@@ -20,7 +20,7 @@ dev: check-python ## Like setup, plus the complete dev/test gate toolchain
 	$(PYTHON) tools/static_build.py
 
 xterm: ## Verify tracked xterm vendor assets against the pinned npm packages
-	npm install --no-audit --no-fund
+	npm ci --ignore-scripts --no-audit --no-fund
 	cmp static/vendor/xterm.js node_modules/@xterm/xterm/lib/xterm.js
 	cmp static/vendor/xterm.css node_modules/@xterm/xterm/css/xterm.css
 	cmp static/vendor/xterm-addon-unicode11.js node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js

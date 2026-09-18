@@ -27,7 +27,6 @@ const {
   nestedSlots,
   parseUrl,
   canonical,
-  makeOverviewFixtureLines,
   makeFileTree,
   test,
   testAsync,
@@ -262,7 +261,7 @@ async function runCrossSurfaceStateSuite() {
   // function body; every other local stays inside its own checkpoint. A failed assertion now
   // fails ONLY its own checkpoint and every later checkpoint still runs and still reports.
   let api, changesHtml, changedFilesSource, fileExplorerSource, c9Src, filesTab;
-  let appSource, changedOverviewStops, assertNoOverviewStopOverlap, overview, preferencesCss;
+  let appSource, changedOverviewStops, assertNoOverviewStopOverlap, makeOverviewFixtureLines, overview, preferencesCss;
   let diffBundle, preferencesHtml, selection, search, popoverForPosition, popoverStyle;
   let filePopover, diagnostics, menuLabels, menus, fileMenu, appearance;
   let hostPointer, source, css, helpMenu, terminalCopyApi, fetchCalls;
@@ -274,33 +273,6 @@ async function runCrossSurfaceStateSuite() {
   let filled, extraPaneItem, finderOnly, finderDropHome, removed, closed;
   let moved, split, killedApi, killedNestedFinderSlots, fullSpanSlots, resizer;
   let event;
-
-  // These checkpoints intentionally run independently. Keep source contracts available even when
-  // an earlier checkpoint fails before its historical setup point.
-  c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
-  appSource = c9Src;
-  const parseOverviewStops = gradient => {
-    const stops = [];
-    const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
-    let match = pattern.exec(String(gradient || ''));
-    while (match) {
-      stops.push({
-        color: match[1].toLowerCase(),
-        startText: match[2],
-        endText: match[3],
-        start: Number.parseFloat(match[2]),
-        end: Number.parseFloat(match[3]),
-      });
-      match = pattern.exec(String(gradient || ''));
-    }
-    return stops;
-  };
-  changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
-  assertNoOverviewStopOverlap = stops => {
-    for (let index = 1; index < stops.length; index += 1) {
-      assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
-    }
-  };
 
   test('cross-surface host state 01: YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open...', () => {
     api = loadYolomux('', ['1', '2']);
@@ -361,7 +333,7 @@ async function runCrossSurfaceStateSuite() {
     }
     assert.equal(api.tabTypeForItem(api.yocostItemId), null, 'the retired YO!cost item id is not a duplicate live tab type');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
-    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready', freshness: 'fresh'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'too_large', too_large: true, coverage: 'partial'}), 'too_large', 'capped file indexes remain visibly partial');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
     // YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open YO!agent.
@@ -454,28 +426,28 @@ async function runCrossSurfaceStateSuite() {
     api.setSessionFilesPayloadForTest({
       session: '3',
       loaded: true,
-      refreshing_elsewhere: true,
+      refreshing: true,
       errors: [],
       refs_by_repo: {},
       repos: [{repo: '/home/test/parser-toolkits3', count: 0, touched_count: 0, added: 0, removed: 0}],
       files: [],
     });
     api.setSessionFilesLoadingForTest(false);
-    const refreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingElsewhereHtml), 'Differ rooted follower placeholders render as loading until real results arrive');
-    assert.equal(refreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rooted follower placeholders do not claim the dirty repo has a completed empty result');
+    const refreshingHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingHtml), 'Differ rooted local-refresh placeholders render as loading until real results arrive');
+    assert.equal(refreshingHtml.includes('No Differ results for this session.'), false, 'Differ rooted local-refresh placeholders do not claim the dirty repo has a completed empty result');
     api.setSessionFilesPayloadForTest({
       session: '4',
       loaded: true,
-      refreshing_elsewhere: true,
+      refreshing: true,
       errors: [],
       refs_by_repo: {},
       repos: [],
       files: [],
     });
-    const rootlessRefreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingElsewhereHtml), 'Differ rootless follower placeholders still render as loading instead of a misleading empty result');
-    assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
+    const rootlessRefreshingHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingHtml), 'Differ rootless local-refresh placeholders still render as loading instead of a misleading empty result');
+    assert.equal(rootlessRefreshingHtml.includes('No Differ results for this session.'), false, 'Differ rootless local-refresh placeholders do not render a completed empty state');
     api.setSessionFilesLoadingForTest(false);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -1405,8 +1377,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
     assert.ok(c9Src.includes('function scheduleFileExplorerActiveFileReveal('), 'Finder active-file reveal uses a shared helper');
     assert.ok(/function showFileEditorPaneForPath\([\s\S]*?scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'opening an editor file reveals it in the current Finder root');
-    const editorRenderBody = c9Src.slice(c9Src.indexOf('function renderFileEditorPanel('), c9Src.indexOf('const state = fileEditorStateForItem', c9Src.indexOf('function renderFileEditorPanel(')));
-    assert.ok(/activeFile = path;[\s\S]*?(?:scheduleFileExplorerActiveFileReveal\(path\)|syncFileExplorerRootToActiveFile\(path, \{force: true\}\))/.test(editorRenderBody), 'switching editor tabs route the active file through Finder reveal or root synchronization');
+    assert.ok(/const previousActiveFile = activeFile;[\s\S]*?if \(previousActiveFile !== path\) scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'switching editor tabs reveals the newly active file without re-expanding on every render');
     assert.ok(changedFilesCss.includes('flex-wrap: wrap;'), 'Finder toolbar wraps instead of clipping quick-access controls');
     assert.ok(/\.file-explorer-path-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(changedFilesCss), 'Finder path row lets the absolute path shrink without wrapping Sync or Copy');
     const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
@@ -1426,6 +1397,30 @@ async function runCrossSurfaceStateSuite() {
     filesTab = api.fileExplorerPaneTabHtml();
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
+    appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const parseOverviewStops = gradient => {
+      const stops = [];
+      const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+      let match = pattern.exec(String(gradient || ''));
+      while (match) {
+        stops.push({
+          color: match[1].toLowerCase(),
+          startText: match[2],
+          endText: match[3],
+          start: Number.parseFloat(match[2]),
+          end: Number.parseFloat(match[3]),
+        });
+        match = pattern.exec(String(gradient || ''));
+      }
+      return stops;
+    };
+    changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
+    assertNoOverviewStopOverlap = stops => {
+      for (let index = 1; index < stops.length; index += 1) {
+        assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
+      }
+    };
+    makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
     assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
     assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
     assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
@@ -1967,13 +1962,13 @@ async function runCrossSurfaceStateSuite() {
     ), true, 'rootless worktree push can update Finder without blanking a loaded same-session Differ repo');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'rootless Finder push leaves the yolomux.dev8002 Differ repo visible');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
-      {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
-    ), true, 'follower worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
-    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder follower placeholder leaves the visible Differ payload intact');
+    ), true, 'local-refresh worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder local-refresh placeholder leaves the visible Differ payload intact');
     assert.equal(rootlessDifferApi.sessionFilesPanelIsLoadingForTest(
-      {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
-    ), true, 'a rooted follower placeholder renders as loading instead of a completed zero-diff result');
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+    ), true, 'a rooted local-refresh placeholder renders as loading instead of a completed zero-diff result');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
@@ -2001,8 +1996,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(sessionFilesRefs[yolomuxRepo], {from: 'abc1234', to: 'current'}, 'the current repo override remains intact');
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
-    assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores follower refresh placeholders after a rooted payload is already visible');
-    assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(payload\)[\s\S]*return false/.test(appSource), 'a rooted follower-refresh placeholder remains loading until real files, warnings, or errors arrive');
+    assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshing\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores local-refresh placeholders after a rooted payload is already visible');
+    assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshing\(payload\)[\s\S]*return false/.test(appSource), 'a rooted local-refresh placeholder remains loading until real files, warnings, or errors arrive');
     assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session, completionIdentity = ''\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
@@ -2131,7 +2126,7 @@ async function runCrossSurfaceStateSuite() {
   transcriptWatchApi.setLayoutSlotsForTest(transcriptWatchSlots);
   assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'terminal tabs do not subscribe to transcript context payloads');
   transcriptWatchApi.activateTerminalDetailTabForTest('1', 'transcript');
-  assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [{session: '1', messages: 200}], 'only the visible transcript pane subscribes to context payloads');
+  assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [{session: '1', messages: 200, pane_target: ''}], 'only the visible transcript pane subscribes to context payloads');
   transcriptWatchApi.activateTerminalDetailTabForTest('1', 'terminal');
   assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'leaving the transcript pane removes the context subscription');
 
@@ -2983,11 +2978,10 @@ async function runCrossSurfaceStateSuite() {
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'vanilla', 'theme toggle moves light preview to vanilla preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla');
-    assert.equal(api.editorThemeLabel(), 'Vanilla preview');
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
-    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'vanilla leaves by restoring a dark editor scheme');
+    assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'the two-state toggle restores the dark editor scheme');
     api.setFileEditorThemeMode('dark');
     api.cycleEditorThemeMode({includeVanilla: false});
     assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'edit/diff theme toggle moves dark to light');
@@ -3006,7 +3000,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Popular IDE-style teal type declarations');
     assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Popular IDE-style brown field and parameter names');
     api.setFileEditorPreviewDisplayMode('vanilla');
-    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
+    assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'preview display mode can select the independent vanilla surface');
     api.setFileEditorThemeMode('github-light');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme', 'choosing a concrete editor theme exits vanilla preview mode');
     api.setFileEditorCursorStyleForTest('block');
@@ -3775,9 +3769,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes('appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu)'), 'terminal context menu exposes explicit tmux copy through the shared action descriptor');
     assert.ok(/function withTerminalVisibleSelectionCleanup\(session, term, container, reason, handler\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, reason\)/.test(source), 'terminal menu actions share one cleanup wrapper after consuming selected text');
     assert.ok(/function copyTerminalSelectionToClipboardEvent\(session, term, event, container = null\)[\s\S]*event\.clipboardData\.setData\('text\/plain', selected\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, TERMINAL_COPY_ACTIONS\.selected\.reason\)/.test(source), 'terminal DOM copy-event path also clears visible terminal selection after capturing clipboard text');
-    const urlMenuSource = source.slice(source.indexOf('function appendUrlContextMenuItems('), source.indexOf('async function copyMarkdownPreviewImageToClipboard'));
-    assert.ok(/const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)/.test(urlMenuSource), 'terminal URL menu actions use the shared visible-selection cleanup wrapper');
-    assert.ok(/appendContextMenuButton\(menu, label\('contextmenu\.openUrl', 'Open URL in a new tab'\), action\('open-url'/.test(urlMenuSource) && /appendContextMenuButton\(menu, label\('contextmenu\.copyUrl', 'Copy URL'\), action\('copy-url'/.test(urlMenuSource), 'terminal URL menu open/copy actions route through visible-selection cleanup');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'/.test(source), 'terminal URL menu open/copy actions route through visible-selection cleanup');
     assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?t\('terminal\.copyHintMac'\)[\s\S]*?t\('terminal\.copyHintPc'\)[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed with localized select/copy hints while Ctrl-C still falls through as SIGINT');
     assert.equal(source.includes("'Copy without indent'"), false, 'terminal copy menu labels are locale keys, not raw strings in the bundle');
     assert.equal(source.includes('copied ${text.length} chars'), false, 'terminal copied-count status text is locale/plural-key driven');
@@ -3812,7 +3804,7 @@ async function runCrossSurfaceStateSuite() {
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
-    assert.ok(urlMenuSource.includes('options.includeSelectedText && selectedText && selectedText !== url') && urlMenuSource.includes("appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text'"), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'[\s\S]*if \(options\.includeSelectedText && selectedText && selectedText !== url\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copySelectedText'\)/.test(source), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
     terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     fetchCalls = [];
     terminalCopyApi.setFetchForTest((url, options = {}) => {
@@ -4856,7 +4848,7 @@ async function runCrossSurfaceStateSuite() {
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     const tabContextMenuStart = source.indexOf('function showTabContextMenu(');
     const tabContextMenuEnd = source.indexOf('function showSessionContextMenu(', tabContextMenuStart);
-    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('sessionTabDescription(item, info)'), 'tab action descriptions reuse the metadata-safe tab description instead of showing Loading for an interactive terminal');
+    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('tabMenuDetailText(item, info)'), 'tab action descriptions reuse the full metadata detail for an interactive terminal');
     api.showSessionContextMenu('1', 10, 10);
     contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
@@ -4866,7 +4858,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal((pinTabRow?.innerHTML.match(/context-menu-check/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — /repo/workspace · workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');

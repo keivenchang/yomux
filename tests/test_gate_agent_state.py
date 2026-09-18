@@ -1117,12 +1117,12 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
         real_build_transcripts_payload = fixture.runtime.app.build_transcripts_payload
         metadata_builds = 0
 
-        def stale_then_current_metadata_payload():
+        def stale_then_current_metadata_payload(*, session_roster=None):
             nonlocal metadata_builds
             metadata_builds += 1
             if metadata_builds == 1:
                 return copy.deepcopy(initial_metadata_payload)
-            return real_build_transcripts_payload()
+            return real_build_transcripts_payload(session_roster=session_roster)
 
         monkeypatch.setattr(
             fixture.runtime.app,

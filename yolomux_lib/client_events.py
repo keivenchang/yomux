@@ -19,7 +19,6 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "activity_summary_ready",
     "attention_acks_changed",
     "auto_approve_changed",
-    "background_owner_changed",
     "background_refresh_done",
     "background_refresh_requested",
     "backend_health_changed",
@@ -69,7 +68,6 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "backend_health_changed": frozenset({"core"}),
     "attention_acks_changed": frozenset({"status", "attention"}),
     "auto_approve_changed": frozenset({"status", "attention"}),
-    "background_owner_changed": frozenset({"core"}),
     "background_refresh_done": frozenset({"core"}),
     "background_refresh_requested": frozenset({"core"}),
     "chat_messages_changed": frozenset({"chat"}),
@@ -109,8 +107,14 @@ CLIENT_EVENT_SNAPSHOT_CLIENT_LIMIT = 32
 # it connects. Every other type is a nudge to refetch, so a reconnecting page repairs itself by
 # asking; backend health has no endpoint the browser is allowed to poll on a timer, so the newest
 # revision has to be replayed here or a page that connects between two transitions would show
-# nothing at all until the next one.
-CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({"backend_health_changed", "search_progress"})
+# nothing at all until the next one. Background completion is retained for the same reason: the
+# local scheduler can finish while an EventSource is reconnecting, and its completion is the
+# browser's one-shot trigger for applying a fresh index or reading the matching session-files cache.
+CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({
+    "backend_health_changed",
+    "background_refresh_done",
+    "search_progress",
+})
 # One retained event per resource, and the retained types own a fixed, tiny resource set.
 CLIENT_EVENT_RETAINED_LIMIT = 8
 

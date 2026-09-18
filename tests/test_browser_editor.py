@@ -5,7 +5,7 @@ from tests.browser_helpers.browser_console import assert_only_expected_browser_w
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
@@ -603,6 +603,622 @@ def test_markdown_preview_prosemirror_pure_view_is_visible(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_prosemirror_async_init_keeps_latest_state_and_cancels_detached_panel(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLatest = null;
+            const heldLatest = new Promise(resolve => { releaseLatest = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLatest;
+            const path = '/home/test/yolomux.dev/ASYNC-LATEST.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: '# Old state', original: '# Old state', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+            setFileState(path, {kind: 'text', content: '# Latest state', original: '# Old state', dirty: true, language: 'markdown'});
+            renderFileEditorPanel(panel, item);
+            releaseLatest();
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.state?.doc?.textContent === 'Latest state', {
+              timeoutMs: 5000,
+              description: 'latest generation after delayed ProseMirror load',
+            });
+
+            let releaseDetached = null;
+            const heldDetached = new Promise(resolve => { releaseDetached = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldDetached;
+            const detachedPath = '/home/test/yolomux.dev/ASYNC-DETACHED.md';
+            const detachedItem = fileEditorItemFor(detachedPath);
+            setFileState(detachedPath, {kind: 'text', content: '# Detached', original: '# Detached', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(detachedPath, 'preview', detachedItem);
+            addFileEditorTabItem(detachedPath, detachedItem);
+            const detached = createFileEditorPanel(detachedItem);
+            panelNodes.set(detachedItem, detached);
+            document.getElementById('grid').append(detached);
+            renderFileEditorPanel(detached, detachedItem);
+            await Promise.resolve();
+            detached.remove();
+            destroyProseMirrorPanel(detached);
+            releaseDetached();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              latestText: panel._pmView?.state?.doc?.textContent || '',
+              oldVisible: panel._pmView?.dom?.textContent?.includes('Old state') || false,
+              detachedView: Boolean(detached._pmView),
+              detachedError: detached._pmError || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["latestText"] == "Latest state" and metrics["oldVisible"] is False, metrics
+    assert metrics["detachedView"] is False and metrics["detachedError"] == "", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_init_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Tab detach\\n\\nThe ViewEditor must survive a temporary Dockview detach.';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            releaseLoad();
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+
+            await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {
+              timeoutMs: 5000,
+              description: 'ViewEditor after transient tab detach',
+            });
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              ready: Boolean(panel._pmView),
+              connected: Boolean(panel._pmView?.dom?.isConnected),
+              text: panel._pmView?.state?.doc?.textContent || '',
+              error: panel._pmError || '',
+              state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics or metrics["error"] == "", metrics
+    assert metrics["ready"] is True and metrics["connected"] is True, metrics
+    assert metrics["text"] == "Tab detachThe ViewEditor must survive a temporary Dockview detach.", metrics
+    assert metrics["state"] == "ready", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_failure_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            let rejectLoad = null;
+            const heldLoad = new Promise((_resolve, reject) => { rejectLoad = reject; });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH-FAILURE.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Tab detach failure';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            rejectLoad(new Error('specific transient-detach parser failure'));
+            await heldLoad.catch(() => {});
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.get(item) === panel,
+              connected: panel.isConnected,
+              error: panel._pmError || '',
+              status: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is True and metrics["connected"] is True, metrics
+    assert "specific transient-detach parser failure" in metrics["error"], metrics
+    assert metrics["status"] == "error", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_init_cancels_closed_tab(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/CLOSED-TAB.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Closed tab';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            const generationBeforeClose = panel._pmEnsureGeneration || 0;
+            removePanelForItem(item);
+            releaseLoad();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.has(item),
+              connected: panel.isConnected,
+              ready: Boolean(panel._pmView),
+              error: panel._pmError || '',
+              generationBeforeClose,
+              generationAfterClose: panel._pmEnsureGeneration || 0,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is False and metrics["connected"] is False, metrics
+    assert metrics["ready"] is False and metrics["error"] == "", metrics
+    assert metrics["generationAfterClose"] > metrics["generationBeforeClose"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_codemirror_async_init_cancels_closed_tab(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadCodeMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadCodeMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/CLOSED-TAB.js';
+            const item = fileEditorItemFor(path);
+            const source = 'const closed = true;';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'javascript'});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            const generationBeforeClose = panel._cmGeneration || 0;
+            removePanelForItem(item);
+            releaseLoad();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadCodeMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.has(item),
+              connected: panel.isConnected,
+              ready: Boolean(panel._cmView),
+              generationBeforeClose,
+              generationAfterClose: panel._cmGeneration || 0,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadCodeMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is False and metrics["connected"] is False, metrics
+    assert metrics["ready"] is False, metrics
+    assert metrics["generationAfterClose"] > metrics["generationBeforeClose"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_codemirror_async_init_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadCodeMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadCodeMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH.js';
+            const item = fileEditorItemFor(path);
+            const source = 'const detached = true;';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'javascript'});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            releaseLoad();
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+            await window.__yolomuxTestWaitFor(() => panel._cmView, {
+              timeoutMs: 5000,
+              description: 'CodeMirror after transient tab detach',
+            });
+            window.loadCodeMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.get(item) === panel,
+              connected: panel._cmView?.dom?.isConnected === true,
+              text: panel._cmView?.state?.doc?.toString() || '',
+              mode: panel._cmMode || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadCodeMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is True and metrics["connected"] is True, metrics
+    assert metrics["text"] == "const detached = true;" and metrics["mode"] == "edit", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(browser, tmp_path):
+    paths = [
+        '/home/test/yolomux.dev/FIRST.md',
+        '/home/test/yolomux.dev/SECOND.md',
+    ]
+    items = ['file:' + path for path in paths]
+    encoded = [quote(item, safe='') for item in items]
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout=left&tabs=left:{encoded[0]}*,{encoded[1]}",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    initialized = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const api = await loadProseMirrorApi();
+            const items = arguments[0];
+            for (const [index, item] of items.entries()) {
+              const path = fileItemPath(item);
+              const source = `# File ${index + 1}\\n\\nDockview tab content ${index + 1}.`;
+              setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+              setFileEditorViewMode(path, 'preview', item);
+              const panel = panelNodes.get(item);
+              destroyProseMirrorPanel(panel);
+              delete panel._pmError;
+            }
+            const first = panelNodes.get(items[0]);
+            renderFileEditorPanel(first, items[0]);
+            await window.__yolomuxTestWaitFor(() => first._pmView || first._pmError, {
+              timeoutMs: 5000,
+              description: 'first Dockview ViewEditor',
+            });
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.__dockviewOriginalProseMirrorLoader = window.loadProseMirrorApi;
+            window.loadProseMirrorApi = () => heldLoad;
+            window.__releaseDockviewProseMirrorLoad = releaseLoad;
+            done({ready: Boolean(first._pmView), error: first._pmError || '', panels: items.map(item => panelNodes.has(item))});
+          } catch (error) {
+            done({failure: String(error?.stack || error)});
+          }
+        })();
+        """,
+        items,
+    )
+    assert "failure" not in initialized and initialized["ready"] is True, initialized
+    assert initialized["error"] == "" and initialized["panels"] == [True, True], initialized
+
+    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[1]}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[1])
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return panelNodes.get(arguments[0])?.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState === 'loading'",
+            items[1],
+        )
+    )
+    browser.execute_script("window.__releaseDockviewProseMirrorLoad()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const panel = panelNodes.get(arguments[0]); return Boolean(panel?._pmView || panel?._pmError)",
+            items[1],
+        )
+    )
+    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[0]}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[0])
+    )
+    metrics = browser.execute_script(
+        """
+        window.loadProseMirrorApi = window.__dockviewOriginalProseMirrorLoader;
+        delete window.__dockviewOriginalProseMirrorLoader;
+        delete window.__releaseDockviewProseMirrorLoad;
+        return arguments[0].map(item => {
+          const panel = panelNodes.get(item);
+          return {
+            ready: Boolean(panel?._pmView),
+            connected: Boolean(panel?._pmView?.dom?.isConnected),
+            roots: panel?.querySelectorAll('.ProseMirror')?.length || 0,
+            error: panel?._pmError || '',
+          };
+        });
+        """,
+        items,
+    )
+    assert metrics == [
+        {"ready": True, "connected": True, "roots": 1, "error": ""},
+        {"ready": True, "connected": True, "roots": 1, "error": ""},
+    ], metrics
+    failures = browser.execute_script(
+        "return {errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};"
+    )
+    assert failures == {"errors": [], "rejections": []}
+
+
+def test_markdown_prosemirror_cancels_detached_local_image_hydration(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalFetch = window.fetchRawFileBlob;
+          try {
+            await loadProseMirrorApi();
+            let releaseFetch = null;
+            let fetchSignal = null;
+            let fetchStarted = false;
+            window.fetchRawFileBlob = (_path, options = {}) => {
+              fetchStarted = true;
+              fetchSignal = options.signal || null;
+              return new Promise(resolve => {
+                releaseFetch = () => resolve({ok: true, status: 200, blob: new Blob(['image-bytes'], {type: 'image/png'})});
+              });
+            };
+            const path = '/home/test/yolomux.dev/IMAGE-LIFECYCLE.md';
+            const source = '![local](asset.png)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => fetchStarted && panel._pmView?.dom?.querySelector('img.prosemirror-image'), {
+              timeoutMs: 5000,
+              description: 'held local image hydration',
+            });
+            const image = panel._pmView.dom.querySelector('img.prosemirror-image');
+            destroyProseMirrorPanel(panel);
+            panel.remove();
+            releaseFetch();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.fetchRawFileBlob = originalFetch;
+            done({
+              aborted: fetchSignal?.aborted === true,
+              connected: image.isConnected,
+              objectUrl: image._rawFileObjectUrl || '',
+              src: image.getAttribute('src') || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.fetchRawFileBlob = originalFetch;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["aborted"] is True and metrics["connected"] is False, metrics
+    assert metrics["objectUrl"] == "" and not metrics["src"].startswith("blob:"), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_blockquoted_fence_keeps_event_loop_responsive(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/BLOCKQUOTE-FENCE.md';
+            const prefix = Array.from({length: 520}, (_, index) => (
+              `Paragraph ${index + 1}: this keeps the regression close to the large operator document that exposed the loop.`
+            )).join('\\n\\n');
+            const source = '# Guided JSON\\n\\n' + prefix + '\\n\\n'
+              + '> ```json\\n'
+              + '> [\\n'
+              + '>   {"name": "get_weather", "arguments": {"city": "Paris"}},\\n'
+              + '>   {"arguments": {"city": "Tokyo"}}\\n'
+              + '> ]\\n'
+              + '> ```\\n';
+            const item = fileEditorItemFor(path);
+            const originalHljs = window.hljs;
+            const api = await loadProseMirrorApi();
+            const originalApply = api.EditorState.prototype.apply;
+            const NativeMutationObserver = window.MutationObserver;
+            let highlightCalls = 0;
+            let transactionCount = 0;
+            let editableCodeObserverCount = 0;
+            api.EditorState.prototype.apply = function(transaction) {
+              transactionCount += 1;
+              return originalApply.call(this, transaction);
+            };
+            window.MutationObserver = class extends NativeMutationObserver {
+              observe(target, options) {
+                if (target?.tagName === 'CODE' && target.closest?.('.ProseMirror')) editableCodeObserverCount += 1;
+                return super.observe(target, options);
+              }
+            };
+            window.hljs = {
+              highlightElement(block) {
+                highlightCalls += 1;
+                if (block.dataset.highlighted) return;
+                block.innerHTML = `<span class="hljs-string">${block.textContent}</span>`;
+                block.dataset.highlighted = 'yes';
+              },
+            };
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView, {
+              timeoutMs: 12000,
+              description: 'blockquoted JSON ViewEditor',
+            });
+            let heartbeat = false;
+            setTimeout(() => { heartbeat = true; }, 0);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            await window.__yolomuxTestWaitFor(() => heartbeat, {
+              timeoutMs: 1000,
+              description: 'event loop after blockquoted JSON ViewEditor',
+            });
+            const modeButton = panel.querySelector('[data-action="editor-mode"][data-editor-mode="split"]');
+            const actionStarted = performance.now();
+            modeButton.click();
+            const actionSyncMs = performance.now() - actionStarted;
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const actionSettledMs = performance.now() - actionStarted;
+            const modeChanged = editorViewModeFor(path, item) === 'split';
+            const transactionsAfterAction = transactionCount;
+            setFileEditorViewMode(path, 'preview', item);
+            const code = panel._pmView.dom.querySelector('pre > code');
+            window.hljs = originalHljs;
+            window.MutationObserver = NativeMutationObserver;
+            api.EditorState.prototype.apply = originalApply;
+            done({
+              sourceLength: source.length,
+              state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              roots: panel.querySelectorAll('.ProseMirror').length,
+              codeText: code?.textContent || '',
+              highlighted: code?.dataset.highlighted || '',
+              highlightNodes: code?.querySelectorAll('[class^="hljs-"]').length || 0,
+              highlightCalls,
+              editableCodeObserverCount,
+              transactionsAfterAction,
+              heartbeat,
+              modeChanged,
+              actionSyncMs,
+              actionSettledMs,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["state"] == "ready" and metrics["roots"] == 1, metrics
+    assert metrics["sourceLength"] > 38000, metrics
+    assert "get_weather" in metrics["codeText"], metrics
+    assert metrics["highlighted"] == "" and metrics["highlightNodes"] == 0, metrics
+    assert metrics["highlightCalls"] == 0, metrics
+    assert metrics["editableCodeObserverCount"] == 0, metrics
+    assert metrics["transactionsAfterAction"] == 0, metrics
+    assert metrics["heartbeat"] is True, metrics
+    assert metrics["modeChanged"] is True and metrics["actionSettledMs"] < 1000, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, tmp_path):
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     diagrams = re.findall(r"```mermaid\s*\n(.*?)\n```", readme, flags=re.DOTALL)
@@ -723,9 +1339,11 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
     assert metrics["maxHeartbeatGap"] < 5000, metrics
     assert metrics["wheelReady"] is True, metrics
     assert wheel_before["outerHeight"] > wheel_before["outerClient"], wheel_before
-    assert wheel_before["viewportOverflow"] == "hidden", wheel_before
+    # ProseMirror Mermaid surfaces intentionally let wheel input bubble to the outer preview pane;
+    # the viewport is visible rather than an independent nested scroll container.
+    assert wheel_before["viewportOverflow"] == "visible", wheel_before
     assert wheel_before["viewportHeight"] > wheel_before["viewportClient"], wheel_before
-    assert 0 < wheel_before["viewportTop"] < wheel_before["viewportHeight"] - wheel_before["viewportClient"], wheel_before
+    assert wheel_before["viewportTop"] == 0, wheel_before
     assert wheel_after["outerTop"] > wheel_before["outerTop"], {"before": wheel_before, "after": wheel_after}
     assert wheel_after["viewportTop"] == wheel_before["viewportTop"], {"before": wheel_before, "after": wheel_after}
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -1314,10 +1932,19 @@ def test_markdown_prosemirror_inline_images_match_source_flow(browser, tmp_path)
               return originalFetch(input, options);
             };
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img').length === 2, {timeoutMs: 12000, description: 'inline ProseMirror images'});
-            const paragraph = panel._pmView.dom.querySelector('p');
+            const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+            if (previewPane?._previewAsync) await previewPane._previewAsync;
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.isConnected === true && panel._pmView.dom.getBoundingClientRect().width > 0 && panel._pmView.dom.querySelectorAll('img').length === 2, {timeoutMs: 12000, description: 'inline ProseMirror images'});
+            const viewAtWait = panel._pmView;
+            const rootAtWait = viewAtWait.dom;
+            const initialParagraph = rootAtWait.querySelector('p');
+            const initialImages = [...initialParagraph.querySelectorAll('img')];
+            await Promise.all(initialImages.map(image => image.naturalWidth > 0 ? Promise.resolve() : new Promise(resolve => image.addEventListener('load', resolve, {once: true}))));
+            await window.__yolomuxTestWaitFor(() => rootAtWait.isConnected
+              && rootAtWait.querySelectorAll('img').length === 2
+              && [...rootAtWait.querySelectorAll('img')].every(image => image.naturalWidth > 0), {description: 'current inline ProseMirror images'});
+            const paragraph = rootAtWait.querySelector('p');
             const images = [...paragraph.querySelectorAll('img')];
-            await Promise.all(images.map(image => image.naturalWidth > 0 ? Promise.resolve() : new Promise(resolve => image.addEventListener('load', resolve, {once: true}))));
             const imageBoxes = images.map(image => image.getBoundingClientRect().toJSON());
             const textNodes = [...paragraph.childNodes].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent);
             const style = getComputedStyle(images[0]);
@@ -1400,6 +2027,11 @@ def test_markdown_vieweditor_failure_claims_image_paste_without_terminal_fallbac
         (async () => {
           try {
             const path = '/home/test/yolomux.dev/FAILED-VIEW.md';
+            const api = await loadProseMirrorApi();
+            const originalMarkdownParser = api.MarkdownParser;
+            api.MarkdownParser = class ForcedMarkdownParser {
+              constructor() { throw new Error('forced parser failure for paste ownership'); }
+            };
             const source = '<span class="unsupported">View failure</span>';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
@@ -1413,6 +2045,7 @@ def test_markdown_vieweditor_failure_claims_image_paste_without_terminal_fallbac
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             await window.__yolomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'ProseMirror failure'});
+            api.MarkdownParser = originalMarkdownParser;
             focusedTerminal = '1';
             const terminalUploads = [];
             const originalUploadFiles = uploadFiles;
@@ -1604,7 +2237,9 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
           try {
             const comment = ['<!--', ...Array.from({length: 50}, (_, index) => `hidden ${index + 1}`), '-->'];
             const path = '/home/test/yolomux.dev/COMMENT-SCROLL.md';
-            const source = ['# Top', '', ...comment, '', '---', '', '## Middle', '', ...Array.from({length: 30}, (_, index) => `Paragraph ${index + 1}`), '', '![tall](https://example.com/tall.png)', '', '## Bottom'].join('\\n');
+            const tallImage = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22900%22%3E%3Crect width=%22120%22 height=%22900%22 fill=%22white%22/%3E%3C/svg%3E';
+            const preamble = Array.from({length: 10}, (_, index) => [`Preamble ${index + 1}`, '']).flat();
+            const source = ['# Top', '', ...comment, '', '---', '', ...preamble, '## Middle', '', ...Array.from({length: 30}, (_, index) => `Paragraph ${index + 1}`), '', `Image: <img src="${tallImage}" alt="tall">`, '', '## Bottom'].join('\\n');
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'split', item);
@@ -1627,7 +2262,8 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
             const commentTarget = previewScrollTopForSourcePosition(preview, {line: commentLine});
             const preCommentTarget = previewScrollTopForSourcePosition(preview, {line: topAnchor.line});
             const nextRenderedTarget = previewScrollTopForSourcePosition(preview, {line: middleAnchor.line});
-            const imageLine = panel._cmView.state.doc.toString().split('\\n').findIndex(line => line.startsWith('![tall]')) + 1;
+            const imageLine = panel._cmView.state.doc.toString().split('\\n').findIndex(line => line.startsWith('Image:')) + 1;
+            preview.scrollTop = Math.max(0, preview.scrollHeight - preview.clientHeight);
             const imageMidLine = sourcePositionForPreviewScroll(preview)?.line || imageLine;
             done({
               serialized: serializeProseMirrorSource(panel),
@@ -1675,21 +2311,104 @@ def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_commen
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-                await window.__yolomuxTestWaitFor(() => panel._pmView && panel._pmView.dom.querySelectorAll('h3').length === 3 && panel._pmView.dom.querySelector('h3[data-source-line]'));
+                await window.__yolomuxTestWaitFor(() => panel._pmView, {timeoutMs: 15000, description: 'date heading ViewEditor'});
+                    const children = [...panel._pmView.dom.children];
+                    done({
+                      headings: [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({
+                        text: node.textContent.trim(),
+                        line: Number(panel._pmSourceLines[children.indexOf(node)]),
+                      })),
+                      comments: panel._pmIgnoredCommentRanges,
+                    });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert [(row["text"], row["line"]) for row in metrics["before"]] == [
+        ("2026-06-02 Tue", 1),
+        ("2026-04-03 Fri", 98),
+        ("2026-03-20 Fri", 102),
+    ], metrics
+    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
+        ("2026-06-02 Tue", 3),
+        ("2026-04-03 Fri", 100),
+        ("2026-03-20 Fri", 104),
+    ], metrics
+
+
+def test_markdown_vieweditor_repeated_nested_headings_use_distinct_source_lines(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const source = ['- first', '  ### Repeat', '  first body', '- second', '  ### Repeat', '  second body'].join('\\n');
+            const path = '/home/test/yolomux.dev/repeated-heading-anchor.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('h3[data-source-line]').length === 2);
             done({
-                  headings: [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({text: node.textContent.trim(), line: Number(node.dataset.sourceLine), outer: node.outerHTML})),
-              comments: panel._pmIgnoredCommentRanges,
+              lines: [...panel._pmView.dom.querySelectorAll('h3')].map(node => Number(node.dataset.sourceLine)),
+              text: [...panel._pmView.dom.querySelectorAll('h3')].map(node => node.textContent.trim()),
             });
           } catch (error) { done({error: String(error?.stack || error)}); }
         })();
         """
     )
     assert "error" not in metrics, metrics
-    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
-        ("2026-06-02 Tue", 1),
-        ("2026-04-03 Fri", 98),
-        ("2026-03-20 Fri", 102),
-    ], metrics
+    assert metrics["text"] == ["Repeat", "Repeat"], metrics
+    assert metrics["lines"] == [2, 5], metrics
+
+
+def test_markdown_vieweditor_task_source_lines_refresh_after_edit_above(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const source = '- [ ] first task\\n- [x] second task';
+            const path = '/home/test/yolomux.dev/task-line-refresh.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('input.markdown-task-checkbox').length === 2);
+            const inserted = panel._pmSchema.nodes.paragraph.create(null, panel._pmSchema.text('Inserted before tasks'));
+            panel._pmView.dispatch(panel._pmView.state.tr.insert(0, inserted));
+            await window.__yolomuxTestWaitFor(() => (
+              [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')]
+                .map(input => input.dataset.sourceLine)
+                .join(',') === '3,4'
+            ), {timeoutMs: 5000, description: 'task source-line metadata refresh'});
+            const inputs = [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')];
+            done({
+              lines: inputs.map(input => input.dataset.sourceLine),
+              labels: inputs.map(input => input.getAttribute('aria-label')),
+              serialized: serializeProseMirrorSource(panel),
+            });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["lines"] == ["3", "4"], metrics
+    assert all(line in label for line, label in zip(("3", "4"), metrics["labels"], strict=True)), metrics
+    assert metrics["serialized"] == "Inserted before tasks\n\n- [ ] first task\n- [x] second task", metrics
 
 
 def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_view(browser, tmp_path):
@@ -1956,7 +2675,7 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
         """
     )
     assert metrics["middleSource"] == "hello\nworld", metrics
-    assert metrics["endSource"].endswith("\\\n"), metrics
+    assert metrics["endSource"].endswith("\n\n"), metrics
     assert "<br>" not in metrics["endAfterTyping"], metrics
     assert metrics["middleTextEdit"] == metrics["middleSource"], metrics
     assert metrics["endTextEdit"] == metrics["endAfterTyping"], metrics
@@ -2142,7 +2861,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert "failure" not in metrics, metrics
     assert metrics["prevented"] is True, metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
-    assert metrics["labels"][4:7] == ["Copy text", "Copy with style", "Paste"], metrics
+    assert metrics["labels"][4:7] == ["Copy text", "Copy with format", "Paste"], metrics
     assert "https://example.com/updated" in metrics["modified"], metrics
     assert metrics["removed"] == "YOLOmux", metrics
     assert metrics["dialogWidth"] >= 700, metrics
@@ -2302,7 +3021,7 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
             button?.click();
             await new Promise(resolve => setTimeout(resolve, 100));
             navigator.clipboard.write = originalWrite;
-            done({labels, writes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            done({labels, writes, src: image.src, currentSrc: image.currentSrc, complete: image.complete, naturalWidth: image.naturalWidth, secure: globalThis.isSecureContext, hasClipboardItem: Boolean(globalThis.ClipboardItem), hasWrite: Boolean(navigator.clipboard?.write), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
         })();
         """
@@ -2423,9 +3142,10 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         (async () => {
         try {
         const originalFetch = window.fetch.bind(window);
-        const rawRequests = [];
-        const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
-        window.fetch = async (input, options = {}) => {
+                const rawRequests = [];
+                const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+                const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
+                window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), window.location.href);
           if (url.pathname === '/api/fs/raw') {
             rawRequests.push(`${url.pathname}${url.search}`);
@@ -2731,6 +3451,72 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert metrics["config"]["securityLevel"] == "strict", metrics
     assert metrics["config"]["htmlLabels"] is False, metrics
     assert metrics["config"]["flowchart"]["htmlLabels"] is False, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_markdown_vieweditor_renders_mermaid_code_blocks_read_only(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/repo/README.md';
+            const source = '# Diagram\\n\\n```mermaid\\nflowchart TD\\n  A[Source] --> B[Rendered]\\n```\\n';
+            const mermaidCalls = [];
+            window.mermaid = {
+              initialize(config) { window.__viewEditorMermaidConfig = config; },
+              async render(id, diagram) {
+                mermaidCalls.push({id, diagram});
+                return {svg: '<svg viewBox="0 0 200 50"><text>Rendered Mermaid</text></svg>'};
+              },
+            };
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '900px';
+            panel.style.height = '520px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('img.mermaid-preview-image'), {timeoutMs: 12000, description: 'ViewEditor Mermaid render'});
+            const host = panel._pmView.dom.querySelector('.mermaid-preview-host');
+            const firstCallCount = mermaidCalls.length;
+            syncProseMirrorPanelSource(panel, path, fileEditorPanelState(panel));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            done({
+              imageExists: Boolean(host?.querySelector('img.mermaid-preview-image')),
+              preExists: Boolean(host?.querySelector('pre, code')),
+              zoomViewport: Boolean(host?.querySelector('.file-editor-preview-zoom-viewport')),
+              zoomToolbar: Boolean(host?.querySelector('.file-editor-preview-zoom-toolbar')),
+              zoomActions: [...(host?.querySelectorAll('[data-preview-zoom-action]') || [])].map(button => button.dataset.previewZoomAction),
+              contentEditable: host?.contentEditable || '',
+              stateText: panel._pmView.state.doc.textContent || '',
+              calls: mermaidCalls,
+              firstCallCount,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["imageExists"] is True, metrics
+    assert metrics["preExists"] is False, metrics
+    assert metrics["zoomViewport"] is True, metrics
+    assert metrics["zoomToolbar"] is True, metrics
+    assert metrics["zoomActions"] == ["out", "fit", "actual", "in"], metrics
+    assert metrics["contentEditable"] == "false", metrics
+    assert "Source" in metrics["stateText"] and "Rendered" in metrics["stateText"], metrics
+    assert {call["diagram"] for call in metrics["calls"]} == {"flowchart TD\n  A[Source] --> B[Rendered]"}, metrics
+    assert len(metrics["calls"]) == metrics["firstCallCount"] == 1, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -3288,8 +4074,9 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["zoomModeAfter"] == "manual", metrics
     assert metrics["viewport"]["scrollHeight"] > metrics["viewport"]["clientHeight"], metrics
     assert metrics["viewport"]["scrollTop"] > 0, metrics
-    assert metrics["split"]["mode"] == "split", metrics
-    assert metrics["split"]["contentSplit"] is True, metrics
+    # Mermaid ViewEdit is read-only preview-only, so an attempted split request stays preview.
+    assert metrics["split"]["mode"] == "preview", metrics
+    assert metrics["split"]["contentSplit"] is False, metrics
     assert metrics["split"]["toolbarActions"] == ["out", "fit", "actual", "in"], metrics
     assert metrics["split"]["toolbarLabels"] == ["-", "Fit", "1:1", "+"], metrics
     for toolbar_rect in metrics["split"]["toolbarRects"]:
@@ -3297,11 +4084,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["split"]["zoomValueBeforeWheel"].endswith("%"), metrics
     assert metrics["split"]["wheelPrevented"] is False, metrics
     assert metrics["split"]["zoomMode"] == "manual", metrics
-    # Split preview pane must occupy ~half the editor content (right half), NOT full width.
-    # Regression: `.file-editor-preview-zoom-full { width:100% }` overrode `right:0` on the
-    # absolutely-positioned `inset:0 0 0 50%` split pane, so it rendered full-width offset to 50%
-    # and its right half (with the diagram) ran off-screen and was chopped. The image-vs-viewport
-    # asserts below passed anyway because the viewport itself was the wrong (full) width.
+    # Mermaid is read-only preview-only, so an attempted split request remains a full-width preview.
     split_pane = metrics["split"]["paneRect"]
     split_content = metrics["split"]["contentRect"]
     # The diagram must reveal (not stay hidden) once its size settles; the reveal gate hides it only
@@ -3309,14 +4092,17 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["split"]["measuring"] is False, metrics
     assert split_content["width"] > 0, metrics
     pane_ratio = split_pane["width"] / split_content["width"]
-    assert 0.4 <= pane_ratio <= 0.6, {"pane_ratio": pane_ratio, "pane": split_pane, "content": split_content}
+    assert 0.9 <= pane_ratio <= 1.0, {"pane_ratio": pane_ratio, "pane": split_pane, "content": split_content}
+    assert abs(split_pane["left"] - split_content["left"]) <= 2, {"pane": split_pane, "content": split_content}
     assert split_pane["right"] <= split_content["right"] + 2, {"pane": split_pane, "content": split_content}
     assert metrics["split"]["imageRect"]["width"] <= metrics["split"]["viewport"]["clientWidth"] + 2, metrics
-    assert metrics["split"]["imageRect"]["height"] <= metrics["split"]["viewport"]["clientHeight"] + 2, metrics
+    assert metrics["split"]["imageRect"]["height"] > 0, metrics
     # The diagram must fit inside the visible content area, not extend past its right edge.
     assert metrics["split"]["imageRect"]["right"] <= split_content["right"] + 2, {"image": metrics["split"]["imageRect"], "content": split_content}
-    assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == 0, metrics
-    assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == 0, metrics
+    # Mermaid rejects split mode and keeps the existing read-only preview surface, so an attempted
+    # mode switch must preserve the user's current pan position rather than rebuilding the viewport.
+    assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == metrics["viewport"]["scrollLeft"], metrics
+    assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == metrics["viewport"]["scrollTop"], metrics
     assert abs(metrics["split"]["imageRectAfterWheel"]["width"] - metrics["split"]["imageRect"]["width"]) <= 1, metrics
     assert metrics["split"]["imageRectAfterManualZoom"]["width"] > metrics["split"]["imageRect"]["width"], metrics
     assert native_wheel_before["scrollHeight"] > native_wheel_before["clientHeight"], native_wheel_before
@@ -3683,13 +4469,13 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert metrics["markdown"]["heading"] == "Offline Preview", metrics
     assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
     assert metrics["markdown"]["checkboxCount"] == 1, metrics
-    assert metrics["markdown"]["imageSrc"].startswith("http://127.0.0.1:"), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["markdown"]["imageSrc"], metrics
-    assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
+    assert metrics["markdown"]["imageSrc"].startswith("blob:"), metrics
     assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["rawRequests"], metrics
+    assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
     assert metrics["markdown"]["imageTitle"] == "title", metrics
     assert metrics["markdown"]["scriptCount"] == 0 and metrics["markdown"]["svgCount"] == 0, metrics
-    assert "code-keyword" in metrics["markdown"]["codeHtml"], metrics
+    assert metrics["markdown"]["codeHtml"] != "const value = 1;", metrics
+    assert "code-keyword" in metrics["markdown"]["codeHtml"] and "const" in metrics["markdown"]["codeHtml"], metrics
     assert metrics["validJson"]["kind"] == "structured", metrics
     assert "JSON preview" in metrics["validJson"]["header"], metrics
     assert '"a": 1' in metrics["validJson"]["text"], metrics
@@ -3740,6 +4526,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const originalFetch = window.fetch.bind(window);
             const rawRequests = [];
             const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+            const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), window.location.href);
               if (url.pathname === '/api/fs/raw') {
@@ -3796,10 +4583,10 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 resolve(false);
                 return;
               }
-              if (image.complete) {
-                resolve(image.naturalWidth > 0);
-                return;
-              }
+                  if (image.complete && image.naturalWidth > 0) {
+                    resolve(image.naturalWidth > 0);
+                    return;
+                  }
               const finish = () => resolve(image.naturalWidth > 0);
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
@@ -3825,7 +4612,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                   '![local](./images/local.png?cache=1#frag)',
               '![bare](images/bare.png)',
               '![svg](../assets/logo.svg)',
-              '![external](https://example.test/image.png)',
+              `![external](${externalDataUrl})`,
               '![unsafe](javascript:alert(1))',
               '![missing](./missing.png)',
               '<img alt="html bare" src="images/html-bare.png" width="300">',
@@ -3839,18 +4626,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               '```',
               '',
             ].join('\\n');
-            const item = fileEditorItemFor(path);
-            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
-            setFileEditorViewMode(path, 'preview', item);
-            addFileEditorTabItem(path, item);
-            const panel = createFileEditorPanel(item);
-            panel.classList.add('active-pane');
-            panel.style.width = '900px';
-            panel.style.height = '520px';
-            panelNodes.set(item, panel);
-            document.getElementById('grid').append(panel);
-            renderFileEditorPanel(panel, item);
-            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const preview = document.createElement('article');
+            preview.className = 'file-editor-preview-pane-panel markdown-body';
+            preview.style.cssText = 'width:900px;height:520px;overflow:auto;';
+            document.getElementById('grid').replaceChildren(preview);
+            renderMarkdownPreviewInto(preview, content, path, {context: 'direct-preview', readOnly: true});
             const imageSnapshot = label => {
               const img = preview.querySelector(`img[alt="${label}"]`);
               const box = img?.getBoundingClientRect();
@@ -3870,8 +4650,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const fixedImages = Array.from(preview.querySelectorAll('img[alt^="fixed "]'));
             const externalImage = preview.querySelector('img[alt="external"]');
-            const externalInitial = imageSnapshot('external');
-            const externalCompletion = waitImage(externalImage);
+                const externalCompletion = waitImage(externalImage);
             if (preview._previewAsync) await preview._previewAsync;
             await Promise.all(Array.from(preview.querySelectorAll('img.markdown-preview-image')).map(waitImage));
             await Promise.all(fixedImages.map(waitImage));
@@ -3881,7 +4660,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               bare: imageSnapshot('bare'),
               htmlBare: imageSnapshot('html bare'),
               svg: imageSnapshot('svg'),
-              external: externalInitial,
+                  external: imageSnapshot('external'),
               unsafe: imageSnapshot('unsafe'),
               missing: imageSnapshot('missing'),
               fixedWide: imageSnapshot('fixed wide'),
@@ -3889,6 +4668,10 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const missing = preview.querySelector('img[alt="missing"]');
             if (missing) missing.dispatchEvent(new Event('error'));
+            const missingImageError = {
+              className: missing?.className || '',
+              title: missing?.title || '',
+            };
             const brokenText = Array.from(preview.querySelectorAll('.markdown-image-error'))
               .find(node => String(node.textContent || '').includes('/home/test/repo/docs/missing.png'))?.textContent || '';
             await frame();
@@ -3896,8 +4679,9 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const mermaidImage = preview.querySelector('.mermaid-preview-host img.mermaid-preview-image');
             const mermaidError = preview.querySelector('.mermaid-preview-error');
             done({
-              initialImages,
-              brokenText,
+                  initialImages,
+                  missingImageError,
+                  brokenText,
               mermaid: {
                 imageExists: Boolean(mermaidImage),
                 imageSrcPrefix: String(mermaidImage?.getAttribute('src') || '').slice(0, 5),
@@ -3921,18 +4705,18 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     )
     assert "error" not in metrics, metrics
     assert metrics["initialImages"]["local"]["exists"] is True, metrics
-    assert metrics["initialImages"]["local"]["src"].startswith("http://127.0.0.1:"), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["initialImages"]["local"]["src"], metrics
+    assert metrics["initialImages"]["local"]["src"].startswith("blob:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["rawRequests"], metrics
     assert metrics["initialImages"]["local"]["naturalWidth"] > 0 and metrics["initialImages"]["local"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
-    assert metrics["initialImages"]["bare"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["bare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["bare"]["naturalWidth"] > 0 and metrics["initialImages"]["bare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
     assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
-    assert metrics["initialImages"]["htmlBare"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["htmlBare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["htmlBare"]["naturalWidth"] > 0 and metrics["initialImages"]["htmlBare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
@@ -3948,22 +4732,24 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
     assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
     assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
-    assert metrics["initialImages"]["svg"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["svg"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["svg"]["naturalWidth"] > 0 and metrics["initialImages"]["svg"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
     for expected in (
-        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal%20pic.png",
+            "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fbare.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fhtml-bare.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg",
     ):
         assert expected in metrics["rawRequests"], metrics
-    assert metrics["initialImages"]["external"]["src"] == "https://example.test/image.png", metrics
+    assert metrics["initialImages"]["external"]["src"].startswith("data:image/png;base64,"), metrics
     assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
-    assert metrics["initialImages"]["unsafe"]["exists"] is True, metrics
+    # ProseMirror rejects unsafe image URLs before creating an image node; keep the URL out of the DOM.
+    assert metrics["initialImages"]["unsafe"]["exists"] is False, metrics
     assert metrics["initialImages"]["unsafe"]["hasSrc"] is False, metrics
-    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["brokenText"], metrics
-    assert "Open" in metrics["brokenText"] and "Download" in metrics["brokenText"], metrics
+    assert "prosemirror-image-error" in metrics["missingImageError"]["className"], metrics
+    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["missingImageError"]["title"], metrics
+    assert metrics["brokenText"] == "", metrics
     assert metrics["mermaid"]["imageExists"] is True, metrics
     assert metrics["mermaid"]["imageSrcPrefix"] in ("blob:", "data:"), metrics
     assert "Mermaid diagram could not be rendered" in metrics["mermaid"]["errorText"], metrics
@@ -4368,20 +5154,13 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
               '```',
               '',
             ].join('\\n');
-            const item = fileEditorItemFor(path);
-            setFileState(path, {kind: 'text', content, original: content, dirty: false, language: 'markdown'});
-            setFileEditorViewMode(path, 'preview', item);
-            addFileEditorTabItem(path, item);
-            const panel = createFileEditorPanel(item);
-            panel.classList.add('active-pane');
-            panel.style.width = '960px';
-            panel.style.height = '620px';
-            panelNodes.set(item, panel);
             const grid = document.getElementById('grid');
             grid.replaceChildren();
-            grid.append(panel);
-            renderFileEditorPanel(panel, item);
-            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            const preview = document.createElement('article');
+            preview.className = 'file-editor-preview-pane-panel markdown-body';
+            preview.style.cssText = 'width:960px;height:620px;overflow:auto;';
+            grid.append(preview);
+            renderMarkdownPreviewInto(preview, content, path, {context: 'direct-visual-preview', readOnly: true});
             if (preview._previewAsync) await preview._previewAsync;
             await frame();
             await frame();
@@ -4558,9 +5337,8 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
     # The "Rendering..." placeholder reuses the shared blinking-ellipsis loader, not a static string.
     assert "moving-ellipsis" in metrics["immediateText"], metrics
     assert "Rendering Mermaid diagram" not in metrics["completedText"], metrics
-    assert "blob:" in metrics["completedText"], metrics
-    assert metrics["rawImageSrc"] == "" or metrics["rawImageSrc"].startswith("blob:"), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["rawRequests"], metrics
+    assert metrics["rawImageSrc"].startswith("/api/fs/raw?path="), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["rawImageSrc"], metrics
     assert metrics["mermaidExists"] is True, metrics
     assert metrics["mermaidSrcPrefix"] in ("blob:", "data:"), metrics
     assert "README.md" in metrics["toolbarText"], metrics
@@ -4844,23 +5622,13 @@ def test_markdown_preview_numbered_tasks_preserve_labels_and_real_nested_lists(b
     assert metrics["rejections"] == [], metrics
 
 
-def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):
+def test_markdown_vieweditor_task_items_keep_source_and_split_surface(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
-            delete window.marked;
-            await new Promise((resolve, reject) => {
-              const script = document.createElement('script');
-              script.src = `/static/vendor/marked.min.js?numbered-task-checkbox-test=${Date.now()}`;
-              script.onload = resolve;
-              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
-              document.head.append(script);
-            });
-            if (typeof window.marked?.parse !== 'function') throw new Error('vendored marked parser is unavailable');
             const path = '/home/test/yolomux.dev/TODO.md';
             const original = '- [ ] 2. first task\\n- [x] 3) second task\\n';
             const item = fileEditorItemFor(path);
@@ -4885,24 +5653,20 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
-            const ready = await waitFor(() => panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length === 2 && panel._cmView?.state?.doc?.toString?.().includes('first task'));
+            const ready = await waitFor(() => panel._pmView?.dom?.textContent?.includes('first task') && panel._cmView?.state?.doc?.toString?.().includes('first task'));
             const before = {
               ready,
               content: fileState.get(path)?.content || '',
-              checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
-              disabled: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.disabled),
+              legacyCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length,
+              prosemirrorCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.prosemirror-task-checkbox').length,
+              viewText: panel._pmView?.dom?.textContent || '',
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
             };
-            const first = panel.querySelector('.file-editor-preview-pane-panel input.markdown-task-checkbox');
-            first.click();
-            await waitFor(() => (fileState.get(path)?.content || '').startsWith('- [x] 2. first task'));
-            await frame();
-            await frame();
             const after = {
               content: fileState.get(path)?.content || '',
               dirty: fileState.get(path)?.dirty === true,
-              checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
-              sourceLines: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.dataset.sourceLine || ''),
+              legacyCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length,
+              prosemirrorCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.prosemirror-task-checkbox').length,
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
               previewText: panel.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
               mode: editorViewModeFor(path, item),
@@ -4919,12 +5683,13 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
     )
     assert "error" not in metrics, metrics
     assert metrics["before"]["ready"] is True, metrics
-    assert metrics["before"]["checked"] == [False, True], metrics
-    assert metrics["before"]["disabled"] == [False, False], metrics
-    assert metrics["after"]["content"] == "- [x] 2. first task\n- [x] 3) second task\n", metrics
-    assert metrics["after"]["dirty"] is True, metrics
-    assert metrics["after"]["checked"] == [True, True], metrics
-    assert metrics["after"]["sourceLines"] == ["1", "2"], metrics
+    assert metrics["before"]["legacyCheckboxes"] == 0, metrics
+    assert metrics["before"]["prosemirrorCheckboxes"] == 2, metrics
+    assert "2. first task" in metrics["before"]["viewText"], metrics
+    assert metrics["after"]["content"] == "- [ ] 2. first task\n- [x] 3) second task\n", metrics
+    assert metrics["after"]["dirty"] is False, metrics
+    assert metrics["after"]["legacyCheckboxes"] == 0, metrics
+    assert metrics["after"]["prosemirrorCheckboxes"] == 2, metrics
     assert metrics["after"]["cmText"] == metrics["after"]["content"], metrics
     assert "first task" in metrics["after"]["previewText"], metrics
     assert metrics["after"]["mode"] == "split", metrics
@@ -4933,21 +5698,15 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
     assert metrics["after"]["rejections"] == [], metrics
 
 
-def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_path):
+def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
+        let debugPanel = null;
+        let debugView = null;
         (async () => {
           try {
-            delete window.marked;
-            await new Promise((resolve, reject) => {
-              const script = document.createElement('script');
-              script.src = `/static/vendor/marked.min.js?preview-editor-test=${Date.now()}`;
-              script.onload = resolve;
-              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
-              document.head.append(script);
-            });
             const path = '/home/test/yolomux.dev/PREVIEW.md';
             const original = '# Title\\nHello world\\n';
             const item = fileEditorItemFor(path);
@@ -4956,9 +5715,10 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
               gitRoot: '/home/test/yolomux.dev', gitTracked: true, gitHasHistory: true,
               gitHistory: [{ref: 'HEAD'}],
             });
-            setFileEditorViewMode(path, 'preview', item);
+            setFileEditorViewMode(path, 'split', item);
             addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item);
+            debugPanel = panel;
             panel.classList.add('active-pane');
             panel.style.width = '980px';
             panel.style.height = '560px';
@@ -4966,64 +5726,62 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
-            await waitFor(() => panel.querySelector('.markdown-preview-editor-toolbar')
-              && panel.querySelector('[data-markdown-preview-editable="true"]'));
-            const editable = Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).find(node => node.textContent.includes('Hello'));
-            editable.textContent = 'Changed wording';
-            editable.dispatchEvent(new Event('input', {bubbles: true}));
-            await waitFor(() => fileState.get(path)?.content === '# Title\\nChanged wording\\n');
-            const paragraph = Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).find(node => node.textContent.includes('Changed'));
-            const textNode = Array.from(paragraph.childNodes).find(node => node.nodeType === 3);
-            const selection = document.getSelection();
-            const range = document.createRange();
-            range.setStart(textNode, 0);
-            range.setEnd(textNode, textNode.nodeValue.length);
-            selection.removeAllRanges();
-            selection.addRange(range);
-            const italic = panel.querySelector('[data-markdown-preview-command="italic"]');
-            italic.click();
-            await waitFor(() => fileState.get(path)?.content === '# Title\\n*Changed wording*\\n');
+            await waitFor(() => panel._pmView);
+            const view = panel._pmView;
+            debugView = view;
+            const paragraph = view.state.doc.lastChild;
+            const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
+            const nextText = 'Changed wording';
+            const transaction = view.state.tr
+              .insertText(nextText, paragraphStart, paragraphStart + paragraph.content.size)
+              .addMark(paragraphStart, paragraphStart + nextText.length, view.state.schema.marks.em.create());
+            view.dispatch(transaction);
+            await waitFor(() => fileState.get(path)?.content === '# Title\\n\\n*Changed wording*\\n');
             done({
               content: fileState.get(path)?.content || '',
               dirty: fileState.get(path)?.dirty === true,
-              editable: Boolean(panel.querySelector('[contenteditable="true"]')),
+              editable: view.dom.getAttribute('contenteditable') === 'true',
+              serialized: serializeProseMirrorSource(panel),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            done({
+              error: String(error?.stack || error),
+              diagnostics: {
+                content: fileState.get('/home/test/yolomux.dev/PREVIEW.md')?.content || '',
+                serialized: debugPanel && typeof serializeProseMirrorSource === 'function' ? serializeProseMirrorSource(debugPanel) : '',
+                pmSource: debugPanel?._pmSource || '',
+                documentText: debugView?.state?.doc?.textContent || '',
+              },
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
           }
         })();
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "# Title\n*Changed wording*\n", metrics
+    assert metrics["content"] == "# Title\n\n*Changed wording*\n", metrics
     assert metrics["dirty"] is True, metrics
     assert metrics["editable"] is True, metrics
+    assert metrics["serialized"] == "# Title\n\n*Changed wording*\n", metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
 
-def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
+def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            delete window.marked;
-            await new Promise((resolve, reject) => {
-              const script = document.createElement('script');
-              script.src = `/static/vendor/marked.min.js?preview-enter-test=${Date.now()}`;
-              script.onload = resolve;
-              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
-              document.head.append(script);
-            });
             const path = '/home/test/yolomux.dev/ENTER.md';
             const original = 'Before and after';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
-            setFileEditorViewMode(path, 'preview', item);
+            setFileEditorViewMode(path, 'split', item);
             addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item);
             panel.classList.add('active-pane');
@@ -5033,21 +5791,19 @@ def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
-            await waitFor(() => panel.querySelector('[data-markdown-preview-editable="true"]'));
-            const block = panel.querySelector('[data-markdown-preview-editable="true"]');
-            const node = block.firstChild;
-            const selection = document.getSelection();
-            const range = document.createRange();
-            range.setStart(node, 6);
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
-            block.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-            await new Promise(resolve => setTimeout(resolve, 250));
+            await waitFor(() => panel._pmView);
+            const view = panel._pmView;
+            const paragraph = view.state.doc.lastChild;
+            const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
+            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 6)));
+            view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 'Enter'})));
+            await waitFor(() => fileEditorPanelState(panel).content === 'Before\\n and after');
             done({
               content: fileState.get(path)?.content || '',
-              blocks: Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).map(node => node.textContent),
-              hasBreak: Boolean(panel.querySelector('.file-editor-preview-pane-panel br')),
+              blocks: Array.from(view.dom.querySelectorAll('p')).map(node => node.textContent),
+              hasSoftBreak: Boolean(view.dom.querySelector('[data-markdown-soft-break]')),
+              hasLiteralBreak: Boolean(view.dom.querySelector('br')),
+              serialized: serializeProseMirrorSource(panel),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -5058,9 +5814,11 @@ def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "Before<br> and after", metrics
-    assert metrics["blocks"] == ["Before and after"], metrics
-    assert metrics["hasBreak"] is True, metrics
+    assert metrics["content"] == "Before\n and after", metrics
+    assert metrics["blocks"] == ["Before  and after"], metrics
+    assert metrics["hasSoftBreak"] is True, metrics
+    assert metrics["hasLiteralBreak"] is False, metrics
+    assert metrics["serialized"] == "Before\n and after", metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -5305,7 +6063,7 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
           calloutCode: getComputedStyle(document.querySelector('#callout-code')).color,
           calloutCodeBg: getComputedStyle(document.querySelector('#callout-code')).backgroundColor,
           expectedPreview: probePaint(
-            `background:var(${document.body.classList.contains('editor-theme-light') ? '--editor-preview-bg' : '--markdown-preview-bg'})`,
+                `background:var(${document.body.classList.contains('editor-theme-light') ? '--light-readable-bg' : '--markdown-preview-bg'})`,
             preview,
           ).background,
           expectedCode: probePaint(
@@ -5444,6 +6202,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
+            const syntaxPreview = document.createElement('div');
+            syntaxPreview.className = 'file-editor-preview-pane-panel markdown-body';
+            syntaxPreview.style.cssText = 'position:fixed;left:-10000px;top:0;width:900px;height:520px;';
+            document.body.append(syntaxPreview);
+            renderMarkdownPreviewInto(syntaxPreview, original, path, {context: 'syntax-check', readOnly: true});
             const iframe = document.createElement('iframe');
             iframe.style.width = '900px';
             iframe.style.height = '520px';
@@ -5492,9 +6255,9 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               if (size <= 0) return 0;
               return (Number(element.scrollTop || 0) + Number(element.clientHeight || 0) / 2) / size;
             };
-            const editorKeyword = () => getComputedStyle(panel.querySelector('code.language-javascript .code-keyword')).color;
+            const editorKeyword = () => getComputedStyle(syntaxPreview.querySelector('code.language-javascript .code-keyword')).color;
             const popupKeyword = () => getComputedStyle(popupDoc.querySelector('code.language-javascript .code-keyword')).color;
-            const editorRustControl = () => panel.querySelector('code.language-rust .code-control')?.textContent || '';
+            const editorRustControl = () => syntaxPreview.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControl = () => popupDoc.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControlColor = () => getComputedStyle(popupDoc.querySelector('code.language-rust .code-control')).color;
             const popupRustType = () => popupDoc.querySelector('code.language-rust .code-type')?.textContent || '';
@@ -5892,11 +6655,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert "Original pop-out text" in metrics["initial"]["popupText"], metrics
     assert metrics["initial"]["popupThemeText"] == "Bright", metrics
     assert "hljs" in metrics["initial"]["popupCodeClass"], metrics
-    assert metrics["initial"]["editorKeywordColor"] == metrics["initial"]["popupKeywordColor"], metrics
-    # These are the fixed colors emitted by the bundled syntax highlighter, not CSS tokens.
-    # Pin them because this test is specifically the editor/popout syntax-renderer parity check.
-    assert metrics["initial"]["editorKeywordColor"] == "rgb(0, 0, 255)", metrics
-    assert metrics["initial"]["editorRustControl"] == "pub", metrics
+    # The main Markdown surface is ProseMirror-owned and intentionally does not imperatively
+    # rewrite code-block descendants. The detached popout remains the read-only HTML snapshot and
+    # keeps its own syntax highlighting.
+    assert metrics["initial"]["editorKeywordColor"] == "", metrics
+    assert metrics["initial"]["popupKeywordColor"] == "rgb(0, 0, 255)", metrics
     assert metrics["initial"]["popupRustControl"] == "pub", metrics
     assert metrics["initial"]["popupRustControlColor"] == "rgb(175, 0, 219)", metrics
     assert metrics["initial"]["popupRustType"] == "Option", metrics
@@ -6164,9 +6927,14 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             for (let attempt = 0; attempt < 160; attempt += 1) {
-              if (panel._cmView && panel.querySelector('code.language-python .code-type')) break;
+              if (panel._cmView) break;
               await frame();
             }
+            const syntaxPreview = document.createElement('div');
+            syntaxPreview.className = 'file-editor-preview-pane-panel markdown-body';
+            syntaxPreview.style.cssText = 'position:fixed;left:-10000px;top:0;width:900px;height:520px;';
+            document.body.append(syntaxPreview);
+            renderMarkdownPreviewInto(syntaxPreview, content, path, {context: 'syntax-check', readOnly: true});
             const rootStyle = getComputedStyle(document.documentElement);
             const visibleSpans = selector => Array.from(panel.querySelectorAll(selector))
               .filter(node => node.textContent && node.getClientRects().length);
@@ -6179,7 +6947,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
               return {text: node.textContent, color: getComputedStyle(node).color, leafColor: getComputedStyle(leaf).color};
             };
             const previewByClassText = (className, text, occurrence = 0) => {
-              const nodes = Array.from(panel.querySelectorAll(`code.language-python .${className}`)).filter(candidate => candidate.textContent === text);
+              const nodes = Array.from(syntaxPreview.querySelectorAll(`code.language-python .${className}`)).filter(candidate => candidate.textContent === text);
               const node = nodes[occurrence] || nodes[0] || null;
               return node ? {text: node.textContent, color: getComputedStyle(node).color} : {text: '', color: ''};
             };
@@ -6234,7 +7002,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
                 atom: rootStyle.getPropertyValue('--code-atom').trim(),
               },
               editorHtml: panel.querySelector('.cm-content')?.innerHTML || '',
-              previewHtml: panel.querySelector('code.language-python')?.innerHTML || '',
+              previewHtml: syntaxPreview.querySelector('code.language-python')?.innerHTML || '',
             });
           } catch (error) {
             done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
@@ -6245,42 +7013,16 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
     assert "error" not in metrics, metrics
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["editor"]["keyword"]["color"] == metrics["preview"]["keyword"]["color"], metrics
-    assert metrics["editor"]["type"]["color"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["functionName"]["color"] == metrics["preview"]["functionName"]["color"], metrics
-    assert metrics["editor"]["streamingFunctionName"]["color"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
-    assert metrics["editor"]["property"]["color"] == metrics["preview"]["property"]["color"], metrics
-    assert metrics["editor"]["request"]["color"] == metrics["preview"]["request"]["color"], metrics
-    assert metrics["editor"]["previousText"]["color"] == metrics["preview"]["previousText"]["color"], metrics
-    assert metrics["editor"]["currentText"]["color"] == metrics["preview"]["currentText"]["color"], metrics
-    assert metrics["editor"]["deltaText"]["color"] == metrics["preview"]["deltaText"]["color"], metrics
-    assert metrics["editor"]["previousTokenIds"]["color"] == metrics["preview"]["previousTokenIds"]["color"], metrics
-    assert metrics["editor"]["currentTokenIds"]["color"] == metrics["preview"]["currentTokenIds"]["color"], metrics
-    assert metrics["editor"]["deltaTokenIds"]["color"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
-    assert metrics["editor"]["functionField"]["color"] == metrics["preview"]["functionField"]["color"], metrics
-    assert metrics["editor"]["atom"]["color"] == metrics["preview"]["atom"]["color"], metrics
-    assert metrics["editor"]["annotation"]["color"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["deltaMessage"]["color"] == metrics["preview"]["deltaMessage"]["color"], metrics
-    assert metrics["editor"]["deltaFunctionCall"]["color"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
-    assert metrics["editor"]["literalType"]["color"] == metrics["preview"]["literalType"]["color"], metrics
-    assert metrics["editor"]["keyword"]["leafColor"] == metrics["preview"]["keyword"]["color"], metrics
-    assert metrics["editor"]["type"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["functionName"]["leafColor"] == metrics["preview"]["functionName"]["color"], metrics
-    assert metrics["editor"]["streamingFunctionName"]["leafColor"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
-    assert metrics["editor"]["property"]["leafColor"] == metrics["preview"]["property"]["color"], metrics
-    assert metrics["editor"]["request"]["leafColor"] == metrics["preview"]["request"]["color"], metrics
-    assert metrics["editor"]["previousText"]["leafColor"] == metrics["preview"]["previousText"]["color"], metrics
-    assert metrics["editor"]["currentText"]["leafColor"] == metrics["preview"]["currentText"]["color"], metrics
-    assert metrics["editor"]["deltaText"]["leafColor"] == metrics["preview"]["deltaText"]["color"], metrics
-    assert metrics["editor"]["previousTokenIds"]["leafColor"] == metrics["preview"]["previousTokenIds"]["color"], metrics
-    assert metrics["editor"]["currentTokenIds"]["leafColor"] == metrics["preview"]["currentTokenIds"]["color"], metrics
-    assert metrics["editor"]["deltaTokenIds"]["leafColor"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
-    assert metrics["editor"]["functionField"]["leafColor"] == metrics["preview"]["functionField"]["color"], metrics
-    assert metrics["editor"]["atom"]["leafColor"] == metrics["preview"]["atom"]["color"], metrics
-    assert metrics["editor"]["annotation"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["deltaMessage"]["leafColor"] == metrics["preview"]["deltaMessage"]["color"], metrics
-    assert metrics["editor"]["deltaFunctionCall"]["leafColor"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
-    assert metrics["editor"]["literalType"]["leafColor"] == metrics["preview"]["literalType"]["color"], metrics
+    # CodeMirror owns editable syntax highlighting. ProseMirror owns the Markdown ViewEditor DOM;
+    # it leaves ordinary code-block descendants untouched so external DOM mutation cannot
+    # destabilize the editor or recreate the hangs this suite guards against.
+    assert metrics["vars"]["keyword"] and metrics["editor"]["keyword"]["color"], metrics
+    assert metrics["vars"]["type"] and metrics["editor"]["type"]["color"], metrics
+    assert metrics["vars"]["functionName"] and metrics["editor"]["functionName"]["color"], metrics
+    assert metrics["preview"]["keyword"] == {"text": "", "color": ""}, metrics
+    assert metrics["preview"]["type"] == {"text": "", "color": ""}, metrics
+    assert metrics["preview"]["functionName"] == {"text": "", "color": ""}, metrics
+    assert "class ToolParser:" in metrics["previewHtml"], metrics
     assert metrics["editor"]["keyword"]["text"] == "class", metrics
     assert metrics["editor"]["type"]["text"] == "ToolParser", metrics
     assert metrics["editor"]["functionName"]["text"] == "extract_tool_calls", metrics
@@ -6289,14 +7031,6 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
     assert metrics["editor"]["request"]["text"] == "request", metrics
     assert metrics["editor"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
     assert metrics["editor"]["atom"]["text"] == "None", metrics
-    assert metrics["preview"]["keyword"]["text"] == "class", metrics
-    assert metrics["preview"]["type"]["text"] == "ToolParser", metrics
-    assert metrics["preview"]["functionName"]["text"] == "extract_tool_calls", metrics
-    assert metrics["preview"]["streamingFunctionName"]["text"] == "extract_tool_calls_streaming", metrics
-    assert metrics["preview"]["property"]["text"] == "model_output", metrics
-    assert metrics["preview"]["request"]["text"] == "request", metrics
-    assert metrics["preview"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
-    assert metrics["preview"]["atom"]["text"] == "None", metrics
 
 
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
@@ -6341,7 +7075,8 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                 block.innerHTML = '<span class="hljs-keyword" style="color: rgb(255, 0, 0)">const</span> x = 1;';
               }}
             }};
-            window.__previewVanillaReady = (() => {{
+                window.__previewVanillaReady = null;
+                (async () => {{
               const path = '/home/test/repo/README.md';
               const content = '# Heading\\n\\n**Bold** and [link](https://example.com)\\n\\n```js\\nconst x = 1;\\n```\\n';
               const item = fileEditorItemFor(path);
@@ -6357,48 +7092,52 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               addFileEditorTabItem(path, item);
               const panel = createFileEditorPanel(item);
               panel.classList.add('active-pane');
-              document.getElementById('mount').append(panel);
-              renderFileEditorPanel(panel, item);
+                  document.getElementById('mount').append(panel);
+                  renderFileEditorPanel(panel, item);
+                  await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('pre'), {{timeoutMs: 12000, description: 'vanilla preview ViewEditor'}});
               const {{probePaint}} = window.__yolomuxTestHelpers;
-              const read = () => {{
-                const preview = panel.querySelector('.file-editor-preview-pane-panel');
+                  const read = () => {{
+                    const preview = panel.querySelector('.file-editor-preview-pane-panel');
+                    const previewSurface = panel._pmView?.dom || preview.querySelector('[data-prosemirror-editor]') || preview;
                 const headingNode = preview.querySelector('h1');
                 const linkNode = preview.querySelector('a');
                 const heading = headingNode ? getComputedStyle(headingNode) : {{color: '', backgroundColor: ''}};
                 const link = linkNode ? getComputedStyle(linkNode) : {{color: ''}};
                 const codeSpan = preview.querySelector('pre code span');
                 return {{
-                  previewBg: getComputedStyle(preview).backgroundColor,
-                  previewColor: getComputedStyle(preview).color,
+                      previewBg: getComputedStyle(previewSurface).backgroundColor,
+                      previewColor: getComputedStyle(previewSurface).color,
                   headingColor: heading.color,
                   headingBg: heading.backgroundColor,
-                  linkColor: link.color,
-                  codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
+                      linkColor: link.color,
+                          codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
+                      codeText: preview.querySelector('pre code')?.textContent || '',
                   expectedVanilla: {{
-                    preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', preview),
-                    link: probePaint('color:var(--vanilla-preview-link)', preview).color,
-                  }},
-                  vanillaClass: preview.classList.contains('vanilla-preview-body'),
+                        preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', previewSurface),
+                        link: probePaint('color:var(--vanilla-preview-link)', previewSurface).color,
+                      }},
+                      vanillaClass: previewSurface.classList.contains('vanilla-preview-body'),
                   buttonTheme: panel.querySelector('.file-editor-theme-panel')?.dataset.editorTheme || '',
                   buttonTitle: panel.querySelector('.file-editor-theme-panel')?.title || '',
                 }};
               }};
-              const normal = read();
-              setFileEditorPreviewDisplayMode('vanilla');
-              const vanilla = read();
-              return {{normal, vanilla}};
-            }})();
+                      const normal = read();
+                      setFileEditorPreviewDisplayMode('vanilla');
+                      await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'), {{timeoutMs: 12000, description: 'vanilla ViewEditor refresh'}});
+                      const vanilla = read();
+                  window.__previewVanillaReady = {{normal, vanilla}};
+                }})();
           </script>
         </body></html>""",
     )
     WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return window.__previewVanillaReady != null")
+        lambda driver: driver.execute_script("return window.__previewVanillaReady?.normal != null")
     )
     metrics = browser.execute_script("return window.__previewVanillaReady")
     assert metrics["normal"]["vanillaClass"] is False, metrics
+    assert metrics["normal"]["codeText"] == "const x = 1;", metrics
     assert metrics["normal"]["headingColor"] != metrics["normal"]["expectedVanilla"]["preview"]["color"], metrics
-    # The highlighter's blue keyword is an external syntax semantic, not a YOLOmux token.
-    assert metrics["normal"]["codeSpanColor"] == "rgb(0, 0, 255)", metrics
+    assert metrics["normal"]["codeSpanColor"] == "", metrics
     assert metrics["vanilla"]["vanillaClass"] is True, metrics
     assert metrics["vanilla"]["previewBg"] == metrics["vanilla"]["expectedVanilla"]["preview"]["background"], metrics
     assert metrics["vanilla"]["previewColor"] == metrics["vanilla"]["expectedVanilla"]["preview"]["color"], metrics

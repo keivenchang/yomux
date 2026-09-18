@@ -97,6 +97,18 @@ def test_control_socket_path_falls_back_for_long_unix_paths(monkeypatch, tmp_pat
     assert len(os.fsencode(str(path))) < control.CONTROL_SOCKET_PATH_LIMIT
 
 
+def test_control_socket_path_keeps_control_budget_when_runtime_fallback_is_long(monkeypatch, tmp_path):
+    long_dir = tmp_path
+    for index in range(12):
+        long_dir = long_dir / f"very-long-runtime-dir-{index}"
+    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(long_dir))
+    monkeypatch.setattr(control, "CONTROL_SOCKET_DIR", tmp_path / "control")
+
+    path = control.control_socket_path(token="abcdef", pid=12345)
+
+    assert len(os.fsencode(str(path))) < control.CONTROL_SOCKET_PATH_LIMIT
+
+
 def test_send_yolomux_control_request_round_trips(monkeypatch):
     response = {"ok": True, "echo": {"action": "ping"}}
     fake_socket = FakeClientSocket(b"")

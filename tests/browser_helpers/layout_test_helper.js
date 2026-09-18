@@ -1054,35 +1054,8 @@ globalThis.__layoutTestApi = {
   sessionFileLookbackLabelForTest: sessionFileLookbackLabel,
   sessionFileLookbackOptionsForTest: sessionFileLookbackOptions,
   normalizeSessionFileLookbackHoursForTest: normalizeSessionFileLookbackHours,
-  backgroundOwnerSearchIndexSummaryForTest: backgroundOwnerSearchIndexSummary,
-  backgroundOwnerStatsSummaryForTest: backgroundOwnerStatsSummary,
-  backgroundOwnerSessionFilesSummaryForTest: backgroundOwnerSessionFilesSummary,
-  backgroundOwnerOwnsAllRolesForTest: backgroundOwnerOwnsAllRoles,
-  backgroundOwnerCurrentOwnerLiveForTest: backgroundOwnerCurrentOwnerLive,
-  topbarOwnerStatusHtmlForTest: topbarOwnerStatusHtml,
-  topbarOwnerStatusTitleForTest: topbarOwnerStatusTitle,
-  createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
-  showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
-  setBackgroundOwnerStatusPayloadForTest(payload) {
-    backgroundOwnerStatusState.resource?.replace(payload, 'test');
-    backgroundOwnerStatusState.payload = payload;
-    backgroundOwnerStatusState.updatedAt = Date.now();
-    backgroundOwnerStatusState.loading = false;
-    backgroundOwnerStatusState.error = '';
-  },
-  refreshBackgroundOwnerStatusForTest: refreshBackgroundOwnerStatus,
   loadAutoStatusesForTest: loadAutoStatuses,
   autoStatusRequestActiveForTest() { return loadAutoStatuses.request !== null; },
-  applyBackgroundOwnerStatusPayloadForTest: applyBackgroundOwnerStatusPayload,
-  backgroundOwnerStatusStateForTest() {
-    return {
-      payload: backgroundOwnerStatusState.payload,
-      loading: backgroundOwnerStatusState.loading,
-      error: backgroundOwnerStatusState.error,
-      request: backgroundOwnerStatusState.request,
-      updatedAt: backgroundOwnerStatusState.updatedAt,
-    };
-  },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   applyLocaleForTest: applyLocale,
@@ -1449,7 +1422,7 @@ globalThis.__layoutTestApi = {
       registrationPending: serverWatchRootsState.registrationPending,
       registered: serverWatchRootsState.registered,
       syncedAt: serverWatchRootsState.syncedAt,
-      baselinePending: serverWatchRootsState.watchDiffPromise !== null,
+      baselinePending: serverWatchRootsState.watchBaselinePromise !== null,
       timer: serverWatchRootsState.timer,
       timerDelay: serverWatchRootsState.timerDelay,
       pendingOptions: {...serverWatchRootsState.pendingOptions},
@@ -2663,6 +2636,8 @@ globalThis.__layoutTestApi = {
   setClientSettingsPayloadPatchForTest(patch) {
     clientSettingsPayload = {...clientSettingsPayload, ...(patch || {})};
   },
+  applySettingsPayloadForTest: applySettingsPayload,
+  clientSettingsMtimeNsForTest() { return clientSettingsMtimeNs; },
   setWindowConfirmForTest(fn) {
     window.confirm = fn;
   },

@@ -1,13 +1,12 @@
 """Mock-agent corpus and tmux helpers shared by status and mock-agent tests."""
-import os
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 import time
 
 from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
+from tools.tmux_paths import short_tmux_socket_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
@@ -39,10 +38,6 @@ def tmux_cmd(tmux_binary, socket_path, *args, timeout=8):
         timeout=timeout,
         check=False,
     )
-
-
-def short_tmux_socket_path(prefix):
-    return Path(tempfile.mkdtemp(prefix=f"{prefix}-{os.getpid()}-", dir="/tmp")) / "s"
 
 
 def _capture(tmux_binary, socket_path, session):

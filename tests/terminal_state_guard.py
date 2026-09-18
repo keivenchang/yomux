@@ -31,7 +31,7 @@ TERMINAL_STATE_CONTRACTS = (
         proof_test="test_k0_each_user_command_class_executes_k1_through_k5",
     ),
     TerminalStateContract(
-        contract_id="differ-refreshing-elsewhere",
+        contract_id="differ-pending-producer",
         owner_path=Path("static_src/js/yolomux/86_changes_editor.js"),
         owner_token="function scheduleSessionFilesProducerDeadline(destination, payload)",
         proof_path=Path("tests/test_gate_differ.py"),

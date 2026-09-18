@@ -2,6 +2,8 @@
 
 YO!agent is YOLOmux's central command surface for product questions, session watches, safe sends, and multi-agent handoffs. YO!agent skills are local product instructions, not Codex or Claude skills and not arbitrary executable plugins. A YO!skill teaches YO!agent how to decide, phrase, monitor, or coordinate work; YOLOmux server code owns tools, auth checks, target resolution, risk checks, audit events, and pane sends.
 
+Backend scope: YO!agent is currently implemented by the Python backend. The experimental Go capability catalog declares `pane.agent.v1` unavailable, and Go `/api/yoagent/*` requests return typed `501 feature_unavailable`. Go YO!stats can observe agent status and tokens, but that read-only telemetry does not provide YO!agent sends, watches, skill management, or handoffs.
+
 ## Locations
 
 - Built-in skills ship read-only with YOLOmux under `yolomux_lib/yoagent/builtin_skills/*.yaml`.

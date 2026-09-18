@@ -56,6 +56,7 @@ from tests.gate_harness import run_fixture_cleanup_phases
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yolomux_lib.host_identity import process_start_identity
+from tools.instance_isolation import synthetic_test_environment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -142,12 +143,12 @@ def build_environment(
     the instance deriving some paths itself and inheriting others from the operator's session.
     """
 
-    env = dict(os.environ)
-    env.update(
+    env = synthetic_test_environment(
         {
             "HOME": str(paths.home_dir),
             "TMPDIR": str(paths.tmp_dir),
             "XDG_CONFIG_HOME": str(paths.root / "xdg-config"),
+            "XDG_DATA_HOME": str(paths.root / "xdg-data"),
             "XDG_STATE_HOME": str(paths.root / "xdg-state"),
             "XDG_CACHE_HOME": str(paths.root / "xdg-cache"),
             "YOLOMUX_CONFIG_DIR": str(paths.config_dir),
@@ -161,11 +162,18 @@ def build_environment(
             "YOLOMUX_CA_DIR": str(paths.ca_dir),
             "YOLOMUX_LOG_DIR": str(paths.log_dir),
             "YOLOMUX_WORKSPACE_BASE": str(paths.workspace_dir),
+            # The Go launcher receives this same explicit value through execve;
+            # it must never infer the operator's default tmux server.
             "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
             "YOLOMUX_TEST_AUTH_BYPASS": "1" if auth_bypass else "0",
             "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "0.2",
             "YOLOMUX_STARTUP_WATCHDOG_SECONDS": "0",
             "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(port),
+            # Ordinary isolated web-server tests use synthetic seeded stats (or do not
+            # exercise collectors). Never let a child discover the operator's OpenCode
+            # database through an inherited data root; collector tests opt in with explicit
+            # fixture roots and override this flag.
+            "YOLOMUX_STATS_DISABLE_COLLECTORS": "1",
             "PYTHONPATH": str(source_root),
             "PYTHONUNBUFFERED": "1",
         }
@@ -376,6 +384,7 @@ def start_isolated_dev_server(
     auth_bypass: bool = True,
     sessions: tuple[str, ...] = (),
     port: int | None = None,
+    force: bool = False,
     env_overrides: dict[str, str] | None = None,
     exec_plan_json: str | None = None,
 ) -> IsolatedDevServer:
@@ -420,6 +429,8 @@ def start_isolated_dev_server(
             "--",
             *command,
         ]
+    if force:
+        command.append("--force")
     release_lease()
     process = subprocess.Popen(
         command,

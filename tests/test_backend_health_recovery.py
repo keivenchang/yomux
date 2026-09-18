@@ -17,9 +17,9 @@ milestone report:
     over `_issue_retry`, the one place a control object is touched.
 
   * A SERVICE WHOSE ABSENCE IS EXPECTED IS NEVER RETRIED. statusd, approvald, indexd and
-    watchd are demand-started and rest absent; batchd carries `scheduler_not_owned` when this
-    process lost the background-owner election. Retrying either class would start daemons on
-    an idle machine or fight the election. Both are fenced twice, by the row's own
+    watchd are demand-started and rest absent; batchd carries `scheduler_inactive` when this
+    process has not started its local scheduler. Retrying either class would start daemons on
+    an idle machine. Both are fenced twice, by the row's own
     declarations and by the reduced state, and `test_the_row_fence_holds_on_its_own` proves
     the second fence still holds when the first is bypassed.
 
@@ -279,7 +279,7 @@ def test_a_demand_started_absent_service_is_never_retried(tmp_path: Path, servic
 
 
 def test_batchd_without_the_scheduler_lease_is_never_retried(tmp_path: Path):
-    """`scheduler_not_owned` is the election, not an outage. Retrying it would fight the winner."""
+    """`scheduler_inactive` is expected absence, not an outage. Retrying it would start idle work."""
 
 
     reset_local_service_traffic()
@@ -295,7 +295,7 @@ def test_batchd_without_the_scheduler_lease_is_never_retried(tmp_path: Path):
         harness.services["batchd"].row = dict(row)
         harness.tick(20)
         assert control.calls == [], control.calls
-        assert harness.outcome("batchd") == "retry_blocked_scheduler_not_owned"
+        assert harness.outcome("batchd") == "retry_blocked_scheduler_inactive"
     finally:
         harness.observer.stop()
         reset_local_service_traffic()
@@ -309,12 +309,12 @@ def test_the_row_fence_holds_on_its_own():
     """
 
     assert recovery_row_fence({"pid": 0, "demand_started": True}) == BLOCKED_DEMAND_STARTED_ABSENT
-    assert recovery_row_fence({"pid": 0, "absence_expected_reason": "scheduler_not_owned"}) == "scheduler_not_owned"
+    assert recovery_row_fence({"pid": 0, "absence_expected_reason": "scheduler_inactive"}) == "scheduler_inactive"
     # A named owner that is not engaging the service blocks even when a failure was recorded:
     # who owns scheduling is not a question a restart can answer.
     assert recovery_row_fence(
-        {"pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "broker exited"}
-    ) == "scheduler_not_owned"
+        {"pid": 0, "absence_expected_reason": "scheduler_inactive", "last_failure": "broker exited"}
+    ) == "scheduler_inactive"
     # A demand-started service that ran and exited is verified down, not legitimately absent.
     assert recovery_row_fence({"pid": 0, "demand_started": True, "last_failure": "worker exited"}) == ""
     # An unreadable excuse is not an excuse, and it is not a licence to act either.
@@ -348,7 +348,7 @@ def test_every_blocked_cause_keeps_its_own_token():
         "identity_mismatch": recovery_blocked_cause("down", REASON_IDENTITY_MISMATCH),
         "revision_mismatch": recovery_blocked_cause("down", REASON_REVISION_MISMATCH),
         "demand_started_absent": recovery_blocked_cause("starting", "service_absent"),
-        "scheduler_not_owned": recovery_blocked_cause("starting", "scheduler_not_owned"),
+        "scheduler_inactive": recovery_blocked_cause("starting", "scheduler_inactive"),
     }
     assert causes == {
         "upgrade_required": "upgrade_required",
@@ -356,7 +356,7 @@ def test_every_blocked_cause_keeps_its_own_token():
         "identity_mismatch": "identity_mismatch",
         "revision_mismatch": "revision_mismatch",
         "demand_started_absent": BLOCKED_DEMAND_STARTED_ABSENT,
-        "scheduler_not_owned": "scheduler_not_owned",
+        "scheduler_inactive": "scheduler_inactive",
     }
     tokens = [recovery_blocked_token(cause) for cause in causes.values()]
     tokens += [
@@ -444,7 +444,7 @@ def test_the_boot_flash_publishes_observer_arming_instead_of_a_retry_storm(tmp_p
 
     Measured on this branch with three isolated boots (see the milestone report): statsd is
     verified-down from the observer's first cycle and reaches `ready` only after the
-    background-owner election and the statsd start complete. The first ladder boundary is 1.0s
+    local scheduler startup and the statsd start complete. The first ladder boundary is 1.0s
     and the observation cadence is 2.0s, so the first attempt would land ~2s into every boot --
     inside the flash, racing the supervisor that is already starting statsd. The fence is
     therefore a separate arming window, and the flash stays visible in history as
@@ -511,7 +511,7 @@ def test_the_statsd_pin_pending_excuse_is_the_first_fence_over_the_boot_flash(tm
 
 
 def test_the_boot_flash_ends_before_the_fence_lifts_and_nothing_is_retried(tmp_path: Path):
-    """The real boot shape: statsd is down, the election completes, statsd comes up. Zero retries."""
+    """The real boot shape: statsd is down, local startup completes, statsd comes up. Zero retries."""
 
     reset_local_service_traffic()
     control = TrapControl()

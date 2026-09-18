@@ -2,6 +2,8 @@
 
 > **STATUS 2026-09-03: HISTORICAL.** This was the pre-activation plan for durable aggregate rings. Current code uses schema 9, persists `aggregate_publication`, `aggregate_rings`, `aggregate_ring_slots`, and the invalidation ledger, and serves cold starts from the persisted ring. The remaining sections are the design and measurement record, not pending implementation work. [`specs/STATS_API.md`](specs/STATS_API.md) is the current storage and serving contract.
 
+Backend scope: this landing sequence records the Python statsd migration. Go now has its own schema-9 ring implementation under `internal/stats`, but it did not follow these Python cache-shadow/cutover steps and must not be evaluated from the historical step table.
+
 This plan recorded the intended move from a `PublishedCache` read path to durable per-resolution rings without a flag day. It is retained for migration history only.
 
 The transition is:

@@ -524,6 +524,18 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
           if (url.pathname === '/api/stats-observations') {
             return Promise.resolve(new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
           }
+          if (url.pathname.startsWith('/api/operations/')) {
+            const operationId = url.pathname.split('/').pop();
+            const operation = operations.find(item => item.operationId === operationId);
+            if (operation) {
+              return Promise.resolve(new Response(JSON.stringify({
+                state: 'queued',
+                status: 'pending',
+                retry_after_seconds: 1,
+                operation: {id: operationId, kind: 'filesystem_operation'},
+              }), {status: 202, headers: {'Content-Type': 'application/json'}}));
+            }
+          }
           if (url.pathname !== '/api/fs/write') return nativeFetch(input, options);
           const body = JSON.parse(options.body || '{}');
           writes.push(body);
@@ -565,11 +577,13 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
             const panels = fileEditorPanelsForPath(path);
             const firstPanel = panels.find(panel => panel.dataset.layoutItem !== secondItem);
             const secondPanel = panels.find(panel => panel.dataset.layoutItem === secondItem);
-            replaceDocument(firstPanel, 'first panel\\n');
-            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
+            // Use the real settings path so deferred metadata refreshes cannot overwrite the
+            // short test delay with the six-second default.
+            await saveSettingsPatch({editor: {autosave: true, autosave_delay_seconds: 0.5}});
             fileEditorAutosaveEnabled = true;
             fileEditorAutosaveDelaySeconds = 0.5;
-            rescheduleAllFileAutosaves();
+            replaceDocument(firstPanel, 'first panel\\n');
+            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
             await window.__yolomuxTestWaitFor(() => writes.length === 1, {timeoutMs: 5000, description: 'first autosave timer request'});
             replaceDocument(secondPanel, 'second panel\\n');
             await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'second panel\\n', {timeoutMs: 5000, description: 'second panel edit'});
@@ -596,7 +610,7 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
-          } catch (error) {
+            } catch (error) {
             done({error: String(error?.stack || error), writes});
           } finally {
             window.fetch = nativeFetch;

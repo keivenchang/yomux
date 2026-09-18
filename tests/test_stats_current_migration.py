@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
 import json
 import os
 import sqlite3
@@ -234,6 +235,26 @@ def _create_live_schema2_database(path: Path) -> Path:
 
 def _file_state(path: Path) -> tuple[bytes, int]:
     return path.read_bytes(), path.stat().st_mtime_ns
+
+
+def test_direct_migration_holds_writer_lease_across_preflight_and_activation(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    events: list[tuple[str, Path]] = []
+
+    @contextmanager
+    def observed_lease(path: Path):
+        events.append(("enter", Path(path)))
+        try:
+            yield
+        finally:
+            events.append(("exit", Path(path)))
+
+    monkeypatch.setattr(migration, "writer_lease", observed_lease)
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    target = state / DATABASE_FILENAME
+    assert report.active_database == target
+    assert events == [("enter", target), ("exit", target)]
 
 
 def test_schema5_current_database_migrates_original_facts_to_schema7_without_mutating_source(tmp_path):

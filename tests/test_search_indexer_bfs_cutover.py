@@ -2,7 +2,7 @@
 
 - item 3: a configured-root FULL build is routed through the breadth-first, directory-at-a-time
   engine instead of the DFS `_walk_root_with_metrics`, publishes the v5 coverage manifest, and a
-  follower disk read sees layer-1 rows; the retired DFS path survives only as the no-runner
+  read-only disk access sees layer-1 rows; the retired DFS path survives only as the no-runner
   fallback and its off-list backstop still clears `building`.
 - item 1: the `indexd` scheduler obligation is reported as measured scheduled work, not the
   hard-coded demand-only idle, and is released when no root is configured.
@@ -290,7 +290,7 @@ def test_configured_full_build_uses_bfs_not_the_dfs_walk(tmp_path, monkeypatch):
     assert coverage["active_generation"] >= 1
 
 
-def test_follower_disk_read_sees_layer_one_rows_from_the_bfs_build(tmp_path):
+def test_read_only_disk_access_sees_layer_one_rows_from_the_bfs_build(tmp_path):
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "top.txt").write_text("x", encoding="utf-8")
@@ -561,8 +561,11 @@ def test_failed_release_preserves_the_lease_handle_for_retry(tmp_path):
 def test_failed_lease_does_not_pin_a_handle_and_retries_next_call(tmp_path):
     client, daemon = _leased_client(tmp_path)
     daemon.fail_lease = True
-    client.lease_configured_roots([str(tmp_path / "a")])
+    result = client.lease_configured_roots([str(tmp_path / "a")])
+    assert result["ok"] is False
     assert client.scheduler_lease_id is None
+    assert client.scheduled_roots == []
+    assert daemon.enqueued == []
     daemon.fail_lease = False
     client.lease_configured_roots([str(tmp_path / "a")])
     assert client.scheduler_lease_id is not None
@@ -716,7 +719,7 @@ def _commit_layer_one_only(root):
     """Publish just the root listing (layer 1), leaving deeper layers pending -> a warming snapshot.
 
     Built under the SAME policy the read path resolves (skip_dirs + exclusion signature) so the
-    committed snapshot actually matches the follower read, matching the existing layer-1 test.
+    committed snapshot actually matches the read-only access, matching the existing layer-1 test.
     """
     policy = fs_search._search_index_policy(root)
     build = bfs_index.ProgressiveBuild(
@@ -748,7 +751,7 @@ def test_cache_hit_returns_within_budget_while_crawler_and_batchd_blocked(tmp_pa
         return {}
 
     monkeypatch.setattr(file_index, "request_background_index_search", _blocked)
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", lambda *_a, **_k: _blocked())
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", lambda *_a, **_k: _blocked())
     file_index._PROMOTION_LAST_DISPATCH.clear()
 
     started = time.perf_counter()
@@ -778,6 +781,31 @@ def test_cache_hit_returns_within_budget_while_crawler_and_batchd_blocked(tmp_pa
     assert "changes" in delta and isinstance(delta["cursor"], str) and delta["more"] is False
 
 
+def test_cold_search_does_not_call_persistent_indexer_synchronously(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    file_index.set_build_authority_checker(lambda _role: False)
+    refreshes = []
+    file_index.set_background_refresh_requester(
+        lambda role, payload: refreshes.append((role, payload))
+        or {"ok": True, "accepted": True, "local": True, "fallback": False}
+    )
+
+    def fail_persistent_search(*_args, **_kwargs):
+        raise AssertionError("cold search must not synchronously call the persistent indexer")
+
+    monkeypatch.setattr(file_index, "request_background_index_search", fail_persistent_search)
+    try:
+        payload = fs_search.search_files(str(root), query="needle", recursive=True)
+    finally:
+        file_index.set_build_authority_checker(None)
+        file_index.set_background_refresh_requester(None)
+
+    assert payload["index_state"] == "warming"
+    assert payload["refresh_requested"] is True
+    assert len(refreshes) == 1
+
+
 def test_warming_query_promotes_the_frontier_without_blocking(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
@@ -790,20 +818,21 @@ def test_warming_query_promotes_the_frontier_without_blocking(tmp_path, monkeypa
     file_index._PROMOTION_LAST_DISPATCH.clear()
 
     captured: list[tuple[str, dict]] = []
-    dispatched = threading.Event()
-
     def _requester(role, payload):
         captured.append((role, payload))
-        dispatched.set()
-        return {"ok": True, "accepted": True, "local_owner": True}
+        return {"ok": True, "accepted": True, "queued": True, "local": True}
 
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", _requester)
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", _requester)
+    monkeypatch.setattr(
+        file_index,
+        "_BACKGROUND_WORK_SUBMITTER",
+        lambda _key, work: (work(), {"queued": True})[1],
+    )
 
     # A name that exists only below the published frontier: honest empty + warming, and it promotes.
     result = fs_search.search_files(str(root), "buried", recursive=True)
     assert result["index_state"] == "warming"
     assert "buried.txt" not in {entry["name"] for entry in result["files"]}
-    assert dispatched.wait(3)  # promotion dispatched OFF the query thread
     role, payload = captured[0]
     assert role == file_index.SEARCH_INDEX_ROLE
     assert payload["operation"] == "promote"
@@ -828,27 +857,36 @@ def test_indexd_promote_bumps_frontier_or_kicks_unscheduled_root(tmp_path):
     assert str(other.resolve()) in indexer.pending_paths
 
 
-def test_request_user_visible_promotion_is_nonblocking_and_debounced(tmp_path, monkeypatch):
+def test_request_user_visible_promotion_uses_scheduler_requester_and_debounces(tmp_path, monkeypatch):
     file_index._PROMOTION_LAST_DISPATCH.clear()
-    started = threading.Event()
     root = tmp_path / "root"
     root.mkdir()
 
-    def _slow(_role, _payload):
-        started.set()
-        time.sleep(5)
-        return {}
+    calls = []
 
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", _slow)
+    def _requester(role, payload):
+        calls.append((role, payload))
+        return {"ok": True, "accepted": True, "queued": True}
+
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", _requester)
+    submitted = []
+    monkeypatch.setattr(
+        file_index,
+        "_BACKGROUND_WORK_SUBMITTER",
+        lambda key, work: submitted.append((key, work)) or {"queued": True},
+    )
     t0 = time.perf_counter()
     assert file_index.request_user_visible_promotion(str(root)) is True
-    assert time.perf_counter() - t0 < 0.5  # dispatch returns immediately; the RPC runs off-thread
+    assert time.perf_counter() - t0 < 0.5  # the scheduler requester only enqueues the operation
     assert file_index.request_user_visible_promotion(str(root)) is False  # coalesced within the window
-    assert started.wait(2)
+    assert len(calls) == 0
+    assert len(submitted) == 1
+    submitted[0][1]()
+    assert len(calls) == 1
 
 
 def test_request_user_visible_promotion_without_owner_is_a_noop(monkeypatch):
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", None)
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", None)
     assert file_index.request_user_visible_promotion("/x/no-owner") is False
 
 
@@ -857,16 +895,17 @@ def test_request_user_visible_promotion_carries_the_authorized_root_identity(tmp
     root = tmp_path / "root"
     root.mkdir()
     captured = []
-    delivered = threading.Event()
-
     def capture(_role, payload):
         captured.append(payload)
-        delivered.set()
-        return {}
+        return {"queued": True}
 
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", capture)
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", capture)
+    monkeypatch.setattr(
+        file_index,
+        "_BACKGROUND_WORK_SUBMITTER",
+        lambda _key, work: (work(), {"queued": True})[1],
+    )
     assert file_index.request_user_visible_promotion(str(root)) is True
-    assert delivered.wait(2)
     assert captured == [
         {
             "root": str(root),

@@ -76,7 +76,7 @@ def cpu_time_delta_percent(
 
 
 def bounded_batchd_status() -> dict[str, Any]:
-    status = batchd.BatchClient().runtime_status()
+    status = BatchClient().runtime_status()
     return {
         "healthy": bool(status.get("healthy")),
         "pid": int(status.get("pid") or 0),

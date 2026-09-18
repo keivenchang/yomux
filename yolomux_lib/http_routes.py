@@ -463,7 +463,12 @@ def get_stats_snapshot(request: Any, parsed: Any, route: Route) -> None:
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )
-    if result.payload is not None:
+    if result.status in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+        # 304/204 are bodyless by the API writer contract. The forwarder
+        # returns metadata for in-process callers, but never pass that
+        # metadata to the transport writer for a bodyless status.
+        request.write_json(None, status=result.status)
+    elif result.payload is not None:
         request.write_json(result.payload, status=result.status)
     elif result.status == HTTPStatus.OK:
         request.write_product_bytes(result.body, inline_json_product_metadata(result.body))
@@ -477,7 +482,9 @@ def get_stats_delta(request: Any, parsed: Any, route: Route) -> None:
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )
-    if result.payload is not None:
+    if result.status in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+        request.write_json(None, status=result.status)
+    elif result.payload is not None:
         request.write_json(result.payload, status=result.status)
     elif result.status == HTTPStatus.OK:
         request.write_product_bytes(result.body, inline_json_product_metadata(result.body))
@@ -705,11 +712,6 @@ def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
     request.write_json_bytes(body, status=status)
 
 
-def get_background_status(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
-    request.write_app_result(request.server.app.background_owner_status_payload())
-
-
 def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None:
     del route
     scope = str(query_one(request_query(request, parsed), "measurement_scope", "") or "")
@@ -747,11 +749,6 @@ def get_system_status_advanced(request: Any, parsed: Any, route: Route) -> None:
 def get_server_logs(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_json(server_logs_payload())
-
-
-def post_background_claim(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
-    request.write_app_result(request.server.app.background_owner_claim_payload())
 
 
 def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
@@ -1612,7 +1609,6 @@ CORE_ROUTES = (
     Route("GET", "/api/transcripts", "readonly", get_transcripts, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, protocol=RESPONSE_JSON, group="core"),
-    Route("GET", "/api/background/status", "readonly", get_background_status, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/system-status", "readonly", get_system_status, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     # Advanced diagnostics are a separate retained body, fetched when a reader opens the
     # disclosure rather than assembled into every five-second poll. It reads a published snapshot
@@ -1637,7 +1633,6 @@ CORE_ROUTES = (
     Route("POST", "/api/self-update", "admin", post_self_update, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/stats-observations", "readonly", post_stats_observations, protocol=RESPONSE_JSON, body_limit=128 * 1024, group="core"),
     Route("POST", "/api/pricing-catalog/refresh", "admin", post_pricing_catalog_refresh, protocol=RESPONSE_JSON, group="core"),
-    Route("POST", "/api/background/claim", "admin", post_background_claim, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/ensure-session", "admin", post_ensure_session, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/create-session-plan", "admin", get_create_session_plan, protocol=RESPONSE_JSON, group="core"),
     Route("POST", "/api/create-session", "admin", post_create_session, protocol=RESPONSE_JSON, group="core"),

@@ -1723,7 +1723,7 @@ async function runTabberSuite() {
     assert.equal(idleClaudeWindow.mtime, 2000, 'after the live working state clears, Tabber returns to the historical transcript clock');
   });
 
-  test('Tabber preserves Ago timestamps across follower refresh placeholders', () => {
+  test('Tabber preserves Ago timestamps across local refresh placeholders', () => {
     const api = loadYolomux('', ['4']);
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeDateModeForTest('date');
@@ -1748,9 +1748,9 @@ async function runTabberSuite() {
     assert.equal(originalDates['/s_4/w_0'], api.sessionFileTimeText(Date.now() / 1000), 'a live working row shows the current liveness clock instead of stale transcript history');
     assert.equal(originalDates['/s_4/w_1'], api.sessionFileTimeText(3000), 'full snapshot shows the shell timestamp');
 
-    const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: true}};
-    assert.equal(api.applyTabberActivityPayloadForTest(placeholder, 2), false, 'empty follower refresh is not authoritative over useful activity');
-    assert.deepEqual(windowDates(), originalDates, 'follower refresh cannot make several Tabber timestamps disappear');
+    const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing: true}};
+    assert.equal(api.applyTabberActivityPayloadForTest(placeholder, 2), false, 'empty local refresh is not authoritative over useful activity');
+    assert.deepEqual(windowDates(), originalDates, 'a local refresh cannot make several Tabber timestamps disappear');
 
     const replacement = {
       activity: {'4:1': {active_recency_ts: 5000}},
@@ -1762,7 +1762,7 @@ async function runTabberSuite() {
     assert.equal(api.applyTabberActivityPayloadForTest({...replacement, activity: {'4:1': {active_recency_ts: 7000}}}, 1), false, 'an older overlapping request cannot roll back an accepted snapshot');
     assert.equal(windowDates()['/s_4/w_1'], api.sessionFileTimeText(5000), 'stale response ordering leaves the accepted timestamp intact');
 
-    assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
+    assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
     assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(Date.now() / 1000), '/s_4/w_1': ''}, 'legitimate activity expiry removes historical rows without hiding a current working status');
   });
 
@@ -1801,7 +1801,7 @@ async function runTabberSuite() {
     assert.ok(/color:\s*var\(--pane-tab-active-text\)[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-color:\s*var\(--pane-tab-active-border\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(sharedActiveTabRule[1]), 'A5: the shared active tab owner carries the complete active paint');
     assert.equal((css.match(/border-bottom-color:\s*var\(--pane-tab-active-bg\)/g) || []).length, 1, 'A5: the exact active-tab paint signature has one owner');
     assert.ok(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab \.session-button-name,[\s\S]*\.tmux-pane-tab-token\.active \.session-button-detail,[\s\S]*\.pane-tab\.active \.session-button-detail\s*\{\s*color:\s*inherit/.test(css), 'A5: every active tab child inherits color from the shared shell paint');
-    assert.ok(/\.panel \.pane-tab:not\(\.active\)\s*\{\s*background:\s*var\(--pane-bar-bg\)/.test(css), 'A5: one unconditional panel owner paints inactive pane tabs');
+    assert.ok(/\.panel \.pane-tab:not\(\.active\),\s*\.panel \.tmux-pane-tab-token:not\(\.active\)\s*\{\s*background:\s*var\(--pane-bar-bg\)/.test(css), 'A5: one unconditional panel owner paints inactive pane tabs');
     assert.equal(css.includes('.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active)'), false, 'A5: inactive tab paint has no focus/readiness partition');
     assert.equal(/\.panel\.active-pane \.pane-tab\.active,\s*\.panel\.file-explorer-panel \.pane-tab\.active\s*\{\s*box-shadow:\s*none/.test(css), false, 'A5: focused pane tabs do not restate the base active no-shadow rule');
     const tabberSessionTabCss = css.match(/\.file-tree-row\.tabber-row \.tabber-session-tab\s*\{([\s\S]*?)\}/)?.[1] || '';
