@@ -164,7 +164,6 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.dangerously_yolo is True
     assert args.self_signed is True
     assert args.http is False
-    assert args.print_background_owner is False
     assert args.print_runtime_report is False
 
 
@@ -175,14 +174,6 @@ def test_parse_args_supports_explicit_http_opt_out(monkeypatch):
 
     assert args.http is True
     assert args.self_signed is False
-
-
-def test_print_background_owner_status_outputs_json(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": {"port": 8003}, "generations": []})
-
-    assert cli.print_background_owner_status() == 0
-
-    assert json.loads(capsys.readouterr().out) == {"current_owner": {"port": 8003}, "generations": []}
 
 
 def test_parse_args_supports_runtime_report(monkeypatch):
@@ -204,8 +195,6 @@ def _forbid_app_construction(monkeypatch):
 def test_print_runtime_report_uses_live_owner_control_socket_without_an_app(monkeypatch, capsys):
     _forbid_app_construction(monkeypatch)
     requests = []
-    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": {"port": 8002}})
-
     def fake_control(owner, request):
         requests.append((owner, request))
         return {"ok": True, "report": {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}}
@@ -216,13 +205,12 @@ def test_print_runtime_report_uses_live_owner_control_socket_without_an_app(monk
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["top_endpoints"] == [{"surface": "GET /api/session-files"}]
-    assert payload["owner_debug"] == {"current_owner": {"port": 8002}}
-    assert requests == [({"port": 8002}, {"action": "runtime_report"})]
+    assert payload["scheduler_diagnostics"] == {"debug": {"status": "local-only", "generations": []}}
+    assert requests == [(None, {"action": "runtime_report"})]
 
 
 def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, capsys, tmp_path):
     _forbid_app_construction(monkeypatch)
-    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": None})
     monkeypatch.setattr(cli, "send_yolomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
     monkeypatch.setattr(cli, "RUNTIME_DIR", tmp_path)
     lease_dir = tmp_path / "server-leases"
@@ -268,8 +256,6 @@ def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, ca
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     captured = {}
-    monkeypatch.setenv("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", "19001")
-    monkeypatch.setattr(cli, "is_managed_instance_port", lambda port: port == 19001)
     args = argparse.Namespace(
         host="0.0.0.0",
         port=19001,
@@ -280,7 +266,6 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         cert=None,
         key=None,
         print_transcripts=False,
-        print_background_owner=False,
         print_runtime_report=False,
         dev=False,
     )
@@ -319,9 +304,8 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
 
         client_events = _Events()
 
-        def start_background_owner(self, port=None, priority=0, managed_instance=False):
-            captured["background_owner_port"] = port
-            captured["background_owner_priority"] = priority
+        def start_background_scheduler(self, port=None, managed_instance=False):
+            captured["background_scheduler_port"] = port
             captured["managed_instance"] = managed_instance
             return True
 
@@ -358,7 +342,11 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
             "state=/tmp/state; cache=/tmp/cache; runtime=/tmp/runtime"
         ),
     )
-    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (SimpleNamespace(release=lambda: None), SimpleNamespace(release=lambda: None)),
+    )
     monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
     monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
     monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
@@ -371,8 +359,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["address"] == ("0.0.0.0", 19001)
     assert captured["tls_context"] is tls_marker
     assert captured["dev"] is False  # dev mode off by default
-    assert captured["background_owner_port"] == 19001
-    assert captured["background_owner_priority"] == 100
+    assert captured["background_scheduler_port"] == 19001
     assert captured["managed_instance"] is True
     assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
@@ -398,7 +385,6 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
         cert=None,
         key=None,
         print_transcripts=False,
-        print_background_owner=False,
         print_runtime_report=False,
         dev=False,
     )
@@ -427,7 +413,7 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
 
         client_events = _Events()
 
-        def start_background_owner(self, **_kwargs):
+        def start_background_scheduler(self, **_kwargs):
             return True
 
         def start_yoagent_backend_prewarm(self, **_kwargs):
@@ -454,7 +440,14 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
     monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
     monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
     monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
-    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: events.append("lease-release")))
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (
+            SimpleNamespace(release=lambda: events.append("root-release")),
+            SimpleNamespace(release=lambda: events.append("lease-release")),
+        ),
+    )
     monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
     monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
     monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
@@ -462,7 +455,7 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
     with pytest.raises(RuntimeError, match="injected app cleanup failure"):
         cli.main()
 
-    assert events == ["app-stop", "server-close", "lease-release"]
+    assert events == ["app-stop", "server-close", "root-release", "lease-release"]
 
 
 def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, capsys):
@@ -476,13 +469,16 @@ def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, ca
         cert=None,
         key=None,
         print_transcripts=False,
-        print_background_owner=False,
         print_runtime_report=False,
         dev=False,
     )
     monkeypatch.setattr(cli, "parse_args", lambda: args)
     monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
-    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: None)
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (SimpleNamespace(release=lambda: None), None),
+    )
     monkeypatch.setattr(cli, "TmuxWebtermApp", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate launch must not initialize app state")))
 
     assert cli.main() == 1
