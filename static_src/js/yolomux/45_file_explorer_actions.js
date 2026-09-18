@@ -2976,7 +2976,13 @@ function transcriptPreviewPaneIsActive(session) {
 function transcriptContextWatchRequests() {
   return activeSessions
     .filter(transcriptPreviewPaneIsActive)
-    .map(session => ({session, messages: transcriptPreviewMessages}));
+    .map(session => ({
+      session,
+      messages: transcriptPreviewMessages,
+      pane_target: typeof terminalContextMenuPaneTargetForSession === 'function'
+        ? terminalContextMenuPaneTargetForSession(session)
+        : '',
+    }));
 }
 
 function clientServerWatchState() {

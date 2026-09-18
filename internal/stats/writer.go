@@ -196,7 +196,7 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 	if err = ensureRingTriggers(ctx, db); err != nil {
 		return closeOnError(fmt.Errorf("ensure YO!stats ring triggers: %w", err))
 	}
-	if err = validateWriterSchema(ctx, db); err != nil {
+	if err = validateWriterSchema(ctx, db, true); err != nil {
 		return closeOnError(err)
 	}
 	if err := publishWriterFence(path); err != nil {
@@ -281,7 +281,11 @@ func validateWriterDatabaseReadOnly(ctx context.Context, path string) error {
 	if _, err := db.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
 		return fmt.Errorf("enable YO!stats read-only preflight: %w", err)
 	}
-	if err := validateWriterSchema(ctx, db); err != nil {
+	// Missing ring-protection triggers are repaired immediately after this
+	// read-only shape check, while the writer lease is held. The read-only
+	// boundary must not reject that repairable same-schema state before the
+	// write-capable connection can reach ensureRingTriggers.
+	if err := validateWriterSchema(ctx, db, false); err != nil {
 		return fmt.Errorf("YO!stats database failed read-only preflight: %w", err)
 	}
 	return nil
@@ -977,7 +981,7 @@ func ensureRingTriggers(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func validateWriterSchema(ctx context.Context, db *sql.DB) error {
+func validateWriterSchema(ctx context.Context, db *sql.DB, requireRingTriggers bool) error {
 	var app, version int64
 	if err := db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
 		return err
@@ -995,7 +999,7 @@ func validateWriterSchema(ctx context.Context, db *sql.DB) error {
 	if protocol > writerProtocol || build > writerBuild {
 		return &SchemaTooNewError{Found: SchemaVersion, Supported: SchemaVersion}
 	}
-	if err := validateRingShape(ctx, db); err != nil {
+	if err := validateRingShape(ctx, db, requireRingTriggers); err != nil {
 		return err
 	}
 	return nil

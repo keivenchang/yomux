@@ -1,0 +1,1336 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/stats"
+)
+
+const (
+	maxContextTranscriptBytes = maxContextTranscriptLines * 64 * 1024
+	maxContextItemText        = 5000
+	maxToolItemText           = 2200
+	maxCompactTranscriptItems = 200
+	maxProcEntries            = 4096
+	maxTranscriptEntries      = 512
+	maxContextTranscriptLines = 5000
+)
+
+func splitTmuxFields(line string) []string {
+	// tmux commands, paths, and window names may contain '|'; tabs are the
+	// established field boundary used by the inventory readers.
+	return strings.Split(line, "\t")
+}
+
+type goGitSnapshot struct {
+	Root       string
+	Branch     string
+	Head       string
+	HeadSHA    string
+	Upstream   string
+	DirtyCount int
+	Ahead      any
+	Behind     any
+}
+
+type procEntry struct {
+	PID     int
+	PPID    int
+	Command string
+}
+
+func runGitMetadata(path string, args ...string) (string, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	commandArgs := append([]string{"-C", path}, args...)
+	command := exec.CommandContext(ctx, "git", commandArgs...)
+	command.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	output, err := command.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(output)), true
+}
+
+func gitSnapshotForPath(path string) (goGitSnapshot, bool) {
+	root, ok := runGitMetadata(path, "rev-parse", "--show-toplevel")
+	if !ok || root == "" {
+		return goGitSnapshot{}, false
+	}
+	snapshot := goGitSnapshot{Root: filepath.Clean(root), Ahead: nil, Behind: nil}
+	snapshot.Branch, _ = runGitMetadata(path, "symbolic-ref", "--short", "HEAD")
+	snapshot.HeadSHA, _ = runGitMetadata(path, "rev-parse", "HEAD")
+	snapshot.Head, _ = runGitMetadata(path, "show", "-s", "--format=%s", "HEAD")
+	snapshot.Upstream, _ = runGitMetadata(path, "rev-parse", "--abbrev-ref", "@{upstream}")
+	if status, statusOK := runGitMetadata(path, "status", "--porcelain"); statusOK && status != "" {
+		snapshot.DirtyCount = len(strings.Split(status, "\n"))
+	}
+	if snapshot.Upstream != "" {
+		if counts, countsOK := runGitMetadata(path, "rev-list", "--left-right", "--count", snapshot.Upstream+"...HEAD"); countsOK {
+			fields := strings.Fields(counts)
+			if len(fields) == 2 {
+				behind, behindErr := strconv.Atoi(fields[0])
+				ahead, aheadErr := strconv.Atoi(fields[1])
+				if behindErr == nil && aheadErr == nil {
+					snapshot.Behind, snapshot.Ahead = behind, ahead
+				}
+			}
+		}
+	}
+	return snapshot, true
+}
+
+func goGraphID(kind, value string) string {
+	// Graph identifiers are only internal joins. Keep them stable within a host while avoiding
+	// embedding arbitrary filesystem/session text into object keys consumed by the browser.
+	var hash uint64 = 1469598103934665603
+	for _, character := range kind + "\x1f" + value {
+		hash ^= uint64(character)
+		hash *= 1099511628211
+	}
+	return fmt.Sprintf("go:%s:%x", kind, hash)
+}
+
+func emptyGoWorkGraph(generation uint64) map[string]any {
+	return map[string]any{
+		"version": 1, "loading": false, "generation": generation,
+		"tmux_sessions": map[string]any{}, "tmux_windows": map[string]any{}, "tmux_panes": map[string]any{},
+		"runtime_actors": map[string]any{}, "path_observations": map[string]any{},
+		"git_worktrees": map[string]any{}, "local_repositories": map[string]any{}, "hosted_repositories": map[string]any{},
+		"local_branches": map[string]any{}, "pull_requests": map[string]any{}, "linear_issues": map[string]any{},
+		"worktree_branch_activity": map[string]any{},
+	}
+}
+
+func appendStringValue(values map[string]any, key, value string) {
+	items, _ := values[key].([]string)
+	if value != "" {
+		for _, existing := range items {
+			if existing == value {
+				return
+			}
+		}
+		values[key] = append(items, value)
+	}
+}
+
+func (s *server) sessionWorkGraph(session string, info map[string]any, generation uint64) map[string]any {
+	graph := emptyGoWorkGraph(generation)
+	sessionID := goGraphID("tmux-session", session)
+	tmuxSessions := graph["tmux_sessions"].(map[string]any)
+	tmuxWindows := graph["tmux_windows"].(map[string]any)
+	tmuxPanes := graph["tmux_panes"].(map[string]any)
+	runtimeActors := graph["runtime_actors"].(map[string]any)
+	observations := graph["path_observations"].(map[string]any)
+	worktrees := graph["git_worktrees"].(map[string]any)
+	repositories := graph["local_repositories"].(map[string]any)
+	branches := graph["local_branches"].(map[string]any)
+
+	tmuxSessions[sessionID] = map[string]any{
+		"id": sessionID, "name": session, "tmux_window_ids": []string{}, "tmux_pane_ids": []string{}, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
+	}
+	panes, _ := info["panes"].([]map[string]any)
+	gitCache := map[string]goGitSnapshot{}
+	paneIDs := map[string]string{}
+	observationIDs := map[string]string{}
+	for _, pane := range panes {
+		target, _ := pane["target"].(string)
+		window, _ := pane["window"].(string)
+		path, _ := pane["current_path"].(string)
+		paneID := goGraphID("tmux-pane", session+"|"+target)
+		windowID := goGraphID("tmux-window", session+"|"+window)
+		paneIDs[target] = paneID
+		tmuxPanes[paneID] = map[string]any{
+			"id": paneID, "target": target, "pane_id": target, "index": pane["pane"], "current_path": path,
+			"command": pane["command"], "pid": pane["pid"], "active": pane["active"], "window_active": pane["window_active"],
+			"tmux_window_id": windowID, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
+		}
+		if _, exists := tmuxWindows[windowID]; !exists {
+			tmuxWindows[windowID] = map[string]any{"id": windowID, "tmux_session_id": sessionID, "index": window, "name": pane["window_name"], "tmux_pane_ids": []string{}}
+			appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_window_ids", windowID)
+		}
+		appendStringValue(tmuxWindows[windowID].(map[string]any), "tmux_pane_ids", paneID)
+		appendStringValue(tmuxSessions[sessionID].(map[string]any), "tmux_pane_ids", paneID)
+
+		if path == "" {
+			continue
+		}
+		observationID := goGraphID("path-observation", session+"|"+target+"|"+path)
+		observationIDs[target] = observationID
+		observation := map[string]any{"id": observationID, "path": path, "path_snapshot": path, "exists": true, "source": "pane-cwd", "priority": 10, "tmux_pane_id": paneID, "runtime_actor_id": nil, "git_worktree_id": nil}
+		observations[observationID] = observation
+		appendStringValue(tmuxPanes[paneID].(map[string]any), "path_observation_ids", observationID)
+		appendStringValue(tmuxSessions[sessionID].(map[string]any), "path_observation_ids", observationID)
+
+		snapshot, cached := gitCache[path]
+		if !cached {
+			snapshot, cached = gitSnapshotForPath(path)
+			if cached {
+				gitCache[path] = snapshot
+			}
+		}
+		if !cached {
+			continue
+		}
+		worktreeID := goGraphID("git-worktree", snapshot.Root)
+		repositoryID := goGraphID("local-repository", snapshot.Root)
+		branchID := goGraphID("local-branch", snapshot.Root+"|"+snapshot.Branch)
+		if _, exists := repositories[repositoryID]; !exists {
+			repositories[repositoryID] = map[string]any{"id": repositoryID, "common_git_dir": filepath.Join(snapshot.Root, ".git"), "git_worktree_ids": []string{}, "local_branch_ids": []string{}, "hosted_repository_id": nil}
+		}
+		if _, exists := worktrees[worktreeID]; !exists {
+			worktrees[worktreeID] = map[string]any{
+				"id": worktreeID, "root": snapshot.Root, "git_dir": filepath.Join(snapshot.Root, ".git"), "kind": "worktree",
+				"local_repository_id": repositoryID, "hosted_repository_id": nil, "current_branch_id": branchID,
+				"branch_activity_ids": []string{}, "path_observation_ids": []string{}, "pull_request_ids": []string{},
+				"activity_priority": 10, "has_actor_cwd": false, "activity_ts": 0, "activity_source": "",
+				"has_current_pull_request": false, "has_ranked_pull_request": false,
+				"git": map[string]any{"root": snapshot.Root, "cwd": path, "branch": snapshot.Branch, "head": snapshot.Head, "head_sha": snapshot.HeadSHA, "upstream": snapshot.Upstream, "dirty_count": snapshot.DirtyCount, "ahead": snapshot.Ahead, "behind": snapshot.Behind},
+			}
+			appendStringValue(repositories[repositoryID].(map[string]any), "git_worktree_ids", worktreeID)
+		}
+		appendStringValue(worktrees[worktreeID].(map[string]any), "path_observation_ids", observationID)
+		observation["git_worktree_id"] = worktreeID
+		if _, exists := branches[branchID]; !exists {
+			branches[branchID] = map[string]any{"id": branchID, "local_repository_id": repositoryID, "name": snapshot.Branch, "sha": snapshot.HeadSHA, "head_sha": snapshot.HeadSHA, "subject": snapshot.Head, "current": true, "remote": false, "checked_out_worktree_ids": []string{worktreeID}, "pull_request_ids": []string{}, "linear_issue_ids": []string{}, "updated_ts": 0}
+			appendStringValue(repositories[repositoryID].(map[string]any), "local_branch_ids", branchID)
+		}
+	}
+
+	agents, _ := info["agents"].([]map[string]any)
+	claimed := map[string]bool{}
+	for _, agent := range agents {
+		target, _ := agent["pane_target"].(string)
+		paneID := paneIDs[target]
+		if paneID == "" {
+			continue
+		}
+		claimed[target] = true
+		actorID := goGraphID("runtime-actor", session+"|"+target+"|agent")
+		runtimeActors[actorID] = map[string]any{"id": actorID, "tmux_pane_id": paneID, "kind": agent["kind"], "pid": agent["pid"], "command": agent["command"], "cwd": agent["cwd"], "status": agent["status"], "agent_session_id": agent["session_id"], "transcript": agent["transcript"], "error": agent["error"], "path_observation_ids": []string{}}
+		appendStringValue(tmuxPanes[paneID].(map[string]any), "runtime_actor_ids", actorID)
+		appendStringValue(tmuxSessions[sessionID].(map[string]any), "runtime_actor_ids", actorID)
+		if observationID := observationIDs[target]; observationID != "" {
+			runtimeActors[actorID].(map[string]any)["path_observation_ids"] = []string{observationID}
+			observations[observationID].(map[string]any)["runtime_actor_id"] = actorID
+			worktreeID, _ := observations[observationID].(map[string]any)["git_worktree_id"].(string)
+			if worktree := worktrees[worktreeID]; worktree != nil {
+				worktree.(map[string]any)["has_actor_cwd"] = true
+			}
+		}
+	}
+	for target, paneID := range paneIDs {
+		if claimed[target] {
+			continue
+		}
+		actorID := goGraphID("runtime-actor", session+"|"+target+"|shell")
+		runtimeActors[actorID] = map[string]any{"id": actorID, "tmux_pane_id": paneID, "kind": "shell", "pid": tmuxPanes[paneID].(map[string]any)["pid"], "command": tmuxPanes[paneID].(map[string]any)["command"], "cwd": tmuxPanes[paneID].(map[string]any)["current_path"], "status": nil, "agent_session_id": nil, "transcript": nil, "error": nil, "path_observation_ids": []string{}}
+		appendStringValue(tmuxPanes[paneID].(map[string]any), "runtime_actor_ids", actorID)
+		appendStringValue(tmuxSessions[sessionID].(map[string]any), "runtime_actor_ids", actorID)
+		if observationID := observationIDs[target]; observationID != "" {
+			runtimeActors[actorID].(map[string]any)["path_observation_ids"] = []string{observationID}
+		}
+	}
+	return graph
+}
+
+func agentKindFromCommand(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	first := strings.ToLower(filepath.Base(strings.Trim(fields[0], "\"'")))
+	switch first {
+	case "claude", "codex", "opencode":
+		return first
+	}
+	if first != "node" && first != "nodejs" && first != "python" && first != "python3" {
+		return ""
+	}
+	for _, raw := range fields[1:] {
+		word := strings.Trim(raw, "\"'")
+		if !strings.ContainsRune(word, '/') {
+			continue
+		}
+		switch base := strings.ToLower(filepath.Base(word)); base {
+		case "claude", "codex", "opencode":
+			return base
+		case "claude.py", "codex.py", "opencode.py":
+			if strings.Contains(" "+strings.Join(fields, " ")+" ", " --mock ") {
+				return strings.TrimSuffix(base, ".py")
+			}
+		}
+	}
+	return ""
+}
+
+func processCommand(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+}
+
+func processParent(pid int) int {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		parent, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
+		return parent
+	}
+	return 0
+}
+
+func processEntries() ([]procEntry, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	processes := make([]procEntry, 0)
+	for _, entry := range entries {
+		if len(processes) >= maxProcEntries {
+			break
+		}
+		pid, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil || pid <= 0 {
+			continue
+		}
+		command := processCommand(pid)
+		if command == "" {
+			continue
+		}
+		processes = append(processes, procEntry{PID: pid, PPID: processParent(pid), Command: command})
+	}
+	return processes, nil
+}
+
+func paneAgentProcess(panePID int, paneCommand string) (string, int, string) {
+	if kind := agentKindFromCommand(paneCommand); kind != "" {
+		return kind, panePID, paneCommand
+	}
+	processes, err := processEntries()
+	if err != nil {
+		return "", 0, ""
+	}
+	children := make(map[int][]procEntry)
+	for _, process := range processes {
+		children[process.PPID] = append(children[process.PPID], process)
+	}
+	queue := append([]procEntry(nil), children[panePID]...)
+	for len(queue) > 0 {
+		process := queue[0]
+		queue = queue[1:]
+		if kind := agentKindFromCommand(process.Command); kind != "" {
+			return kind, process.PID, process.Command
+		}
+		queue = append(queue, children[process.PID]...)
+	}
+	return "", 0, ""
+}
+
+func transcriptRoot(kind string) string {
+	if kind == "claude" {
+		if root := strings.TrimSpace(os.Getenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT")); root != "" {
+			return root
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".claude", "projects")
+	}
+	if kind == "opencode" {
+		return ""
+	}
+	if root := strings.TrimSpace(os.Getenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT")); root != "" {
+		return root
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "sessions")
+}
+
+func transcriptCWD(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	var record map[string]any
+	if decoder.Decode(&record) != nil {
+		return ""
+	}
+	if cwd, _ := record["cwd"].(string); cwd != "" {
+		return cwd
+	}
+	payload, _ := record["payload"].(map[string]any)
+	cwd, _ := payload["cwd"].(string)
+	return cwd
+}
+
+func transcriptSessionID(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	for index := 0; index < 20; index++ {
+		var record map[string]any
+		if decoder.Decode(&record) != nil {
+			break
+		}
+		if record["type"] != "session_meta" {
+			continue
+		}
+		payload, _ := record["payload"].(map[string]any)
+		id, _ := payload["id"].(string)
+		if id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func newestTranscriptForCWD(root, cwd string) string {
+	if root == "" {
+		return ""
+	}
+	var newestPath string
+	var newestTime time.Time
+	entries := 0
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry == nil || entry.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
+		}
+		entries++
+		if entries > maxTranscriptEntries {
+			return filepath.SkipAll
+		}
+		if cwd != "" && transcriptCWD(path) != cwd {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr == nil && (newestPath == "" || info.ModTime().After(newestTime)) {
+			newestPath, newestTime = filepath.Clean(path), info.ModTime()
+		}
+		return nil
+	})
+	return newestPath
+}
+
+func openTranscriptForProcess(pid int, kind string) string {
+	if pid <= 0 {
+		return ""
+	}
+	entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
+	if err != nil {
+		return ""
+	}
+	root := filepath.Clean(transcriptRoot(kind))
+	for _, entry := range entries {
+		target, readErr := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name()))
+		if readErr != nil || !strings.HasSuffix(target, ".jsonl") || !strings.HasPrefix(filepath.Clean(target), root+string(os.PathSeparator)) {
+			continue
+		}
+		return filepath.Clean(target)
+	}
+	return ""
+}
+
+func agentTranscript(kind string, pid int, cwd string) (string, string, string) {
+	return agentTranscriptWithTitle(kind, pid, cwd, "")
+}
+
+func agentTranscriptWithTitle(kind string, pid int, cwd, title string) (string, string, string) {
+	return agentTranscriptWithCommand(kind, pid, cwd, title, "")
+}
+
+func agentTranscriptWithCommand(kind string, pid int, cwd, title, command string) (string, string, string) {
+	if kind == "opencode" {
+		databasePath := strings.TrimSpace(os.Getenv("YOLOMUX_OPENCODE_DATABASE"))
+		if databasePath == "" {
+			return "", "", cwd
+		}
+		database, err := stats.OpenOpenCodeReadOnly(context.Background(), databasePath)
+		if err != nil {
+			return "", databasePath, cwd
+		}
+		defer database.Close()
+		sessionID := explicitOpenCodeSessionID(command)
+		if sessionID == "" {
+			sessionID, _ = database.ResolveSessionID(context.Background(), cwd, title, 0, float64(time.Now().UnixNano())/1e9)
+		}
+		return sessionID, databasePath, cwd
+	}
+	if kind == "claude" {
+		sessionID, transcript, resolvedCWD := resolveClaudePaneIdentity(strconv.Itoa(pid), cwd)
+		if sessionID != "" || transcript != "" {
+			return sessionID, transcript, resolvedCWD
+		}
+	}
+	transcript := openTranscriptForProcess(pid, kind)
+	if transcript == "" {
+		transcript = newestTranscriptForCWD(transcriptRoot(kind), cwd)
+	}
+	if transcript == "" {
+		return "", "", cwd
+	}
+	return transcriptSessionID(transcript), transcript, transcriptCWD(transcript)
+}
+
+func explicitOpenCodeSessionID(command string) string {
+	fields := strings.Fields(command)
+	for index, field := range fields {
+		field = strings.Trim(field, "\"'")
+		if strings.HasPrefix(field, "--session=") {
+			return strings.TrimPrefix(field, "--session=")
+		}
+		if (field == "--session" || field == "-s") && index+1 < len(fields) {
+			return strings.Trim(fields[index+1], "\"'")
+		}
+	}
+	return ""
+}
+
+func (s *server) tmuxStatus(w http.ResponseWriter, r *http.Request) {
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session is required"})
+		return
+	}
+	if s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
+	}
+	if r.Method == http.MethodPost {
+		user, ok := s.identity(r)
+		if !ok || user.role != "admin" {
+			s.rejectForbidden(w, user, "admin")
+			return
+		}
+		mode, err := s.readTmuxStatusMode(session)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "session": session})
+			return
+		}
+		next := map[string]string{"top": "bottom", "bottom": "none", "none": "top"}[mode]
+		if next == "none" {
+			err = s.tmuxCommand("set-option", "-t", s.exactTarget(session), "status", "off").Run()
+		} else {
+			err = s.tmuxCommand("set-option", "-t", s.exactTarget(session), "status", "on").Run()
+			if err == nil {
+				err = s.tmuxCommand("set-option", "-t", s.exactTarget(session), "status-position", next).Run()
+			}
+		}
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "tmux status update failed", "session": session})
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]any{"session": session, "status": next})
+		return
+	}
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	mode, err := s.readTmuxStatusMode(session)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "session": session})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"session": session, "status": mode})
+}
+
+func (s *server) readTmuxStatusMode(session string) (string, error) {
+	target := s.exactTarget(session)
+	status, err := s.tmuxCommand("show-options", "-A", "-t", target, "-v", "status").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux status read failed")
+	}
+	if strings.TrimSpace(string(status)) != "on" {
+		return "none", nil
+	}
+	position, err := s.tmuxCommand("show-options", "-A", "-t", target, "-v", "status-position").Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux status position read failed")
+	}
+	mode := strings.ToLower(strings.TrimSpace(string(position)))
+	if mode != "top" && mode != "bottom" {
+		mode = "bottom"
+	}
+	return mode, nil
+}
+
+func (s *server) eventLogTail(session string, limit int) []map[string]any {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	path := s.eventLogPath
+	if path == "" && s.config != "" {
+		path = filepath.Join(s.config, "event-log.jsonl")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer file.Close()
+	values := make([]map[string]any, 0, limit)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event == nil {
+			continue
+		}
+		eventSession, _ := event["session"].(string)
+		if session != "" && eventSession != "" && eventSession != session {
+			continue
+		}
+		values = append(values, event)
+		if len(values) > limit {
+			copy(values, values[len(values)-limit:])
+			values = values[:limit]
+		}
+	}
+	return values
+}
+
+func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": "unknown session"})
+		return
+	}
+	limit, ok := transcriptQueryLimit(w, r, "messages", 40, maxCompactTranscriptItems)
+	if !ok {
+		return
+	}
+	path, agent, selectionError := s.sessionTranscriptForRequest(session, r.URL.Query().Get("pane_target"), r.URL.Query().Get("window"))
+	if path == "" {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError})
+		return
+	}
+	items, err := readContextItemsForAgent(path, agent, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	writeSSE := func(event string, value any) bool {
+		data, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			return false
+		}
+		if _, writeErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); writeErr != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeSSE("reset", map[string]any{"session": session, "path": path, "items": items, "pending": false, "stale": false, "agent": agent, "errors": []any{}}) {
+		return
+	}
+	lastSize, lastMod := transcriptSignature(path)
+	isOpenCode := false
+	if kind, _ := agent["kind"].(string); kind == "opencode" {
+		isOpenCode = true
+	}
+	var offset int64
+	var pending []byte
+	var lastFileID string
+	if !isOpenCode {
+		offset, _, lastFileID = transcriptPathIdentity(path)
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			size, mod := transcriptSignature(path)
+			if size == lastSize && mod == lastMod {
+				continue
+			}
+			_, _, fileID := transcriptPathIdentity(path)
+			if !isOpenCode && fileID == lastFileID && size > offset {
+				updated, nextOffset, nextPending, readErr := readTranscriptItemsSinceWithPending(path, offset, pending)
+				if readErr != nil {
+					return
+				}
+				offset, pending = nextOffset, nextPending
+				lastFileID = fileID
+				lastSize, lastMod = size, mod
+				if len(updated) > 0 && !writeSSE("items", map[string]any{"items": updated}) {
+					return
+				}
+				continue
+			}
+			updated, readErr := readContextItemsForAgent(path, agent, limit)
+			if readErr != nil {
+				return
+			}
+			lastSize, lastMod = size, mod
+			if !isOpenCode {
+				offset, pending, lastFileID = size, nil, fileID
+			}
+			if !writeSSE("reset", map[string]any{"session": session, "path": path, "items": updated, "pending": false, "stale": false, "agent": agent, "errors": []any{}}) {
+				return
+			}
+		case <-ping.C:
+			if !writeSSE("ping", map[string]any{"time": time.Now().UTC().Format(time.RFC3339)}) {
+				return
+			}
+		}
+	}
+}
+
+func (s *server) contextItems(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": "unknown session"})
+		return
+	}
+	limit, ok := transcriptQueryLimit(w, r, "messages", 40, maxCompactTranscriptItems)
+	if !ok {
+		return
+	}
+	path, agent, selectionError := s.sessionTranscriptForRequest(session, r.URL.Query().Get("pane_target"), r.URL.Query().Get("window"))
+	if path == "" {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError})
+		return
+	}
+	items, err := readContextItemsForAgent(path, agent, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"session": session, "path": path, "messages": limit, "items": items, "pending": false, "stale": false, "agent": agent, "errors": []any{}})
+}
+
+func (s *server) transcript(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": "unknown session"})
+		return
+	}
+	lines, ok := transcriptQueryLimit(w, r, "lines", 120, 5000)
+	if !ok {
+		return
+	}
+	path, agent, selectionError := s.sessionTranscriptForRequest(session, r.URL.Query().Get("pane_target"), r.URL.Query().Get("window"))
+	if path == "" {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError, "agent": agent, "errors": []any{}})
+		return
+	}
+	text, contextItems, err := readTranscriptTextForAgent(path, agent, lines)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "agent": agent, "error": "transcript read failed", "errors": []any{}})
+		return
+	}
+	response := map[string]any{"session": session, "agent": agent, "path": path, "lines": lines, "text": text, "errors": []any{}}
+	if contextItems != nil {
+		response["items"] = contextItems
+		response["source"] = "opencode"
+	}
+	jsonResponse(w, http.StatusOK, response)
+}
+
+func (s *server) context(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" || s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": "unknown session"})
+		return
+	}
+	messages, ok := transcriptQueryLimit(w, r, "messages", 40, maxCompactTranscriptItems)
+	if !ok {
+		return
+	}
+	path, agent, selectionError := s.sessionTranscriptForRequest(session, r.URL.Query().Get("pane_target"), r.URL.Query().Get("window"))
+	if path == "" {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"session": session, "error": selectionError, "agent": agent, "errors": []any{}})
+		return
+	}
+	items, err := readContextItemsForAgent(path, agent, messages)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "agent": agent, "error": "transcript read failed", "errors": []any{}})
+		return
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		lines = append(lines, formatTranscriptItem(item))
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"session": session, "path": path, "messages": messages, "text": strings.Join(lines, "\n\n"), "pending": false, "stale": false, "agent": agent, "errors": []any{}})
+}
+
+func transcriptQueryLimit(w http.ResponseWriter, r *http.Request, name string, defaultValue, maximum int) (int, bool) {
+	raw, present := r.URL.Query()[name]
+	if !present || len(raw) == 0 || raw[0] == "" {
+		return defaultValue, true
+	}
+	value, err := strconv.Atoi(raw[0])
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"error": "" + name + " must be an integer", "field": name,
+		})
+		return 0, false
+	}
+	if value < 1 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"error": "" + name + " must be at least 1", "field": name, "min": 1,
+		})
+		return 0, false
+	}
+	if value > maximum {
+		value = maximum
+	}
+	return value, true
+}
+
+func (s *server) sessionTranscript(session string) (string, map[string]any) {
+	path, agent, _ := s.sessionTranscriptForRequest(session, "", "")
+	return path, agent
+}
+
+func (s *server) sessionTranscriptForRequest(session, requestedPane, requestedWindow string) (string, map[string]any, string) {
+	_, agents, finderErr := s.sessionFilesPaneInputs(session)
+	if finderErr != nil {
+		return "", nil, finderErr.Message
+	}
+	activeTarget := s.activeTmuxPaneTarget(session)
+	candidate, reason := chooseSessionTranscript(agents, requestedPane, requestedWindow, activeTarget)
+	if candidate == nil {
+		return "", nil, reason
+	}
+	if candidate.Transcript == "" {
+		return "", transcriptAgentPayload(session, *candidate), reason
+	}
+	return candidate.Transcript, transcriptAgentPayload(session, *candidate), ""
+}
+
+func chooseSessionTranscript(agents []finder.SessionFileAgent, requestedPane, requestedWindow, activeTarget string) (*finder.SessionFileAgent, string) {
+	requestedPane = strings.TrimSpace(requestedPane)
+	requestedWindow = strings.TrimSpace(requestedWindow)
+	if requestedPane != "" {
+		for index := range agents {
+			if agents[index].PaneTarget == requestedPane {
+				if agents[index].Transcript == "" {
+					return &agents[index], "selected pane has no agent transcript"
+				}
+				return &agents[index], ""
+			}
+		}
+		return nil, "selected pane has no agent transcript"
+	}
+	if requestedWindow != "" {
+		var windowAgents []*finder.SessionFileAgent
+		for index := range agents {
+			if agents[index].Window == requestedWindow {
+				windowAgents = append(windowAgents, &agents[index])
+			}
+		}
+		if len(windowAgents) == 1 {
+			if windowAgents[0].Transcript == "" {
+				return windowAgents[0], "selected window has no agent transcript"
+			}
+			return windowAgents[0], ""
+		}
+		for _, candidate := range windowAgents {
+			if !candidate.Active {
+				continue
+			}
+			if candidate.Transcript == "" {
+				return candidate, "selected window has no agent transcript"
+			}
+			return candidate, ""
+		}
+		if len(windowAgents) > 1 {
+			return nil, "selected window has ambiguous agent transcripts"
+		}
+		return nil, "selected window has no agent transcript"
+	}
+	activeTarget = strings.TrimSpace(activeTarget)
+	for index := range agents {
+		if activeTarget != "" && agents[index].PaneTarget == activeTarget {
+			if agents[index].Transcript == "" {
+				return &agents[index], "active pane has no agent transcript"
+			}
+			return &agents[index], ""
+		}
+	}
+	return nil, "active pane has no agent transcript"
+}
+
+func (s *server) activeTmuxPaneTarget(session string) string {
+	output, err := s.tmuxCommand("display-message", "-p", "-t", s.exactTarget(session), "#{pane_id}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func transcriptAgentPayload(session string, agent finder.SessionFileAgent) map[string]any {
+	return map[string]any{
+		"session": session, "kind": agent.Kind, "pid": agent.PID, "pane_target": agent.PaneTarget,
+		"command": agent.Command, "cwd": agent.CWD, "status": "idle", "session_id": agent.SessionID,
+		"transcript": agent.Transcript, "error": "", "window": agent.Window, "window_index": agent.WindowIndex,
+		"pane": agent.Pane, "window_active": agent.WindowActive, "current": agent.Active && agent.WindowActive,
+	}
+}
+
+func readTranscriptTail(path string, lines int) (string, error) {
+	return readTranscriptTailWithByteLimit(path, lines, 0)
+}
+
+func readTranscriptTailWithByteLimit(path string, lines int, byteLimit int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	maxBytes := int64(lines) * 64 * 1024
+	if maxBytes < 64*1024 {
+		maxBytes = 64 * 1024
+	}
+	if byteLimit > 0 && maxBytes > byteLimit {
+		maxBytes = byteLimit
+	}
+	start := info.Size() - maxBytes
+	if start < 0 {
+		start = 0
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	if err != nil {
+		return "", err
+	}
+	text := string(data)
+	if start > 0 {
+		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
+			text = text[newline+1:]
+		}
+	}
+	parts := strings.SplitAfter(text, "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) > lines {
+		parts = parts[len(parts)-lines:]
+	}
+	return strings.Join(parts, ""), nil
+}
+
+func formatTranscriptItem(item map[string]any) string {
+	role, _ := item["role"].(string)
+	if role == "" {
+		role = "message"
+	}
+	metadata := make([]string, 0, 2)
+	for _, key := range []string{"timestamp", "cwd"} {
+		if value, _ := item[key].(string); value != "" {
+			metadata = append(metadata, value)
+		}
+	}
+	header := role
+	if len(metadata) > 0 {
+		header += " (" + strings.Join(metadata, ", ") + ")"
+	}
+	text, _ := item["text"].(string)
+	return header + "\n" + text
+}
+
+func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (string, []map[string]any, error) {
+	if kind, _ := agent["kind"].(string); kind == "opencode" {
+		itemLimit := lines
+		if itemLimit > maxCompactTranscriptItems {
+			itemLimit = maxCompactTranscriptItems
+		}
+		items, err := readContextItemsForAgent(path, agent, itemLimit)
+		if err != nil {
+			return "", nil, err
+		}
+		formatted := make([]string, 0, len(items))
+		for _, item := range items {
+			formatted = append(formatted, formatTranscriptItem(item))
+		}
+		return strings.Join(formatted, "\n\n"), items, nil
+	}
+	text, err := readTranscriptTail(path, lines)
+	return text, nil, err
+}
+
+func (s *server) liveSessionMetadata(session string) map[string]any {
+	format := "#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}"
+	output, err := s.tmuxCommand("list-panes", "-s", "-t", s.exactTarget(session), "-F", format).Output()
+	if err != nil {
+		return map[string]any{"panes": []any{}, "selected_pane": nil, "agents": []any{}, "window_metadata": []any{}}
+	}
+	panes := make([]map[string]any, 0)
+	agents := make([]map[string]any, 0)
+	windows := make(map[string]map[string]any)
+	var selected map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		parts := splitTmuxFields(line)
+		if len(parts) < 10 {
+			continue
+		}
+		pid, _ := strconv.Atoi(parts[7])
+		paneIndex, _ := strconv.Atoi(parts[2])
+		windowIndex, _ := strconv.Atoi(parts[0])
+		active := parts[8] == "1"
+		windowActive := parts[9] == "1"
+		pane := map[string]any{
+			"session": session, "window": parts[0], "window_index": windowIndex, "pane": parts[2],
+			"pane_index": paneIndex, "pane_id": parts[3], "target": parts[3], "current_path": parts[4],
+			"command": parts[5], "active": active, "window_active": windowActive, "title": parts[6], "pid": pid,
+			"window_name": parts[1],
+		}
+		panes = append(panes, pane)
+		if selected == nil && windowActive && active {
+			selected = pane
+		}
+		if selected == nil && active {
+			selected = pane
+		}
+		if _, ok := windows[parts[0]]; !ok {
+			windows[parts[0]] = map[string]any{
+				"window": parts[0], "window_index": windowIndex, "window_name": parts[1],
+				"path": parts[4], "pane": parts[2], "pane_target": parts[3],
+			}
+		}
+		kind, agentPID, agentCommand := paneAgentProcess(pid, parts[5])
+		if kind == "" {
+			continue
+		}
+		cwd := parts[4]
+		sessionID, transcript, resolvedCWD := agentTranscriptWithCommand(kind, agentPID, cwd, parts[6], agentCommand)
+		if resolvedCWD != "" {
+			cwd = resolvedCWD
+		}
+		agents = append(agents, map[string]any{
+			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[3], "command": agentCommand,
+			"cwd": cwd, "status": "idle", "session_id": sessionID, "transcript": transcript,
+			"error": "", "window": parts[0], "window_index": windowIndex, "pane": parts[2],
+			"window_active": windowActive, "current": active && windowActive,
+		})
+	}
+	windowMetadata := make([]map[string]any, 0, len(windows))
+	for _, item := range windows {
+		windowMetadata = append(windowMetadata, item)
+	}
+	sort.SliceStable(windowMetadata, func(i, j int) bool {
+		left, _ := windowMetadata[i]["window_index"].(int)
+		right, _ := windowMetadata[j]["window_index"].(int)
+		return left < right
+	})
+	return map[string]any{"panes": panes, "selected_pane": selected, "agents": agents, "window_metadata": windowMetadata}
+}
+
+func transcriptSignature(path string) (int64, int64) {
+	// SQLite commits can land in the WAL while the main database remains unchanged.
+	// Include both sidecars so an OpenCode stream observes those commits as well as
+	// ordinary JSONL appends and replacements.
+	paths := []string{path, path + "-wal", path + "-shm"}
+	var size int64
+	hasher := fnv.New64a()
+	for index, candidate := range paths {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		size += info.Size() + int64(index)
+		_, _ = fmt.Fprintf(hasher, "%d:%s:%d:%d:%v\x00", index, candidate, info.Size(), info.ModTime().UnixNano(), info.Sys())
+	}
+	return size, int64(hasher.Sum64())
+}
+
+func readTranscriptItemsSince(path string, offset int64) ([]map[string]any, int64, error) {
+	items, nextOffset, _, err := readTranscriptItemsSinceWithPending(path, offset, nil)
+	return items, nextOffset, err
+}
+
+func readTranscriptItemsSinceWithPending(path string, offset int64, pending []byte) ([]map[string]any, int64, []byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, offset, pending, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, offset, pending, err
+	}
+	readStart := offset + int64(len(pending))
+	if offset < 0 || readStart < offset || readStart > info.Size() {
+		return nil, 0, nil, fmt.Errorf("transcript offset is outside file")
+	}
+	if _, err := file.Seek(readStart, io.SeekStart); err != nil {
+		return nil, offset, pending, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, offset, pending, err
+	}
+	data = append(append([]byte(nil), pending...), data...)
+	items := make([]map[string]any, 0)
+	nextOffset := offset
+	consumedTotal := 0
+	for {
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			break
+		}
+		line := data[:newline+1]
+		var record map[string]any
+		if json.Unmarshal(line, &record) == nil && record != nil {
+			items = append(items, transcriptItems(record)...)
+		}
+		consumed := newline + 1
+		consumedTotal += consumed
+		nextOffset = offset + int64(consumedTotal)
+		data = data[consumed:]
+	}
+	return items, nextOffset, data, nil
+}
+
+func transcriptPathIdentity(path string) (int64, int64, string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, ""
+	}
+	return info.Size(), info.ModTime().UnixNano(), fmt.Sprintf("%d:%v", info.Size(), info.Sys())
+}
+
+func readContextItems(path string, limit int) ([]map[string]any, error) {
+	data, err := readTranscriptTailWithByteLimit(path, maxContextTranscriptLines, maxContextTranscriptBytes)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]map[string]any, 0, limit)
+	for _, line := range strings.Split(data, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || record == nil {
+			continue
+		}
+		all = append(all, transcriptItems(record)...)
+	}
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	return all, nil
+}
+
+func readContextItemsForAgent(path string, agent map[string]any, limit int) ([]map[string]any, error) {
+	if kind, _ := agent["kind"].(string); kind == "opencode" {
+		sessionID, _ := agent["session_id"].(string)
+		if sessionID == "" {
+			return nil, fmt.Errorf("OpenCode session identity unavailable")
+		}
+		database, err := stats.OpenOpenCodeReadOnly(context.Background(), path)
+		if err != nil {
+			return nil, err
+		}
+		defer database.Close()
+		contextItems, err := database.ReadContextItems(context.Background(), sessionID, limit)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]map[string]any, 0, len(contextItems))
+		for _, item := range contextItems {
+			items = append(items, map[string]any{
+				"role": item.Role, "timestamp": item.Timestamp, "cwd": item.CWD, "text": item.Text,
+			})
+		}
+		return items, nil
+	}
+	return readContextItems(path, limit)
+}
+
+func transcriptItems(record map[string]any) []map[string]any {
+	timestamp, _ := record["timestamp"].(string)
+	cwd, _ := record["cwd"].(string)
+	entryType, _ := record["type"].(string)
+	if message, ok := record["message"].(map[string]any); ok {
+		role, _ := message["role"].(string)
+		if role == "" {
+			role = entryType
+			if role == "" {
+				role = "message"
+			}
+		}
+		return transcriptContentBlocks(message["content"], role, timestamp, cwd)
+	}
+	payload, _ := record["payload"].(map[string]any)
+	if payload == nil {
+		return nil
+	}
+	payloadType, _ := payload["type"].(string)
+	if payloadType == "message" {
+		role, _ := payload["role"].(string)
+		if role == "" {
+			role = "message"
+		}
+		return transcriptContentBlocks(payload["content"], role, timestamp, cwd)
+	}
+	if payloadType == "function_call" || payloadType == "custom_tool_call" {
+		name, _ := payload["name"].(string)
+		if name == "" {
+			name = "tool"
+		}
+		argumentKey := "arguments"
+		if payloadType == "custom_tool_call" {
+			argumentKey = "input"
+		}
+		encoded, _ := json.Marshal(payload[argumentKey])
+		return []map[string]any{{"role": "tool_use", "timestamp": timestamp, "cwd": cwd, "text": boundedText(name+"\n"+string(encoded), maxToolItemText)}}
+	}
+	if payloadType == "function_call_output" || payloadType == "custom_tool_call_output" {
+		return []map[string]any{{"role": "tool_result", "timestamp": timestamp, "cwd": cwd, "text": boundedText(transcriptValueText(payload["output"]), maxToolItemText)}}
+	}
+	if payloadType == "agent_message" || payloadType == "user_message" {
+		message, _ := payload["message"].(string)
+		role := "assistant"
+		if payloadType == "user_message" {
+			role = "user"
+		}
+		if strings.TrimSpace(message) == "" {
+			return nil
+		}
+		return []map[string]any{{"role": role, "timestamp": timestamp, "cwd": cwd, "text": boundedText(message, maxContextItemText)}}
+	}
+	if payloadType == "task_started" || payloadType == "task_complete" {
+		field := "turn_id"
+		if payloadType == "task_complete" {
+			field = "last_agent_message"
+		}
+		message, _ := payload[field].(string)
+		if message == "" {
+			return nil
+		}
+		return []map[string]any{{"role": payloadType, "timestamp": timestamp, "cwd": cwd, "text": boundedText(message, maxToolItemText)}}
+	}
+	if payloadType == "patch_apply_end" {
+		stdout, _ := payload["stdout"].(string)
+		stderr, _ := payload["stderr"].(string)
+		parts := make([]string, 0, 2)
+		if strings.TrimSpace(stdout) != "" {
+			parts = append(parts, strings.TrimSpace(stdout))
+		}
+		if strings.TrimSpace(stderr) != "" {
+			parts = append(parts, strings.TrimSpace(stderr))
+		}
+		if len(parts) == 0 {
+			return nil
+		}
+		return []map[string]any{{"role": "tool_result", "timestamp": timestamp, "cwd": cwd, "text": boundedText(strings.Join(parts, "\n"), maxToolItemText)}}
+	}
+	return nil
+}
+
+func transcriptContentBlocks(raw any, role, timestamp, cwd string) []map[string]any {
+	if text, ok := raw.(string); ok && strings.TrimSpace(text) != "" {
+		return []map[string]any{{"role": role, "timestamp": timestamp, "cwd": cwd, "text": boundedText(text, maxContextItemText)}}
+	}
+	blocks, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	items := make([]map[string]any, 0, len(blocks))
+	for _, rawBlock := range blocks {
+		block, _ := rawBlock.(map[string]any)
+		if block == nil {
+			continue
+		}
+		kind, _ := block["type"].(string)
+		if kind == "text" || kind == "input_text" || kind == "output_text" {
+			text, _ := block["text"].(string)
+			if strings.TrimSpace(text) != "" {
+				items = append(items, map[string]any{"role": role, "timestamp": timestamp, "cwd": cwd, "text": boundedText(text, maxContextItemText)})
+			}
+		} else if kind == "tool_use" {
+			name, _ := block["name"].(string)
+			encoded, _ := json.Marshal(block["input"])
+			items = append(items, map[string]any{"role": "tool_use", "timestamp": timestamp, "cwd": cwd, "text": boundedText(name+"\n"+string(encoded), maxToolItemText)})
+		} else if kind == "tool_result" {
+			text := transcriptValueText(block["content"])
+			items = append(items, map[string]any{"role": "tool_result", "timestamp": timestamp, "cwd": cwd, "text": boundedText(text, maxToolItemText)})
+		}
+	}
+	return items
+}
+
+func transcriptValueText(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}

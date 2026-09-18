@@ -346,6 +346,15 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert web.server_string("en", "menu.help.about.sha", sha="abcdef123456") in page
     assert web.server_string("en", "menu.help.about.commits", count="1234") in page
 
+    go_page = web.html_page([], backend_label="Go 0.1.0-phase4")
+    go_match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', go_page, re.DOTALL)
+    assert go_match
+    go_payload = json.loads(go_match.group(1))
+    assert go_payload["versionStatus"] == "0.8.1(3)*"
+    assert go_payload["backendLabel"] == "Go 0.1.0-phase4"
+    assert ">0.8.1(3)*</span>" in go_page
+    assert "0.8.1(3)* [Go 0.1.0-phase4]" in go_page
+
 
 def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)

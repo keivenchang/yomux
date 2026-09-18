@@ -47,6 +47,7 @@ func New(backendBuild string) *Catalog {
 		"core.integrations.v1",
 		"terminal.websocket.v1",
 		"terminal.tmux.v1",
+		"terminal.status.v1",
 		"session.roster.v1",
 		"pane.finder.v1",
 		"finder.read.v1",
@@ -72,6 +73,7 @@ func New(backendBuild string) *Catalog {
 		"core.diagnostics.v1",
 		"terminal.websocket.v1",
 		"terminal.tmux.v1",
+		"terminal.status.v1",
 		"session.roster.v1",
 		"pane.finder.v1",
 		"finder.read.v1",
@@ -223,13 +225,16 @@ func RouteCapability(method, rawPath string) string {
 	if path == "/api/session-metadata" {
 		return "core.bootstrap.v1"
 	}
-	if path == "/api/transcripts" || path == "/api/activity" || path == "/api/activity-summary" {
+	if path == "/api/transcripts" {
+		return "core.bootstrap.v1"
+	}
+	if path == "/api/activity" || path == "/api/activity-summary" {
 		return "pane.tabber.v1"
 	}
 	if strings.HasPrefix(path, "/api/session-files") {
 		return "finder.git.v1"
 	}
-	if strings.HasPrefix(path, "/api/tmux-") || path == "/api/auto-approve" || path == "/api/context-items" || path == "/api/events" {
+	if strings.HasPrefix(path, "/api/tmux-") || path == "/api/auto-approve" || path == "/api/transcript" || path == "/api/context" || path == "/api/context-items" || path == "/api/context-stream" || path == "/api/events" {
 		return "terminal.status.v1"
 	}
 	if strings.HasPrefix(path, "/api/fs/") || path == "/api/watch/roots" || path == "/api/upload" || strings.HasPrefix(path, "/api/batch/") {

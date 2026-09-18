@@ -2678,6 +2678,13 @@ func main() {
 	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots), "admin"))
 	s.registerFilesystemRoutes(mux)
 	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost), "readonly"))
+	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsList), "readonly"))
+	mux.Handle("/api/transcripts", s.protected(http.HandlerFunc(s.sessionMetadata), "readonly"))
+	mux.Handle("/api/transcript", s.protected(http.HandlerFunc(s.transcript), "readonly"))
+	mux.Handle("/api/context", s.protected(http.HandlerFunc(s.context), "readonly"))
+	mux.Handle("/api/context-items", s.protected(http.HandlerFunc(s.contextItems), "readonly"))
+	mux.Handle("/api/context-stream", s.protected(http.HandlerFunc(s.contextStream), "readonly"))
+	mux.Handle("/api/tmux-status", s.protected(http.HandlerFunc(s.tmuxStatus), "readonly"))
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
 	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
@@ -5221,19 +5228,20 @@ func (s *server) logs(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, s.logState().payload())
 }
 func (s *server) eventsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	limit := 120
 	if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 && value < 1000 {
 		limit = value
 	}
-	s.events.mu.Lock()
-	start := len(s.events.events) - limit
-	if start < 0 {
-		start = 0
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session != "" && s.tmuxCommand("has-session", "-t", session).Run() != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
 	}
-	events := make([]clientEvent, len(s.events.events[start:]))
-	copy(events, s.events.events[start:])
-	s.events.mu.Unlock()
-	jsonResponse(w, http.StatusOK, map[string]any{"state": "ready", "events": events, "limit": limit})
+	jsonResponse(w, http.StatusOK, map[string]any{"events": s.eventLogTail(session, limit), "session": session, "limit": minInt(limit, 1000)})
 }
 func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	eventSnapshot := map[string]any{}
@@ -5443,13 +5451,11 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 	metadataIdentity := map[string]any{"epoch": epoch, "generation": generation}
 	metadataSessions := make(map[string]any, len(sessions))
 	for _, session := range sessions {
-		metadataSessions[session] = map[string]any{
-			"session":    session,
-			"label":      session,
-			"agents":     []any{},
-			"panes":      []any{},
-			"work_graph": map[string]any{"generation": 0},
-		}
+		info := s.liveSessionMetadata(session)
+		info["session"] = session
+		info["label"] = session
+		info["work_graph"] = s.sessionWorkGraph(session, info, generation)
+		metadataSessions[session] = info
 	}
 	cache := map[string]any{
 		"hit":        true,
@@ -5565,18 +5571,18 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
-	// The Go backend currently exposes the deliberate stats-only boot contract. The
-	// remaining application routes are capability-gated below, so advertising a full
-	// boot here would make the frontend probe unsupported APIs and turn their 404/501
-	// responses into misleading stats failures. Promote this to full boot only when
-	// every non-stats capability has a tested Go owner.
 	script := `import json,sys
 from yolomux_lib.web import html_page
-print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5]), stats_only=True), end="")`
+print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5]), stats_only=sys.argv[6] == "1", backend_label=sys.argv[7]), end="")`
 	sessions, _ := json.Marshal(s.sessionNames())
 	capabilityData, _ := json.Marshal(s.capabilities.Snapshot())
 	command := exec.Command("python3", "-c", script, string(sessions), user.role, user.username, r.Header.Get("Accept-Language"))
-	command.Args = append(command.Args, string(capabilityData))
+	statsOnly := "0"
+	if queryTrue(r.URL.Query().Get("stats_only")) {
+		statsOnly = "1"
+	}
+	command.Args = append(command.Args, string(capabilityData), statsOnly)
+	command.Args = append(command.Args, "Go "+version)
 	command.Dir = s.root
 	command.Env = append(os.Environ(), "PYTHONPATH="+s.root)
 	body, err := command.Output()

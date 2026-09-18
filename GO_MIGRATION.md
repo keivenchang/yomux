@@ -110,8 +110,9 @@ The following routes have concrete handlers in `cmd/yolomux-go`.
 
 - `/ws`, `/api/tmux`, `/api/tmux-session-exists`
 - `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/kill-session`
+- `/api/transcripts`, `/api/transcript`, `/api/context`, `/api/context-items`, `/api/context-stream`
 
-The shared browser must capability-gate other Python terminal/session paths. Auto-approval, transcript/activity APIs, self-update, and YO!agent are not made available merely because the terminal itself works.
+The shared browser must capability-gate other Python terminal/session paths. Auto-approval, activity APIs, self-update, and YO!agent are not made available merely because the terminal itself works. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
 
 ### Finder, Editor, And Differ
 
@@ -150,6 +151,8 @@ The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It do
 | Phase 6/7 | Shared TextEdit/ViewEdit exercised through Go Finder APIs, including save, upload, preview, and Chromium editor workflows |
 | YO!stats | Go SQLite ownership, snapshots/deltas/SSE, collectors/materialization/rings, pricing, agent status, tokens, OpenCode, and Docker browser coverage |
 | Phase 8 | Differ session-file caches, quick history followed by numstat backfill, consolidated commit detail, diff, history, commit, and blame routes |
+
+The transcript compatibility routes are intentionally implemented through one Go selector and remain covered by the consolidation TODO at [`queues/backlog/DOIT.p1.e3.transcript-api-consolidation.md`](queues/backlog/DOIT.p1.e3.transcript-api-consolidation.md). The long-term goal is one language-neutral transcript contract rather than two independently evolving discovery and parser stacks.
 
 Phase numbers are migration history, not runtime configuration. The capability catalog and registered routes determine current behavior.
 

@@ -41,8 +41,9 @@ function capabilityNameForRequest(url, options = {}) {
   if (pathname === '/api/kill-session') return 'session.kill.v1';
   if (pathname === '/api/rename-session') return 'session.rename.v1';
   if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
-  if (pathname === '/api/transcripts' || pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname.startsWith('/api/session-files')) return 'pane.tabber.v1';
-  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/context-items' || pathname === '/api/events') return 'terminal.status.v1';
+  if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
+  if (pathname === '/api/activity' || pathname === '/api/activity-summary') return 'pane.tabber.v1';
+  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
 	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
 		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';

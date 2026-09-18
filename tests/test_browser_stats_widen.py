@@ -508,7 +508,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
             ) from error
         browser.get(
             f"{base_url}/?sessions={tmux_runtime.sessions[0]},debug"
-            f"&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1"
+            f"&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1&stats_only=1"
         )
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.execute_script(
@@ -1120,7 +1120,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         )
         request.node._yolomux_skip_reused_browser_diagnostic = True
         sessions = ",".join(tmux_runtime.sessions)
-        browser.get(f"{base_url}/?sessions={sessions},debug&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1")
+        browser.get(f"{base_url}/?sessions={sessions},debug&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1&stats_only=1")
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.execute_script("return document.readyState === 'complete' && document.querySelector('#grid') !== null")
         )
@@ -1339,7 +1339,7 @@ def _stop_production_stats_server(process, port_lease: HttpPortLease) -> None:
     port_lease.close()
 
 
-def _production_stats_browser_pass(browser, base_url: str, session: str, request) -> dict[str, Any]:
+def _production_stats_browser_pass(browser, base_url: str, session: str, request, *, stats_only: bool = False) -> dict[str, Any]:
     """Run one identical authenticated browser journey and return stable wire evidence."""
 
     register_browser_new_document_script(browser, _STATS_ROUTE_INSTRUMENTATION)
@@ -1356,8 +1356,9 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
         lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
     )
     request.node._yolomux_skip_reused_browser_diagnostic = True
+    stats_only_query = "&stats_only=1" if stats_only else ""
     browser.get(
-        f"{base_url}/?sessions={session},debug&layout=left&tabs=left:{session},__debug__*&debug=1"
+        f"{base_url}/?sessions={session},debug&layout=left&tabs=left:{session},__debug__*&debug=1{stats_only_query}"
     )
     WebDriverWait(browser, 15, poll_frequency=0.05).until(
         lambda driver: driver.execute_script(
@@ -1527,13 +1528,23 @@ def _normalize_stats_capabilities_for_parity(payload: Any) -> Any:
 
 
 def _normalize_stats_snapshot_for_parity(payload: Any) -> Any:
-    """Ignore wall-clock bucket placement while retaining every rendered fact."""
+    """Compare seeded facts while excluding backend-specific live browser telemetry."""
     if not isinstance(payload, dict):
         return payload
     normalized = copy.deepcopy(payload)
     buckets = normalized.get("buckets")
     if isinstance(buckets, list):
-        normalized["buckets"] = [bucket for bucket in buckets if isinstance(bucket, dict) and bucket.get("series")]
+        comparable = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            series = bucket.get("series")
+            if not isinstance(series, dict):
+                continue
+            bucket["series"] = {name: item for name, item in series.items() if not str(name).startswith("browser_")}
+            if bucket["series"]:
+                comparable.append(bucket)
+        normalized["buckets"] = comparable
     return normalized
 
 
@@ -1635,7 +1646,7 @@ def test_production_python_and_go_stats_share_one_fixture_and_browser_journey(br
             )
             servers.append((process, port_lease))
             browser.get("about:blank")
-            servers[-1] = (process, port_lease, _production_stats_browser_pass(browser, base_url, session, request))
+            servers[-1] = (process, port_lease, _production_stats_browser_pass(browser, base_url, session, request, stats_only=True))
         python_evidence = servers[0][2]
         go_evidence = servers[1][2]
         assert _normalize_stats_capabilities_for_parity(go_evidence["capabilities"]) == _normalize_stats_capabilities_for_parity(python_evidence["capabilities"]), {"python": python_evidence, "go": go_evidence}

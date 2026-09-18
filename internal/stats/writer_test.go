@@ -54,6 +54,46 @@ func TestOpenWriterCreatesSchema8AndReadback(t *testing.T) {
 	}
 }
 
+func TestOpenWriterRepairsMissingRingTriggers(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"} {
+		for _, operation := range []string{"insert", "delete"} {
+			if _, err := db.ExecContext(ctx, "DROP TRIGGER "+table+"_reject_"+operation); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err = OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatalf("same-schema database with repairable missing triggers was rejected: %v", err)
+	}
+	defer writer.Close()
+	var triggerCount int
+	if err := writer.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('aggregate_publication','aggregate_rings','aggregate_ring_slots')").Scan(&triggerCount); err != nil {
+		t.Fatal(err)
+	}
+	if triggerCount != 6 {
+		t.Fatalf("ring trigger count = %d, want 6", triggerCount)
+	}
+}
+
 func TestSchema9UsesPythonAffinityAndRejectsInvalidConstraints(t *testing.T) {
 	ctx := context.Background()
 	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))

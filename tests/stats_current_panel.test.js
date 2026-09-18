@@ -47,7 +47,7 @@ test('session metadata uses the bootstrap capability while Tabber routes stay Ta
     capabilityNameForRequest('/api/session-metadata?force=1'),
     capabilityNameForRequest('/api/transcripts?session=1'),
   ];`, context);
-  assert.deepEqual([...context.result], ['core.bootstrap.v1', 'pane.tabber.v1']);
+  assert.deepEqual([...context.result], ['core.bootstrap.v1', 'core.bootstrap.v1']);
 });
 
 function test(name, body) {

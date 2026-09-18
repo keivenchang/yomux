@@ -42,8 +42,9 @@ function capabilityNameForRequest(url, options = {}) {
   if (pathname === '/api/kill-session') return 'session.kill.v1';
   if (pathname === '/api/rename-session') return 'session.rename.v1';
   if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
-  if (pathname === '/api/transcripts' || pathname === '/api/activity' || pathname === '/api/activity-summary' || pathname.startsWith('/api/session-files')) return 'pane.tabber.v1';
-  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/context-items' || pathname === '/api/events') return 'terminal.status.v1';
+  if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
+  if (pathname === '/api/activity' || pathname === '/api/activity-summary') return 'pane.tabber.v1';
+  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
 	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
 		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';
@@ -10183,9 +10184,7 @@ function showTabContextMenu(item, x, y, options = {}) {
   const appendDescription = () => {
     const info = transcriptMetadataState.payload.sessions?.[item];
     const tab = itemLabel(item);
-    const rawDescription = isTmuxSession(item)
-      ? sessionTabDescription(item, info)
-      : tabMenuDetailText(item, info);
+    const rawDescription = tabMenuDetailText(item, info);
     const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
     const text = t('tab.actions.moreDescription', {tab, description});
     const line = makeButton({
@@ -30480,7 +30479,13 @@ function transcriptPreviewPaneIsActive(session) {
 function transcriptContextWatchRequests() {
   return activeSessions
     .filter(transcriptPreviewPaneIsActive)
-    .map(session => ({session, messages: transcriptPreviewMessages}));
+    .map(session => ({
+      session,
+      messages: transcriptPreviewMessages,
+      pane_target: typeof terminalContextMenuPaneTargetForSession === 'function'
+        ? terminalContextMenuPaneTargetForSession(session)
+        : '',
+    }));
 }
 
 function clientServerWatchState() {
@@ -84128,11 +84133,26 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
     ...transcriptMetadataState.payload,
     sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
   });
+  restartTranscriptStreamForPaneTarget(session, signalTarget);
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
     if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
+  return true;
+}
+
+function restartTranscriptStreamForPaneTarget(session, paneTarget) {
+  const target = String(paneTarget || '').trim();
+  if (!target || typeof transcriptPreviewPaneIsActive !== 'function' || !transcriptPreviewPaneIsActive(session)) return false;
+  const source = transcriptLifecycleScopes.get(session)?.value('stream');
+  if (!source) return false;
+  let currentTarget = '';
+  try {
+    currentTarget = new URL(String(source.url || ''), window.location.href).searchParams.get('pane_target') || '';
+  } catch (_) {}
+  if (currentTarget === target) return false;
+  startTranscriptStream(session, {paneTarget: target, scrollBottom: false});
   return true;
 }
 
@@ -86570,7 +86590,7 @@ function relocalizeTranscriptPanelStatus(session) {
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
-    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    const payload = await apiFetchJson(transcriptContextApiUrl('/api/context-items', session, transcriptPreviewMessages, options));
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
@@ -86641,7 +86661,7 @@ function startTranscriptStream(session, options = {}) {
   stopTranscriptStream(session);
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
-  const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const url = transcriptContextApiUrl('/api/context-stream', session, transcriptPreviewMessages, options);
   const {scope, token: lifecycleToken} = tmuxSessionStreamLifecycleScope(transcriptLifecycleScopes, session);
   const source = new EventSource(url);
   ownTmuxSessionStream(scope, lifecycleToken, source);
@@ -86680,6 +86700,19 @@ function startTranscriptStream(session, options = {}) {
       });
     }
   };
+}
+
+function transcriptContextApiUrl(route, session, messages, options = {}) {
+  const params = [`session=${encodeURIComponent(session)}`, `messages=${encodeURIComponent(messages)}`];
+  const paneTarget = String(
+    options.paneTarget !== undefined
+      ? options.paneTarget
+      : (typeof terminalContextMenuPaneTargetForSession === 'function' ? terminalContextMenuPaneTargetForSession(session) : ''),
+  ).trim();
+  if (paneTarget) params.push(`pane_target=${encodeURIComponent(paneTarget)}`);
+  const windowIndex = String(options.window || '').trim();
+  if (windowIndex && !paneTarget) params.push(`window=${encodeURIComponent(windowIndex)}`);
+  return `${route}?${params.join('&')}`;
 }
 
 function stopTranscriptStream(session, expectedSource = null) {
@@ -88249,7 +88282,7 @@ async function showContext(session) {
   modal.classList.add(CLS.open);
   relocalizeModalChrome();
   try {
-    const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    const payload = await apiFetchJson(transcriptContextApiUrl('/api/context', session, transcriptPreviewMessages));
     renderContextTailPayload(session, payload);
   } catch (error) {
     if (isApiPendingResponse(error)) return;

@@ -524,7 +524,6 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 		"/api/watched-prs":    "core.integrations.v1",
 		"/api/auto-approve":   "terminal.status.v1",
 		"/api/chat/bootstrap": "pane.chat.v1",
-		"/api/transcripts":    "pane.tabber.v1",
 		"/api/activity":       "pane.tabber.v1",
 	}
 	for path, wantCapability := range cases {
@@ -573,7 +572,7 @@ func TestSessionMetadataStartupRouteUsesAvailableBootstrapCapability(t *testing.
 	}
 }
 
-func TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes(t *testing.T) {
+func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	config := t.TempDir()
 	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -584,7 +583,24 @@ func TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes(t *te
 	page := httptest.NewRecorder()
 	s.index(page, httptest.NewRequest(http.MethodGet, "/", nil))
 	if page.Code != http.StatusOK {
-		t.Fatalf("stats-only root status = %d, body=%s", page.Code, page.Body.String())
+		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
+	}
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.1`)) {
+		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
+	}
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
+		t.Fatalf("Go root does not provide its backend label for the version popup: %s", page.Body.String())
+	}
+	if !bytes.Contains(page.Body.Bytes(), []byte(` [Go `)) {
+		t.Fatalf("Go root version popup does not use the one-line backend format: %s", page.Body.String())
+	}
+	brandVersionStart := bytes.Index(page.Body.Bytes(), []byte(`<span class="brand-version"`))
+	if brandVersionStart >= 0 {
+		brandVersionTextStart := bytes.Index(page.Body.Bytes()[brandVersionStart:], []byte(`>`))
+		brandVersionEnd := bytes.Index(page.Body.Bytes()[brandVersionStart:], []byte(`</span>`))
+		if brandVersionTextStart >= 0 && brandVersionEnd > brandVersionTextStart && bytes.Contains(page.Body.Bytes()[brandVersionStart+brandVersionTextStart:brandVersionStart+brandVersionEnd], []byte(`[Go `)) {
+			t.Fatalf("Go backend label leaked into the visible version text")
+		}
 	}
 	const bootstrapPrefix = `<script id="yolomux-bootstrap" type="application/json">`
 	start := bytes.Index(page.Body.Bytes(), []byte(bootstrapPrefix))
@@ -600,8 +616,13 @@ func TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes(t *te
 	if err := json.Unmarshal(page.Body.Bytes()[start:start+end], &bootstrap); err != nil {
 		t.Fatalf("decode root bootstrap: %v", err)
 	}
-	if bootstrap["statsOnly"] != true {
-		t.Fatalf("root bootstrap statsOnly = %#v, want true", bootstrap["statsOnly"])
+	if bootstrap["statsOnly"] != false {
+		t.Fatalf("root bootstrap statsOnly = %#v, want false", bootstrap["statsOnly"])
+	}
+	statsPage := httptest.NewRecorder()
+	s.index(statsPage, httptest.NewRequest(http.MethodGet, "/?stats_only=1", nil))
+	if statsPage.Code != http.StatusOK || !bytes.Contains(statsPage.Body.Bytes(), []byte(`"statsOnly":true`)) {
+		t.Fatalf("explicit stats-only root = %d, body=%s", statsPage.Code, statsPage.Body.String())
 	}
 	capabilityDocument, ok := bootstrap["capabilities"].(map[string]any)
 	if !ok {
@@ -616,12 +637,12 @@ func TestStatsOnlyRootAdvertisesStatsSurfaceAndGatesOtherApplicationRoutes(t *te
 		t.Fatalf("root bootstrap stats capability = %#v", capabilityEntries["pane.stats.v1"])
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/transcripts", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/activity", nil)
 	request.SetBasicAuth("admin", "secret")
 	response := httptest.NewRecorder()
 	s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(response, request)
 	if response.Code != http.StatusNotImplemented || !bytes.Contains(response.Body.Bytes(), []byte(`"capability":"pane.tabber.v1"`)) {
-		t.Fatalf("stats-only unrelated route = %d %s", response.Code, response.Body.String())
+		t.Fatalf("unsupported unrelated route = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -933,7 +954,14 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tmuxSocket := filepath.Join(t.TempDir(), "tmux.sock")
+	// Bazel's TEST_TMPDIR can be deeply nested. Keep the Unix socket itself under /tmp;
+	// tmux rejects a longer pathname before the test reaches the route under test.
+	tmuxSocketDir, err := os.MkdirTemp("/tmp", "yo7221-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxSocketDir) })
+	tmuxSocket := filepath.Join(tmuxSocketDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	session := "go-phase8-session"
 	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
@@ -1107,7 +1135,14 @@ func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	tmuxSocket := filepath.Join(t.TempDir(), "tmux.sock")
+	// Bazel's TEST_TMPDIR can be deeply nested. Keep the Unix socket itself under /tmp;
+	// tmux rejects a longer pathname before the test reaches the route under test.
+	tmuxSocketDir, err := os.MkdirTemp("/tmp", "yo7221-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxSocketDir) })
+	tmuxSocket := filepath.Join(tmuxSocketDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	session := "go-phase8-claude"
 	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", session, "-c", root, claude, "30").CombinedOutput(); err != nil {
@@ -1153,6 +1188,27 @@ func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
 	}
 	if agents[0].SessionID != "claude-session" || agents[0].Transcript != transcript {
 		t.Fatalf("Claude pane transcript identity = %#v, want session=%q transcript=%q", agents[0], "claude-session", transcript)
+	}
+	query := "?session=" + url.QueryEscape(session) + "&pane_target=" + url.QueryEscape(agents[0].PaneTarget)
+	routeChecks := []struct {
+		name string
+		path string
+		call func(http.ResponseWriter, *http.Request)
+		want string
+	}{
+		{name: "raw transcript", path: "/api/transcript", call: s.transcript, want: `"path":"` + strings.ReplaceAll(transcript, `\`, `\\`)},
+		{name: "compact context", path: "/api/context", call: s.context, want: "tool_use"},
+		{name: "structured context", path: "/api/context-items", call: s.contextItems, want: "tool_use"},
+	}
+	for _, route := range routeChecks {
+		route := route
+		t.Run(route.name, func(t *testing.T) {
+			record := httptest.NewRecorder()
+			route.call(record, httptest.NewRequest(http.MethodGet, route.path+query, nil))
+			if record.Code != http.StatusOK || !strings.Contains(record.Body.String(), route.want) {
+				t.Fatalf("response = %d %s", record.Code, record.Body.String())
+			}
+		})
 	}
 }
 

@@ -4204,11 +4204,26 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
     ...transcriptMetadataState.payload,
     sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
   });
+  restartTranscriptStreamForPaneTarget(session, signalTarget);
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
     if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
+  return true;
+}
+
+function restartTranscriptStreamForPaneTarget(session, paneTarget) {
+  const target = String(paneTarget || '').trim();
+  if (!target || typeof transcriptPreviewPaneIsActive !== 'function' || !transcriptPreviewPaneIsActive(session)) return false;
+  const source = transcriptLifecycleScopes.get(session)?.value('stream');
+  if (!source) return false;
+  let currentTarget = '';
+  try {
+    currentTarget = new URL(String(source.url || ''), window.location.href).searchParams.get('pane_target') || '';
+  } catch (_) {}
+  if (currentTarget === target) return false;
+  startTranscriptStream(session, {paneTarget: target, scrollBottom: false});
   return true;
 }
 
@@ -6646,7 +6661,7 @@ function relocalizeTranscriptPanelStatus(session) {
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
-    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    const payload = await apiFetchJson(transcriptContextApiUrl('/api/context-items', session, transcriptPreviewMessages, options));
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
@@ -6717,7 +6732,7 @@ function startTranscriptStream(session, options = {}) {
   stopTranscriptStream(session);
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
-  const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const url = transcriptContextApiUrl('/api/context-stream', session, transcriptPreviewMessages, options);
   const {scope, token: lifecycleToken} = tmuxSessionStreamLifecycleScope(transcriptLifecycleScopes, session);
   const source = new EventSource(url);
   ownTmuxSessionStream(scope, lifecycleToken, source);
@@ -6756,6 +6771,19 @@ function startTranscriptStream(session, options = {}) {
       });
     }
   };
+}
+
+function transcriptContextApiUrl(route, session, messages, options = {}) {
+  const params = [`session=${encodeURIComponent(session)}`, `messages=${encodeURIComponent(messages)}`];
+  const paneTarget = String(
+    options.paneTarget !== undefined
+      ? options.paneTarget
+      : (typeof terminalContextMenuPaneTargetForSession === 'function' ? terminalContextMenuPaneTargetForSession(session) : ''),
+  ).trim();
+  if (paneTarget) params.push(`pane_target=${encodeURIComponent(paneTarget)}`);
+  const windowIndex = String(options.window || '').trim();
+  if (windowIndex && !paneTarget) params.push(`window=${encodeURIComponent(windowIndex)}`);
+  return `${route}?${params.join('&')}`;
 }
 
 function stopTranscriptStream(session, expectedSource = null) {

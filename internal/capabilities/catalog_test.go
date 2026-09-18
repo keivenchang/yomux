@@ -21,7 +21,7 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
 		t.Fatal("capability availability does not match the implemented Finder and stats surfaces")
 	}
-	for _, name := range []string{"terminal.status.v1", "core.settings.v1", "core.integrations.v1", "pane.tabber.v1", "pane.chat.v1"} {
+	for _, name := range []string{"core.settings.v1", "core.integrations.v1", "pane.tabber.v1", "pane.chat.v1"} {
 		if catalog.Available(name) {
 			t.Fatalf("unimplemented capability %q is unexpectedly available", name)
 		}
@@ -51,6 +51,11 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 		"GET /api/yoagent/conversation":     "pane.agent.v1",
 		"GET /api/system-status":            "core.diagnostics.v1",
 		"GET /api/session-files?session=1":  "finder.git.v1",
+		"GET /api/transcripts":              "core.bootstrap.v1",
+		"GET /api/transcript?session=1":     "terminal.status.v1",
+		"GET /api/context?session=1":        "terminal.status.v1",
+		"GET /api/context-items?session=1":  "terminal.status.v1",
+		"GET /api/context-stream?session=1": "terminal.status.v1",
 		"GET /api/settings":                 "core.settings.v1",
 		"POST /api/settings":                "core.settings.v1",
 		"GET /api/update-status":            "core.integrations.v1",

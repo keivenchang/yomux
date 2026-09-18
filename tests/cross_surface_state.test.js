@@ -2126,7 +2126,7 @@ async function runCrossSurfaceStateSuite() {
   transcriptWatchApi.setLayoutSlotsForTest(transcriptWatchSlots);
   assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'terminal tabs do not subscribe to transcript context payloads');
   transcriptWatchApi.activateTerminalDetailTabForTest('1', 'transcript');
-  assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [{session: '1', messages: 200}], 'only the visible transcript pane subscribes to context payloads');
+  assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [{session: '1', messages: 200, pane_target: ''}], 'only the visible transcript pane subscribes to context payloads');
   transcriptWatchApi.activateTerminalDetailTabForTest('1', 'terminal');
   assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'leaving the transcript pane removes the context subscription');
 
@@ -4848,7 +4848,7 @@ async function runCrossSurfaceStateSuite() {
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     const tabContextMenuStart = source.indexOf('function showTabContextMenu(');
     const tabContextMenuEnd = source.indexOf('function showSessionContextMenu(', tabContextMenuStart);
-    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('sessionTabDescription(item, info)'), 'tab action descriptions reuse the metadata-safe tab description instead of showing Loading for an interactive terminal');
+    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('tabMenuDetailText(item, info)'), 'tab action descriptions reuse the full metadata detail for an interactive terminal');
     api.showSessionContextMenu('1', 10, 10);
     contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
@@ -4858,7 +4858,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal((pinTabRow?.innerHTML.match(/context-menu-check/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
     assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — /repo/workspace · workspace', 'Expand pane', "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');

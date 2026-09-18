@@ -39,7 +39,7 @@ async function showContext(session) {
   modal.classList.add(CLS.open);
   relocalizeModalChrome();
   try {
-    const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    const payload = await apiFetchJson(transcriptContextApiUrl('/api/context', session, transcriptPreviewMessages));
     renderContextTailPayload(session, payload);
   } catch (error) {
     if (isApiPendingResponse(error)) return;

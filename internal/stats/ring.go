@@ -199,7 +199,7 @@ func decodeRingBucket(value any) (string, error) {
 	}
 }
 
-func validateRingShape(ctx context.Context, db *sql.DB) error {
+func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) error {
 	for table, expected := range ringColumns {
 		rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 		if err != nil {
@@ -242,6 +242,9 @@ func validateRingShape(ctx context.Context, db *sql.DB) error {
 			}
 		}
 		_ = rows.Close()
+	}
+	if !requireTriggers {
+		return nil
 	}
 	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('aggregate_publication','aggregate_rings','aggregate_ring_slots')")
 	if err != nil {

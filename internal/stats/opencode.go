@@ -15,6 +15,7 @@ import (
 
 const MaxOpenCodePartReadLimit = 2048
 const MaxOpenCodeSessionTree = 64
+const MaxOpenCodeContextItems = 200
 
 var openCodeRequiredColumns = map[string][]string{
 	"session": {"id", "directory", "agent", "model", "time_created", "time_updated", "cost"},
@@ -49,6 +50,16 @@ type OpenCodeStepFinishPart struct {
 	Model         string
 	ModelEvidence string
 	Tokens        OpenCodeTokenSnapshot
+}
+
+// OpenCodeContextItem is the bounded, display-safe conversation projection used
+// by the Go transcript surface. OpenCode stores this data in SQLite parts rather
+// than in a JSONL transcript, so callers must not scan the database as text.
+type OpenCodeContextItem struct {
+	Role      string
+	Timestamp string
+	CWD       string
+	Text      string
 }
 
 // OpenCodePartCursor is the stable SQL boundary for one session's newest
@@ -106,6 +117,109 @@ func (d *OpenCodeDatabase) Close() error {
 		return nil
 	}
 	return d.close()
+}
+
+// ReadContextItems returns the newest bounded OpenCode conversation items for a
+// single persisted session. It reads only message/part identity and display
+// fields, and never mutates the external database.
+func (d *OpenCodeDatabase) ReadContextItems(ctx context.Context, sessionID string, limit int) ([]OpenCodeContextItem, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("OpenCode session ID is required")
+	}
+	if limit <= 0 || limit > MaxOpenCodeContextItems {
+		return nil, fmt.Errorf("invalid OpenCode context limit %d", limit)
+	}
+	rows, err := d.reader.Rows(ctx, `SELECT m.id, m.time_created, m.data, p.id, p.time_created, p.data, s.directory
+FROM message AS m JOIN session AS s ON s.id = m.session_id LEFT JOIN part AS p ON p.message_id = m.id AND p.session_id = m.session_id
+WHERE m.session_id = ?
+ORDER BY COALESCE(p.time_created, m.time_created) DESC, m.id DESC, p.id DESC LIMIT ?`, sessionID, limit*8)
+	if err != nil {
+		return nil, fmt.Errorf("read OpenCode context: %w", err)
+	}
+	items := make([]OpenCodeContextItem, 0, limit)
+	seenMessages := make(map[string]bool)
+	for index := len(rows) - 1; index >= 0; index-- {
+		row := rows[index]
+		if len(row) != 7 {
+			return nil, fmt.Errorf("malformed OpenCode context row %d", index)
+		}
+		messageID, messageOK := openCodeString(row[0])
+		messageTime, timeErr := openCodeInteger(row[1])
+		if !messageOK || messageID == "" || timeErr != nil {
+			return nil, fmt.Errorf("malformed OpenCode context message")
+		}
+		directory, directoryOK := openCodeString(row[6])
+		if !directoryOK {
+			return nil, fmt.Errorf("malformed OpenCode context directory")
+		}
+		var message map[string]any
+		if err := decodeOpenCodeObject(row[2], &message); err != nil {
+			return nil, fmt.Errorf("malformed OpenCode context message JSON: %w", err)
+		}
+		role, _ := message["role"].(string)
+		if !seenMessages[messageID] {
+			seenMessages[messageID] = true
+			if text, ok := openCodeTextValue(message["content"]); ok {
+				items = append(items, OpenCodeContextItem{Role: firstNonEmpty(role, "assistant"), Timestamp: openCodeContextTimestamp(messageTime), CWD: directory, Text: boundedOpenCodeContextText(text, 5000)})
+			}
+		}
+		partID, _ := openCodeString(row[3])
+		if partID == "" {
+			continue
+		}
+		partTime, partTimeErr := openCodeInteger(row[4])
+		if partTimeErr != nil {
+			return nil, fmt.Errorf("malformed OpenCode context part time")
+		}
+		var part map[string]any
+		if err := decodeOpenCodeObject(row[5], &part); err != nil {
+			return nil, fmt.Errorf("malformed OpenCode context part JSON: %w", err)
+		}
+		partType, _ := part["type"].(string)
+		switch partType {
+		case "text", "reasoning":
+			if text, ok := openCodeTextValue(part["text"]); ok {
+				items = append(items, OpenCodeContextItem{Role: firstNonEmpty(role, "assistant"), Timestamp: openCodeContextTimestamp(partTime), CWD: directory, Text: boundedOpenCodeContextText(text, 5000)})
+			}
+		case "tool":
+			name, _ := part["tool"].(string)
+			state, _ := part["state"].(map[string]any)
+			if name == "" {
+				name = "tool"
+			}
+			toolText := name
+			if input, present := state["input"]; present && input != nil {
+				if encoded, encodeErr := json.Marshal(input); encodeErr == nil && string(encoded) != "null" {
+					toolText += "\n" + string(encoded)
+				}
+			}
+			items = append(items, OpenCodeContextItem{Role: "tool_use", Timestamp: openCodeContextTimestamp(partTime), CWD: directory, Text: boundedOpenCodeContextText(toolText, 2200)})
+			if output, ok := openCodeTextValue(state["output"]); ok {
+				items = append(items, OpenCodeContextItem{Role: "tool_result", Timestamp: openCodeContextTimestamp(partTime), CWD: directory, Text: boundedOpenCodeContextText(output, 2200)})
+			}
+		}
+	}
+	if len(items) > limit {
+		items = items[len(items)-limit:]
+	}
+	return items, nil
+}
+
+func openCodeTextValue(value any) (string, bool) {
+	text, ok := value.(string)
+	return text, ok && strings.TrimSpace(text) != ""
+}
+
+func openCodeContextTimestamp(milliseconds int64) string {
+	return time.UnixMilli(milliseconds).UTC().Format(time.RFC3339)
+}
+
+func boundedOpenCodeContextText(value string, limit int) string {
+	characters := []rune(value)
+	if len(characters) <= limit {
+		return value
+	}
+	return string(characters[:limit]) + "\n[truncated]"
 }
 
 // OpenOpenCodeReadOnly opens only the external OpenCode database. It never

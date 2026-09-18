@@ -181,6 +181,9 @@ if [[ "$backend" == "go" ]]; then
     go_binary="$repo_root/yolomux-go"
   fi
   [[ -n "$go_binary" ]] && extra_env+=("YOLOMUX_GO_BINARY=$go_binary")
+  extra_env+=("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT=${YOLOMUX_CLAUDE_TRANSCRIPT_ROOT:-$HOME/.claude/projects}")
+  extra_env+=("YOLOMUX_CODEX_TRANSCRIPT_ROOT=${YOLOMUX_CODEX_TRANSCRIPT_ROOT:-$HOME/.codex/sessions}")
+  extra_env+=("YOLOMUX_OPENCODE_DATABASE=${YOLOMUX_OPENCODE_DATABASE:-$HOME/.local/share/opencode/opencode.db}")
 fi
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
