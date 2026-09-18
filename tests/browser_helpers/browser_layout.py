@@ -2323,6 +2323,7 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
         "serverHostname": "localhost",
         "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
+        "backend": web.YOLOMUX_BACKEND,
         "version": "test",
         "versionStatus": "test",
         "backendLabel": "Go test",

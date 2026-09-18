@@ -105,6 +105,16 @@ def test_html_page_bootstraps_authoritative_username():
     assert bootstrap["authUsername"] == "alice"
 
 
+def test_html_page_bootstraps_backend_identity_and_brand_hover(monkeypatch):
+    monkeypatch.setattr(web, "yolomux_version_metadata", lambda: ("0.8.8(7)", []))
+
+    page = web.html_page([])
+    bootstrap = json.loads(_bootstrap_json(page))
+
+    assert bootstrap["backend"] == common.YOLOMUX_BACKEND
+    assert page.count(f'title="0.8.8(7) [{common.YOLOMUX_BACKEND}]') == 2
+
+
 def test_html_page_bootstraps_host_cpu_topology(monkeypatch):
     monkeypatch.setattr(web, "cpu_topology", lambda: {"logical_cpus": 32, "physical_cores": 24})
 

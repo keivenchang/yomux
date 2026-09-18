@@ -118,7 +118,8 @@ Section order follows the reading path: capabilities and terms, layout and tab m
 
 ### Version Display
 
-- The top-left version directly shows the release version followed by the number of commits after its matching `v<version>` tag in parentheses when nonzero, and an asterisk when the worktree is dirty: `0.8.1`, `0.8.1(3)`, `0.8.1*`, or `0.8.1(3)*`. Hovering the version shows the post-release commits first, one per line as `YYYY-MM-DD HH:MM:SS PT subject`, followed by the existing commit SHA, commit time, and total history details.
+- The top-left version directly shows the release version followed by the number of commits after its matching `v<version>` tag in parentheses when nonzero, and an asterisk when the worktree is dirty: `0.8.1`, `0.8.1(3)`, `0.8.1*`, or `0.8.1(3)*`. Hovering the version starts with the release status followed by bracketed server implementation/runtime identity, such as `0.8.8(7) [Python 3.12.3]` or `0.9.0(12)* [Go 1.23.4]`, then shows the post-release commits one per line as `YYYY-MM-DD HH:MM:SS PT subject`, followed by the existing commit SHA, commit time, and total history details.
+- Hovering the top-left YOLOmux wordmark shows the same release-first implementation/runtime identity on its first line, such as `0.8.8(7) [Python 3.12.3]`; the current server uptime remains on the next line. The complete implementation/runtime string is server-owned bootstrap metadata, and the release status uses the same version/tag/dirty-worktree calculation as the visible version.
 
 ## Tab Strip Behavior
 

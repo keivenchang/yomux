@@ -14,6 +14,7 @@ import hashlib
 import logging
 import math
 import os
+import platform
 import re
 import signal
 import shutil
@@ -64,6 +65,8 @@ MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
 YOLOMUX_VERSION = "0.8.8"
+# The implementation/runtime identity is shown by the top-left version hover.
+YOLOMUX_BACKEND = f"Python {platform.python_version()}"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
