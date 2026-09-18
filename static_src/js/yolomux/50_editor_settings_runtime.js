@@ -9,20 +9,21 @@ function editorViewModeFor(path, item = null) {
   const state = fileEditorStateForItem(path, item);
   if (state?.historical === true && mode !== 'preview') return 'diff';
   if (!editorPreviewModeAvailable(path, state)) return 'edit';
+  if (previewRendererForPath(path, state)?.previewOnly === true) return 'preview';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
 }
 
 function fileEditorWrapForPath(path, state = null) {
-  if (fileEditorWrapEnabled) return true;
-  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
+  return fileEditorWrapEnabled;
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   const state = fileEditorStateForItem(path, item);
   if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (state?.historical !== true && mode !== 'diff' && previewRendererForPath(path, state)?.previewOnly === true) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
   const previousMode = editorViewModeFor(path, item);
   if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
@@ -40,7 +41,8 @@ function setFileEditorViewMode(path, mode, item = null) {
 function updateEditorModeControl(control, path, state, item = null) {
   if (!control) return;
   const visible = Boolean(state?.kind) && editorPreviewModeAvailable(path, state);
-  control.hidden = !visible;
+  const previewOnly = previewRendererForPath(path, state)?.previewOnly === true;
+  control.hidden = !visible || previewOnly;
   if (!visible) return;
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
@@ -96,7 +98,7 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
+  if (mode === fileEditorThemeMode && fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
   return t('editor.editorSchemeLabel', {scheme: scheme.label});
@@ -133,7 +135,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': 'var(--active-accent)',
+    '--markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--markdown-heading-bg': 'transparent',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
@@ -164,7 +166,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': 'var(--active-accent)',
+    '--lt-markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
     '--lt-markdown-heading-bg': 'transparent',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
@@ -215,7 +217,7 @@ function updateEditorThemeButton(button, options = {}) {
 }
 
 function updateImageViewerThemeButton(button) {
-  updateEditorThemeButton(button);
+  updateEditorThemeButton(button, {includeVanilla: false});
   if (!button) return;
   button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
   button.setAttribute('aria-label', t('editor.toggleImageBackground'));
@@ -245,8 +247,13 @@ function applyEditorThemeMode(options = {}) {
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
+  document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
   document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
-  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+  document.querySelectorAll('.file-editor-theme-panel').forEach(button => {
+    const panel = button.closest('.file-editor-panel');
+    const state = panel ? fileEditorPanelState(panel) : null;
+    updateEditorThemeButton(button, {includeVanilla: !panel || state?.kind === 'text'});
+  });
   if (options.refreshEditors) refreshOpenEditorThemePanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
 }
@@ -268,8 +275,8 @@ function setFileEditorPreviewDisplayMode(mode) {
 }
 
 function cycleEditorThemeMode(options = {}) {
-  const includeVanilla = options.includeVanilla !== false;
   const previewState = editorPreviewThemeState();
+  const includeVanilla = options.includeVanilla !== false;
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
     return;
@@ -646,7 +653,7 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
   const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
-  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state, force: true});
   if (rendered === false) return false;
   restorePreviewFindAfterRender(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);

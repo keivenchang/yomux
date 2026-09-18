@@ -4015,6 +4015,32 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.clientEventReadyGapResourcesForTest({resource_revisions: {fs_changed: 4, 'event_log_changed:1': 3}})), ['event_log_changed:1']);
   });
 
+  test('queued events from the retired server epoch are dropped at frame flush', () => {
+    const frames = [];
+    const api = loadYolomux(
+      '?sessions=old&layout=left&tabs=left:old',
+      ['old'],
+      'http:',
+      'Linux x86_64',
+      'admin',
+      {requestAnimationFrame(callback) { frames.push(callback); return frames.length; }},
+    );
+    assert.equal(api.handleClientPushEventForTest('transcripts_changed', {
+      data: {
+        metadata_identity: {epoch: 'server-old', generation: 1},
+        topology_generation: 1,
+        session_order: ['old'],
+        sessions: {old: {panes: [], marker: 'stale-old-server'}},
+      },
+    }, {resource: 'transcripts_changed', resource_revision: 1}), true);
+    assert.equal(api.clientEventTransportStateForTest().queued, 1);
+    assert.equal(api.applyClientEventReadyEnvelopeForTest({epoch: 'server-new'}), true);
+    frames[0]();
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(state.epoch, 'server-new');
+    assert.equal(state.payload.sessions?.old, undefined, 'the queued old-server transcript event never applies');
+  });
+
   await testAsync('status deltas repair a missed revision and a late joiner to the latest snapshots', async () => {
     const latestAuto = {
       agent_window_snapshot_revision: 3,
@@ -4404,6 +4430,203 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.autoApproveStateForTest('1')?.marker, 'fresh-topology');
   });
 
+  await testAsync('metadata roster responses cannot move topology backward or erase a rename', async () => {
+    const pending = [];
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=gale-5_3&layout=left&tabs=left:gale-5_3',
+      ['gale-5_3'],
+    );
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const staleRequest = api.refreshSessionMetadataForTest({
+      refreshAuto: false,
+      refreshActivity: false,
+      refreshContext: false,
+    });
+    assert.equal(pending.length, 1, 'the pre-rename metadata response is held in flight');
+    api.applyAutoApprovePayloadForTest({
+      topology_generation: 4,
+      session_order: ['gale-5_3'],
+      sessions: {'gale-5_3': {target: 'gale-5_3'}},
+    }, {render: false});
+    api.replaceTmuxSessionInClient('gale-5_3', '234-gale-5_3', ['234-gale-5_3']);
+    pending[0].resolve(jsonResponse({
+      topology_generation: 3,
+      session_order: ['gale-5_3'],
+      sessions: {'gale-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }));
+    await staleRequest;
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_topology_generation');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-gale-5_3'], active: '234-gale-5_3'}},
+      'releasing the delayed pre-rename response cannot erase the renamed tab',
+    );
+
+    const stale = await api.applySessionMetadataPayloadForTest({
+      topology_generation: 3,
+      session_order: ['gale-5_3'],
+      sessions: {'gale-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(stale, false, 'a response from before the rename is rejected');
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_topology_generation');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-gale-5_3'], active: '234-gale-5_3'}},
+      'the stale roster cannot restore the retired session identity',
+    );
+
+    const refreshing = await api.applySessionMetadataPayloadForTest({
+      status: 'refreshing',
+      topology_generation: 4,
+      session_order: [],
+      sessions: {},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(refreshing, false, 'a transient statusd refresh is not an empty authoritative roster');
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'refreshing');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-gale-5_3'], active: '234-gale-5_3'}},
+      'a transient roster rebuild preserves the optimistic rename',
+    );
+
+    const fresh = await api.applySessionMetadataPayloadForTest({
+      topology_generation: 5,
+      session_order: ['234-gale-5_3'],
+      sessions: {'234-gale-5_3': {panes: [], marker: 'authoritative-rename'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(fresh, true, 'the later authoritative roster is accepted');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['234-gale-5_3'].marker, 'authoritative-rename');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['gale-5_3'], undefined);
+  });
+
+  await testAsync('a replacement server can apply its own topology generation', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('', ['old']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-old', generation: 1},
+      topology_generation: 50,
+      session_order: ['old'],
+      sessions: {old: {panes: []}},
+    }, quiet);
+    const applied = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-new', generation: 1},
+      topology_generation: 1,
+      session_order: ['new'],
+      sessions: {new: {panes: []}},
+    }, quiet);
+    assert.equal(applied, true, 'a new server topology sequence is independent of the old server');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['new']);
+    assert.equal(api.transcriptMetadataStateForTest().epoch, 'server-new');
+  });
+
+  await testAsync('a delayed old-epoch metadata request cannot overwrite the replacement server', async () => {
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=old&layout=left&tabs=left:old',
+      ['old'],
+    );
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const pending = [];
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const delayed = api.refreshSessionMetadataForTest(quiet);
+    assert.equal(pending.length, 1, 'the old-server metadata request is held in flight');
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-new', generation: 1},
+      topology_generation: 2,
+      session_order: ['new'],
+      sessions: {new: {panes: [], marker: 'replacement'}},
+    }, quiet);
+    const stateAfterReplacement = api.transcriptMetadataStateForTest();
+    const layoutAfterReplacement = canonical(api.serialize(api.currentSlots()).panes);
+    pending[0].resolve(jsonResponse({
+      metadata_identity: {epoch: 'server-old', generation: 2},
+      topology_generation: 99,
+      session_order: ['old'],
+      sessions: {old: {panes: [], marker: 'stale-old-server'}},
+    }));
+    await delayed;
+    const stateAfterDelayed = api.transcriptMetadataStateForTest();
+    assert.equal(stateAfterDelayed.lastApply.reason, 'superseded_request');
+    assert.equal(stateAfterDelayed.epoch, 'server-new');
+    assert.equal(stateAfterDelayed.generation, stateAfterReplacement.generation);
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['new']);
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), layoutAfterReplacement);
+    assert.equal(stateAfterDelayed.payload.sessions.new.marker, 'replacement');
+    assert.equal(stateAfterDelayed.payload.sessions.old, undefined);
+  });
+
+  await testAsync('the real rename flow survives a delayed pre-rename metadata response', async () => {
+    const api = loadYolomuxWithFileExplorerClosed(
+      '?sessions=gale-5_3&layout=left&tabs=left:gale-5_3',
+      ['gale-5_3'],
+    );
+    const pending = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/session-metadata' && !parsed.searchParams.has('force')) {
+        const request = deferredFetch();
+        pending.push(request);
+        return request.promise;
+      }
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({
+          new_session: '234-gale-5_3',
+          sessions: ['234-gale-5_3'],
+          topology_generation: 4,
+          ok: true,
+        }));
+      }
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({session: '234-gale-5_3', created: false, ok: true}));
+      }
+      if (parsed.pathname === '/api/session-metadata' && parsed.searchParams.get('force') === '1') {
+        return Promise.resolve(jsonResponse({
+          metadata_identity: {epoch: 'rename-server', generation: 4},
+          cache: {pending_identity: {epoch: 'rename-server', generation: 4}},
+          topology_generation: 4,
+          session_order: ['234-gale-5_3'],
+          sessions: {'234-gale-5_3': {panes: [], marker: 'fresh-after-rename'}},
+        }));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['234-gale-5_3'], sessions: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const staleRequest = api.refreshSessionMetadataForTest({
+      refreshAuto: false,
+      refreshActivity: false,
+      refreshContext: false,
+    });
+    assert.equal(pending.length, 1, 'the metadata request started before the rename');
+    const rename = api.renameTmuxSessionForTest('gale-5_3', '234-gale-5_3');
+    await flushAsyncWork();
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['234-gale-5_3'], 'the real mutation commits the new roster before reconciliation');
+    pending[0].resolve(jsonResponse({
+      topology_generation: 3,
+      session_order: ['gale-5_3'],
+      sessions: {'gale-5_3': {panes: [], marker: 'stale-before-rename'}},
+    }));
+    await staleRequest;
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'superseded_request');
+    assert.equal(await rename, true, 'the committed rename does not fail on stale reconciliation bytes');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['234-gale-5_3'], active: '234-gale-5_3'}},
+    );
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['234-gale-5_3'].marker, 'fresh-after-rename');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions['gale-5_3'], undefined);
+  });
+
   test('tmux lifecycle generations make kill-create reuse ABA-safe', () => {
     const api = loadYolomux('', ['1']);
     const originalToken = api.tmuxSessionLifecycleTokenForTest('1');
@@ -4507,7 +4730,7 @@ async function runLayoutAsyncSuite() {
     const terminalCases = [
       ['malformed_payload', null, quiet],
       ['superseded_request', metadataFor(3, ['1']), {...quiet, requestIsCurrent: () => false}],
-      ['older_work_graph_generation', metadataFor(4, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
+      ['older_work_graph_generation', metadataFor(1, ['1'], {work_graph: {version: 1, generation: 4}}), quiet],
       // The committed-render outcome is current at the entry gate and superseded at the render
       // gate, which is the only way to reach the fourth terminal exit.
       ['committed_render_superseded', metadataFor(5, ['1']), {
@@ -4568,7 +4791,7 @@ async function runLayoutAsyncSuite() {
     );
   });
 
-  await testAsync('metadata apply records the generation it rendered and a machine-readable reason for every drop', async () => {
+  await testAsync('metadata apply records build freshness and rejects only stale same-epoch work graphs', async () => {
     // Regression: a dropped metadata payload returned a bare `false` that no caller read, and the
     // rendered model carried no identity, so "the refresh landed and had nothing new" and "the
     // refresh was silently discarded" were indistinguishable. A create-session gate could only tell
@@ -4592,18 +4815,29 @@ async function runLayoutAsyncSuite() {
       {applied: true, reason: 'applied', payloadGeneration: 7},
     );
 
-    const dropped = await api.applySessionMetadataPayloadForTest({
+    const newerBuild = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 8},
       session_order: ['1'],
-      sessions: {'1': {panes: [], work_graph: {version: 1, generation: 3}}},
+      sessions: {'1': {panes: [], marker: 'newer-build', work_graph: {version: 1, generation: 3}}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    const afterNewerBuild = api.transcriptMetadataStateForTest();
+    assert.equal(newerBuild, true, 'a newer same-epoch metadata build may carry an older work-graph generation');
+    assert.equal(afterNewerBuild.payload.sessions['1'].marker, 'newer-build');
+    assert.equal(afterNewerBuild.generation, 8, 'the newer metadata build becomes the rendered identity');
+
+    const dropped = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 7},
+      session_order: ['1'],
+      sessions: {'1': {panes: [], marker: 'stale-build', work_graph: {version: 1, generation: 2}}},
     }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
     const afterDrop = api.transcriptMetadataStateForTest();
-    assert.equal(dropped, false, 'an older session work graph is still refused');
+    assert.equal(dropped, false, 'an older same-epoch metadata build with an older graph is refused');
     assert.deepStrictEqual(
       {applied: afterDrop.lastApply.applied, reason: afterDrop.lastApply.reason, session: afterDrop.lastApply.session},
       {applied: false, reason: 'older_work_graph_generation', session: '1'},
     );
-    assert.equal(afterDrop.generation, 7, 'a refused payload cannot advance the rendered generation');
+    assert.equal(afterDrop.generation, 8, 'a refused payload cannot move the rendered generation backward');
+    assert.equal(afterDrop.payload.sessions['1'].marker, 'newer-build', 'a stale payload cannot replace the newer build');
 
     const superseded = await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 9},
@@ -4625,7 +4859,69 @@ async function runLayoutAsyncSuite() {
     assert.equal(unidentified, true, 'an identity-less payload is still rendered');
     assert.equal(afterUnidentified.payload.sessions['1'].marker, 'legacy-server');
     assert.equal(afterUnidentified.epoch, 'epoch-a', 'an identity-less payload cannot change which server the client is tracking');
-    assert.equal(afterUnidentified.generation, 7, 'a bare generation scalar cannot advance the applied identity');
+    assert.equal(afterUnidentified.generation, 8, 'a bare generation scalar cannot advance the applied identity');
+  });
+
+  await testAsync('tmux roster events update cached Tabs state without metadata polling', async () => {
+    const api = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 4},
+      topology_generation: 1,
+      session_order: ['old'],
+      sessions: {old: {panes: [], marker: 'cached'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    let metadataReads = 0;
+    api.setFetchForTest(() => {
+      metadataReads += 1;
+      return Promise.reject(new Error('roster event must not poll metadata'));
+    });
+    const applied = api.applyTmuxRosterPayloadForTest({
+      session_order: ['renamed'],
+      roster_generation: 2,
+      topology_generation: 2,
+      server_epoch: 'epoch-a',
+      renames: [{old_session: 'old', new_session: 'renamed'}],
+    }, {epoch: 'epoch-a'});
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(applied, true);
+    assert.equal(api.itemInLayout('old'), false, 'the external rename retires the old layout item');
+    assert.equal(api.itemInLayout('renamed'), true, 'the external rename preserves the layout item under the new name');
+    assert.deepStrictEqual(canonical(state.payload.session_order), ['renamed']);
+    assert.equal(state.payload.sessions.renamed.marker, 'cached', 'the compact roster event rekeys cached row data');
+    assert.equal(state.payload.sessions.old, undefined);
+    assert.equal(state.rosterGeneration, 2);
+    assert.equal(metadataReads, 0, 'roster event convergence does not request full metadata');
+
+    const stale = api.applyTmuxRosterPayloadForTest({
+      session_order: ['old'],
+      roster_generation: 1,
+      topology_generation: 1,
+      server_epoch: 'epoch-a',
+    }, {epoch: 'epoch-a'});
+    assert.equal(stale, false, 'a lower roster generation cannot overwrite the renamed row');
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['renamed']);
+    const foreign = api.applyTmuxRosterPayloadForTest({
+      session_order: ['foreign'],
+      roster_generation: 3,
+      topology_generation: 3,
+      server_epoch: 'epoch-b',
+    }, {epoch: 'epoch-b'});
+    assert.equal(foreign, false, 'a roster from another server epoch is rejected');
+
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-b', generation: 1},
+      topology_generation: 0,
+      session_order: ['foreign'],
+      sessions: {foreign: {panes: [], marker: 'new-server'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    const fresh = api.applyTmuxRosterPayloadForTest({
+      session_order: ['fresh'],
+      roster_generation: 1,
+      topology_generation: 1,
+      server_epoch: 'epoch-b',
+    }, {epoch: 'epoch-b'});
+    assert.equal(fresh, true, 'a replacement server can restart roster generations at one');
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['fresh']);
   });
 
   await testAsync('a superseded response still records the build the server promised', async () => {
@@ -4851,6 +5147,35 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.lastApply.awaitedGeneration, 51);
   });
 
+  await testAsync('forced convergence rejects a delayed read from the replaced server', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    await applyOldServerMetadata(api);
+    const convergence = deferredFetch();
+    let requestCount = 0;
+    api.setFetchForTest(async input => {
+      requestCount += 1;
+      assert.equal(String(input), requestCount === 1 ? '/api/session-metadata?force=1' : '/api/session-metadata');
+      return requestCount === 1
+        ? jsonResponse(metadataPayload(EPOCH_A, 50, {pending: {epoch: EPOCH_A, generation: 51}}))
+        : convergence.promise;
+    });
+    const resultPromise = api.refreshSessionMetadataForTest({force: true, refreshAuto: false, refreshActivity: false});
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(requestCount, 2, 'forced convergence issued its cache read');
+    await api.applySessionMetadataPayloadForTest(
+      metadataPayload(EPOCH_B, 3, {sessions: {'1': {panes: [], marker: 'replacement'}}}),
+      {refreshAuto: false, refreshActivity: false, refreshContext: false},
+    );
+    convergence.resolve(jsonResponse(metadataPayload(EPOCH_A, 51, {sessions: {'1': {panes: [], marker: 'stale-old-server'}}})));
+    const result = await resultPromise;
+    const state = api.transcriptMetadataStateForTest();
+    assert.deepStrictEqual({ok: result.ok, reason: result.reason}, {ok: false, reason: 'forced_settle_epoch_changed'});
+    assert.equal(state.epoch, EPOCH_B);
+    assert.equal(state.payload.sessions['1'].marker, 'replacement');
+    assert.equal(state.generation, 3);
+  });
+
   await testAsync('an epoch change drops the previous process\'s generation-dependent baseline', async () => {
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     await applyOldServerMetadata(api);
@@ -4869,13 +5194,14 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.payload.sessions['1'].work_graph.generation, 5, 'the previous epoch\'s work graph is not carried forward');
     assert.deepStrictEqual(canonical(state.payload.indexed_repos), [], 'nor its indexed-repo baseline');
 
-    // Negative control: inside ONE epoch the same refusal still applies, so the acceptance above is
-    // caused by the epoch change and not by the work-graph comparison having been removed.
+    // Negative control: inside ONE epoch, an old/equal metadata build still cannot replace a newer
+    // work graph. The acceptance above is caused by the epoch change, not by stale protection being
+    // removed.
     const refused = await api.applySessionMetadataPayloadForTest(
-      metadataPayload(EPOCH_B, 2, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
+      metadataPayload(EPOCH_B, 1, {sessions: {'1': {panes: [], marker: 'same-epoch-older', work_graph: {version: 1, generation: 4}}}}),
       {refreshAuto: false, refreshActivity: false, refreshContext: false},
     );
-    assert.equal(refused, false, 'an older work graph within the same epoch is still refused');
+    assert.equal(refused, false, 'an old same-epoch metadata build is still refused');
     assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'older_work_graph_generation');
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['1'].marker, 'new-server-lightweight');
   });
@@ -5022,56 +5348,22 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.sessionAgentWindowStatusModelForTest('2').stateRevision, 17, 'metadata convergence releases the held sealed status snapshot');
   });
 
-  await testAsync('Tabs menu shows cached labels immediately then refreshes its open rows from live session metadata', async () => {
-    const pending = [];
+  await testAsync('Tabs menu opens from cached rows without forcing metadata refresh', async () => {
     const api = loadYolomux('', ['1']);
-    api.setFetchForTest(url => {
-      assert.equal(String(url), '/api/session-metadata?force=1', 'opening Tabs requests one live metadata refresh after rendering cached rows');
-      const request = deferredFetch();
-      pending.push(request);
-      return request.promise;
+    let metadataReads = 0;
+    api.setFetchForTest(() => {
+      metadataReads += 1;
+      return Promise.reject(new Error('opening Tabs must not poll metadata'));
     });
     api.renderSessionButtonsForTest({force: true});
     const tabs = Array.from(api.sessionButtonsForTest().querySelectorAll('.app-menu'))
       .find(menu => menu.dataset.appMenu === 'tabs');
-    assert.ok(tabs, 'Tabs menu is rendered from the existing cached session snapshot');
+    assert.ok(tabs, 'Tabs is rendered from the existing cached session snapshot');
     const cachedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
-    assert.ok(cachedCommand, 'cached session row is available without waiting for list-sessions');
-    assert.equal(cachedCommand.html.includes('fresh-session-name'), false, 'the initial row is the pre-refresh cached label');
-
+    assert.ok(cachedCommand, 'cached session row is available immediately');
     api.openAppMenuForTest(tabs);
-    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately while live metadata is pending');
-    assert.equal(pending.length, 1, 'reopening work is coalesced through the shared metadata request record');
-    pending[0].resolve(jsonResponse({
-      session_order: ['1'],
-      sessions: {
-        '1': {
-          panes: [],
-          agents: [],
-          work_graph: {
-            version: 1,
-            generation: 1,
-            tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
-            tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: '', tmux_pane_ids: ['tmux-pane:1:0.0']}},
-            tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', target: '%1-0', index: '0', current_path: '/tmp/fresh-session-name', active: true, window_active: true, runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
-            runtime_actors: {'actor:1:0': {id: 'actor:1:0', tmux_pane_id: 'tmux-pane:1:0.0', kind: 'shell', cwd: '/tmp/fresh-session-name', status: '', path_observation_ids: ['observation:1:0']}},
-            path_observations: {'observation:1:0': {id: 'observation:1:0', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: 'actor:1:0', git_worktree_id: 'worktree:/tmp/fresh-session-name', path: '/tmp/fresh-session-name', source: 'fixture', priority: 0, last_observed_at: 1}},
-            git_worktrees: {'worktree:/tmp/fresh-session-name': {id: 'worktree:/tmp/fresh-session-name', root: '/tmp/fresh-session-name', git_dir: '/tmp/fresh-session-name/.git', kind: 'primary', parent_root: '', local_repository_id: 'local:/tmp/fresh-session-name', hosted_repository_id: null, current_branch_id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', branch_activity_ids: [], path_observation_ids: ['observation:1:0'], git: {root: '/tmp/fresh-session-name', branch: 'fresh-session-name'}}},
-            local_repositories: {'local:/tmp/fresh-session-name': {id: 'local:/tmp/fresh-session-name', common_git_dir: '/tmp/fresh-session-name/.git', git_worktree_ids: ['worktree:/tmp/fresh-session-name'], local_branch_ids: ['branch:local:/tmp/fresh-session-name:fresh-session-name'], hosted_repository_id: null}},
-            hosted_repositories: {},
-            local_branches: {'branch:local:/tmp/fresh-session-name:fresh-session-name': {id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', local_repository_id: 'local:/tmp/fresh-session-name', name: 'fresh-session-name', current: true, pull_request_ids: [], linear_issue_ids: []}},
-            pull_requests: {},
-            linear_issues: {},
-            worktree_branch_activity: {},
-          },
-        },
-      },
-    }));
-    await flushAsyncWork();
-    assert.equal(tabs.classList.contains('open'), true, 'the live update patches the open Tabs menu instead of closing it');
-    const refreshedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
-    assert.ok(refreshedCommand, 'the live update retains the cached session row identity');
-    assert.equal(refreshedCommand.html.includes('fresh-session-name'), true, 'the open Tabs row receives the live list-sessions name/description');
+    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately');
+    assert.equal(metadataReads, 0, 'opening Tabs does not start a full metadata request');
   });
 
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
@@ -6043,7 +6335,7 @@ async function runLayoutAsyncSuite() {
       globalThemeMode: 'light',
       terminalThemeMode: 'light',
       themeMode: 'github-light',
-      previewDisplayMode: 'vanilla',
+      previewDisplayMode: 'theme',
       wrapEnabled: true,
       lineNumbersEnabled: false,
       blameEnabled: true,
@@ -8851,9 +9143,9 @@ async function runLayoutAsyncSuite() {
       assert.equal(has(dt({types: ['text/plain'], data: {'text/plain': 'hello'}})), false, '78.5: plain text is not image-bearing');
       assert.equal(has(dt({items: [{kind: 'file', type: 'application/pdf', getAsFile() { return {name: 'a.pdf', type: 'application/pdf'}; }}]})), false, '78.5: a non-image file item is not image-bearing');
       assert.equal(has(null), false, '78.5: missing payload is not image-bearing');
-      assert.equal(files(dt({items: [fileItem(), fileItem('image/jpeg')]})).length, 2, '78.5: extracts every image File item (multi-image)');
-      assert.equal(files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]})).length, 1, '78.5: extracts only image entries from a plain File list');
-      assert.equal(files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}})).length, 1, '78.5: extracts image data URLs from rich text/html');
+      assert.equal((await files(dt({items: [fileItem(), fileItem('image/jpeg')]}))).length, 2, '78.5: extracts every image File item (multi-image)');
+      assert.equal((await files(dt({files: [{type: 'image/png', name: 'p.png'}, {type: 'text/plain', name: 'n.txt'}]}))).length, 1, '78.5: extracts only image entries from a plain File list');
+      assert.equal((await files(dt({types: ['text/html'], data: {'text/html': '<img src="data:image/png;base64,AAAA">'}}))).length, 1, '78.5: extracts image data URLs from rich text/html');
     }
 
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
@@ -8980,6 +9272,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(content, 'hello\n![one](note/one.png)\n![two file](note/two%20file.png)', 'Markdown editor paste preserves original image filenames as alt text and inserts file-directory links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
+      assert.equal(api.markdownPreviewImageTarget('note/one.png', path).path, '/repo/docs/note/one.png', 'uploaded Markdown references retain relative source semantics for the owning Markdown file');
     }
 
     // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
@@ -9021,7 +9314,8 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.equal(pasteEvent.defaultPrevented, true, 'remote Markdown image paste is claimed');
       assert.equal(pasteEvent.propagationStopped, true, 'remote Markdown image paste stops propagation');
-      assert.equal(calls.length, 0, 'remote Markdown image paste does not upload without an extractable File');
+      assert.equal(calls.length, 1, 'remote Markdown image paste fetches the rich image source before deciding whether it is uploadable');
+      assert.equal(calls[0].url, 'https://example.com/remote.png', 'remote Markdown image paste fetches the image source');
       assert.equal(sent.length, 0, 'remote Markdown image paste never leaks to xterm');
     }
 
@@ -9066,10 +9360,10 @@ async function runLayoutAsyncSuite() {
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
       const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      assert.ok(/scope\.ownEvent\('paste', document, 'paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
-      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
+      assert.ok(/scope\.ownEvent\('paste', document, 'paste', async event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
+      assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', async event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
-      assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
+      assert.ok(/const files = await dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
       assert.ok(/const proseMirrorView = panel\?\._pmView[\s\S]*surface = proseMirrorView/.test(imgSource), '78.6: ViewEditor paste target is selected from the ProseMirror surface');
       assert.ok(/surface === 'view-editor'[\s\S]*state\.tr\.replaceWith\(from, to, content\)/.test(imgSource), '78.6: ViewEditor image references use the ProseMirror selection');
     }
@@ -10594,7 +10888,7 @@ async function runLayoutAsyncSuite() {
       const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8').includes('ClipboardItem'));
       assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\)[\s\S]*copyTextToClipboard\(text\)\.then\([\s\S]*showCopyFeedback\(options\)/, 'one parent owns text-copy success and failure feedback');
       assert.deepEqual(rawTextWriterFiles, ['10_core_utils.js'], 'the raw text writer stays private to the shared feedback parent');
-      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
+      assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js', '88_markdown_preview.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');
       assert.equal([...core.matchAll(/copyTextToClipboard\(/g)].length, 2, 'only the shared feedback parent may invoke the raw text clipboard writer');
       assert.match(files, /navigator\.clipboard\.write\(\[new ClipboardItem[\s\S]*showCopyFeedback\(/, 'image clipboard writes report through the shared feedback parent');
       assert.match(core, /function copyTerminalSelectionToClipboardEvent[\s\S]*showCopyFeedback\(/, 'the synchronous terminal copy-event path keeps activation while reporting feedback');

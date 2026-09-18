@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "gekopieerd relatief pad",
   "status.copiedTerminalChars.one": "kopieerde {count} char",
   "status.copiedTerminalChars.other": "kopieerde {count} personages",
-  "status.copiedText": "gekopieerde tekst",
+  "status.copiedText": "Tekst gekopieerd",
   "status.copiedTmuxSelection.one": "kopieerde {count} char van tmux",
   "status.copiedTmuxSelection.other": "kopieerde {count} personages van tmux",
   "status.copiedTranscriptPath": "transcriptpad gekopieerd",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "Alle lettergroottes synchroniseren",
   "pref.appearance.sync_font_sizes.help": "Als dit is ingeschakeld, gebruiken UI, terminal, editor, voorbeeld en Finder de globale lettergrootte.",
   "pref.section.appearance": "Uiterlijk",
-  "pref.section.sizes": "Grootte"
+  "pref.section.sizes": "Grootte",
+  "contextmenu.copyText": "Tekst kopiëren",
+  "contextmenu.copyWithStyle": "Kopiëren met stijl",
+  "status.copiedStyledText": "Gekopieerd met stijl"
 }

@@ -1096,6 +1096,8 @@ globalThis.__layoutTestApi = {
   setTranscriptMetadataLoadErrorForTest(value) { transcriptMetadataState.error = value; },
   refreshSessionMetadataForTest: refreshSessionMetadata,
   applySessionMetadataPayloadForTest: applySessionMetadataPayload,
+  sessionsForTest() { return sessions.slice(); },
+  applyTmuxRosterPayloadForTest: applyTmuxRosterPayload,
   transcriptMetadataStateForTest() {
     return {
       payload: transcriptMetadataState.payload,
@@ -1106,6 +1108,7 @@ globalThis.__layoutTestApi = {
       epoch: transcriptMetadataState.epoch,
       previousEpoch: transcriptMetadataState.previousEpoch,
       generation: transcriptMetadataState.generation,
+      rosterGeneration: transcriptMetadataState.rosterGeneration,
       pendingGeneration: transcriptMetadataState.pendingGeneration,
       lastApply: transcriptMetadataState.lastApply,
     };
@@ -2864,6 +2867,7 @@ globalThis.__layoutTestApi = {
   terminalUsesAppWheelForTest: terminalUsesAppWheel,
   routeTerminalScrollLinesForTest: routeTerminalScrollLines,
   sessionPaneIsAlternateScreen,
+  terminalLineLinks,
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,
   terminalReferenceAtPosition,
@@ -3520,6 +3524,10 @@ function canonical(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function makeOverviewFixtureLines(count, label) {
+  return Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
+}
+
 function makeFileTree(paths) {
   const tree = new TestElement('file-tree');
   tree.setAttribute('role', 'tree');
@@ -3641,6 +3649,7 @@ module.exports = {
   nestedSlots,
   parseUrl,
   canonical,
+  makeOverviewFixtureLines,
   makeFileTree,
   test,
   testAsync,

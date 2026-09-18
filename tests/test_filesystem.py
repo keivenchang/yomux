@@ -4749,10 +4749,17 @@ def test_parse_blame_porcelain_extracts_author_pr_and_uncommitted():
     assert lines["3"]["pr"] is None
 
 
-def test_blame_file_on_a_tracked_repo_file():
-    # AGENTS.md is committed in this repo; blame should return per-line commit info.
-    repo_file = str(Path(__file__).resolve().parents[1] / "AGENTS.md")
-    result = filesystem.blame_file(repo_file)
+def test_blame_file_on_a_tracked_repo_file(tmp_path):
+    # Use a small repository so this contract does not depend on the checkout's loose-object layout.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    repo_file = repo / "tracked.txt"
+    repo_file.write_text("tracked line\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "add tracked file")
+
+    result = filesystem.blame_file(str(repo_file))
     assert result["in_repo"] is True
     assert result["lines"], "expected per-line blame for a tracked file"
     first = result["lines"]["1"]

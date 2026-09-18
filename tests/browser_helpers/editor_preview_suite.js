@@ -1664,7 +1664,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8'),
     ].join('\n');
     assert.equal((sources.match(/function fetchRawFileBlob\(/g) || []).length, 1, 'one shared raw-byte fetch owner serves every preview surface');
-    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*img\.src = rawFileUrl\(rawPath\)/.test(sources), 'Markdown local images use the direct raw-file URL');
+    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*installRawFileMediaSource/.test(sources), 'Markdown local images use the shared raw-file media lifecycle');
+    const markdownSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+    assert.ok(/img\.dataset\.markdownRawPath = target\.path;\s*img\.removeAttribute\('src'\)/.test(markdownSource), 'legacy Markdown local images remove the source before attachment so no relative request can start');
+    assert.ok(/container\.replaceChildren\(frag\)[\s\S]*installRawFileMediaSource\(img, rawPath/.test(markdownSource), 'legacy Markdown local images install the authenticated Blob owner after attachment');
     assert.ok(/function openFileImagePreview[\s\S]*installRawFileMediaSource/.test(sources), 'Finder and Differ hover images use the shared status-aware owner');
     assert.ok(/function renderFileEditorImagePane[\s\S]*installRawFileMediaSource/.test(sources), 'editor images use the shared status-aware owner');
     assert.ok(/function previewFileActionLinks[\s\S]*openRawFileInNewTab[\s\S]*triggerFileDownload/.test(sources), 'Open and Download siblings route through status-aware fetch owners');

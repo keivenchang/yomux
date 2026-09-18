@@ -58,6 +58,12 @@
   color: var(--text);
   background: transparent;
 }
+body.theme-light .yolomux-dockview .yolomux-dockview-core {
+  --dv-activegroup-visiblepanel-tab-color: var(--light-readable-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--light-readable-text);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--light-readable-text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--light-readable-text);
+}
 .yolomux-dockview .dv-tabs-and-actions-container {
   position: relative;
   border-bottom: 0;
@@ -240,6 +246,9 @@ body.app-phone-single-pane .panel {
   color: var(--pane-tab-text);
   background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--pane-inactive-tab-border);
+}
+body.theme-light .yolomux-dockview .dv-tab > .dockview-pane-tab {
+  color: var(--light-readable-text) !important;
 }
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
@@ -1466,6 +1475,17 @@ body.layout-resizing {
 .panel .pane-tab:not(.active) {
   background: var(--pane-bar-bg);
 }
+body.theme-light .panel .pane-tab:not(.active) {
+  color: var(--light-readable-text) !important;
+  background: var(--light-readable-bg);
+  border-color: var(--light-readable-line);
+}
+body.theme-light .panel .pane-tab:not(.active) .session-button-name,
+body.theme-light .panel .pane-tab:not(.active) .session-button-dir,
+body.theme-light .panel .pane-tab:not(.active) .session-button-detail,
+body.theme-light .panel .pane-tab:not(.active) .pane-tab-close {
+  color: var(--light-readable-text) !important;
+}
 .pane-tab:not(.active):hover,
 .pane-tab:not(.active):focus-visible,
 .tmux-pane-tab-token-action:not(.active):hover,
@@ -1513,6 +1533,10 @@ body.layout-resizing {
   color: currentColor;
   opacity: 0.58;
   border-radius: 50%;
+}
+body.theme-light .pane-tab-close {
+  color: var(--light-readable-text) !important;
+  opacity: 0.9;
 }
 .pane-tab-close::before {
   transform: translate(-50%, -50%) rotate(45deg);

@@ -397,10 +397,15 @@ def test_session_files_stale_background_refresh_publishes_materialized_payload(m
     finally:
         webapp.control_server.stop()
 
-    assert published == [
-        ({"session": "5", "hours": 24.0, "from_ref": "HEAD", "to_ref": "current", "repo_refs": {}}, fresh_payload, HTTPStatus.OK,
-         {"trigger": "background-refresh", "compute_ms": pytest.approx(published[0][3]["compute_ms"])})
-    ]
+    assert len(published) == 1
+    request, payload, status, details = published[0]
+    assert request == {"session": "5", "hours": 24.0, "from_ref": "HEAD", "to_ref": "current", "repo_refs": {}}
+    assert payload == fresh_payload
+    assert status == HTTPStatus.OK
+    assert details["trigger"] == "background-refresh"
+    assert details["compute_ms"] >= 0
+    assert details["completion"]["cache_key_hash"] == "ready"
+    assert len(details["completion"]["cache_view_id"]) == 64
 
 
 def test_session_files_refresh_callers_share_one_publication_owner():
@@ -447,9 +452,9 @@ def test_session_files_http_payload_issues_canonical_descriptor_for_symlinked_re
     assert len(descriptor) == 64 and str(alias) not in descriptor
 
 
-@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires two fixture-owned server processes")
-def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypatch, tmp_path, gate_http_port):
-    """A follower reads only the owner-published opaque cache view through its own HTTP server."""
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
+def test_session_files_cache_view_survives_real_server_restart(monkeypatch, tmp_path, gate_http_port):
+    """One server owns the product root and can reread its opaque cache after a restart."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -459,28 +464,7 @@ def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypa
     git(repo, "commit", "-m", "seed")
     (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
     runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1, session_cwd=repo)
-    shared_state = tmp_path / "shared" / "state"
-    shared_runtime = tmp_path / "shared" / "runtime"
-    shared_runtime.mkdir(parents=True)
-    owner_paths = build_paths(tmp_path / "owner", state_dir=shared_state)
-    follower_paths = build_paths(tmp_path / "follower", state_dir=shared_state)
-
-    def git_view_footprint(*roots: Path) -> tuple[int, int]:
-        entries = [
-            entry
-            for root in roots
-            for entry in root.rglob("yolomux-git-view-*")
-            if entry.is_file()
-        ]
-        return len(entries), sum(entry.stat().st_blocks * 512 for entry in entries)
-
-    def process_io(pid: int) -> dict[str, int]:
-        values = {}
-        for line in Path(f"/proc/{pid}/io").read_text(encoding="utf-8").splitlines():
-            name, value = line.split(":", 1)
-            if name in {"write_bytes", "cancelled_write_bytes"}:
-                values[name] = int(value.strip())
-        return values
+    server_paths = build_paths(tmp_path / "server")
 
     def process_environment_contains(pid: int, name: str, value: Path) -> bool:
         return f"{name}={value}".encode("utf-8") in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
@@ -491,47 +475,29 @@ def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypa
         for line in git(repo, "count-objects", "-v").stdout.splitlines()
         if line.startswith("count:")
     ))
-    owner = follower = None
+    server = None
     try:
-        owner_port = gate_http_port.release()
-        owner = start_isolated_dev_server(
-            "session-files-owner",
+        server = start_isolated_dev_server(
+            "session-files-cache",
             Path(__file__).resolve().parents[1],
-            owner_paths,
+            server_paths,
             runtime,
-            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime)},
-            port=owner_port,
+            port=gate_http_port.release(),
         )
-        follower = start_isolated_dev_server(
-            "session-files-follower",
-            Path(__file__).resolve().parents[1],
-            follower_paths,
-            runtime,
-            env_overrides={
-                "YOLOMUX_RUNTIME_DIR": str(shared_runtime),
-                "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port),
-            },
-        )
-        assert process_environment_contains(owner.process.pid, "TMPDIR", owner_paths.tmp_dir), "owner child did not inherit its fixture TMPDIR"
-        assert process_environment_contains(follower.process.pid, "TMPDIR", follower_paths.tmp_dir), "follower child did not inherit its fixture TMPDIR"
-        temp_before = git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir)
-        io_before = {
-            name: process_io(owner.process.pid).get(name, 0) + process_io(follower.process.pid).get(name, 0)
-            for name in ("write_bytes", "cancelled_write_bytes")
-        }
+        assert process_environment_contains(server.process.pid, "TMPDIR", server_paths.tmp_dir), "server child did not inherit its fixture TMPDIR"
         session = runtime.sessions[0]
         request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&force=1"
-        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", request_path)
         receipt_response = connection.getresponse()
         receipt = json.loads(receipt_response.read().decode("utf-8"))
         connection.close()
         assert receipt_response.status == HTTPStatus.ACCEPTED
-        terminal_status, terminal = operation_terminal_response(owner, receipt["operation"]["status_url"], timeout=20)
+        terminal_status, terminal = operation_terminal_response(server, receipt["operation"]["status_url"], timeout=20)
         assert terminal_status == HTTPStatus.OK
         assert terminal["state"] == "ready"
         views = sorted(
-            path for path in shared_state.rglob("session-files-cache/*.json")
+            path for path in server_paths.state_dir.rglob("session-files-cache/*.json")
             if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}
         )
         assert len(views) == 1
@@ -541,29 +507,28 @@ def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypa
         # terminalized. A real changed worktree must produce one newer canonical generation,
         # rather than reusing the prior completion or merely replaying its event.
         (repo / "new-after-terminal.py").write_text("value = 3\n", encoding="utf-8")
-        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", f"{request_path}&fresh_git=1")
         changed_receipt_response = connection.getresponse()
         changed_receipt = json.loads(changed_receipt_response.read().decode("utf-8"))
         connection.close()
         assert changed_receipt_response.status == HTTPStatus.ACCEPTED
-        changed_terminal_status, changed_terminal = operation_terminal_response(owner, changed_receipt["operation"]["status_url"], timeout=20)
+        changed_terminal_status, changed_terminal = operation_terminal_response(server, changed_receipt["operation"]["status_url"], timeout=20)
         assert changed_terminal_status == HTTPStatus.OK and changed_terminal["state"] == "ready"
-        changed_record = json.loads(views[0].read_text(encoding="utf-8"))
         assert any(file.get("path") == "new-after-terminal.py" for file in changed_terminal["data"].get("files", []))
-        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}")
-        follower_response = connection.getresponse()
-        follower_payload = json.loads(follower_response.read().decode("utf-8"))
+        cache_response = connection.getresponse()
+        cache_payload = json.loads(cache_response.read().decode("utf-8"))
         connection.close()
-        assert follower_response.status == HTTPStatus.OK
-        assert follower_payload["state"] == "ready"
+        assert cache_response.status == HTTPStatus.OK
+        assert cache_payload["state"] == "ready"
         expected_payload = dict(changed_terminal["data"])
         expected_payload.pop("cache", None)
-        follower_payload["data"].pop("cache", None)
-        assert follower_payload["data"] == expected_payload
-        follower.restart()
-        replay_connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        cache_payload["data"].pop("cache", None)
+        assert cache_payload["data"] == expected_payload
+        server.restart()
+        replay_connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         replay_connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}")
         replay_response = replay_connection.getresponse()
         replay_payload = json.loads(replay_response.read().decode("utf-8"))
@@ -571,7 +536,7 @@ def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypa
         assert replay_response.status == HTTPStatus.OK
         replay_payload["data"].pop("cache", None)
         assert replay_payload["data"] == expected_payload
-        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=other&cache_only=1&cache_view={view_id}")
         mismatch_response = connection.getresponse()
         mismatch = json.loads(mismatch_response.read().decode("utf-8"))
@@ -579,48 +544,17 @@ def test_session_files_cache_view_crosses_real_owner_follower_processes(monkeypa
         assert mismatch_response.status == HTTPStatus.ACCEPTED
         assert mismatch["state"] == "queued" and mismatch["status"] == "pending"
         # This is a causal fixture, not an ambient disk probe: its repository identity and all
-        # server-written paths are frozen below tmp_path. One logical generation leaves no private
-        # Git view behind, cannot mutate the repository, and remains below a deliberately generous
-        # process-I/O ceiling that would catch the original rapid rewrite loop.
+        # server-written paths are frozen below tmp_path. The cache read cannot mutate the repository.
         assert git(repo, "rev-parse", "HEAD").stdout.strip() == frozen_head
         assert int(next(line.split(":", 1)[1].strip() for line in git(repo, "count-objects", "-v").stdout.splitlines() if line.startswith("count:"))) == frozen_object_count
-        assert git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir) == temp_before
-        io_after = {
-            name: process_io(owner.process.pid).get(name, 0) + process_io(follower.process.pid).get(name, 0)
-            for name in ("write_bytes", "cancelled_write_bytes")
-        }
-        temp_after = git_view_footprint(owner_paths.tmp_dir, follower_paths.tmp_dir)
-        assert_e3_causal_ceilings(
-            {
-                # The fixture performs two owner generations (before and after the owned repo
-                # mutation), one follower opaque read, one stale owner revalidation, and one
-                # mismatched follower refusal. Each is independently
-                # required by this causal sequence; another request is a loop.
-                "http_requests": 5,
-                "canonical_views": len(views),
-                "temporary_view_files": temp_after[0],
-                "temporary_view_allocated_bytes": temp_after[1],
-                "write_bytes": io_after["write_bytes"] - io_before["write_bytes"],
-                "cancelled_write_bytes": io_after["cancelled_write_bytes"] - io_before["cancelled_write_bytes"],
-            },
-            {
-                "http_requests": 5,
-                "canonical_views": 1,
-                "temporary_view_files": temp_before[0],
-                "temporary_view_allocated_bytes": temp_before[1],
-                "write_bytes": 64 * 1024 * 1024,
-                "cancelled_write_bytes": 64 * 1024 * 1024,
-            },
-        )
+        assert len(views) == 1
     finally:
-        if follower is not None:
-            stop_and_reap_daemons(follower)
-        if owner is not None:
-            stop_and_reap_daemons(owner)
+        if server is not None:
+            stop_and_reap_daemons(server)
         stop_isolated_tmux_runtime(runtime)
 
 
-@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires fixture-owned Linux processes")
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
 def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, gate_http_port):
     """One unchanged generation has one producer and bounded durable disk effects."""
 
@@ -633,10 +567,8 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
     git(repo, "commit", "-m", "seed")
     (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
     runtime = start_isolated_tmux_runtime(monkeypatch, fixture_root / "tmux", session_count=1, session_cwd=repo)
-    runtime_base = fixture_root / "runtime"
-    shared_state = fixture_root / "state"
-    owner_paths = build_paths(fixture_root / "owner", state_dir=shared_state)
-    follower_paths = build_paths(fixture_root / "follower", state_dir=shared_state)
+    server_paths = build_paths(fixture_root / "server")
+    runtime_base = server_paths.runtime_dir
     fixture_tmp = fixture_root / "tmp"
     fixture_tmp.mkdir(parents=True)
     monkeypatch.setenv("TMPDIR", str(fixture_tmp))
@@ -658,7 +590,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         return Path(entry.removeprefix(b"TMPDIR=").decode("utf-8"))
 
     def qualified_pids(status: dict[str, object]) -> tuple[int, ...]:
-        pids = (owner.process.pid, follower.process.pid, int(status["pid"]), *(int(pid) for pid in status["worker_pids"]))
+        pids = (server.process.pid, int(status["pid"]), *(int(pid) for pid in status["worker_pids"]))
         assert len(pids) == len(set(pids)), pids
         assert all(pid > 0 and process_state(pid) not in {"", "Z"} for pid in pids)
         return pids
@@ -681,33 +613,28 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
             assert time.monotonic() < deadline, result
             time.sleep(0.02)
 
-    owner = follower = observer = job_client = differ = finder = None
+    server = observer = job_client = differ = finder = None
     try:
         effective_runtime = runtime_root(environ={"YOLOMUX_RUNTIME_DIR": str(runtime_base)})
         job_client = batchd_module.BatchClient(effective_runtime / "services" / batchd_module.BATCHD_SOCKET_NAME)
         # The scheduler lease establishes the exact broker before the boundary, so the worker
         # process counters are comparable rather than born halfway through the measurement.
         assert job_client.start_for_scheduler()
-        # Both session-files lanes have one stable worker before the physical boundary. The warm
-        # products are a fixture lifecycle cost, not part of the session-files counters below.
+        # The session-files worker is stable before the physical boundary. The warm products are a
+        # fixture lifecycle cost, not part of the session-files counters below.
         warm_batchd_lane("interactive")
         warm_batchd_lane("freshness")
-        owner = start_isolated_dev_server(
-            "session-files-physical-owner", Path(__file__).resolve().parents[1], owner_paths, runtime,
+        server = start_isolated_dev_server(
+            "session-files-physical", Path(__file__).resolve().parents[1], server_paths, runtime,
             env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base)}, port=gate_http_port.release(),
-        )
-        follower = start_isolated_dev_server(
-            "session-files-physical-follower", Path(__file__).resolve().parents[1], follower_paths, runtime,
-            env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base), "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port)},
         )
         status_before = job_client.runtime_status()
         pids_before = qualified_pids(status_before)
         assert Path(tempfile.gettempdir()).is_relative_to(fixture_root)
-        assert process_tmpdir(owner.process.pid).is_relative_to(fixture_root)
-        assert process_tmpdir(follower.process.pid).is_relative_to(fixture_root)
+        assert process_tmpdir(server.process.pid).is_relative_to(fixture_root)
         assert all(process_tmpdir(pid).is_relative_to(fixture_root) for pid in pids_before[2:])
-        cache_dir = host_partitioned_state_dir(shared_state) / "session-files-cache"
-        events_dir = host_partitioned_state_dir(shared_state) / "background-owner"
+        cache_dir = host_partitioned_state_dir(server_paths.state_dir) / "session-files-cache"
+        events_dir = host_partitioned_state_dir(server_paths.state_dir) / "background-owner"
         frozen_head = git(repo, "rev-parse", "HEAD").stdout.strip()
         session = runtime.sessions[0]
         # The measured boundary starts before the sole ordinary accepted request. Do not fabricate a
@@ -719,26 +646,26 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         io_before = {name: sum(process_io(pid)[name] for pid in pids_before) for name in ("write_bytes", "cancelled_write_bytes")}
         git_before = temp_footprint()
         direct_session_files_requests = [0]
-        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         direct_session_files_requests[0] += 1
         connection.request("GET", request_path)
         fresh_response = connection.getresponse()
         fresh_receipt = json.loads(fresh_response.read().decode("utf-8"))
         connection.close()
         assert fresh_response.status == HTTPStatus.ACCEPTED
-        terminal_status, terminal = operation_terminal_response(owner, fresh_receipt["operation"]["status_url"], timeout=20)
+        terminal_status, terminal = operation_terminal_response(server, fresh_receipt["operation"]["status_url"], timeout=20)
         assert terminal_status == HTTPStatus.OK and terminal["state"] == "ready"
         views = sorted(path for path in cache_dir.glob("*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"})
         assert len(views) == 1
         view_id = views[0].stem
 
-        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         direct_session_files_requests[0] += 1
         connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&cache_only=1&cache_view={view_id}")
-        follower_response = connection.getresponse()
-        follower_payload = json.loads(follower_response.read().decode("utf-8"))
+        cache_response = connection.getresponse()
+        cache_payload = json.loads(cache_response.read().decode("utf-8"))
         connection.close()
-        assert follower_response.status == HTTPStatus.OK and follower_payload["state"] == "ready"
+        assert cache_response.status == HTTPStatus.OK and cache_payload["state"] == "ready"
         for name, destination, panel, state_expression in (
             ("differ", "differ", "#panel-__differ__", "fileExplorerSessionFilesState"),
             ("finder", "finder", "#panel-__finder__", "fileExplorerFinderSessionFilesState"),
@@ -760,14 +687,14 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
                 " return originalFetch(...args);"
                 "};",
             )
-            surface.get(f"http://127.0.0.1:{follower.port}/?sessions=__{destination}__,{quote(session, safe='')}&layout=left&tabs=left:__{destination}__")
+            surface.get(f"http://127.0.0.1:{server.port}/?sessions=__{destination}__,{quote(session, safe='')}&layout=left&tabs=left:__{destination}__")
             WebDriverWait(surface, 12).until(lambda driver, panel=panel: driver.execute_script(f"return Boolean(document.querySelector('{panel}'));"))
             WebDriverWait(surface, 12).until(lambda driver, state_expression=state_expression: driver.execute_script(f"return {state_expression}?.payload?.loaded === true;"))
             WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
             requests = surface.execute_script("return [...window.__e3SessionFilesRequests];")
             initial_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24"
             cache_read = f"{initial_read}&cache_only=1&cache_view={view_id}"
-            # The initial HTML may already contain the follower's coherent cache view.  In that
+            # The initial HTML may already contain the server's coherent cache view.  In that
             # case zero browser fetches is strictly better than an opaque revalidation; otherwise
             # permit the initial read and its one completion-view read.
             assert requests in ([], [initial_read], [initial_read, cache_read]), requests
@@ -845,7 +772,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         assert_e3_causal_ceilings(observed, ceilings)
         assert git(repo, "rev-parse", "HEAD").stdout.strip() == frozen_head
         # This is a real repeated completion read, remeasured against the same frozen ceiling.
-        connection = HTTPConnection("127.0.0.1", follower.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         direct_session_files_requests[0] += 1
         connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&cache_only=1&cache_view={view_id}")
         control_response = connection.getresponse()
@@ -863,16 +790,14 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
             observer.close()
         if job_client is not None:
             job_client.stop_for_scheduler()
-        if follower is not None:
-            stop_and_reap_daemons(follower)
-        if owner is not None:
-            stop_and_reap_daemons(owner)
+        if server is not None:
+            stop_and_reap_daemons(server)
         tempfile.tempdir = previous_tempdir
         stop_isolated_tmux_runtime(runtime)
         shutil.rmtree(fixture_root)
 
 
-@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires fixture-owned server processes")
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
 def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(monkeypatch, tmp_path, gate_http_port):
     """A real Differ browser applies a completion with no repeated cache-read loop."""
 
@@ -884,44 +809,36 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
     git(repo, "commit", "-m", "seed")
     (repo / "changed.py").write_text("value = 2\n", encoding="utf-8")
     runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1, session_cwd=repo)
-    shared_state = tmp_path / "shared" / "state"
-    shared_runtime = tmp_path / "shared" / "runtime"
-    shared_runtime.mkdir(parents=True)
-    owner_paths = build_paths(tmp_path / "owner", state_dir=shared_state)
-    follower_paths = build_paths(tmp_path / "follower", state_dir=shared_state)
-    owner = follower = browser = finder = None
+    server_paths = build_paths(tmp_path / "server")
+    server = browser = finder = None
     try:
-        owner = start_isolated_dev_server(
-            "session-files-browser-owner", Path(__file__).resolve().parents[1], owner_paths, runtime,
-            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime)}, port=gate_http_port.release(),
-        )
-        follower = start_isolated_dev_server(
-            "session-files-browser-follower", Path(__file__).resolve().parents[1], follower_paths, runtime,
-            env_overrides={"YOLOMUX_RUNTIME_DIR": str(shared_runtime), "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(owner.port)},
+        server = start_isolated_dev_server(
+            "session-files-browser", Path(__file__).resolve().parents[1], server_paths, runtime,
+            port=gate_http_port.release(),
         )
         session = runtime.sessions[0]
         request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&force=1&fresh_git=1"
-        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", request_path)
         receipt_response = connection.getresponse()
         receipt = json.loads(receipt_response.read().decode("utf-8"))
         connection.close()
         assert receipt_response.status == HTTPStatus.ACCEPTED
-        terminal_status, terminal = operation_terminal_response(owner, receipt["operation"]["status_url"], timeout=20)
+        terminal_status, terminal = operation_terminal_response(server, receipt["operation"]["status_url"], timeout=20)
         assert terminal_status == HTTPStatus.OK and terminal["state"] == "ready"
-        views = [path for path in shared_state.rglob("session-files-cache/*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}]
+        views = [path for path in server_paths.state_dir.rglob("session-files-cache/*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}]
         assert len(views) == 1
         view_id = views[0].stem
         browser = new_chrome_driver(profile_dir=tmp_path / "chrome-profile")
         assert (tmp_path / "chrome-profile").is_relative_to(tmp_path)
-        browser.get(f"http://127.0.0.1:{follower.port}/?sessions=__differ__,{quote(session, safe='')}&layout=left&tabs=left:__differ__")
+        browser.get(f"http://127.0.0.1:{server.port}/?sessions=__differ__,{quote(session, safe='')}&layout=left&tabs=left:__differ__")
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__differ__'));"))
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return fileExplorerSessionFilesState?.payload?.loaded === true;"))
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
         browser_descriptor = browser.execute_script("return sessionFilesDescriptorForDestination('differ', sessionFilesRequestForDestination('differ'));" )
         assert browser_descriptor == json.loads(views[0].read_text(encoding="utf-8"))["request_descriptor"]
         finder = new_chrome_driver(profile_dir=tmp_path / "finder-profile")
-        finder.get(f"http://127.0.0.1:{follower.port}/?sessions=__finder__,{quote(session, safe='')}&layout=left&tabs=left:__finder__")
+        finder.get(f"http://127.0.0.1:{server.port}/?sessions=__finder__,{quote(session, safe='')}&layout=left&tabs=left:__finder__")
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__finder__'));"))
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return fileExplorerFinderSessionFilesState?.payload?.loaded === true;"))
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
@@ -947,19 +864,18 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             record = json.loads(cache_record.read_text(encoding="utf-8"))
             record["stored_at"] = 0.0
             cache_record.write_text(json.dumps(record), encoding="utf-8")
-        # An expired durable view after an owner restart is a recoverable state.  Do not pair the
-        # expired record with a still-fresh owner-memory entry: that split state cannot happen to
-        # a user and used to leave this EventSource assertion waiting for an event that was never
-        # eligible to publish.
-        owner.restart()
-        connection = HTTPConnection("127.0.0.1", owner.port, timeout=10)
+        # An expired durable view after a server restart is a recoverable state.  Do not pair the
+        # expired record with a still-fresh memory entry: that split state cannot happen to a user and
+        # used to leave this EventSource assertion waiting for an event that was never eligible.
+        server.restart()
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
         connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current")
         stale_response = connection.getresponse()
         assert stale_response.status == HTTPStatus.OK
         stale_response.read()
         connection.close()
         def completion_is_published():
-            manifests = list(shared_state.rglob("background-owner/client-events.json"))
+            manifests = list(server_paths.state_dir.rglob("background-owner/client-events.json"))
             if len(manifests) != 1:
                 return False
             events = json.loads(manifests[0].read_text(encoding="utf-8")).get("events", [])
@@ -972,7 +888,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         WebDriverWait(browser, 12).until(lambda _driver: completion_is_published())
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
         expected_cache_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}"
-        # This must be the follower's delivered EventSource completion, not merely a
+        # This must be the connected browser's delivered EventSource completion, not merely a
         # persisted event that a disconnected browser never handled.
         WebDriverWait(browser, 12).until(
             lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
@@ -987,7 +903,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
         completion = next(
             event["payload"]
-            for event in json.loads(next(shared_state.rglob("background-owner/client-events.json")).read_text(encoding="utf-8")).get("events", [])
+            for event in json.loads(next(server_paths.state_dir.rglob("background-owner/client-events.json")).read_text(encoding="utf-8")).get("events", [])
             if event.get("type") == "background_refresh_done"
             and event.get("payload", {}).get("role") == "session-files"
             and event.get("payload", {}).get("cache_view_id") == view_id
@@ -1025,10 +941,8 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             finder.quit()
         if browser is not None:
             browser.quit()
-        if follower is not None:
-            stop_and_reap_daemons(follower)
-        if owner is not None:
-            stop_and_reap_daemons(owner)
+        if server is not None:
+            stop_and_reap_daemons(server)
         stop_isolated_tmux_runtime(runtime)
 
 

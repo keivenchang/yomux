@@ -3531,7 +3531,7 @@ function bindFileUpload(panel, session) {
     if (panel.contains(event.relatedTarget)) return;
     panel.classList.remove(CLS.fileDragOver);
   });
-  panel.addEventListener('drop', event => {
+  panel.addEventListener('drop', async event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -3539,7 +3539,9 @@ function bindFileUpload(panel, session) {
     // DOIT.57: remember the drop point so the post-upload suggestion overlay can anchor there.
     // Prefer the plain File list; fall back to images extracted from rich data (text/html <img>,
     // image MIME) so a dragged image exposed without a File still uploads instead of leaking.
-    const dropped = event.dataTransfer?.files?.length ? event.dataTransfer.files : dataTransferImageFiles(event.dataTransfer);
+    const dropped = event.dataTransfer?.files?.length
+      ? event.dataTransfer.files
+      : await dataTransferImageFiles(event.dataTransfer);
     uploadFiles(session, dropped, {suggestAt: {x: event.clientX, y: event.clientY}});
   });
 }
@@ -3566,7 +3568,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
 
 function bindClipboardPaste() {
   if (readOnlyMode) return;
-  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', event => {
+  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', async event => {
     if (!dataTransferHasImagePayload(event.clipboardData)) return;
     const editorTarget = markdownEditorPasteTarget(event);
     // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
@@ -3579,7 +3581,7 @@ function bindClipboardPaste() {
         statusErr(esc(editorTarget.panel?._pmError || t('editor.prosemirrorDidNotInitialize')));
         return;
       }
-      const files = dataTransferImageFiles(event.clipboardData);
+      const files = await dataTransferImageFiles(event.clipboardData);
       if (!files.length) {
         statusErr(localizedHtml('status.selectPaneForImagePaste'));
         return;
@@ -3595,7 +3597,7 @@ function bindClipboardPaste() {
       statusErr(localizedHtml('status.selectPaneForImagePaste'));
       return;
     }
-    const files = dataTransferImageFiles(event.clipboardData);
+    const files = await dataTransferImageFiles(event.clipboardData);
     if (!files.length) {
       // Claimed (so nothing leaks to the agent) but the image was exposed only as un-extractable rich
       // data (e.g. a remote <img> URL with no File and no data: URL).
@@ -3658,7 +3660,7 @@ function dataTransferHasImagePayload(dt) {
 // Extract EVERY image in the payload as a renamed upload File, so multi-image prompts are deterministic
 // (N images -> N uploaded path references, never one text ref + one attachment). Handles File items, a
 // plain File list, and data: URL <img> sources embedded in text/html (browser image copies).
-function dataTransferImageFiles(dt) {
+async function dataTransferImageFiles(dt) {
   if (!dt) return [];
   const files = [];
   for (const item of Array.from(dt.items || [])) {
@@ -3682,6 +3684,21 @@ function dataTransferImageFiles(dt) {
     while ((match = re.exec(html))) {
       const file = dataUrlToImageFile(match[1]);
       if (file) files.push(file);
+    }
+  }
+  if (!files.length && typeof dt.getData === 'function') {
+    const html = dt.getData('text/html') || '';
+    const re = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const source = match[1];
+      if (!/^https?:\/\//i.test(source)) continue;
+      try {
+        const response = await fetch(source, {mode: 'cors'});
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        files.push(new File([blob], pastedImageFilename('', blob.type || 'image/png'), {type: blob.type || 'image/png'}));
+      } catch (_) {}
     }
   }
   return files;
@@ -6084,9 +6101,25 @@ async function applySessionMetadataPayload(payload, options = {}) {
     return finalizeSessionMetadataOutcome(false, 'superseded_request', payload);
   }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  if (epochChanged && typeof options.onServerEpochAdopted === 'function') options.onServerEpochAdopted();
   const payloadTopologyGeneration = Number(payload?.topology_generation || 0);
-  if (!epochChanged && payloadTopologyGeneration < tmuxTopologyGeneration) {
-    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {topologyGeneration: payloadTopologyGeneration});
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration < tmuxTopologyGeneration) {
+    return finalizeSessionMetadataOutcome(false, 'older_topology_generation', payload, {
+      payloadTopologyGeneration,
+      currentTopologyGeneration: tmuxTopologyGeneration,
+    });
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration >= transcriptMetadataState.rosterGeneration) {
+    transcriptMetadataState.rosterGeneration = payloadTopologyGeneration;
+  }
+  if (payload.status === 'refreshing') {
+    return finalizeSessionMetadataOutcome(false, 'refreshing', payload, {
+      topologyGeneration: payloadTopologyGeneration,
+    });
   }
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
@@ -6102,16 +6135,18 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const priorPayload = epochChanged ? {} : transcriptMetadataState.payload;
   const nextPayload = transcriptPayloadWithTmuxWindowOverrides({...payload, sessions: filteredSessions, session_order: filteredOrder}, priorPayload);
   const currentSessions = priorPayload?.sessions || {};
+  const payloadIdentity = sessionMetadataPayloadIdentity(payload);
+  const newerMetadataBuild = payloadIdentity?.epoch === transcriptMetadataState.epoch
+    && payloadIdentity.generation > transcriptMetadataState.generation;
   for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
-    if (nextGeneration > 0 && currentGeneration > nextGeneration) {
+    if (!newerMetadataBuild && nextGeneration > 0 && currentGeneration > nextGeneration) {
       return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
   adoptTopologyGeneration(payload);
-  finalizeSessionMetadataOutcome(true, 'applied', payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -6126,6 +6161,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   updateMetadataBadgePulses(transcriptMetadataState.payload);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
+  finalizeSessionMetadataOutcome(true, 'applied', payload);
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
@@ -6195,15 +6231,84 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
   return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
 }
 
+function tmuxRosterEventOrder(payload) {
+  const raw = Array.isArray(payload?.session_order)
+    ? payload.session_order
+    : (Array.isArray(payload?.sessions) ? payload.sessions : payload?.roster);
+  return normalizedSessionOrder(raw);
+}
+
+function tmuxRosterEventGeneration(payload) {
+  const raw = payload?.roster_generation ?? payload?.topology_generation ?? payload?.generation;
+  return Number.isSafeInteger(Number(raw)) && Number(raw) >= 0 ? Number(raw) : 0;
+}
+
+function applyTmuxRosterPayload(payload, envelope = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const eventEpoch = String(payload.server_epoch || payload.epoch || envelope.epoch || '');
+  if (!eventEpoch) return false;
+  if (transcriptMetadataState.epoch && transcriptMetadataState.epoch !== eventEpoch) return false;
+  const nextOrder = tmuxRosterEventOrder(payload);
+  const generation = tmuxRosterEventGeneration(payload);
+  if (!nextOrder || generation < transcriptMetadataState.rosterGeneration || generation < tmuxTopologyGeneration) return false;
+  const sameOrder = nextOrder.length === sessions.length && nextOrder.every((session, index) => session === sessions[index]);
+  if (generation === transcriptMetadataState.rosterGeneration && !sameOrder) return false;
+  adoptServerEpoch(eventEpoch);
+  const renames = Array.isArray(payload.renames) ? payload.renames : [];
+  const validRenames = renames.filter(rename => {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    return oldSession && newSession && oldSession !== newSession
+      && nextOrder.includes(newSession) && sessions.includes(oldSession);
+  });
+  for (const rename of validRenames) {
+    const oldSession = String(rename.old_session).trim();
+    const newSession = String(rename.new_session).trim();
+    if (typeof replaceTmuxSessionInClient === 'function') replaceTmuxSessionInClient(oldSession, newSession, nextOrder);
+  }
+  const priorPayload = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+    ? transcriptMetadataState.payload
+    : {};
+  const metadataSessions = Object.fromEntries(
+    Object.entries(priorPayload.sessions || {}).filter(([session]) => nextOrder.includes(session)),
+  );
+  for (const rename of validRenames) {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    if (oldSession && newSession && metadataSessions[oldSession] && !metadataSessions[newSession]) {
+      metadataSessions[newSession] = metadataSessions[oldSession];
+      delete metadataSessions[oldSession];
+    }
+  }
+  setTranscriptMetadataPayload({
+    ...priorPayload,
+    sessions: metadataSessions,
+    session_order: nextOrder,
+    topology_generation: generation,
+  });
+  transcriptMetadataState.rosterGeneration = generation;
+  adoptTopologyGeneration({topology_generation: generation});
+  const sessionsChanged = updateSessionList(nextOrder);
+  if (sessionsChanged) {
+    updateDocumentTitle();
+    renderSessionButtons();
+  }
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
+  return true;
+}
+
 function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {
+  const previousApply = transcriptMetadataState.lastApply;
   transcriptMetadataState.lastApply = {
-    ...(transcriptMetadataState.lastApply || {}),
+    ...(previousApply || {}),
     applied: false,
     reason,
     epoch: transcriptMetadataState.epoch,
     awaitedGeneration: Number(target || 0),
     appliedGeneration: Number(transcriptMetadataState.generation || 0),
     at: Date.now(),
+    previousApplyReason: String(previousApply?.reason || ''),
+    previousApplyPayloadGeneration: Number(previousApply?.payloadGeneration || 0),
     ...details,
   };
   // The diagnostic record stays -- it is what a Debug pane reads -- but the verdict is also
@@ -6238,6 +6343,12 @@ async function settleForcedSessionMetadata(target) {
   const topologyIsCurrent = () => topologyEpoch === tmuxTopologyEpoch;
   const serverIsCurrent = () => target.epoch === transcriptMetadataState.epoch;
   const requestIsCurrent = () => topologyIsCurrent() && serverIsCurrent();
+  // Preserve the target as shared diagnostic state even when the response that named it loses a
+  // render race. The forced caller and the failure record must report the same generation the server
+  // promised, not a later transient payload's zero pending field.
+  if (serverIsCurrent() && target.generation > transcriptMetadataState.pendingGeneration) {
+    transcriptMetadataState.pendingGeneration = target.generation;
+  }
   const settleGround = () => (serverIsCurrent() ? 'forced_settle_topology_changed' : 'forced_settle_epoch_changed');
   const deadline = Date.now() + forcedSessionMetadataSettleTimeoutMs;
   // The ground is checked BEFORE the applied generation on every pass, because a replacement
@@ -6256,17 +6367,22 @@ async function settleForcedSessionMetadata(target) {
     // outcome of the convergence, never of the caller's own work: the caller may be a session
     // mutation that has already committed, and throwing here would roll it back.
     //
-    // The apply is gated on topology alone: a payload from a replacement server is valid to render
-    // -- refusing it would leave the pane on bytes from a dead process -- it just cannot count as
-    // the awaited build, which the ground check at the top of the next pass decides.
+    // A payload from a replacement server is valid to render -- refusing it would leave the pane on
+    // bytes from a dead process -- but a delayed response from the server that was replaced is not.
+    const fetchEpochGeneration = clientEventTransportState.epochGeneration;
+    const fetchServerEpoch = clientEventTransportState.resourceEpoch;
     try {
       const payload = await apiFetchJson('/api/session-metadata');
+      const payloadEpoch = sessionMetadataPayloadIdentity(payload)?.epoch || '';
+      const responseIsCurrent = () => topologyIsCurrent()
+        && (fetchEpochGeneration === clientEventTransportState.epochGeneration
+          || (payloadEpoch && payloadEpoch !== fetchServerEpoch && payloadEpoch === clientEventTransportState.resourceEpoch));
       await applySessionMetadataPayload(payload, {
         refreshAuto: false,
         refreshActivity: false,
         refreshContext: false,
         source: 'request',
-        requestIsCurrent: topologyIsCurrent,
+        requestIsCurrent: responseIsCurrent,
       });
     } catch (error) {
       return noteForcedSessionMetadataSettleOutcome('forced_settle_read_failed', target.generation, {
@@ -6280,7 +6396,13 @@ async function refreshSessionMetadata(options = {}) {
   if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;
   const guardIsCurrent = transcriptMetadataState.guard.begin();
   const topologyEpoch = tmuxTopologyEpoch;
-  const requestIsCurrent = () => guardIsCurrent() && topologyEpoch === tmuxTopologyEpoch;
+  let serverEpochGeneration = clientEventTransportState.epochGeneration;
+  const requestIsCurrent = () => guardIsCurrent()
+    && topologyEpoch === tmuxTopologyEpoch
+    && serverEpochGeneration === clientEventTransportState.epochGeneration;
+  const onServerEpochAdopted = () => {
+    serverEpochGeneration = clientEventTransportState.epochGeneration;
+  };
   transcriptMetadataState.loading = true;
   transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
@@ -6298,6 +6420,7 @@ async function refreshSessionMetadata(options = {}) {
           refreshActivity: options.refreshActivity !== false,
           source: 'request',
           requestIsCurrent,
+          onServerEpochAdopted,
         }),
       );
       if (!result.ok && requestIsCurrent()) {

@@ -1608,8 +1608,6 @@ def session_work_graph(
 
 
 METADATA_WARM_VIEW_MAX_SESSIONS = 64
-
-
 def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
     """Warm the GitHub/Linear/git metadata cache for a batch of sessions in a worker.
 

@@ -1656,7 +1656,7 @@
   "status.copiedTerminalChars.one": "העתיק {count} char",
   "status.copiedTerminalChars.other": "העתיקו תווים {count}",
   "status.copiedTerminalChars.two": "העתיקו תווים {count}",
-  "status.copiedText": "טקסט מועתק",
+  "status.copiedText": "הטקסט הועתק",
   "status.copiedTmuxSelection.one": "העתיק את ה-{count} char מ-tmux",
   "status.copiedTmuxSelection.other": "העתיקו תווים {count} מ-tmux",
   "status.copiedTmuxSelection.two": "העתיקו תווים {count} מ-tmux",
@@ -2604,5 +2604,8 @@
   "pref.appearance.sync_font_sizes.label": "סנכרון כל גדלי הגופנים",
   "pref.appearance.sync_font_sizes.help": "כאשר מופעל, ממשק המשתמש, המסוף, העורך, התצוגה המקדימה ו-Finder משתמשים בגודל הגלובלי.",
   "pref.section.appearance": "מראה",
-  "pref.section.sizes": "גדלים"
+  "pref.section.sizes": "גדלים",
+  "contextmenu.copyText": "העתק טקסט",
+  "contextmenu.copyWithStyle": "העתק עם סגנון",
+  "status.copiedStyledText": "הועתק עם סגנון"
 }

@@ -65,6 +65,22 @@ function registerCrossSurfaceQuickOpenSuite(test) {
       .map(item => item.label);
     assert.equal(ranked[0], 'w5k.md', 'the late exact-name match ranks first');
   });
+
+  test('an exact filename outranks fuzzy and recent path matches', () => {
+    const api = loadYolomux('', ['exact-filename-ranking']);
+    api.setCommandPaletteStateForTest('files', 'w5k.md');
+    api.setFileQuickOpenCandidatesForTest('/repo', [
+      {path: '/repo/notes/w5k-notes.md', name: 'w5k-notes.md', relative_path: 'notes/w5k-notes.md', realpath: '/repo/notes/w5k-notes.md', mtime: Date.now()},
+      {path: '/repo/w5k.md', name: 'w5k.md', relative_path: 'w5k.md', realpath: '/repo/w5k.md', mtime: 0},
+    ]);
+    const ranked = api.commandPaletteItems()
+      .filter(item => item.category === 'file')
+      .map(item => ({...item, score: api.commandPaletteItemScore(item, 'w5k.md', {surface: 'files'})}))
+      .filter(item => Number.isFinite(item.score))
+      .sort((left, right) => right.score - left.score)
+      .map(item => item.label);
+    assert.equal(ranked[0], 'w5k.md', 'the exact basename ranks first regardless of recency');
+  });
 }
 
 module.exports = {registerCrossSurfaceQuickOpenSuite};

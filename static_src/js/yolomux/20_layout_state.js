@@ -3629,7 +3629,8 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
   if (!activeSummaries.length) return '';
   const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(t(`backgroundOwner.role.${state}`))}</span></span>`;
+  const stateLabel = t(`backgroundOwner.role.${state}`);
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(stateLabel)}</span></span>`;
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
@@ -5201,7 +5202,8 @@ function commandPaletteFileNameBonus(item, query) {
   for (const token of tokens) {
     const canonicalToken = fuzzyCanonicalPrefixText(token);
     if (!canonicalToken) continue;
-    if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
+    if (canonicalName === canonicalToken) bonus += searchRankWeights.fileNameExact;
+    else if (canonicalName.startsWith(canonicalToken)) bonus += searchRankWeights.fileNamePrefix;
     else if (canonicalName.includes(canonicalToken)) bonus += searchRankWeights.fileNameContains;
     else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += searchRankWeights.fileNameSubsequence;
   }
@@ -7229,11 +7231,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
   if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
+  if (options.message) showLayoutStatus(options.message, options.messageKind || '');
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
-  } else if (options.message && activeSessions.length) {
-    showLayoutStatus(options.message, options.messageKind || '');
-  } else {
+  } else if (!options.message) {
     resetLayoutStatusSurface();
     updateStatus();
   }
@@ -7332,6 +7333,8 @@ function beginLayoutMutationCompletion(state = null) {
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
   const options = {...current.options, ...next.options};
+  if (next.options.message) options.message = next.options.message;
+  if (next.options.messageKind) options.messageKind = next.options.messageKind;
   const completionGeneration = layoutCompletionGeneration(
     current.options.completionGeneration,
     next.options.completionGeneration,

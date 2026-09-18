@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "सापेक्ष पथ की प्रतिलिपि बनाई गई",
   "status.copiedTerminalChars.one": "{count} चार की प्रतिलिपि बनाई गई",
   "status.copiedTerminalChars.other": "{count} वर्णों की प्रतिलिपि बनाई गई",
-  "status.copiedText": "कॉपी किया गया पाठ",
+  "status.copiedText": "टेक्स्ट कॉपी किया गया",
   "status.copiedTmuxSelection.one": "tmux से {count} चार कॉपी किया गया",
   "status.copiedTmuxSelection.other": "tmux से {count} वर्णों की प्रतिलिपि बनाई गई",
   "status.copiedTranscriptPath": "ट्रांसक्रिप्ट पथ कॉपी हुआ",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "सभी फ़ॉन्ट आकार सिंक करें",
   "pref.appearance.sync_font_sizes.help": "चालू होने पर UI, टर्मिनल, संपादक, पूर्वावलोकन और Finder वैश्विक फ़ॉन्ट आकार का उपयोग करते हैं।",
   "pref.section.appearance": "रूप-रंग",
-  "pref.section.sizes": "आकार"
+  "pref.section.sizes": "आकार",
+  "contextmenu.copyText": "टेक्स्ट कॉपी करें",
+  "contextmenu.copyWithStyle": "शैली के साथ कॉपी करें",
+  "status.copiedStyledText": "शैली के साथ कॉपी किया गया"
 }

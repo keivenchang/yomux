@@ -45,6 +45,7 @@ from tools.tls_san import self_signed_interface_ips as discover_self_signed_inte
 from tools.tls_san import self_signed_san as build_self_signed_san
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
+from .server_lease import acquire_instance_root_lease
 from .server_logs import emit_server_log
 from .server_logs import install_server_log_handler
 from .tmux.tmux_utils import cmd_error
@@ -542,6 +543,11 @@ def main() -> int:
     if lease is None:
         print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
         return 1
+    root_lease = acquire_instance_root_lease(_YOLOMUX_ROOTS.root or _YOLOMUX_ROOTS.state_dir)
+    if root_lease is None:
+        lease.release()
+        print("YOLOmux product root is already owned by another server; refusing shared IDX/STATS/SESS state.", file=sys.stderr)
+        return 1
     # Ledger provenance + bounded startup protection: services spawned from
     # here on are stamped with this port, and a runaway during the launch
     # window is contained by the tracked-group watchdog.
@@ -565,7 +571,7 @@ def main() -> int:
         app.start_background_owner(
             port=args.port,
             priority=background_owner_priority(args.port),
-            managed_instance=is_managed_instance_port(args.port),
+            managed_instance=True,
         )
         backend_health = start_backend_health_observer(args.port, app)
         server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
@@ -627,4 +633,5 @@ def main() -> int:
                         if hasattr(app, "control_server"):
                             app.control_server.stop()
                 finally:
+                    root_lease.release()
                     lease.release()

@@ -316,6 +316,23 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/fs/fast/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
+            if requested_path != "/":
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                body = b"File not found\n"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            body = json.dumps({"path": "/", "parent": None, "entries": []}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         super().do_GET()
 
     def log_message(self, *args):  # keep the pytest output clean
@@ -2306,8 +2323,10 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
         "serverHostname": "localhost",
         "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
+        "backend": web.YOLOMUX_BACKEND,
         "version": "test",
         "versionStatus": "test",
+        "backendLabel": "Go test",
         "postReleaseCommits": [],
         "versionCommitTime": "test",
         "settingsPayload": {"settings": settings, "defaults": settings_module.default_settings(), "mtime_ns": 0},

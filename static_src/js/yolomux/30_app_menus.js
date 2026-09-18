@@ -92,7 +92,7 @@ function topbarVersionTitle() {
   const sha = aboutCommitShaText();
   const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
-  if (bootstrap.versionStatus) lines.push(String(bootstrap.versionStatus));
+  lines.push(topbarBackendVersionTitle());
   if (Array.isArray(bootstrap.postReleaseCommits)) lines.push(...bootstrap.postReleaseCommits.map(String));
   if (sha) lines.push(t('menu.help.about.sha', {sha}));
   if (bootstrap.versionCommitTime) lines.push(t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}));
@@ -134,9 +134,19 @@ function topbarServerUptimeTitle() {
   return t('server.uptimeRunning', {duration: topbarDurationText((Date.now() - startedAtMs) / 1000)});
 }
 
+function topbarBackendVersionTitle() {
+  const backend = String(bootstrap.backend || '').trim() || t('common.unknown');
+  const version = String(bootstrap.versionStatus || bootstrap.version || '').trim() || t('common.unknown');
+  return `${version} [${backend}]`;
+}
+
+function topbarBrandTitle() {
+  return `${topbarBackendVersionTitle()}\n${topbarServerUptimeTitle()}`;
+}
+
 function updateBrandTitles() {
   for (const brand of document.querySelectorAll('.brand-title')) {
-    brand.title = topbarServerUptimeTitle();
+    brand.title = topbarBrandTitle();
     brand.onpointerenter = updateBrandTitles;
   }
   for (const version of document.querySelectorAll('.brand-title .brand-version')) {
@@ -768,11 +778,9 @@ function refreshOpenTabsMenuRows() {
 }
 
 function refreshTabsMenuMetadataOnOpen() {
-  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
-  // forced request then performs tmux list-sessions in the background and refreshes only this
-  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
-  if (typeof refreshSessionMetadata !== 'function') return;
-  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
+  // Opening Tabs is a cache read. The tmux watcher owns asynchronous roster updates, so opening
+  // this menu must not start a metadata rebuild or a timer-backed refresh.
+  refreshOpenTabsMenuRows();
 }
 
 function fileMenuVirtualCommand(item, detail) {

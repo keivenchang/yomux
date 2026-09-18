@@ -500,6 +500,12 @@ class StatsCurrentClient:
             return self._transport.registry.failure_response()
         return response
 
+    def agent_token_usage_status(self) -> dict[str, Any]:
+        response = self._call("status", timeout=STATUS_TIMEOUT_SECONDS)
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        transcripts = usage.get("transcripts") if isinstance(usage.get("transcripts"), dict) else {}
+        return dict(transcripts)
+
     def resource_state(self) -> dict[str, Any]:
         """Lock-free control state for `/readyz`. Deliberately NOT `status()`.
 

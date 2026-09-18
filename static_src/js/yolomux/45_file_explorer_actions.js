@@ -1665,12 +1665,15 @@ function updateOpenFileDirtyFlag(path) {
 
 function syncOpenFileContentFromPanel(path, panel) {
   if (fileEditorPanelState(panel)?.historical === true) return false;
+  if (fileEditorPanelMode(panel) === 'diff') return false;
+  if (panel?._cmMergeView) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
   flushCodeMirrorSource(panel, path);
   const cmContent = codeMirrorPanelContent(panel);
   if (cmContent === null) return false;
-  state.content = cmContent;
+  const preserveFinalNewline = state.original.endsWith('\n') && cmContent !== state.original && !cmContent.endsWith('\n');
+  state.content = preserveFinalNewline ? `${cmContent}\n` : cmContent;
   updateOpenFileDirtyFlag(path);
   return true;
 }
@@ -2136,7 +2139,8 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffFromRef = payload.from_ref || '';
   state.diffToRef = payload.to_ref || '';
   state.diffWorkingMissing = payload.working_missing === true;
-  if (state.externalMissing && state.diffWorkingMissing) state.content = '';
+  if (!state.dirty && state.externalMissing && state.diffWorkingMissing) state.content = '';
+  if (state.dirty && state.original.endsWith('\n') && !state.content.endsWith('\n')) state.content += '\n';
   state.untracked = payload.untracked === true;
   state.diffLoaded = true;
   state.diffUnavailable = false;

@@ -134,10 +134,11 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
   return (Number(rect.height) || 0) >= DOCKVIEW_MIN_LAYOUT_HEIGHT;
 }
 
-function dockviewRootBoundaryDropIntent(event) {
+function dockviewRootBoundaryDropIntent(event, classification = null) {
   if (event?.kind === 'tab') return null;
   if (narrowSingleColumnMode()) return null;
-  const region = dockviewContentDropRegionForEvent(event);
+  classification ||= dockviewDropClassification(event, {skipRoot: true});
+  const region = classification.region;
   if (!region) return null;
   const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
   if (event?.nativeEvent && tabPointerDrag?.item) {
@@ -148,13 +149,13 @@ function dockviewRootBoundaryDropIntent(event) {
     // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
     // overlay here would recreate the false top-root drop after the shared pointer resolver
     // rejected it.
-    return dockviewTabPointerRootBoundaryIntentWithMemory(event.nativeEvent, tabPointerDrag);
+    return dockviewTabPointerRootBoundaryIntentWithMemory(classification.pointerEvent, tabPointerDrag);
   }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
   if (!isLayoutItem(item)) return null;
-  const nativeEvent = event.nativeEvent;
+  const nativeEvent = classification.pointerEvent;
   const target = rootBoundaryLayoutTarget();
   const targetRect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   const zoneRect = dockviewRootBoundaryZoneRect(region, targetRect);
@@ -186,7 +187,11 @@ function dockviewDragRegionForPoint(x, y) {
   if (!group) return {kind: 'outside', group: null, slot: '', rect: null};
   const slot = dockviewSlotForGroupElement(group);
   const headerRect = dockviewGroupHeaderRect(group);
-  if (dockviewPointInRect(x, y, headerRect)) return {kind: 'tabs', group, slot, rect: headerRect};
+  const groupRect = group.getBoundingClientRect?.();
+  if (dockviewPointInRect(x, y, headerRect)
+    || (groupRect && headerRect && x >= groupRect.left && x <= groupRect.right && y >= groupRect.top && y <= headerRect.bottom)) {
+    return {kind: 'tabs', group, slot, rect: headerRect};
+  }
   const content = Array.from(group.querySelectorAll?.('[data-dockview-region="content"]') || []).find(node =>
     dockviewPointInRect(x, y, node.getBoundingClientRect?.()),
   );
@@ -199,9 +204,33 @@ function dockviewDragRegionForEvent(event) {
   return dockviewDragRegionForPoint(Number(event?.clientX), Number(event?.clientY));
 }
 
+function dockviewDropClassification(event, options = {}) {
+  const state = options.state || (options.skipPointerState ? null : dockviewLayoutState.tabPointerDrag);
+  const nativeEvent = event?.nativeEvent || event;
+  const pointerEvent = state ? dockviewTabPointerEvent(nativeEvent, state) : nativeEvent;
+  const region = dockviewDragRegionForEvent(pointerEvent);
+  const zone = region.kind === 'content'
+    ? (narrowSingleColumnMode() ? 'middle' : dropZoneForRect(pointerEvent, region.rect))
+    : null;
+  const classification = {event, nativeEvent, pointerEvent, region, zone, state, rootIntent: null};
+  if (!options.skipRoot && event?.kind !== 'tab' && (region.kind === 'content' || (state?.item && !options.tabInsertion))) {
+    classification.rootIntent = state?.item
+      ? dockviewTabPointerRootBoundaryIntentWithMemory(pointerEvent, state)
+      : dockviewRootBoundaryDropIntent(event, classification);
+  }
+  if (!classification.rootIntent && options.pendingIntent && !options.hasCoordinates) {
+    classification.rootIntent = options.pendingIntent;
+  }
+  if (classification.rootIntent && dockviewPinnedTabRootBoundaryViolation(classification.rootIntent)) {
+    classification.rootIntent = null;
+  }
+  classification.owner = classification.rootIntent ? 'root' : region.kind;
+  return classification;
+}
+
 function dockviewContentDropRegionForEvent(event) {
-  const region = dockviewDragRegionForEvent(event?.nativeEvent || event);
-  return region.kind === 'content' ? region : null;
+  const classification = dockviewDropClassification(event, {skipPointerState: true});
+  return classification.region.kind === 'content' ? classification.region : null;
 }
 
 function dockviewRootBoundaryZoneRect(region, rootRect) {
@@ -220,16 +249,16 @@ function dockviewRootBoundaryDropZoneForEvent(event, rect, preferredZone = null)
   return rootBoundaryDropZoneForEvent(event, rect, preferredZone);
 }
 
-function dockviewPaneContentDropInfo(event) {
+function dockviewPaneContentDropInfo(event, classification = dockviewDropClassification(event)) {
   if (event?.kind !== 'content' || !event.group) return null;
-  const region = dockviewContentDropRegionForEvent(event);
+  const region = classification.region;
   if (!region || dockviewTabDropTargetActive(event)) return null;
   const targetSlot = region.slot;
   const targetRect = region.rect;
   const zone = narrowSingleColumnMode()
     ? 'middle'
-    : (event.nativeEvent && targetRect
-      ? dropZoneForRect(event.nativeEvent, targetRect)
+    : (classification.nativeEvent && targetRect
+      ? dropZoneForRect(classification.nativeEvent, targetRect)
       : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
@@ -253,7 +282,8 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
   if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) return null;
-  const region = dockviewContentDropRegionForEvent(nativeEvent);
+  const classification = dockviewDropClassification(event, {state});
+  const region = classification.region;
   if (!region) return null;
   if (dockviewTabDropTargetActive(event)) return null;
   const dx = Math.abs(pointerX - (Number(state.x) || 0));
@@ -295,6 +325,14 @@ function dockviewCommitSideVerticalDrop(intent) {
   });
 }
 
+function dockviewCommitOwnedDrop(event, intent, commit) {
+  if (!intent || typeof commit !== 'function') return false;
+  event?.preventDefault?.();
+  dockviewLayoutState.tabDropHandledAt = Date.now();
+  commit();
+  return true;
+}
+
 function dockviewPaneContentDropIntent(event) {
   const info = dockviewPaneContentDropInfo(event);
   return dockviewPaneContentSplitAllowed(info) ? info.intent : null;
@@ -316,14 +354,41 @@ function dockviewPaneContentSplitAllowed(info) {
   );
 }
 
-function dockviewShouldSuppressPaneContentDrop(event) {
-  const info = dockviewPaneContentDropInfo(event);
+function dockviewShouldSuppressPaneContentDrop(event, classification = dockviewDropClassification(event)) {
+  const info = dockviewPaneContentDropInfo(event, classification);
   return Boolean(info && (
     (narrowSingleColumnMode() && event.position !== 'center')
       ||
     !dockviewPaneContentDropAllowed(info)
       || (layoutSplitZone(info.intent.zone) && !dockviewPaneContentSplitAllowed(info))
   ));
+}
+
+function dockviewCommitPaneDrop(event, intent) {
+  if (!intent) return false;
+  if (intent.zone === 'middle') {
+    if (!dockviewPaneContentDropAllowed({item: intent.item, intent})) return false;
+    return dockviewCommitOwnedDrop(event, intent, () => {
+      void moveSessionToSlot(intent.item, intent.targetSlot, intent.sourceSlot, paneTabs(intent.targetSlot).length);
+    });
+  }
+  if (!dockviewPaneContentSplitAllowed({item: intent.item, intent})) return false;
+  return dockviewCommitOwnedDrop(event, intent, () => {
+    void splitSessionAtSlot(intent.item, intent.targetSlot, intent.zone, intent.sourceSlot);
+  });
+}
+
+function dockviewPointerContentDropIntent(event, state) {
+  const classification = dockviewDropClassification(event, {state});
+  if (classification.owner !== 'content' || !classification.region.slot) return null;
+  return {
+    item: state.item,
+    sourceSlot: state.slot,
+    targetSlot: classification.region.slot,
+    targetRect: classification.region.rect,
+    zone: 'middle',
+    createsPane: false,
+  };
 }
 
 function dockviewClearRootBoundaryPreview() {
@@ -354,8 +419,9 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const pointerEvent = dockviewTabPointerEvent(event?.nativeEvent);
-  const region = dockviewDragRegionForEvent(pointerEvent);
-  if (event?.kind === 'tab') {
+  const classification = dockviewDropClassification(event);
+  const region = classification.region;
+  if (classification.owner === 'tabs') {
     const tabInsertion = dockviewTabInsertionInfo(event);
     if (tabInsertion) {
       const capacityRefusal = dropIntentCapacityRefusalStatus(tabInsertion.item, {
@@ -371,7 +437,7 @@ function dockviewTrackRootBoundaryOverlay(event) {
       return;
     }
   }
-  if (region.kind === 'chrome' || region.kind === 'outside' || (event?.kind === 'tab' && dockviewTabDropTargetActive(event))) {
+  if (classification.owner === 'none' || (event?.kind === 'tab' && dockviewTabDropTargetActive(event))) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearTabInsertionPreview();
     dockviewClearRootBoundaryPreview();
@@ -387,13 +453,27 @@ function dockviewTrackRootBoundaryOverlay(event) {
       || dockviewTabStripEndDropViolatesPinnedPartition(customPointerInsertion)
   );
   const invalidTabDrop = pointerInsertionInvalid || dockviewTabDropViolatesPinnedPartition(event);
-  const paneInfo = dockviewPaneContentDropInfo(event);
-  if (paneInfo?.intent) {
-    // Dockview owns previews for every pane-content zone. Clear any legacy custom group/grid
-    // overlay first; otherwise native and app previews render as multiple yellow boxes.
-    clearDropPreview();
+  const paneInfo = dockviewPaneContentDropInfo(event, classification);
+  if (classification.owner === 'root' && classification.rootIntent) {
+    dockviewLayoutState.pendingRootBoundaryDrop = {
+      ...classification.rootIntent,
+      signature: layoutSlotsSignature(layoutSlots),
+    };
+    dockviewClearTabInsertionPreview();
+    dockviewShowRootBoundaryPreview(classification.rootIntent);
+    event.preventDefault?.();
+    return;
+  }
+  if (classification.owner === 'content') {
+    // Dockview owns pane-content previews. Retire only custom owners; clearing the shared preview
+    // here also clears Dockview's native edge preview before it can paint.
+    dockviewClearRootBoundaryPreview();
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearTabInsertionPreview();
+    if (paneInfo && dockviewShouldSuppressPaneContentDrop(event, classification)) {
+      dockviewSetInvalidTabDropPreview(true);
+      event.preventDefault?.();
+    }
     return;
   }
   const pointerCapacityRefusal = customPointerInsertion
@@ -421,7 +501,7 @@ function dockviewTrackRootBoundaryOverlay(event) {
     dockviewClearRootBoundaryPreview();
     return;
   }
-  const intent = dockviewRootBoundaryDropIntent(event);
+  const intent = dockviewRootBoundaryDropIntent(event, classification);
   if (dockviewPinnedTabRootBoundaryViolation(intent)) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
@@ -953,16 +1033,8 @@ function dockviewTrackTabPointerDrag(event) {
   state.dragged = true;
   beginLayoutMutationCompletion(state);
   const tabInsertion = dockviewTabInsertionInfoForPointer(pointerEvent, state);
-  const targetGroup = dockviewGroupForPoint(pointerEvent.clientX, pointerEvent.clientY);
-  const targetHeader = dockviewGroupHeaderRect(targetGroup);
-  const targetRect = targetGroup?.getBoundingClientRect?.();
-  const overTabHeader = Boolean(
-    tabInsertion
-      && targetHeader
-      && targetRect
-      && pointerEvent.clientY >= targetRect.top
-      && pointerEvent.clientY <= targetHeader.bottom,
-  );
+  const classification = dockviewDropClassification(pointerEvent, {state, tabInsertion});
+  const overTabHeader = Boolean(tabInsertion && classification.region.kind === 'tabs');
   if (overTabHeader) {
     state.lastTabInsertion = tabInsertion;
     const capacityRefusal = dropIntentCapacityRefusalStatus(tabInsertion.item, {
@@ -986,6 +1058,7 @@ function dockviewTrackTabPointerDrag(event) {
     dockviewShowRootBoundaryPreview(intent);
     return;
   }
+  if (classification.region.kind === 'tabs') return;
   dockviewClearRootBoundaryPreview();
   const contentRegion = dockviewContentDropRegionForEvent(pointerEvent);
   if (!contentRegion) return;
@@ -999,7 +1072,8 @@ function dockviewTrackTabPointerDrag(event) {
 function dockviewFinishTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   const releaseEvent = dockviewTabPointerEvent(event, state);
-  const releaseRegion = dockviewDragRegionForEvent(releaseEvent);
+  const classification = dockviewDropClassification(releaseEvent, {state});
+  const releaseRegion = classification.region;
   dockviewLayoutState.tabPointerDrag = null;
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
@@ -1042,24 +1116,20 @@ function dockviewFinishTabPointerDrag(event) {
     // This gesture belongs to the app layout, not Dockview's center-stack transaction. Commit it
     // before Dockview can flatten the tab back into one group. Keep propagation intact so Dockview
     // can remove its own drag ghost; preventDefault marks the release as app-owned.
-    releaseEvent.preventDefault?.();
-    dockviewLayoutState.tabDropHandledAt = Date.now();
-    void dockviewCommitSideVerticalDrop(sideIntent);
+    dockviewCommitOwnedDrop(releaseEvent, sideIntent, () => void dockviewCommitSideVerticalDrop(sideIntent));
     return;
   }
   const hasReleaseCoordinates = Number.isFinite(Number(event?.clientX))
     && Number.isFinite(Number(event?.clientY))
     && (Number(event.clientX) !== 0 || Number(event.clientY) !== 0);
   const rootIntent = releaseRegion.kind === 'content'
-    ? dockviewTabPointerRootBoundaryIntentWithMemory(releaseEvent, state)
+    ? (classification.rootIntent || state.lastRootBoundaryIntent)
     : (hasReleaseCoordinates ? null : state.lastRootBoundaryIntent);
   if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
     // The app owns the visible root-edge preview. Commit it before Dockview's generic tab-drop
     // stamp can make the pointer fallback stand down without producing the requested root split.
-    releaseEvent.preventDefault?.();
-    dockviewLayoutState.tabDropHandledAt = Date.now();
     beginLayoutMutationCompletion(state);
-    void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
+    dockviewCommitOwnedDrop(releaseEvent, rootIntent, () => void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot));
     return;
   }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(releaseEvent, state);
@@ -1070,16 +1140,8 @@ function dockviewFinishTabPointerDrag(event) {
     }, 0);
     return;
   }
-  const contentRegion = dockviewContentDropRegionForEvent(releaseEvent);
-  const contentTargetSlot = contentRegion?.slot || '';
-  const contentIntent = contentTargetSlot ? {
-    item: state.item,
-    sourceSlot: state.slot,
-    targetSlot: contentTargetSlot,
-    targetRect: contentRegion?.rect || null,
-    zone: 'middle',
-    createsPane: false,
-  } : null;
+  const contentIntent = dockviewPointerContentDropIntent(releaseEvent, state);
+  const contentTargetSlot = contentIntent?.targetSlot || '';
   if (
     contentTargetSlot
     && contentTargetSlot !== state.slot
@@ -1139,7 +1201,8 @@ function dockviewFinishPendingRootBoundaryDrop(event) {
   const x = Number(event?.clientX);
   const y = Number(event?.clientY);
   const hasCoordinates = Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0);
-  if (hasCoordinates && dockviewDragRegionForEvent(event).kind !== 'content') {
+  const classification = dockviewDropClassification(event, {pendingIntent: pending, hasCoordinates});
+  if (hasCoordinates && classification.owner !== 'content') {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     return;
   }
@@ -1623,7 +1686,8 @@ function dockviewInit() {
         }
       }
       const pointerEvent = dockviewTabPointerEvent(event.nativeEvent);
-      const region = dockviewDragRegionForEvent(pointerEvent);
+      const classification = dockviewDropClassification(event);
+      const region = classification.region;
       if (region.kind === 'chrome' || region.kind === 'outside') {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -1675,7 +1739,7 @@ function dockviewInit() {
         });
         return;
       }
-      const rootIntent = dockviewRootBoundaryDropIntent(event);
+      const rootIntent = classification.rootIntent || dockviewRootBoundaryDropIntent(event, classification);
       if (dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
@@ -1746,7 +1810,7 @@ function dockviewInit() {
         });
         return;
       }
-      const paneInfo = dockviewPaneContentDropInfo(event);
+      const paneInfo = dockviewPaneContentDropInfo(event, classification);
       const capacityRefusal = paneInfo?.intent?.zone === 'middle'
         ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
         : '';
@@ -1760,27 +1824,19 @@ function dockviewInit() {
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.
-      if (paneInfo && paneInfo.intent.zone === 'middle' && dockviewPaneContentDropAllowed(paneInfo)) {
+      if (paneInfo && paneInfo.intent.zone === 'middle' && dockviewCommitPaneDrop(event, paneInfo.intent)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
-        event.preventDefault();
-        queueMicrotask(() => {
-          void moveSessionToSlot(paneInfo.item, paneInfo.intent.targetSlot, paneInfo.intent.sourceSlot, paneTabs(paneInfo.intent.targetSlot).length);
-        });
         return;
       }
       const paneIntent = dockviewPaneContentDropIntent(event);
       if (paneIntent) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
-        event.preventDefault();
-        dockviewLayoutState.tabDropHandledAt = Date.now();
-        queueMicrotask(() => {
-          void splitSessionAtSlot(paneIntent.item, paneIntent.targetSlot, paneIntent.zone, paneIntent.sourceSlot);
-        });
+        dockviewCommitPaneDrop(event, paneIntent);
         return;
       }
-      if (dockviewShouldSuppressPaneContentDrop(event)) {
+      if (dockviewShouldSuppressPaneContentDrop(event, classification)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();

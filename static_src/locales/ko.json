@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "복사된 상대 경로",
   "status.copiedTerminalChars.one": "{count} 문자를 복사했습니다.",
   "status.copiedTerminalChars.other": "{count} 문자를 복사했습니다.",
-  "status.copiedText": "복사된 텍스트",
+  "status.copiedText": "텍스트를 복사했습니다",
   "status.copiedTmuxSelection.one": "tmux에서 {count} 문자를 복사했습니다.",
   "status.copiedTmuxSelection.other": "{count} 문자를 tmux에서 복사했습니다.",
   "status.copiedTranscriptPath": "트랜스크립트 경로 복사됨",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "모든 글꼴 크기 동기화",
   "pref.appearance.sync_font_sizes.help": "사용하면 UI, 터미널, 편집기, 미리보기 및 Finder가 전역 글꼴 크기를 사용합니다.",
   "pref.section.appearance": "외관",
-  "pref.section.sizes": "크기"
+  "pref.section.sizes": "크기",
+  "contextmenu.copyText": "텍스트 복사",
+  "contextmenu.copyWithStyle": "스타일과 함께 복사",
+  "status.copiedStyledText": "스타일과 함께 복사했습니다"
 }

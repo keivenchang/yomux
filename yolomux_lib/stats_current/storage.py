@@ -3005,6 +3005,18 @@ class Store:
                 verdicts.append(self.COVERAGE_CHANGED)
         return tuple(verdicts)
 
+    def coverage_epoch_started_at(
+        self, family: str, source_id: str, epoch_id: str,
+    ) -> float | None:
+        """Return the durable start for one lifecycle identity, if retained."""
+
+        row = self._connection().execute(
+            "SELECT started_at FROM coverage_epochs "
+            "WHERE family = ? AND source_id = ? AND epoch_id = ?",
+            (family, source_id, epoch_id),
+        ).fetchone()
+        return None if row is None else float(row[0])
+
     def last_vacuumed_at(self) -> float:
         """Return the persisted completion time for the last successful VACUUM."""
         row = self._connection().execute(

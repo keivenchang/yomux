@@ -290,7 +290,7 @@ def test_i2_active_drop_target_matches_pointer_geometry_at_top_left(browser, tmp
     )
     wait_for_dockview(browser, min_tabs=2)
     wait_for_dockview_tab_geometry(browser, min_tabs=2)
-    preview = _dockview_drag_preview(browser, x_ratio=0.02, y_ratio=0.02)
+    preview = _dockview_drag_preview(browser, x_ratio=0.02, y_ratio=0.5)
     contained = [
         target for target in preview["previews"]
         if target["left"] <= preview["point"]["x"] <= target["right"]

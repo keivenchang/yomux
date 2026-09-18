@@ -361,6 +361,51 @@ def test_quiescence_waits_out_the_in_flight_watch_diff_baseline_receipt():
     assert settled["watchRootsBaselinePending"] is False
 
 
+def test_quiescence_waits_for_a_pending_filesystem_write_receipt_after_the_write_acknowledgement():
+    class FilesystemWriteReceiptDriver:
+        def __init__(self):
+            self.receipt_awaited = 0
+            self.receipt_scripts = []
+
+        def execute_script(self, _script):
+            if self.receipt_awaited:
+                state = _quiescent_state()
+                state["pendingDetails"] = []
+                state["pendingDetailsTruncated"] = False
+                return state
+            state = _blocked_by_baseline_state()
+            state["pending"] = ["op-write-after-ack"]
+            state["pendingDetails"] = [{
+                "id": "op-write-after-ack",
+                "kind": "filesystem_operation",
+                "contextOperation": "write",
+                "waiterCount": 1,
+            }]
+            state["pendingDetailsTruncated"] = False
+            state["watchDiffPendingOperationIds"] = []
+            state["watchRootsPending"] = False
+            state["watchRootsBaselinePending"] = False
+            return state
+
+        def execute_async_script(self, script, *args):
+            if "awaitPendingOperationReceipts" in script:
+                self.receipt_awaited += 1
+                assert args and int(args[0]) > 0
+                return {
+                    "available": True,
+                    "settled": True,
+                    "state": _quiescent_state(),
+                }
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = FilesystemWriteReceiptDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.receipt_awaited == 1
+    assert settled["filesystemOperationReceiptBarrier"]["settled"] is True
+    assert settled["pending"] == []
+
+
 def test_quiescence_waits_out_batch_items_owned_by_the_in_flight_baseline():
     class OwnedBatchDescendantDriver:
         def __init__(self):

@@ -177,3 +177,14 @@ async function installRawFileMediaSource(media, path, options = {}) {
 function releaseRawFileMediaSources(root) {
   for (const media of Array.from(root?.querySelectorAll?.('img, audio, video') || [])) releaseRawFileMediaSource(media);
 }
+
+function waitForImageDecode(image) {
+  if (!image) return Promise.resolve(false);
+  if (Number(image.naturalWidth || 0) > 0 && Number(image.naturalHeight || 0) > 0) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = () => resolve(Number(image.naturalWidth || 0) > 0 && Number(image.naturalHeight || 0) > 0);
+    image.addEventListener?.('load', finish, {once: true});
+    image.addEventListener?.('error', finish, {once: true});
+    if (typeof image.decode === 'function') image.decode().then(finish, finish);
+  });
+}

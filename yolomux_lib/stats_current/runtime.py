@@ -35,7 +35,7 @@ DEFAULT_OWNER_CHECK_SECONDS = 1.0
 BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS = 4.0
 SUPERVISOR_JOIN_SECONDS = 5.0
 EXPECTED_SUPERVISOR_ERRORS = (OSError, RuntimeError, ValueError)
-WEB_COLLECTED_FAMILIES = scheduler.COLLECTED_FAMILIES - frozenset({"cpu", "gpu"})
+WEB_COLLECTED_FAMILIES = scheduler.COLLECTED_FAMILIES - frozenset({"cpu", "gpu", "agent_tokens"})
 logger = logging.getLogger(__name__)
 
 
@@ -71,11 +71,11 @@ class StatsCurrentRuntime:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         supplied = set(collectors_by_family)
-        if supplied != WEB_COLLECTED_FAMILIES:
+        missing = WEB_COLLECTED_FAMILIES - supplied
+        if missing:
             missing = sorted(WEB_COLLECTED_FAMILIES - supplied)
-            extra = sorted(supplied - WEB_COLLECTED_FAMILIES)
             raise CurrentRuntimeError(
-                f"current collector set mismatch; missing={missing}, extra={extra}"
+                f"current collector set mismatch; missing={missing}"
             )
         self.client = client
         self._owner_generation = owner_generation
@@ -216,7 +216,7 @@ class StatsCurrentRuntime:
                 min_interval_seconds=BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS,
             )
         with self._lock:
-            self._family_sources[family].update(
+            self._family_sources.setdefault(family, set()).update(
                 epoch.source_id for epoch in facts.coverage_epochs if epoch.family == family
             )
 

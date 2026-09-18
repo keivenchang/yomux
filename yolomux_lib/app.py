@@ -152,8 +152,8 @@ from .stats_current import host_collectors as stats_current_host_collectors
 from .stats_current import families as stats_current_families
 from .stats_current.http import StatsHttpForwarder
 from .stats_current.runtime import StatsCurrentRuntime
-from .stats_current import storage as stats_current_storage
 from .stats_current import opencode as stats_current_opencode
+from .stats_current.agent_tokens import AgentTokenCollector
 from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
@@ -682,6 +682,7 @@ SESSION_FILES_BATCH_MAX_WORKERS = 2
 SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
+TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS = WATCHD_DESCRIPTOR_RESYNC_SECONDS
 # A single-flight refresh worker that outlives this deadline is treated as stalled and
 # may be superseded, so a hung heavy build cannot pin the guard and refuse every future
 # refresh (which froze the aggregate session-metadata header indefinitely). Far above a
@@ -3144,6 +3145,7 @@ class WatchBridge:
                 for repo in changed_repos:
                     if repo in app.session_files_service.repo_dirty_generations:
                         app.session_files_service.repo_dirty_generations[repo] += 1
+            app.invalidate_transcripts_payload_inputs()
         filesystem_roots = {Path(root) for root in (*previous_filesystem_roots, *roots)}
         filesystem_changed = any(
             filesystem_paths_intersect(path, root)
@@ -3176,8 +3178,8 @@ class WatchBridge:
             app.publish_client_event("settings_changed", {"data": app.settings_payload()}, trigger="watchd", cache="ready")
             events.append("settings_changed")
         if revision.get("transcripts_changed"):
-            app.clear_transcript_caches()
-            app.publish_client_event("transcripts_changed", {"refresh": True}, trigger="watchd", cache="refresh")
+            app.clear_transcript_content_caches()
+            app.invalidate_transcripts_payload_inputs()
             events.append("transcripts_changed")
         if files_changed:
             app.publish_client_event("files_changed", {"files": files_changed, "count": len(files_changed)}, trigger="watchd", cache="ready")
@@ -3380,6 +3382,8 @@ class WatchBridge:
                 if not app.sync_watchd_descriptors(record):
                     record.watchd_stop_event.wait(1.0)
                     continue
+                if record.next_watch_snapshot_refresh_at > 0 and time.monotonic() >= record.next_watch_snapshot_refresh_at:
+                    app.start_client_watch_snapshot_publish()
                 # The descriptor set is the sole demand owner for watchd. Once the final
                 # descriptor has been removed successfully, do not arm another revision wait:
                 # release the lease in ``finally`` while the parent event worker keeps serving
@@ -4096,20 +4100,24 @@ class WatchBridge:
 
     def clear_transcript_caches(self, app) -> None:
         app.clear_transcript_content_caches()
-        with app.activity_transcript_service.transcripts_payload_cache_lock:
-            record = app.activity_transcript_service.transcripts_payload_cache_record
-            record.generation += 1
-            record.stored_at = None
-            record.payload = None
-            future = record.lightweight_future
-            record.lightweight_future = None
-            record.lightweight_generation = record.generation
-            if future is not None and not future.done():
-                future.set_exception(RuntimeError("transcript metadata cache invalidated"))
+        record = app.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                record.generation += 1
+                record.input_generation += 1
+                record.committed_input_generation = -1
+                record.watch_refreshed_at = None
+                record.stored_at = None
+                record.payload = None
+                future = record.lightweight_future
+                record.lightweight_future = None
+                record.lightweight_generation = record.generation
+                if future is not None and not future.done():
+                    future.set_exception(RuntimeError("transcript metadata cache invalidated"))
             # Invalidation supersedes the in-flight build, so it must release the whole guard, not
             # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
             # intent behind that belonged to a caller this invalidation had already superseded.
-            record.release_worker()
+                record.release_worker()
         # A queued follow-up build is a promise to a forced caller waiting on a named generation.
         # The invalidated worker can no longer keep it -- its finish is a generation mismatch and
         # returns before the drain -- so the promise was left sitting on the record until some
@@ -4118,19 +4126,27 @@ class WatchBridge:
         # with no worker and no queued intent.
         app.start_queued_transcripts_payload_rebuild()
 
+    def invalidate_transcripts_payload_inputs(self, app) -> None:
+        """Advance the source fence and coalesce one complete publishing rebuild."""
+        requested_at = time.monotonic()
+        record = app.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            app.advance_transcripts_payload_input_generation()
+        app.start_transcripts_payload_refresh(publish=True, not_before=requested_at, lifecycle_owner=True)
+
     def start_client_watch_snapshot_publish(self, app) -> bool:
         generation = 0
         worker: threading.Thread | None = None
         with self.state.lock:
             watcher_record = self.state.event_watcher_record
-            if watcher_record.snapshot_worker is not None:
+            if watcher_record.stop_event.is_set() or watcher_record.snapshot_worker is not None:
                 return False
             def run() -> None:
                 app.publish_client_watch_snapshot(watcher_record, generation)
 
             worker = threading.Thread(target=run, daemon=True)
             watcher_record.snapshot_worker = worker
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
+            generation = app.begin_transcripts_payload_work(worker, lifecycle_owner=True)
             if generation <= 0:
                 watcher_record.snapshot_worker = None
                 return False
@@ -4171,35 +4187,104 @@ class WatchBridge:
     ) -> None:
         worker = threading.current_thread()
         guarded = record is not None
+        completed = False
         if generation is None:
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
+            generation = app.begin_transcripts_payload_work(worker)
             if generation <= 0:
                 return
         try:
             started = time.perf_counter()
-            payload = app.build_transcripts_payload()
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                source_generation = payload_record.input_generation
+                cache_age = (
+                    time.monotonic() - payload_record.watch_refreshed_at
+                    if payload_record.watch_refreshed_at is not None
+                    else None
+                )
+                reusable_payload = (
+                    payload_record.payload is not None
+                    and payload_record.payload.get("metadata_loading") is not True
+                    and payload_record.committed_input_generation == source_generation
+                    and cache_age is not None
+                    and cache_age <= TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
+                )
+                payload = copy.deepcopy(payload_record.payload) if reusable_payload else None
+            if payload is None:
+                payload = app.build_transcripts_payload()
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
-            if not app.commit_transcripts_payload_cache(payload, generation):
+            if (
+                not app.status_service_mode
+                and app.client_events.has_demand("transcripts")
+            ):
+                live_sessions, _live_sessions_error = list_tmux_session_names()
+                if live_sessions:
+                    # A browser metadata watcher can be the first owner to observe a new tmux
+                    # roster. Register that exact roster with statusd before publishing metadata;
+                    # otherwise statusd keeps its old snapshot roster and the browser receives
+                    # transcript bytes for sessions whose status rows never get a new revision.
+                    app.sessions = list(live_sessions)
+                    status_response, status_body = app.status_client.snapshot(live_sessions, timeout=5.0)
+                    if status_response.get("ok") is True and status_body:
+                        try:
+                            status_metadata = validate_status_snapshot(status_response, status_body)
+                            status_payload = json.loads(status_body)
+                        except (StatusProtocolError, ValueError, TypeError):
+                            status_payload = None
+                        if isinstance(status_payload, dict) and status_metadata.generation == int(status_response.get("generation") or 0):
+                            app.publish_client_event(
+                                "auto_approve_changed",
+                                {
+                                    "status": int(status_response.get("status") or HTTPStatus.OK),
+                                    "refresh": False,
+                                    "generation": status_metadata.generation,
+                                    "signature": f"statusd:{status_metadata.generation}:{int(status_response.get('status') or HTTPStatus.OK)}",
+                                    "data": status_payload,
+                                },
+                                trigger="metadata-watch-lifecycle",
+                                cache="ready",
+                            )
+                    app.wake_client_event_watcher()
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                publish_requested = payload_record.publish_requested
+            # An ordinary watch refresh may reuse a fresh payload without changing its identity.
+            # A forced request that joined this worker is different: its promised generation must be
+            # materialized and published by this same owner, even when the bytes are reusable.
+            commit_reused_payload = reusable_payload and publish_requested
+            if (not reusable_payload or commit_reused_payload) and not app.commit_transcripts_payload_cache(
+                payload,
+                generation,
+                input_generation=source_generation,
+            ):
                 return
-            signature = app.transcripts_payload_event_signature(payload)
-            with self.state.lock:
-                if guarded and (
-                    self.state.event_watcher_record is not record
-                    or record.snapshot_worker is not worker
-                    or record.stop_event.is_set()
-                ):
-                    return
-                previous_signature = self.state.transcripts_payload_signature
-                self.state.transcripts_payload_signature = signature
-            if previous_signature != signature:
-                app.publish_client_event(
-                    "transcripts_changed",
-                    {"signature": signature, "refresh": True},
-                    trigger="watch_state",
-                    cache="ready",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                )
+            with app.activity_transcript_service.transcripts_payload_cache_record.publication_lock:
+                with app.activity_transcript_service.transcripts_payload_cache_lock:
+                    payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                    if payload_record.input_generation != source_generation:
+                        return
+                    if reusable_payload:
+                        payload_record.watch_refreshed_at = time.monotonic()
+                    signature = app.transcripts_payload_event_signature(payload)
+                with self.state.lock:
+                    if guarded and (
+                        self.state.event_watcher_record is not record
+                        or record.snapshot_worker is not worker
+                        or record.stop_event.is_set()
+                    ):
+                        return
+                    previous_signature = self.state.transcripts_payload_signature
+                    self.state.transcripts_payload_signature = signature
+                    should_publish = previous_signature != signature or payload_record.publish_requested
+                if should_publish:
+                    app.publish_client_event(
+                        "transcripts_changed",
+                        {"signature": signature, "refresh": True, "data": copy.deepcopy(payload)},
+                        trigger="watch_state",
+                        cache="ready",
+                        compute_ms=(time.perf_counter() - started) * 1000,
+                    )
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
             app.publish_context_items_ready_events(trigger="watch_state")
@@ -4209,7 +4294,12 @@ class WatchBridge:
             if guarded and not app.client_watch_snapshot_is_current(record, worker):
                 return
             app.publish_session_files_ready_events(trigger="watch_state")
+            completed = True
         finally:
+            if guarded and completed:
+                with self.state.lock:
+                    if self.state.event_watcher_record is record and record.snapshot_worker is worker:
+                        record.next_watch_snapshot_refresh_at = time.monotonic() + TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
             app.finish_transcripts_payload_work(generation, worker)
             with self.state.lock:
                 if guarded and self.state.event_watcher_record is record and record.snapshot_worker is worker:
@@ -4331,12 +4421,22 @@ class WatchBridge:
         trigger: str,
         force: bool = False,
         compute_ms: float | None = None,
+        completion: dict[str, Any] | None = None,
     ) -> bool:
         """Publish one already-materialized session-files generation to local SSE clients."""
         event_payload = {"request": copy.deepcopy(request), "status": int(status), "data": copy.deepcopy(payload)}
+        if isinstance(completion, dict):
+            completion_identity = {
+                key: str(completion[key])
+                for key in ("cache_key_hash", "cache_view_id")
+                if completion.get(key) not in (None, "")
+            }
+            if completion_identity:
+                event_payload["completion"] = completion_identity
         stable_event_payload = copy.deepcopy(event_payload)
         if isinstance(stable_event_payload.get("data"), dict):
             stable_event_payload["data"].pop("cache", None)
+        stable_event_payload.pop("completion", None)
         signature = app.client_event_payload_signature(stable_event_payload)
         key = app.client_event_payload_signature(request)
         with self.state.lock:
@@ -4527,20 +4627,112 @@ class WatchBridge:
                 app.tmux_signal_cache.clear()
                 record.wake_event.set()
             return
-        if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
+        if event_type in {"pane-exited", "pane-died", "window-close", "session-renamed", "sessions-changed"}:
             event_time = float(event.get("time") or time.time())
             with self.state.lock:
                 self.state.tmux_signal_removal_event = {"type": event_type, "time": event_time}
             # The retained statusd roster is the sole agent-window authority. A topology event
             # must retire it so its next snapshot cannot keep a dead pane as a transition row.
             app.status_client.invalidate("tmux-topology")
-            if event_type == "sessions-changed":
-                app.refresh_sessions(maintenance=False)
+            if event_type in {"session-renamed", "sessions-changed"}:
+                self.schedule_tmux_roster_rebuild(app, rename_hint=event_type == "session-renamed")
         app.tmux_signal_cache.clear()
         with self.state.lock:
             record = self.state.event_watcher_record
             record.tmux_signal_refresh_at = time.monotonic()
         record.wake_event.set()
+
+    def schedule_tmux_roster_rebuild(self, app, *, rename_hint: bool = False) -> bool:
+        """Queue one asynchronous tmux roster read, coalescing events while it runs."""
+
+        with self.state.lock:
+            record = self.state.event_watcher_record
+            if record.stop_event.is_set():
+                return False
+            record.tmux_roster_dirty = True
+            record.tmux_roster_rename_hint |= rename_hint
+            worker = record.tmux_roster_worker
+            if worker is not None and worker.is_alive():
+                record.wake_event.set()
+                return False
+            worker = threading.Thread(
+                target=app.rebuild_tmux_roster,
+                args=(record,),
+                name="tmux-roster-rebuild",
+                daemon=True,
+            )
+            record.tmux_roster_worker = worker
+        try:
+            worker.start()
+        except BaseException:
+            with self.state.lock:
+                if self.state.event_watcher_record is record and record.tmux_roster_worker is worker:
+                    record.tmux_roster_worker = None
+            raise
+        return True
+
+    def rebuild_tmux_roster(self, app, record: ClientEventWatcherRecord) -> None:
+        """Read and publish the latest compact roster until no tmux event remains dirty."""
+
+        worker = threading.current_thread()
+        read_failures = 0
+        rename_hint = False
+        try:
+            while True:
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    rename_hint |= record.tmux_roster_rename_hint
+                    record.tmux_roster_rename_hint = False
+                    record.tmux_roster_dirty = False
+                roster, error = list_tmux_session_names()
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    if record.tmux_roster_dirty:
+                        continue
+                if error is not None:
+                    read_failures += 1
+                    if read_failures >= 3:
+                        return
+                    if record.stop_event.wait(0.1):
+                        return
+                    continue
+                read_failures = 0
+                previous = list(app.sessions)
+                if app.apply_session_roster(roster, refresh_metadata=False):
+                    removed = [session for session in previous if session not in roster]
+                    added = [session for session in roster if session not in previous]
+                    renames = (
+                        [{"old_session": removed[0], "new_session": added[0]}]
+                        if rename_hint and len(removed) == 1 and len(added) == 1
+                        else []
+                    )
+                    app.publish_client_event(
+                        "tmux_roster_changed",
+                        {
+                            "sessions": list(app.sessions),
+                            "session_order": list(app.sessions),
+                            "roster_generation": app.topology_generation,
+                            "topology_generation": app.topology_generation,
+                            "server_epoch": app.server_epoch,
+                            "renames": renames,
+                        },
+                        trigger="tmux-roster",
+                        cache="ready",
+                    )
+                rename_hint = False
+                with self.state.lock:
+                    if self.state.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    if record.tmux_roster_dirty:
+                        continue
+                    record.tmux_roster_worker = None
+                    return
+        finally:
+            with self.state.lock:
+                if self.state.event_watcher_record is record and record.tmux_roster_worker is worker:
+                    record.tmux_roster_worker = None
 
     def tmux_signal_event_watcher_healthy(self, app) -> bool:
         return app.tmux_signal_event_watcher_status().get("state") == "attached"
@@ -4672,21 +4864,20 @@ class WatchBridge:
             thread = record.worker
             watchd_worker = record.watchd_worker
             snapshot_worker = record.snapshot_worker
+            roster_worker = record.tmux_roster_worker
+            record.tmux_roster_dirty = False
+            record.tmux_roster_rename_hint = False
             record.snapshot_worker = None
         app.stop_status_generation_watcher(record)
-        if snapshot_worker is not None:
-            with app.activity_transcript_service.transcripts_payload_cache_lock:
-                cache_record = app.activity_transcript_service.transcripts_payload_cache_record
-                snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
-            if snapshot_generation:
-                app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
-            # The snapshot build can be blocked in tmux or metadata work that has no cancellation
-            # boundary. Generation invalidation above fences its result; do not hold the SSE request
-            # open waiting for uncancellable work to return.
+        # Keep an in-flight metadata worker as the single-flight owner until its finally block
+        # releases the guard. A Git/filesystem operation may not have a cancellation boundary, and
+        # releasing ownership here would let an SSE reconnect start a duplicate full rebuild.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
             watchd_worker.join(timeout=5.0)
+        if roster_worker is not None and roster_worker is not threading.current_thread():
+            roster_worker.join(timeout=2.0)
         with self.state.lock:
             if self.state.event_watcher_record is record:
                 self.state.event_watcher_record = ClientEventWatcherRecord()
@@ -5707,6 +5898,10 @@ class SessionFilesCoordinator:
                 status,
                 trigger=trigger,
                 compute_ms=compute_ms,
+                completion={
+                    "cache_key_hash": refresh_details.get("cache_key_hash", ""),
+                    "cache_view_id": refresh_details["cache_view_id"],
+                },
             )
             done_details = dict(refresh_details)
             done_details["compute_ms"] = round(compute_ms, 3)
@@ -7483,7 +7678,7 @@ class SystemStatusProjector:
         migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
         build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
         service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
-        transcript_usage = app.stats_current_transcript_usage.status()
+        transcript_usage = app.stats_current_client.agent_token_usage_status()
         token_family = current_runtime.get("families", {}).get("agent_tokens", {}) if isinstance(current_runtime.get("families"), dict) else {}
         token_cadence = float(token_family.get("cadence_seconds") or STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS) if isinstance(token_family, dict) else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
         usage = dict(service_usage)
@@ -8124,10 +8319,6 @@ class TmuxWebtermApp:
         self.stats_collection_state = StatsCollectionState()
         self.status_collector_lease_lock = threading.Lock()
         self.status_collector_lease_id = ""
-        self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
-        self.stats_opencode_cursors = stats_current_opencode.OpenCodeCursorStore(
-            stats_current_opencode.OpenCodeCursorStore.default_path()
-        )
         # M8: the live retained-health store, attached by whoever started this port's
         # observer. `None` until then, and the projection says `observer_unattached`
         # rather than publishing zeros. See `attach_backend_health_store`.
@@ -8237,7 +8428,6 @@ class TmuxWebtermApp:
                 "agent_status": self.collect_current_stats_agent_status,
                 "service_load": self.collect_current_stats_service_load,
                 "system_memory": self.collect_current_stats_system_memory,
-                "agent_tokens": self.collect_current_stats_agent_tokens,
             },
             owner_generation=self.stats_current_owner_generation,
             token_cadence_seconds=self.stats_current_token_cadence_seconds,
@@ -8856,7 +9046,11 @@ class TmuxWebtermApp:
             for key in list(self.stats_collection_state.agent_activity_state):
                 if key not in seen_keys:
                     self.stats_collection_state.agent_activity_state.pop(key, None)
-        process_id, _label, _port = self.stats_current_process_identity()
+        process_id, _label, _port = (
+            self.stats_current_process_identity()
+            if hasattr(self, "background_owner")
+            else ("web-test", "web-test", 0)
+        )
         return stats_current_collectors.agent_status_success(
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
@@ -8950,27 +9144,49 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
+        """Compatibility adapter for tests; statsd owns token collection."""
+        stats_client = self.__dict__.get("stats_current_client")
+        scanner = self.__dict__.get("stats_current_transcript_usage")
+        compatibility_scanner = scanner is None
+        if scanner is None:
+            scanner = StatsCurrentTranscriptUsageScanner()
+            self.stats_current_transcript_usage = scanner
+        cursors = self.__dict__.get("stats_opencode_cursors")
+        if not isinstance(cursors, stats_current_opencode.OpenCodeCursorStore):
+            cursors = stats_current_opencode.OpenCodeCursorStore(
+                stats_current_opencode.OpenCodeCursorStore.default_path()
+                if stats_client is not None else None
+            )
+            self.stats_opencode_cursors = cursors
+        database = stats_current_opencode.DEFAULT_DATABASE_PATH
         row_provider = self.__dict__.get("stats_agent_window_rows")
         fixture_rows = callable(row_provider) and hasattr(self, "stats_agent_token_rows")
-        if fixture_rows:
-            inventory = stats_current_opencode.OpenCodeProcessInventory((), ())
-            inventory_errors: list[str] = []
-            rows = self.stats_agent_token_rows(row_provider())
-        else:
-            inventory, inventory_errors = machinewide_opencode_inventory()
-            rows = [{
-                "key": stats_current_opencode.agent_token_key_for_process(
-                    pid=item.observation.pid,
-                    tmux_session=item.observation.tmux_session,
-                ),
-                "session": item.observation.tmux_session,
-                "pane_target": item.observation.pane_target,
-                "kind": "opencode",
-                "agent_session_id": item.session_id,
-                "cwd": item.observation.directory or "",
-                "started_at": item.observation.started_at,
-            } for item in inventory.sessions]
-        if not rows and not inventory.unavailable and not hasattr(self, "stats_current_transcript_usage"):
+        inventory_result: tuple[stats_current_opencode.OpenCodeProcessInventory, list[str]] | None = None
+
+        if hasattr(self, "start_status_collector_lease"):
+            if not self.start_status_collector_lease():
+                return stats_current_collectors.collector_unavailable(
+                    family="agent_tokens",
+                    source_id="statusd",
+                    epoch_id=attempt.epoch_id,
+                    epoch_started_at=attempt.epoch_started_at,
+                    observed_at=attempt.scheduled_at,
+                    cadence_seconds=attempt.cadence_seconds,
+                    owner_generation=attempt.owner_generation,
+                    reason="statusd-unavailable",
+                )
+
+        def inventory_provider() -> tuple[stats_current_opencode.OpenCodeProcessInventory, list[str]]:
+            nonlocal inventory_result
+            if inventory_result is None:
+                inventory_result = (
+                    stats_current_opencode.OpenCodeProcessInventory((), ()), []
+                ) if fixture_rows else machinewide_opencode_inventory()
+            return inventory_result
+
+        rows_provider = None
+        fixture_rows_value = row_provider() if fixture_rows else None
+        if compatibility_scanner and fixture_rows and not fixture_rows_value:
             return stats_current_collectors.collector_unavailable(
                 family="agent_tokens",
                 source_id="statusd",
@@ -8979,426 +9195,41 @@ class TmuxWebtermApp:
                 observed_at=attempt.scheduled_at,
                 cadence_seconds=attempt.cadence_seconds,
                 owner_generation=attempt.owner_generation,
-                reason=("status-roster-unavailable" if callable(row_provider) else "statusd-unavailable"),
+                reason="status-roster-unavailable",
             )
-        unavailable_spans = []
-        for item in (*inventory.unavailable,):
-            unavailable_spans.extend(stats_current_collectors.collector_unavailable(
-                family="agent_tokens",
-                source_id=stats_current_opencode.source_id_for_agent(f"process:{item.observation.pid}"),
-                epoch_id=f"{attempt.epoch_id}:opencode:process:{item.observation.pid}",
-                epoch_started_at=attempt.epoch_started_at,
-                observed_at=attempt.scheduled_at,
-                cadence_seconds=attempt.cadence_seconds,
-                owner_generation=attempt.owner_generation,
-                reason=f"opencode-{item.reason or 'session-identity-unavailable'}",
-            ).unavailable_spans)
-        if not fixture_rows:
-            for error in inventory_errors:
-                unavailable_spans.extend(stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("process-inventory"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:process-inventory",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{error[:120]}",
-                ).unavailable_spans)
-        atoms = []
-        tombstones = []
-        token_rows = rows
-        scan = self.stats_current_transcript_usage.scan(token_rows)
-        opencode_atoms: list[tuple[str, session_files.TranscriptUsageAtom]] = []
-        opencode_coverage: list[stats_current_storage.CoverageEpoch] = []
-        opencode_cursors = self.__dict__.get("stats_opencode_cursors")
-        if not isinstance(opencode_cursors, stats_current_opencode.OpenCodeCursorStore):
-            opencode_cursors = stats_current_opencode.OpenCodeCursorStore()
-            self.__dict__["stats_opencode_cursors"] = opencode_cursors
-        stats_client = self.__dict__.get("stats_current_client")
-        stats_database = getattr(stats_client, "database_path", None)
-        if isinstance(stats_database, Path):
-            cursor_fence = opencode_cursors.reset_for_database(stats_database)
-            if cursor_fence is not None:
-                return stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state-fence",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{cursor_fence.reason}",
-                )
-        cursor_state = opencode_cursors.state()
-        cursor_values = cursor_state.values if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState) else {}
-        cursor_epochs = (
-            cursor_state.epochs
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.epochs is not None else {}
+        if fixture_rows:
+            rows_provider = lambda _inventory: self.stats_agent_token_rows(fixture_rows_value)
+        source_identity_provider = (
+            lambda: self.stats_current_process_identity()[0]
+            if hasattr(self, "background_owner")
+            else "web-test"
         )
-        cursor_sequences = (
-            cursor_state.sequences
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.sequences is not None else {}
+        backfill_status_sink = (
+            stats_client.set_usage_atom_backfill_status
+            if isinstance(stats_client, StatsCurrentClient)
+            else None
         )
-        cursor_presence = (
-            cursor_state.presence
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.presence is not None else {}
-        )
-        cursor_event_revisions = (
-            cursor_state.event_revisions
-            if isinstance(cursor_state, stats_current_opencode.OpenCodeCursorState)
-            and cursor_state.event_revisions is not None else {}
-        )
-        cursor_unavailable = cursor_state if isinstance(cursor_state, stats_current_opencode.OpenCodeUnavailable) else None
-        proposed_cursor_values = dict(cursor_values)
-        proposed_cursor_epochs = dict(cursor_epochs)
-        proposed_cursor_sequences = dict(cursor_sequences)
-        proposed_cursor_presence = dict(cursor_presence)
-        proposed_cursor_event_revisions = dict(cursor_event_revisions)
-        transcript_atoms_accepted = 0
-        opencode_results: dict[str, stats_current_opencode.OpenCodeReadResult] = {}
-        opencode_claims: dict[str, set[str]] = {}
-        for row_index, row in enumerate(token_rows):
-            if str(row.get("kind") or "").lower() != "opencode":
-                continue
-            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
-            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
-            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
-            started_at = row.get("started_at")
-            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
-                started_at = None
-            result = stats_current_opencode.read_usage(
-                session_id=session_id,
-                directory=directory,
-                started_at=started_at,
-                now=attempt.scheduled_at,
-                known_event_revisions=proposed_cursor_event_revisions,
-                incremental=True,
-            )
-            opencode_results[token_key] = result
-            if isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
-                opencode_claims.setdefault(result.session.session_id, set()).add(token_key)
-        conflicting_opencode_keys = {
-            token_key
-            for claimants in opencode_claims.values()
-            if len(claimants) > 1
-            for token_key in claimants
-        }
-        for row_index, row in enumerate(token_rows):
-            if str(row.get("kind") or "").lower() != "opencode":
-                continue
-            token_key = str(row.get("key") or self.stats_agent_token_key(row, row_index))
-            session_id = str(row.get("agent_session_id") or row.get("session_id") or "").strip() or None
-            directory = str(row.get("cwd") or row.get("path") or "").strip() or None
-            started_at = row.get("started_at")
-            if isinstance(started_at, bool) or not isinstance(started_at, (int, float)) or started_at <= 0:
-                started_at = None
-            source_id = stats_current_opencode.source_id_for_selector(
-                session_id=session_id, directory=directory, agent_key=token_key,
-            )
-            if cursor_unavailable is not None:
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{cursor_unavailable.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            result = opencode_results[token_key]
-            if isinstance(result, stats_current_opencode.OpenCodeAmbiguousSession):
-                # A live pane with a missing session ID is still a valid collector row, but
-                # directory/title selection is unsafe when OpenCode has multiple sessions.
-                # Keep that source explicitly unavailable instead of treating the whole family
-                # as absent.
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens", source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at, observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds, owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{result.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            if not isinstance(result, stats_current_opencode.OpenCodeReadSuccess):
-                unavailable_source = source_id
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=unavailable_source,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason=f"opencode-{result.reason}",
-                    ).unavailable_spans
-                )
-                continue
-            if token_key in conflicting_opencode_keys:
-                unavailable_spans.extend(
-                    stats_current_collectors.collector_unavailable(
-                        family="agent_tokens",
-                        source_id=source_id,
-                        epoch_id=f"{attempt.epoch_id}:opencode:{token_key}",
-                        epoch_started_at=attempt.epoch_started_at,
-                        observed_at=attempt.scheduled_at,
-                        cadence_seconds=attempt.cadence_seconds,
-                        owner_generation=attempt.owner_generation,
-                        reason="opencode-session-claimed-by-multiple-agents",
-                    ).unavailable_spans
-                )
-                continue
-            source_id = stats_current_opencode.source_id_for_session(result.session.session_id)
-            # OpenCode reports reasoning and cache-write counters, but the current atom contract
-            # has no exact representation for either dimension. Keep input/cache-read/output
-            # atoms and mark them partial instead of shading the whole source as unavailable.
-            opencode_omits_dimensions = any(
-                component.dimension not in stats_current_opencode._ATOM_DIMENSIONS
-                for component in result.components
-            )
-            # Each step-finish part is already a completed-step quantity. Do not subtract the
-            # session's cumulative counters, which turns historical work into a latest-bucket burst.
-            # Value-only cursors from the previous implementation are retained for reset recovery,
-            # but cannot identify historical parts and therefore do not suppress this backfill.
-            opencode_coverage.append(stats_current_storage.CoverageEpoch(
-                "agent_tokens", source_id,
-                f"{attempt.epoch_id}:opencode:{result.session.session_id}",
-                attempt.epoch_started_at, attempt.scheduled_at + attempt.cadence_seconds,
-                attempt.cadence_seconds, attempt.owner_generation,
-            ))
-            for component in result.components:
-                if component.dimension not in stats_current_opencode._ATOM_DIMENSIONS:
-                    continue
-                cursor_key = stats_current_opencode.cursor_key(
-                    component.session_id, component.dimension,
-                )
-                if not component.source_revision:
-                    # Fixtures and pre-revision adapters may still provide cumulative snapshots.
-                    # Keep that compatibility path isolated from the real per-part reader.
-                    previous = proposed_cursor_values.get(cursor_key)
-                    if previous is not None and component.tokens < previous:
-                        proposed_cursor_epochs[cursor_key] = proposed_cursor_epochs.get(cursor_key, 0) + 1
-                        proposed_cursor_sequences[cursor_key] = 0
-                        proposed_cursor_values[cursor_key] = component.tokens
-                        continue
-                    quantity = component.tokens - previous if previous is not None else component.tokens
-                    proposed_cursor_values[cursor_key] = component.tokens
-                    if quantity <= 0:
-                        continue
-                    proposed_cursor_sequences[cursor_key] = proposed_cursor_sequences.get(cursor_key, 0) + 1
-                    event_id = stats_current_opencode.delta_event_id(
-                        component.session_id, component.dimension,
-                        proposed_cursor_epochs.get(cursor_key, 0),
-                        proposed_cursor_sequences[cursor_key],
-                    )
-                else:
-                    quantity = component.tokens
-                    event_id = component.event_id
-                if quantity <= 0:
-                    continue
-                if component.source_revision:
-                    previous_revision = proposed_cursor_event_revisions.get(event_id)
-                    if previous_revision == component.source_revision:
-                        continue
-                    if previous_revision is not None and previous_revision != component.source_revision:
-                        unavailable_spans.extend(
-                            stats_current_collectors.collector_unavailable(
-                                family="agent_tokens", source_id=source_id,
-                                epoch_id=f"{attempt.epoch_id}:opencode:revision",
-                                epoch_started_at=attempt.epoch_started_at,
-                                observed_at=attempt.scheduled_at,
-                                cadence_seconds=attempt.cadence_seconds,
-                                owner_generation=attempt.owner_generation,
-                                reason="opencode-source-revision-changed",
-                            ).unavailable_spans
-                        )
-                        continue
-                    proposed_cursor_event_revisions[event_id] = component.source_revision
-                if component.dimension == "input":
-                    direction, cache_role = "input", "none"
-                elif component.dimension == "cache_read":
-                    direction, cache_role = "input", "read"
-                elif component.dimension == "output":
-                    direction, cache_role = "output", "none"
-                else:
-                    # The current atom contract has no exact role for OpenCode's cache-write
-                    # lifetime or reasoning counter. Do not relabel either as billable input/output.
-                    continue
-                opencode_atoms.append((
-                    token_key,
-                    session_files.TranscriptUsageAtom(
-                        source=f"opencode:{component.session_id}",
-                        timestamp=component.observed_at,
-                        event_id=event_id,
-                        provider=component.provider,
-                        model=component.model,
-                        model_evidence=component.model_evidence,
-                        effort="unknown",
-                        direction=direction,
-                        modality="text",
-                        cache_role=cache_role,
-                        unit="tokens",
-                        quantity=float(quantity),
-                        root_thread_id=component.session_id,
-                        agent_thread_id=component.session_id,
-                        endpoint="opencode",
-                        # OpenCode also reports cache-write and reasoning counters. They have no
-                        # exact current atom representation, so supported atoms remain usable but
-                        # explicitly partial rather than claiming complete telemetry.
-                        telemetry_complete=(
-                            component.telemetry_complete and not opencode_omits_dimensions
-                        ),
-                    ),
-                ))
-        cursor_prepared = False
-        try:
-            if (
-                proposed_cursor_values != cursor_values
-                or proposed_cursor_epochs != cursor_epochs
-                or proposed_cursor_sequences != cursor_sequences
-                or proposed_cursor_presence != cursor_presence
-                or proposed_cursor_event_revisions != cursor_event_revisions
-            ):
-                opencode_cursors.prepare(
-                    proposed_cursor_values,
-                    proposed_cursor_epochs,
-                    proposed_cursor_sequences,
-                    expected_values=cursor_values,
-                    expected_epochs=cursor_epochs,
-                    expected_sequences=cursor_sequences,
-                    presence=proposed_cursor_presence,
-                    expected_presence=cursor_presence,
-                    event_revisions=proposed_cursor_event_revisions,
-                    expected_event_revisions=cursor_event_revisions,
-                )
-                cursor_prepared = True
-        except (OSError, ValueError) as error:
-            unavailable_spans.extend(
-                stats_current_collectors.collector_unavailable(
-                    family="agent_tokens",
-                    source_id=stats_current_opencode.source_id_for_agent("cursor-state"),
-                    epoch_id=f"{attempt.epoch_id}:opencode:cursor-state",
-                    epoch_started_at=attempt.epoch_started_at,
-                    observed_at=attempt.scheduled_at,
-                    cadence_seconds=attempt.cadence_seconds,
-                    owner_generation=attempt.owner_generation,
-                    reason=f"opencode-{str(error)[:120] or 'cursor-state-unavailable'}",
-                ).unavailable_spans
-            )
-            opencode_atoms = []
-            opencode_coverage = []
-        current_settings = self.settings_payload().get("settings", {})
-        rejection_reasons: dict[str, int] = {}
-        for item in scan.items:
-            fields = dict(vars(item.atom))
-            fields["tmux_key"] = item.tmux_key
-            fields["agent_kind"] = item.agent_kind
-            if fields.get("pricing_profile", "default") == "default":
-                fields["pricing_profile"] = configured_usage_pricing_profile(
-                    current_settings,
-                    provider=str(fields.get("provider") or ""),
-                    execution_source=item.agent_kind,
-                    endpoint=str(fields.get("endpoint") or ""),
-                    observed_at=item.atom.timestamp,
-                )
-            try:
-                atoms.append(stats_current_usage.usage_atom_from_source(fields))
-                transcript_atoms_accepted += 1
-            except stats_current_usage.UsageValidationError as error:
-                reason = str(error)[:160] or "usage_validation_error"
-                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-                continue
-        for tmux_key, atom in opencode_atoms:
-            fields = dict(vars(atom))
-            fields["tmux_key"] = tmux_key
-            fields["agent_kind"] = "opencode"
-            fields["agent_id"] = tmux_key
-            if fields.get("pricing_profile", "default") == "default":
-                fields["pricing_profile"] = configured_usage_pricing_profile(
-                    current_settings,
-                    provider=str(fields.get("provider") or ""),
-                    execution_source="opencode",
-                    endpoint=str(fields.get("endpoint") or ""),
-                    observed_at=atom.timestamp,
-                )
-            try:
-                atoms.append(stats_current_usage.usage_atom_from_source(fields))
-            except stats_current_usage.UsageValidationError as error:
-                reason = str(error)[:160] or "usage_validation_error"
-                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-        if "stats_current_client" in self.__dict__ and isinstance(self.stats_current_client, StatsCurrentClient):
-            self.stats_current_client.set_usage_atom_backfill_status(
-                self.stats_current_transcript_usage.usage_atom_backfill_status_for_scan(
-                    scan,
-                    atoms_accepted=transcript_atoms_accepted,
-                    rejection_reasons=rejection_reasons,
-                )
-            )
-        for item in scan.tombstones:
-            tombstones.append(
-                stats_current_usage.legacy_fork_usage_tombstone_from_source(
-                    vars(item.atom)
-                )
-            )
-        process_id, _label, _port = self.stats_current_process_identity()
-        cursor_changed = (
-            proposed_cursor_values != cursor_values
-            or proposed_cursor_epochs != cursor_epochs
-            or proposed_cursor_sequences != cursor_sequences
-            or proposed_cursor_presence != cursor_presence
-            or proposed_cursor_event_revisions != cursor_event_revisions
-        )
-        transcript_committed = False
-        cursor_committed = not cursor_prepared
+        def read_usage(**kwargs: Any) -> Any:
+            kwargs.pop("database", None)
+            return stats_current_opencode.read_usage(**kwargs)
 
-        def commit_receipt() -> None:
-            nonlocal transcript_committed, cursor_committed
-            if not transcript_committed:
-                self.stats_current_transcript_usage.commit(scan.receipt_id)
-                transcript_committed = True
-            if cursor_prepared and not cursor_committed:
-                opencode_cursors.commit()
-                cursor_committed = True
-
-        def rollback_receipt() -> None:
-            if not transcript_committed:
-                try:
-                    self.stats_current_transcript_usage.rollback(scan.receipt_id)
-                finally:
-                    if cursor_prepared and not cursor_committed:
-                        opencode_cursors.rollback()
-            elif cursor_prepared and not cursor_committed:
-                # The transcript receipt is already durable. Discarding the pending cursor is
-                # safe because the next deterministic atom reuses its event ID and statsd dedupes it.
-                opencode_cursors.rollback()
-        receipt = stats_current_collectors.CollectorReceipt(
-            commit_receipt,
-            rollback_receipt,
+        collector = AgentTokenCollector(
+            scanner=scanner,
+            cursors=cursors,
+            database=database,
+            coverage_database=(
+                stats_client.database_path
+                if isinstance(stats_client, StatsCurrentClient)
+                else None
+            ),
+            inventory_provider=inventory_provider,
+            rows_provider=rows_provider,
+            settings_provider=lambda: self.settings_payload().get("settings", {}),
+            source_identity_provider=source_identity_provider,
+            read_usage=read_usage,
+            backfill_status_sink=backfill_status_sink,
         )
-        return stats_current_collectors.usage_scan_success(
-            atoms,
-            tombstones,
-            receipt,
-            epoch_id=attempt.epoch_id,
-            epoch_started_at=attempt.epoch_started_at,
-            observed_at=attempt.scheduled_at,
-            cadence_seconds=attempt.cadence_seconds,
-            owner_generation=attempt.owner_generation,
-            source_id=process_id,
-            unavailable_spans=unavailable_spans,
-            additional_coverage=opencode_coverage,
-            budget_exhausted_follow_up=scan.budget_exhausted,
-        )
+        return collector.collect(attempt)
 
     def latest_stats_sample(self) -> dict[str, Any]:
         """Read the last scheduler-owned CPU sample without collecting in an API thread.
@@ -9439,47 +9270,14 @@ class TmuxWebtermApp:
         return self.latest_stats_sample(), False
 
     def start_background_owner(self, port: int | None = None, priority: int = 0, *, managed_instance: bool = False) -> bool:
-        if managed_instance:
-            # The launcher allocated this root from the port before importing the
-            # product, so all background work is private to this process.  Keep
-            # the owner API intact for callers while bypassing same-root election.
-            self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
-            file_index.set_background_owner_checker(self.search_index_can_build)
-            self.background_owner.start()
-            self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
-            return True
-        self.background_owner = BackgroundOwnerRegistry(
-            control_socket=str(self.control_server.path),
-            port=port,
-            project_root=str(PROJECT_ROOT),
-            on_demote=self.demote_background_owner,
-            on_acquire=self.handle_background_owner_acquired,
-            priority=priority,
-            capabilities={
-                "stats_writer_build": stats_current_storage.MIN_WRITER_BUILD,
-            },
-        )
+        # The server lease now exclusively owns the complete product root. There
+        # is no same-root follower or role election to perform: this process owns
+        # IDX, STATS, and SESS for its lifetime.
+        self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
         file_index.set_background_owner_checker(self.search_index_can_build)
-        acquired = self.background_owner.start()
-        if not acquired:
-            acquired = self.background_owner.attempt_required_capability_takeover(
-                "stats_writer_build",
-                stats_current_storage.MIN_WRITER_BUILD,
-            )
-        if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
-            self.log_event(
-                None,
-                "background_owner_blocked",
-                "Background owner takeover blocked",
-                self.background_owner.status_payload(),
-                message_key="events.message.backgroundOwner.blocked",
-            )
-        if not acquired:
-            with self.client_events.lock:
-                has_subscribers = bool(self.client_events.subscribers)
-            if has_subscribers:
-                self.replay_shared_background_client_events()
-        return acquired
+        self.background_owner.start()
+        self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
+        return True
 
     def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
         transition = str(status.get("last_transition") or "acquired")
@@ -10183,10 +9981,10 @@ class TmuxWebtermApp:
             self.record_background_fallback(role, result, payload)
         return result
 
-    def refresh_sessions(self, maintenance: bool = True) -> list[str]:
+    def refresh_sessions(self, maintenance: bool = True, *, invalidate_status: bool = True) -> list[str]:
         sessions, error = list_tmux_session_names()
         if error is None:
-            self.apply_session_roster(sessions)
+            self.apply_session_roster(sessions, invalidate_status=invalidate_status)
             if not maintenance:
                 return []
             self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
@@ -10196,7 +9994,13 @@ class TmuxWebtermApp:
             return []
         return [error]
 
-    def apply_session_roster(self, sessions: list[str]) -> bool:
+    def apply_session_roster(
+        self,
+        sessions: list[str],
+        *,
+        invalidate_status: bool = True,
+        refresh_metadata: bool = True,
+    ) -> bool:
         """Install one tmux-session roster and invalidate metadata on membership transitions."""
 
         roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
@@ -10204,15 +10008,24 @@ class TmuxWebtermApp:
         self.sessions = roster
         if membership_changed:
             self.topology_generation = getattr(self, "topology_generation", 0) + 1
+            if self.activity_transcript_service is not None:
+                self.advance_transcripts_payload_input_generation()
         if not roster:
             self.stop_status_collector_lease()
         if membership_changed and not self.status_service_mode:
+            # The web roster is also the statusd snapshot request's roster owner. Invalidate the
+            # daemon at the same lifecycle boundary so its next generation carries every session
+            # the metadata build just observed; otherwise transcripts and status rows converge on
+            # different rosters until an unrelated status change occurs.
+            if invalidate_status:
+                self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
             # Record the transition only after installing the roster. A build that started before
             # this instant cannot have observed the new membership, so the existing single-flight
             # web owner must either start now or queue one publishing follow-up behind that older
             # build. statusd owns roster production only; it has no browser metadata consumer and
             # must not publish a second transcript-metadata stream from its internal app.
-            self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic())
+            if refresh_metadata:
+                self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
         return membership_changed
 
     def advance_topology_generation(self) -> int:
@@ -11452,6 +11265,17 @@ class TmuxWebtermApp:
     def clear_transcript_caches(self) -> None:
         return composed_owner_for(self, "_watch_bridge", WatchBridge).clear_transcript_caches(self)
 
+    def invalidate_transcripts_payload_inputs(self) -> None:
+        return composed_owner_for(self, "_watch_bridge", WatchBridge).invalidate_transcripts_payload_inputs(self)
+
+    def advance_transcripts_payload_input_generation(self) -> int:
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                record.input_generation += 1
+                record.watch_refreshed_at = None
+                return record.input_generation
+
     def start_client_watch_snapshot_publish(self) -> bool:
         return self._watch_bridge.start_client_watch_snapshot_publish(self)
 
@@ -11487,6 +11311,7 @@ class TmuxWebtermApp:
         trigger: str,
         force: bool = False,
         compute_ms: float | None = None,
+        completion: dict[str, Any] | None = None,
     ) -> bool:
         return self._watch_bridge.publish_session_files_ready_payload(
             self,
@@ -11496,6 +11321,7 @@ class TmuxWebtermApp:
             trigger=trigger,
             force=force,
             compute_ms=compute_ms,
+            completion=completion,
         )
 
     def start_status_generation_watcher(self, record: ClientEventWatcherRecord) -> bool:
@@ -11512,6 +11338,12 @@ class TmuxWebtermApp:
 
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
         return self._watch_bridge.handle_tmux_signal_event(self, event)
+
+    def schedule_tmux_roster_rebuild(self, *, rename_hint: bool = False) -> bool:
+        return self._watch_bridge.schedule_tmux_roster_rebuild(self, rename_hint=rename_hint)
+
+    def rebuild_tmux_roster(self, record: ClientEventWatcherRecord) -> None:
+        return self._watch_bridge.rebuild_tmux_roster(self, record)
 
     def tmux_signal_event_watcher_healthy(self) -> bool:
         return self._watch_bridge.tmux_signal_event_watcher_healthy(self)
@@ -11771,6 +11603,7 @@ class TmuxWebtermApp:
         replace: bool = False,
         queue_rebuild_after: float | None = None,
         queue_rebuild_publish: bool = False,
+        lifecycle_owner: bool = False,
         pending_generation_out: list[int] | None = None,
     ) -> int:
         """Claim the single-flight build guard, or queue one follow-up build for a caller it cannot answer.
@@ -11802,7 +11635,15 @@ class TmuxWebtermApp:
                 # build cannot refuse every future refresh; the stale worker's later
                 # commit/finish is a no-op because the generation has advanced.
                     if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
-                        if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
+                        lifecycle_owner_observes_current_input = (
+                            lifecycle_owner
+                            and record.worker_lifecycle_owner
+                            and record.worker_input_generation == record.input_generation
+                        )
+                        if queue_rebuild_after is not None and (
+                            started_at is None
+                            or (started_at < queue_rebuild_after and not lifecycle_owner_observes_current_input)
+                        ):
                             record.rebuild_requested = True
                             record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
                             # The queued follow-up commits the generation after the in-flight one.
@@ -11820,15 +11661,28 @@ class TmuxWebtermApp:
             if worker is not None:
                 record.active_workers.add(worker)
             record.worker_started_at = time.monotonic()
+            record.worker_input_generation = record.input_generation
+            record.worker_lifecycle_owner = lifecycle_owner
             record.publish_requested = False
             if pending_generation_out is not None:
                 pending_generation_out.append(record.generation)
             return record.generation
 
-    def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
+    def commit_transcripts_payload_cache(
+        self,
+        payload: dict[str, Any],
+        generation: int,
+        *,
+        input_generation: int | None = None,
+    ) -> bool:
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
-            if generation <= 0 or record.generation != generation:
+            committed_input_generation = record.input_generation if input_generation is None else input_generation
+            if (
+                generation <= 0
+                or record.generation != generation
+                or committed_input_generation != record.input_generation
+            ):
                 return False
             # Stamp the committing identity into the payload itself, not beside it. Every consumer
             # -- the HTTP cache hit, the client-events push, and a direct build -- carries the same
@@ -11837,6 +11691,8 @@ class TmuxWebtermApp:
             self.stamp_metadata_identity(payload, generation)
             record.stored_at = time.monotonic()
             record.payload = copy.deepcopy(payload)
+            record.committed_input_generation = committed_input_generation
+            record.watch_refreshed_at = record.stored_at
             if record.lightweight_future is not None and record.lightweight_future.done():
                 record.lightweight_future = None
             return True
@@ -11889,6 +11745,21 @@ class TmuxWebtermApp:
             worker.join(timeout=30)
             assert not worker.is_alive(), "transcript payload rebuild did not stop"
 
+    def fence_transcripts_payload_work(self) -> None:
+        """Fence watcher-owned payload work without disabling future HTTP refreshes."""
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            record.generation += 1
+            workers = tuple(record.active_workers)
+            record.release_worker()
+            record.rebuild_requested = False
+            record.rebuild_publish = False
+        for worker in workers:
+            if worker is threading.current_thread():
+                continue
+            worker.join(timeout=30)
+            assert not worker.is_alive(), "transcript payload rebuild did not stop"
+
     def start_queued_transcripts_payload_rebuild(self) -> bool:
         """Run the rebuild a forced refresh could not start because an older build held the guard.
 
@@ -11919,6 +11790,7 @@ class TmuxWebtermApp:
         defer: bool = False,
         *,
         not_before: float | None = None,
+        lifecycle_owner: bool = False,
         pending_generation_out: list[int] | None = None,
     ) -> bool:
         """Start a metadata rebuild.
@@ -11950,6 +11822,7 @@ class TmuxWebtermApp:
             worker,
             queue_rebuild_after=not_before,
             queue_rebuild_publish=publish,
+            lifecycle_owner=lifecycle_owner,
             pending_generation_out=pending_generation_out,
         )
         if generation <= 0:
@@ -11988,26 +11861,35 @@ class TmuxWebtermApp:
             if generation <= 0:
                 return
         try:
-            payload = self.build_transcripts_payload()
-            if not self.commit_transcripts_payload_cache(payload, generation):
-                return
             with self.activity_transcript_service.transcripts_payload_cache_lock:
-                record = self.activity_transcript_service.transcripts_payload_cache_record
-                should_publish = publish or (
-                    record.generation == generation
-                    and record.worker is current_worker
-                    and record.publish_requested
-                )
-            if should_publish:
-                payload_signature = self.transcripts_payload_event_signature(payload)
-                with self.client_watch_service.lock:
-                    self.client_watch_service.transcripts_payload_signature = payload_signature
-                self.publish_client_event(
-                    "transcripts_changed",
-                    {"data": payload},
-                    trigger="transcripts_refresh",
-                    cache="ready",
-                )
+                input_generation = self.activity_transcript_service.transcripts_payload_cache_record.input_generation
+            payload = self.build_transcripts_payload()
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            with record.publication_lock:
+                if not self.commit_transcripts_payload_cache(
+                    payload,
+                    generation,
+                    input_generation=input_generation,
+                ):
+                    return
+                with self.activity_transcript_service.transcripts_payload_cache_lock:
+                    should_publish = publish or (
+                        record.generation == generation
+                        and record.worker is current_worker
+                        and record.publish_requested
+                    )
+                    if record.input_generation != input_generation:
+                        return
+                if should_publish:
+                    payload_signature = self.transcripts_payload_event_signature(payload)
+                    with self.client_watch_service.lock:
+                        self.client_watch_service.transcripts_payload_signature = payload_signature
+                    self.publish_client_event(
+                        "transcripts_changed",
+                        {"data": copy.deepcopy(payload)},
+                        trigger="transcripts_refresh",
+                        cache="ready",
+                    )
         finally:
             self.finish_transcripts_payload_work(generation, current_worker)
 
@@ -16430,8 +16312,8 @@ class TmuxWebtermApp:
             }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
-        self.refresh_sessions()
-        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
+        self.refresh_sessions(invalidate_status=False)
+        self.invalidate_status_topology_async()
         self.log_event(
             None,
             "session_killed",
@@ -16441,6 +16323,20 @@ class TmuxWebtermApp:
             message_params={"session": session},
         )
         return {"session": session, "killed": True, "sessions": self.sessions, "topology_generation": self.topology_generation, "ok": True}, HTTPStatus.OK
+
+    def invalidate_status_topology_async(self) -> None:
+        """Publish a topology invalidation without making the destructive API wait on statusd."""
+        sessions = list(self.sessions)
+        topology_generation = self.topology_generation
+
+        def invalidate() -> None:
+            try:
+                self.status_client.invalidate("tmux-topology", sessions, topology_generation)
+            except Exception:
+                logging.exception("status topology invalidation failed")
+
+        worker = threading.Thread(target=invalidate, name="status-topology-invalidate", daemon=True)
+        common.start_thread_with_rollback(worker, lambda: None)
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
         if session not in self.sessions or direction not in {"up", "down"}:

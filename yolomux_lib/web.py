@@ -16,6 +16,7 @@ from .common import MANAGED_CHAT_AGENT_KINDS
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
+from .common import YOLOMUX_BACKEND
 from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
@@ -207,8 +208,9 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     commit_count = yolomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
     version_status, post_release_commits = version_metadata or yolomux_version_metadata()
+    backend_version_title = f"{version_status} [{YOLOMUX_BACKEND}]"
     version_title = html.escape(
-        f"{version_status}\n"
+        f"{backend_version_title}\n"
         + "\n".join(post_release_commits)
         + ("\n" if post_release_commits else "")
         + f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
@@ -225,8 +227,9 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     update_title = html.escape(server_string(active_locale, "update.badgeTitle"), quote=True)
     update_aria = html.escape(server_string(active_locale, "update.badgeAria"), quote=True)
     update_label = html.escape(server_string(active_locale, "update.badgeLabel"))
+    backend_title = html.escape(backend_version_title, quote=True)
     return (
-        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="{brand_aria}">'
+        f'<{tag} class="{html.escape(class_name, quote=True)}" title="{backend_title}" aria-label="{brand_aria}">'
         f'<span class="brand-yolo brand-green">{yo}</span>'
         f'<span class="brand-lo brand-green">{lo}</span>'
         '<span class="brand-blue">m</span>'
@@ -344,6 +347,7 @@ def html_page(
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
+        "backend": YOLOMUX_BACKEND,
         "version": YOLOMUX_VERSION,
         "versionStatus": version_metadata[0],
         "postReleaseCommits": version_metadata[1],

@@ -76,7 +76,24 @@ def test_runtime_uses_one_demand_cadence_parent_for_every_web_scheduled_family()
 
     assert "cpu" not in current.scheduler._workers
     assert "gpu" not in current.scheduler._workers
-    assert current.scheduler._cadence(current.scheduler._workers["agent_tokens"].job) == 60
+    assert "agent_tokens" not in current.scheduler._workers
+
+
+def test_runtime_rejects_missing_web_collector_but_ignores_daemon_owned_extra():
+    with pytest.raises(runtime.CurrentRuntimeError, match="missing"):
+        runtime.StatsCurrentRuntime(
+            FakeClient(),
+            {},
+            owner_generation=lambda: 1,
+            token_cadence_seconds=lambda: 10,
+        )
+    current = runtime.StatsCurrentRuntime(
+        FakeClient(),
+        {**complete_collectors(lambda _attempt: collectors.CollectorFacts()), "agent_tokens": lambda _attempt: collectors.CollectorFacts()},
+        owner_generation=lambda: 1,
+        token_cadence_seconds=lambda: 10,
+    )
+    assert "agent_tokens" not in current.scheduler._workers
 
 
 def test_runtime_persists_scheduler_deadline_misses_for_known_sources():

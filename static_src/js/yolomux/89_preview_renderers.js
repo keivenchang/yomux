@@ -92,6 +92,11 @@ function previewZoomStateForAction(actionId, currentScale) {
   return previewZoomActionById.get(actionId)?.zoomState?.(currentScale) || null;
 }
 
+function previewZoomStateForRender(options = {}) {
+  const state = previewZoomReadState(options);
+  return state.mode === 'fit' ? {mode: 'fit', scale: 1} : state;
+}
+
 function clampPreviewZoomScale(scale) {
   const value = Number.parseFloat(String(scale || ''));
   if (!Number.isFinite(value)) return 1;
@@ -140,6 +145,7 @@ function writePreviewZoomSurfaceDataset(shell, options = {}) {
   shell.dataset.previewZoomKey = options.zoomKey || 'default';
   shell.dataset.previewZoomFull = options.full === false ? '0' : '1';
   shell.dataset.previewZoomPan = options.panDrag === true ? '1' : '0';
+  shell.dataset.previewZoomWheelParent = options.wheelScrollParent === true ? '1' : '0';
   if (Number.isFinite(options.fitMaxScale)) shell.dataset.previewZoomFitMaxScale = String(options.fitMaxScale);
   else delete shell.dataset.previewZoomFitMaxScale;
 }
@@ -151,6 +157,7 @@ function previewZoomOptionsFromSurface(shell) {
     zoomKey: shell?.dataset?.previewZoomKey || 'default',
     full: shell?.dataset?.previewZoomFull !== '0',
     panDrag: shell?.dataset?.previewZoomPan === '1',
+    wheelScrollParent: shell?.dataset?.previewZoomWheelParent === '1',
     fitMaxScale: Number.isFinite(fitMaxScale) ? fitMaxScale : Number.POSITIVE_INFINITY,
   };
 }
@@ -239,7 +246,7 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
   const hasFocusPoint = Number.isFinite(applyOptions.focusClientX) || Number.isFinite(applyOptions.focusClientY);
   const focusX = (viewport.scrollLeft + focusOffsetX) / previousScale;
   const focusY = (viewport.scrollTop + focusOffsetY) / previousScale;
-  const state = previewZoomReadState({...options, shell});
+  const state = previewZoomStateForRender({...options, shell});
   const scale = state.mode === 'fit' ? previewZoomFitScale(viewport, content, options) : clampPreviewZoomScale(state.scale);
   const size = previewZoomContentSize(content);
   const scaledWidth = Math.max(1, Math.round(size.width * scale));
@@ -330,6 +337,31 @@ function bindPreviewZoomDragPan(shell, viewport, bind, options) {
   bind(viewport, 'pointercancel', finish);
 }
 
+function bindPreviewZoomParentWheel(shell, viewport, bind) {
+  bind(shell.ownerDocument, 'wheel', event => {
+    if (!shell.isConnected || !viewport.contains(event.target)) return;
+    if (event.defaultPrevented || event.ctrlKey) return;
+    const scrollOwner = shell.closest?.('.file-editor-preview-pane-panel');
+    if (!scrollOwner || scrollOwner === viewport) return;
+    const lineScale = event.deltaMode === 1
+      ? (Number.parseFloat(previewZoomOwnerWindow(shell)?.getComputedStyle?.(scrollOwner)?.lineHeight || '') || 16)
+      : 1;
+    const xScale = event.deltaMode === 2 ? Math.max(1, scrollOwner.clientWidth) : lineScale;
+    const yScale = event.deltaMode === 2 ? Math.max(1, scrollOwner.clientHeight) : lineScale;
+    event.preventDefault();
+    const innerLeft = viewport.scrollLeft;
+    const innerTop = viewport.scrollTop;
+    scrollOwner.scrollBy({left: event.deltaX * xScale, top: event.deltaY * yScale, behavior: 'auto'});
+    const restoreInnerScroll = () => {
+      if (!shell._previewZoomLifecycleScope?.current?.()) return;
+      viewport.scrollLeft = innerLeft;
+      viewport.scrollTop = innerTop;
+    };
+    restoreInnerScroll();
+    schedulePreviewZoomFrame(shell, restoreInnerScroll);
+  }, {capture: true, passive: false});
+}
+
 function hydratePreviewZoomSurface(shell, content = null, options = null) {
   if (!shell) return false;
   const resolvedContent = content || previewZoomSurfaceContent(shell);
@@ -363,6 +395,7 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     });
   });
   if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind, resolvedOptions);
+  if (resolvedOptions.wheelScrollParent === true) bindPreviewZoomParentWheel(shell, viewport, bind);
   const ownerWindow = previewZoomOwnerWindow(shell);
   // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
   // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
@@ -493,6 +526,16 @@ function mermaidLoadingNode() {
   title.innerHTML = textWithMovingEllipsisHtml(t('preview.mermaid.rendering'), 'mermaid-preview-loading-dots');
   node.appendChild(title);
   return node;
+}
+
+function disposeMermaidPreviewHost(host) {
+  if (!host) return;
+  host.dataset.mermaidRenderSeq = `stale-${++mermaidPreviewRenderSeq}`;
+  disconnectPreviewZoomSurface(host, {resetClasses: true});
+  const source = host.querySelector?.('img.mermaid-preview-image')?.getAttribute?.('src') || '';
+  if (source.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    URL.revokeObjectURL(source);
+  }
 }
 
 async function renderMermaidSourceInto(container, source, options = {}) {
@@ -1406,8 +1449,11 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
-  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  container.classList.toggle('vanilla-preview-body', vanilla);
+  container.classList.toggle('editor-preview-vanilla', vanilla);
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  refreshMarkdownFenceHighlights(container);
   if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft, {
     owner: 'preview-render-restore', previewSurface: renderer.id, renderContext: previewContext, renderGeneration,

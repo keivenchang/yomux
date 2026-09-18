@@ -1626,7 +1626,7 @@
   "status.copiedRelativePath": "kopierter relativer Pfad",
   "status.copiedTerminalChars.one": "kopiertes {count} Zeichen",
   "status.copiedTerminalChars.other": "kopierte {count}-Zeichen",
-  "status.copiedText": "kopierter Text",
+  "status.copiedText": "Text kopiert",
   "status.copiedTmuxSelection.one": "{count} char von tmux kopiert",
   "status.copiedTmuxSelection.other": "kopierte {count}-Zeichen von tmux",
   "status.copiedTranscriptPath": "Transkriptpfad kopiert",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "Alle Schriftgrößen synchronisieren",
   "pref.appearance.sync_font_sizes.help": "Wenn aktiviert, verwenden UI, Terminal, Editor, Vorschau und Finder die globale Schriftgröße.",
   "pref.section.appearance": "Darstellung",
-  "pref.section.sizes": "Größen"
+  "pref.section.sizes": "Größen",
+  "contextmenu.copyText": "Text kopieren",
+  "contextmenu.copyWithStyle": "Mit Formatierung kopieren",
+  "status.copiedStyledText": "Mit Formatierung kopiert"
 }

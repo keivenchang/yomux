@@ -1634,6 +1634,14 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.markdown-body img\.markdown-preview-image\s*\{[\s\S]*max-width:\s*100%[\s\S]*height:\s*auto[\s\S]*object-fit:\s*contain[\s\S]*\}/.test(editorCss), 'Markdown Preview images keep document sizing instead of direct-image viewport fitting');
     assert.equal(/\.markdown-body img\.markdown-preview-image\s*\{[^}]*max-height:/.test(editorCss), false, 'Markdown Preview images are not height-clamped because that changes width for different aspect ratios');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'vanilla preview uses the shared opaque-white paint and stable neutral email-friendly text token');
+    assert.ok(/\.prosemirror-editor\.vanilla-preview-body[\s\S]*background:\s*var\(--paint-white\)[\s\S]*color:\s*var\(--markdown-html-light-text\)/.test(editorCss), 'ViewEdit Vanilla uses the regular white/black surface');
+    assert.ok(!/body\.editor-theme-light \.file-editor-panel \.file-editor-title/.test(editorCss), 'editor theme does not recolor app-chrome editor titles');
+    assert.ok(/body\.theme-light \.yolomux-dockview[\s\S]*\.session-button-name[\s\S]*color:\s*var\(--chrome-text-strong\) !important/.test(editorCss), 'light-mode active tab titles remain dark on white theme surfaces');
+    assert.ok(/body\.theme-light \.file-editor-content \.markdown-body[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode Markdown content remains dark on white surfaces');
+    assert.ok(/body\.theme-light \.panel \.pane-tab:not\(\.active\)[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'light-mode inactive tabs remain dark on light surfaces');
+    assert.ok(/body\.theme-light \.yolomux-dockview \.yolomux-dockview-core[\s\S]*--dv-activegroup-visiblepanel-tab-color:\s*var\(--light-readable-text\)/.test(editorCss), 'light-mode Dockview tabs remain dark on light surfaces');
+    assert.ok(!/body\.editor-(?:theme|contrast)-light \.yolomux-dockview/.test(editorCss), 'editor theme does not recolor Dockview chrome');
+    assert.ok(/body\.editor-scheme-yolomux-light \.file-editor-raw-panel \.md-heading[\s\S]*color:\s*var\(--light-readable-text\) !important/.test(editorCss), 'Moon White light editor headings remain dark');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*var\(--markdown-html-light-text\)[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
     assert.ok(/--vanilla-preview-link:\s*#0645ad/.test(editorCss) && /\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*var\(--vanilla-preview-link\)/.test(editorCss), 'vanilla preview links use one conventional-blue token instead of copied scheme colors');
     assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
@@ -2367,8 +2375,10 @@ async function runLayoutRestoreSuite() {
     assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
     // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
     assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.marker'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
-    assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarServerUptimeTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows server uptime and version hover shows the commit SHA');
-    assert.ok(/function topbarVersionTitle\(\)[\s\S]*bootstrap\.versionStatus[\s\S]*bootstrap\.postReleaseCommits[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'top-left version title shows release status, post-release commits, SHA, and commit count');
+    assert.ok(/function topbarBackendVersionTitle\(\)[\s\S]*bootstrap\.backend[\s\S]*bootstrap\.versionStatus[\s\S]*function topbarBrandTitle\(\)[\s\S]*topbarBackendVersionTitle\(\)[\s\S]*topbarServerUptimeTitle\(\)/.test(source), 'top-left brand hover identifies the backend and release status before uptime');
+    assert.ok(/function updateBrandTitles\(\)[\s\S]*brand\.title = topbarBrandTitle\(\)[\s\S]*version\.title = topbarVersionTitle\(\)/.test(source), 'top-left brand hover shows backend identity while version hover shows the commit SHA');
+    assert.ok(/function topbarVersionTitle\(\)[\s\S]*lines\.push\(topbarBackendVersionTitle\(\)\)[\s\S]*bootstrap\.postReleaseCommits[\s\S]*t\('menu\.help\.about\.sha', \{sha\}\)[\s\S]*t\('menu\.help\.about\.commits', \{count: commitCount\}\)/.test(source), 'version hover starts with release identity and shows post-release commits, SHA, and commit count');
+    assert.ok(/return `\$\{version\} \[\$\{backend\}\]`/.test(source), 'version hover formats release status before bracketed backend/runtime identity');
     // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
     // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
     assert.ok(/function startSessionDrag[\s\S]*?options\.dragImage \|\| source[\s\S]*?setDragImage\(dragImageSource/.test(source), '#47: tab drags default to the native tab drag image while allowing shared callers to override it');
@@ -3354,7 +3364,11 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
     assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
     assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
-    assert.ok(/const paneInfo = dockviewPaneContentDropInfo\(event\);[\s\S]*paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*clearDropPreview\(\)/.test(source), 'center drops clear custom overlays so Dockview owns the single center preview');
+    assert.ok(/function dockviewDropClassification\(event, options = \{\}\)[\s\S]*dockviewDragRegionForEvent\(pointerEvent\)[\s\S]*classification\.owner/.test(source), 'Dockview routes every coordinate through one semantic drop classifier');
+    assert.ok(/function dockviewCommitOwnedDrop\(event, intent, commit\)[\s\S]*event\?\.preventDefault\?\.\(\)[\s\S]*dockviewLayoutState\.tabDropHandledAt/.test(source), 'Dockview commits and claims app-owned drops through one owner');
+    assert.ok(/function dockviewPaneContentDropIntent\(event\)[\s\S]*return dockviewPaneContentSplitAllowed\(info\) \? info\.intent : null/.test(source), 'pane-content intent resolution does not claim rejected drops');
+    assert.ok(/if \(classification\.owner === 'content'\)[\s\S]*dockviewClearRootBoundaryPreview\(\)[\s\S]*dockviewClearTabInsertionPreview\(\)[\s\S]*return;/.test(source), 'native pane-content preview preserves Dockview ownership');
+    assert.ok(/function dockviewCommitPaneDrop\(event, intent\)[\s\S]*dockviewCommitOwnedDrop\(event, intent/.test(source), 'pane center and split commits share the Dockview commit owner');
     assert.ok(/const capacityRefusal = paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*showLayoutStatus\(capacityRefusal, 'danger'\)[\s\S]*return;[\s\S]*Dockview's default center-drop mutates/.test(source), 'Dockview release prevents capacity-refused drops and shows the shared danger status');
     const moveSlots = api.emptyLayoutSlots();
     moveSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
@@ -4508,8 +4522,8 @@ async function runLayoutRestoreSuite() {
       'editor toolbar keeps Reload with the trailing command buttons'
     );
     assert.equal(source.includes("cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'})"), false, 'editor theme button never falls back to two-state dark/light based on view mode');
-    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'editor theme button always cycles Bright/Dark/Vanilla');
-    assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'editor theme button always renders the visible three-state label');
+    assert.ok(/'editor-theme': \(\) => cycleEditorThemeMode\(\{includeVanilla: fileEditorPanelState\(panel\)\?\.kind === 'text'\}\)/.test(source), 'editor theme button selects vanilla only for text previews');
+    assert.ok(/function updateImageViewerThemeButton\(button\)[\s\S]*updateEditorThemeButton\(button, \{includeVanilla: false\}\)/.test(source), 'image editor theme button renders two-state labels');
     assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorFrameControlsEnd)), '#42: only frame controls remain before the shared toolbar slot');
     assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(css), '#42: the editor panel inherits the shared three-row toolbar scaffold');
     assert.equal(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:/.test(css), false, '#42: the editor panel does not restate the shared grid locally');

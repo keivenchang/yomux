@@ -286,7 +286,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.avif': 'image/avif',
   }}),
   previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
-  previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
+  previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, previewOnly: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
   previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
   previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
     '.json': parseJsonStructuredPreviewStrategy,
@@ -1644,6 +1644,7 @@ const transcriptMetadataState = {
   epoch: '',
   previousEpoch: '',
   generation: 0,
+  rosterGeneration: 0,
   pendingGeneration: 0,
   // Every non-apply outcome, with a machine-readable reason. A dropped payload used to be a bare
   // `false` that no caller read, so a metadata refresh that silently declined to apply looked
@@ -1727,6 +1728,7 @@ const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
   replacementSource: null,
+  epochGeneration: 0,
   connected: false,
   reconnectPending: false,
   disconnectTimer: null,
@@ -1757,8 +1759,8 @@ const clientEventTransportState = {
 // falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
 const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
-// server: client-event resource revisions AND the session-metadata build generation. They all
-// restart at zero in a replacement process, so they reset together, here, once.
+// server: client-event resource revisions, session-metadata build generation, and tmux topology
+// generation. They all restart at zero in a replacement process, so they reset together, here, once.
 //
 // Two call sites in the client-event transport used to inline the transport half of this reset and
 // nothing reset the metadata half, which is how a browser kept claiming applied generation 50 while
@@ -1773,13 +1775,16 @@ function adoptServerEpoch(epoch) {
   if (!next || clientEventTransportState.resourceEpoch === next) return false;
   transcriptMetadataState.previousEpoch = transcriptMetadataState.epoch;
   clientEventTransportState.resourceEpoch = next;
+  clientEventTransportState.epochGeneration += 1;
   clientEventTransportState.resourceRevisions.clear();
   clientEventTransportState.resourceRepairs.clear();
   transcriptMetadataState.epoch = next;
-  // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
-  // the previous process into a comparison against this one.
+  // Reset server-owned generations to zero BEFORE the incoming generation is considered, so nothing
+  // can carry a number from the previous process into a comparison against this one.
   transcriptMetadataState.generation = 0;
+  transcriptMetadataState.rosterGeneration = 0;
   transcriptMetadataState.pendingGeneration = 0;
+  tmuxTopologyGeneration = 0;
   return true;
 }
 const clientEventDisconnectGraceMs = 15000;
@@ -1787,6 +1792,7 @@ const apiOperationState = {
   records: new Map(),
   pending: new Map(),
   terminal: new Map(),
+  repairs: new Set(),
   waiters: new Map(),
 };
 const apiOperationReplayLimit = 128;
@@ -1809,6 +1815,18 @@ const activitySummaryState = {
 };
 window.__yolomuxFixtureLifecycle = Object.freeze({
   diagnosticMode: 'retained-js',
+  async awaitPendingOperationReceipts() {
+    while (true) {
+      const pending = Array.from(apiOperationState.pending.values());
+      const baseline = serverWatchRootsState.watchDiffPromise;
+      await Promise.all([
+        ...pending.map(record => record.completionPromise || Promise.resolve()),
+        ...(baseline ? [Promise.resolve(baseline)] : []),
+      ]);
+      const state = this.operationState();
+      if (!state.pending.length && !state.watchRootsPending) return state;
+    }
+  },
   operationState() {
     const finderVisible = typeof fileExplorerTreePaneIsVisible === 'function'
       && fileExplorerTreePaneIsVisible();

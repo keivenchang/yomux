@@ -1623,7 +1623,7 @@
   "status.copiedRelativePath": "đường dẫn tương đối được sao chép",
   "status.copiedTerminalChars.one": "ký tự {count} đã sao chép",
   "status.copiedTerminalChars.other": "ký tự {count} đã sao chép",
-  "status.copiedText": "văn bản được sao chép",
+  "status.copiedText": "Đã sao chép văn bản",
   "status.copiedTmuxSelection.one": "đã sao chép ký tự {count} từ tmux",
   "status.copiedTmuxSelection.other": "đã sao chép {count} ký tự từ tmux",
   "status.copiedTranscriptPath": "đã sao chép đường dẫn transcript",
@@ -2558,5 +2558,8 @@
   "pref.appearance.sync_font_sizes.label": "Đồng bộ tất cả cỡ phông chữ",
   "pref.appearance.sync_font_sizes.help": "Khi bật, giao diện, thiết bị đầu cuối, trình chỉnh sửa, bản xem trước và Finder dùng cỡ chung.",
   "pref.section.appearance": "Giao diện",
-  "pref.section.sizes": "Kích thước"
+  "pref.section.sizes": "Kích thước",
+  "contextmenu.copyText": "Sao chép văn bản",
+  "contextmenu.copyWithStyle": "Sao chép có kiểu",
+  "status.copiedStyledText": "Đã sao chép có kiểu"
 }
