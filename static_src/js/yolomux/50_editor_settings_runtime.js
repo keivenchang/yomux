@@ -383,14 +383,6 @@ function previewFindSetReadOnly(host = null, readOnly = false) {
   if (!view) return;
   host._pmSearchReadOnly = readOnly === true;
   view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
-  view.dom.setAttribute('contenteditable', String(host._pmSearchReadOnly !== true));
-}
-
-function previewFindSetDomObserver(host = null, running = true) {
-  const observer = host?._pmView?.domObserver;
-  if (!observer) return;
-  if (running) observer.start?.();
-  else observer.stop?.();
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -448,6 +440,10 @@ function previewFindSelectMatch(host = null, index = 0) {
     const range = state.matches[state.index];
     const element = range.startContainer.parentElement;
     element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else if (host?._pmView?.dom) {
+    const range = state.matches[state.index];
+    range.getBoundingClientRect?.();
+    range.startContainer?.parentElement?.scrollIntoView?.({block: 'center', inline: 'nearest'});
   } else {
     state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
     state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
@@ -472,7 +468,8 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
   state.index = -1;
   const needle = state.query.toLocaleLowerCase();
   if (needle) {
-    const root = previewFindUsesTextHighlights(host) ? host._pmView.dom : preview;
+    const prosemirrorRoot = host?._pmView?.dom || null;
+    const root = prosemirrorRoot || preview;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
@@ -487,7 +484,7 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       let from = 0;
       let index = folded.indexOf(needle, from);
       if (index < 0) continue;
-      if (previewFindUsesTextHighlights(host)) {
+      if (prosemirrorRoot) {
         for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
           const range = document.createRange();
           range.setStart(node, matchIndex);
@@ -527,7 +524,6 @@ function openPreviewFind(host = null) {
   const state = previewFindStateForHost(host, true);
   state.open = true;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   const input = panel.querySelector('input');
   previewFindApplyQuery(host, input?.value || '');
   input?.focus();
@@ -540,7 +536,6 @@ function closePreviewFind(host = null) {
   if (!panel) return false;
   previewFindClearMatches(host);
   previewFindSetReadOnly(host, false);
-  previewFindSetDomObserver(host, true);
   const state = previewFindStateForHost(host, true);
   state.open = false;
   state.matches = [];
@@ -561,7 +556,6 @@ function restorePreviewFindAfterRender(host = null) {
   if (!panel || !state || state.open !== true) return;
   panel.hidden = false;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
 }
 

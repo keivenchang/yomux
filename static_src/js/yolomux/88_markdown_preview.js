@@ -1203,11 +1203,12 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
-function prosemirrorPreviewImageSource(image, path) {
+function prosemirrorPreviewImageSource(image, path, options = {}) {
   if (!image || !path) return Promise.resolve(false);
   const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
   if (!target || target.external) return Promise.resolve(false);
   return installRawFileMediaSource(image, target.path, {
+    isCurrent: options.isCurrent,
     onFailure: error => {
       image.classList.add('prosemirror-image-error');
       image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));

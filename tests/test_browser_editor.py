@@ -603,6 +603,250 @@ def test_markdown_preview_prosemirror_pure_view_is_visible(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_prosemirror_async_init_keeps_latest_state_and_cancels_detached_panel(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLatest = null;
+            const heldLatest = new Promise(resolve => { releaseLatest = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLatest;
+            const path = '/home/test/yolomux.dev/ASYNC-LATEST.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: '# Old state', original: '# Old state', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+            setFileState(path, {kind: 'text', content: '# Latest state', original: '# Old state', dirty: true, language: 'markdown'});
+            renderFileEditorPanel(panel, item);
+            releaseLatest();
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.state?.doc?.textContent === 'Latest state', {
+              timeoutMs: 5000,
+              description: 'latest generation after delayed ProseMirror load',
+            });
+
+            let releaseDetached = null;
+            const heldDetached = new Promise(resolve => { releaseDetached = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldDetached;
+            const detachedPath = '/home/test/yolomux.dev/ASYNC-DETACHED.md';
+            const detachedItem = fileEditorItemFor(detachedPath);
+            setFileState(detachedPath, {kind: 'text', content: '# Detached', original: '# Detached', dirty: false, language: 'markdown'});
+            setFileEditorViewMode(detachedPath, 'preview', detachedItem);
+            addFileEditorTabItem(detachedPath, detachedItem);
+            const detached = createFileEditorPanel(detachedItem);
+            panelNodes.set(detachedItem, detached);
+            document.getElementById('grid').append(detached);
+            renderFileEditorPanel(detached, detachedItem);
+            await Promise.resolve();
+            detached.remove();
+            destroyProseMirrorPanel(detached);
+            releaseDetached();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              latestText: panel._pmView?.state?.doc?.textContent || '',
+              oldVisible: panel._pmView?.dom?.textContent?.includes('Old state') || false,
+              detachedView: Boolean(detached._pmView),
+              detachedError: detached._pmError || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["latestText"] == "Latest state" and metrics["oldVisible"] is False, metrics
+    assert metrics["detachedView"] is False and metrics["detachedError"] == "", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_cancels_detached_local_image_hydration(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalFetch = window.fetchRawFileBlob;
+          try {
+            await loadProseMirrorApi();
+            let releaseFetch = null;
+            let fetchSignal = null;
+            let fetchStarted = false;
+            window.fetchRawFileBlob = (_path, options = {}) => {
+              fetchStarted = true;
+              fetchSignal = options.signal || null;
+              return new Promise(resolve => {
+                releaseFetch = () => resolve({ok: true, status: 200, blob: new Blob(['image-bytes'], {type: 'image/png'})});
+              });
+            };
+            const path = '/home/test/yolomux.dev/IMAGE-LIFECYCLE.md';
+            const source = '![local](asset.png)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => fetchStarted && panel._pmView?.dom?.querySelector('img.prosemirror-image'), {
+              timeoutMs: 5000,
+              description: 'held local image hydration',
+            });
+            const image = panel._pmView.dom.querySelector('img.prosemirror-image');
+            destroyProseMirrorPanel(panel);
+            panel.remove();
+            releaseFetch();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.fetchRawFileBlob = originalFetch;
+            done({
+              aborted: fetchSignal?.aborted === true,
+              connected: image.isConnected,
+              objectUrl: image._rawFileObjectUrl || '',
+              src: image.getAttribute('src') || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.fetchRawFileBlob = originalFetch;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["aborted"] is True and metrics["connected"] is False, metrics
+    assert metrics["objectUrl"] == "" and not metrics["src"].startswith("blob:"), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_blockquoted_fence_keeps_event_loop_responsive(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/BLOCKQUOTE-FENCE.md';
+            const prefix = Array.from({length: 520}, (_, index) => (
+              `Paragraph ${index + 1}: this keeps the regression close to the large operator document that exposed the loop.`
+            )).join('\\n\\n');
+            const source = '# Guided JSON\\n\\n' + prefix + '\\n\\n'
+              + '> ```json\\n'
+              + '> [\\n'
+              + '>   {"name": "get_weather", "arguments": {"city": "Paris"}},\\n'
+              + '>   {"arguments": {"city": "Tokyo"}}\\n'
+              + '> ]\\n'
+              + '> ```\\n';
+            const item = fileEditorItemFor(path);
+            const originalHljs = window.hljs;
+            const api = await loadProseMirrorApi();
+            const originalApply = api.EditorState.prototype.apply;
+            const NativeMutationObserver = window.MutationObserver;
+            let highlightCalls = 0;
+            let transactionCount = 0;
+            let editableCodeObserverCount = 0;
+            api.EditorState.prototype.apply = function(transaction) {
+              transactionCount += 1;
+              return originalApply.call(this, transaction);
+            };
+            window.MutationObserver = class extends NativeMutationObserver {
+              observe(target, options) {
+                if (target?.tagName === 'CODE' && target.closest?.('.ProseMirror')) editableCodeObserverCount += 1;
+                return super.observe(target, options);
+              }
+            };
+            window.hljs = {
+              highlightElement(block) {
+                highlightCalls += 1;
+                if (block.dataset.highlighted) return;
+                block.innerHTML = `<span class="hljs-string">${block.textContent}</span>`;
+                block.dataset.highlighted = 'yes';
+              },
+            };
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView, {
+              timeoutMs: 12000,
+              description: 'blockquoted JSON ViewEditor',
+            });
+            let heartbeat = false;
+            setTimeout(() => { heartbeat = true; }, 0);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            await window.__yolomuxTestWaitFor(() => heartbeat, {
+              timeoutMs: 1000,
+              description: 'event loop after blockquoted JSON ViewEditor',
+            });
+            const modeButton = panel.querySelector('[data-action="editor-mode"][data-editor-mode="split"]');
+            const actionStarted = performance.now();
+            modeButton.click();
+            const actionSyncMs = performance.now() - actionStarted;
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const actionSettledMs = performance.now() - actionStarted;
+            const modeChanged = editorViewModeFor(path, item) === 'split';
+            const transactionsAfterAction = transactionCount;
+            setFileEditorViewMode(path, 'preview', item);
+            const code = panel._pmView.dom.querySelector('pre > code');
+            window.hljs = originalHljs;
+            window.MutationObserver = NativeMutationObserver;
+            api.EditorState.prototype.apply = originalApply;
+            done({
+              sourceLength: source.length,
+              state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              roots: panel.querySelectorAll('.ProseMirror').length,
+              codeText: code?.textContent || '',
+              highlighted: code?.dataset.highlighted || '',
+              highlightNodes: code?.querySelectorAll('[class^="hljs-"]').length || 0,
+              highlightCalls,
+              editableCodeObserverCount,
+              transactionsAfterAction,
+              heartbeat,
+              modeChanged,
+              actionSyncMs,
+              actionSettledMs,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["state"] == "ready" and metrics["roots"] == 1, metrics
+    assert metrics["sourceLength"] > 38000, metrics
+    assert "get_weather" in metrics["codeText"], metrics
+    assert metrics["highlighted"] == "" and metrics["highlightNodes"] == 0, metrics
+    assert metrics["highlightCalls"] == 0, metrics
+    assert metrics["editableCodeObserverCount"] == 0, metrics
+    assert metrics["transactionsAfterAction"] == 0, metrics
+    assert metrics["heartbeat"] is True, metrics
+    assert metrics["modeChanged"] is True and metrics["actionSettledMs"] < 1000, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, tmp_path):
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     diagrams = re.findall(r"```mermaid\s*\n(.*?)\n```", readme, flags=re.DOTALL)
@@ -1629,9 +1873,9 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
             const nextRenderedTarget = previewScrollTopForSourcePosition(preview, {line: middleAnchor.line});
             const imageLine = panel._cmView.state.doc.toString().split('\\n').findIndex(line => line.startsWith('![tall]')) + 1;
             const imageMidLine = sourcePositionForPreviewScroll(preview)?.line || imageLine;
-            done({
-              serialized: serializeProseMirrorSource(panel),
-              commentText: panel._pmView.dom.querySelector('[data-markdown-comment]')?.textContent || '',
+                done({
+                  serialized: serializeProseMirrorSource(panel),
+                  commentText: panel._pmView.dom.querySelector('[data-markdown-comment]')?.textContent || '',
               emptyBeforeHr: hr.previousElementSibling?.matches('p:empty') || false,
               emptyAfterHr: hr.nextElementSibling?.matches('p:empty') || false,
               hrMargin: getComputedStyle(hr).marginBlockStart,
@@ -1676,7 +1920,15 @@ def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_commen
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
                 await window.__yolomuxTestWaitFor(() => panel._pmView && panel._pmView.dom.querySelectorAll('h3').length === 3 && panel._pmView.dom.querySelector('h3[data-source-line]'));
+            const before = [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({text: node.textContent.trim(), line: Number(node.dataset.sourceLine)}));
+            const inserted = panel._pmSchema.nodes.paragraph.create(null, panel._pmSchema.text('Inserted before headings'));
+            panel._pmView.dispatch(panel._pmView.state.tr.insert(0, inserted));
+            await window.__yolomuxTestWaitFor(() => Number(panel._pmView.dom.querySelector('h3')?.dataset.sourceLine) === 3, {
+              timeoutMs: 5000,
+              description: 'source-line decorations after ViewEditor commit',
+            });
             done({
+              before,
                   headings: [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({text: node.textContent.trim(), line: Number(node.dataset.sourceLine), outer: node.outerHTML})),
               comments: panel._pmIgnoredCommentRanges,
             });
@@ -1685,11 +1937,90 @@ def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_commen
         """
     )
     assert "error" not in metrics, metrics
-    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
+    assert [(row["text"], row["line"]) for row in metrics["before"]] == [
         ("2026-06-02 Tue", 1),
         ("2026-04-03 Fri", 98),
         ("2026-03-20 Fri", 102),
     ], metrics
+    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
+        ("2026-06-02 Tue", 3),
+        ("2026-04-03 Fri", 100),
+        ("2026-03-20 Fri", 104),
+    ], metrics
+
+
+def test_markdown_vieweditor_repeated_nested_headings_use_distinct_source_lines(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const source = ['- first', '  ### Repeat', '  first body', '- second', '  ### Repeat', '  second body'].join('\\n');
+            const path = '/home/test/yolomux.dev/repeated-heading-anchor.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('h3[data-source-line]').length === 2);
+            done({
+              lines: [...panel._pmView.dom.querySelectorAll('h3')].map(node => Number(node.dataset.sourceLine)),
+              text: [...panel._pmView.dom.querySelectorAll('h3')].map(node => node.textContent.trim()),
+            });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["text"] == ["Repeat", "Repeat"], metrics
+    assert metrics["lines"] == [2, 5], metrics
+
+
+def test_markdown_vieweditor_task_source_lines_refresh_after_edit_above(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const source = '- [ ] first task\\n- [x] second task';
+            const path = '/home/test/yolomux.dev/task-line-refresh.md';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('input.markdown-task-checkbox').length === 2);
+            const inserted = panel._pmSchema.nodes.paragraph.create(null, panel._pmSchema.text('Inserted before tasks'));
+            panel._pmView.dispatch(panel._pmView.state.tr.insert(0, inserted));
+            await window.__yolomuxTestWaitFor(() => (
+              [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')]
+                .map(input => input.dataset.sourceLine)
+                .join(',') === '3,4'
+            ), {timeoutMs: 5000, description: 'task source-line metadata refresh'});
+            const inputs = [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')];
+            done({
+              lines: inputs.map(input => input.dataset.sourceLine),
+              labels: inputs.map(input => input.getAttribute('aria-label')),
+              serialized: serializeProseMirrorSource(panel),
+            });
+          } catch (error) { done({error: String(error?.stack || error)}); }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["lines"] == ["3", "4"], metrics
+    assert all(line in label for line, label in zip(("3", "4"), metrics["labels"], strict=True)), metrics
+    assert metrics["serialized"] == "Inserted before tasks\n\n- [ ] first task\n- [x] second task", metrics
 
 
 def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_view(browser, tmp_path):
@@ -2731,6 +3062,72 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert metrics["config"]["securityLevel"] == "strict", metrics
     assert metrics["config"]["htmlLabels"] is False, metrics
     assert metrics["config"]["flowchart"]["htmlLabels"] is False, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_markdown_vieweditor_renders_mermaid_code_blocks_read_only(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/repo/README.md';
+            const source = '# Diagram\\n\\n```mermaid\\nflowchart TD\\n  A[Source] --> B[Rendered]\\n```\\n';
+            const mermaidCalls = [];
+            window.mermaid = {
+              initialize(config) { window.__viewEditorMermaidConfig = config; },
+              async render(id, diagram) {
+                mermaidCalls.push({id, diagram});
+                return {svg: '<svg viewBox="0 0 200 50"><text>Rendered Mermaid</text></svg>'};
+              },
+            };
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '900px';
+            panel.style.height = '520px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('img.mermaid-preview-image'), {timeoutMs: 12000, description: 'ViewEditor Mermaid render'});
+            const host = panel._pmView.dom.querySelector('.mermaid-preview-host');
+            const firstCallCount = mermaidCalls.length;
+            syncProseMirrorPanelSource(panel, path, fileEditorPanelState(panel));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            done({
+              imageExists: Boolean(host?.querySelector('img.mermaid-preview-image')),
+              preExists: Boolean(host?.querySelector('pre, code')),
+              zoomViewport: Boolean(host?.querySelector('.file-editor-preview-zoom-viewport')),
+              zoomToolbar: Boolean(host?.querySelector('.file-editor-preview-zoom-toolbar')),
+              zoomActions: [...(host?.querySelectorAll('[data-preview-zoom-action]') || [])].map(button => button.dataset.previewZoomAction),
+              contentEditable: host?.contentEditable || '',
+              stateText: panel._pmView.state.doc.textContent || '',
+              calls: mermaidCalls,
+              firstCallCount,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["imageExists"] is True, metrics
+    assert metrics["preExists"] is False, metrics
+    assert metrics["zoomViewport"] is True, metrics
+    assert metrics["zoomToolbar"] is True, metrics
+    assert metrics["zoomActions"] == ["out", "fit", "actual", "in"], metrics
+    assert metrics["contentEditable"] == "false", metrics
+    assert "Source" in metrics["stateText"] and "Rendered" in metrics["stateText"], metrics
+    assert {call["diagram"] for call in metrics["calls"]} == {"flowchart TD\n  A[Source] --> B[Rendered]"}, metrics
+    assert len(metrics["calls"]) == metrics["firstCallCount"] == 1, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -4895,7 +5292,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             };
             const first = panel.querySelector('.file-editor-preview-pane-panel input.markdown-task-checkbox');
             first.click();
-            await waitFor(() => (fileState.get(path)?.content || '').startsWith('- [x] 2. first task'));
+            await waitFor(() => (fileState.get(path)?.content || '').includes('[x] 2. first task'));
             await frame();
             await frame();
             const after = {
@@ -4903,6 +5300,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
               dirty: fileState.get(path)?.dirty === true,
               checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
               sourceLines: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.dataset.sourceLine || ''),
+              serialized: serializeProseMirrorSource(panel),
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
               previewText: panel.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
               mode: editorViewModeFor(path, item),
@@ -4925,6 +5323,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
     assert metrics["after"]["dirty"] is True, metrics
     assert metrics["after"]["checked"] == [True, True], metrics
     assert metrics["after"]["sourceLines"] == ["1", "2"], metrics
+    assert metrics["after"]["serialized"] == "- [x] 2. first task\n- [x] 3) second task", metrics
     assert metrics["after"]["cmText"] == metrics["after"]["content"], metrics
     assert "first task" in metrics["after"]["previewText"], metrics
     assert metrics["after"]["mode"] == "split", metrics

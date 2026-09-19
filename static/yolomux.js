@@ -32879,14 +32879,6 @@ function previewFindSetReadOnly(host = null, readOnly = false) {
   if (!view) return;
   host._pmSearchReadOnly = readOnly === true;
   view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
-  view.dom.setAttribute('contenteditable', String(host._pmSearchReadOnly !== true));
-}
-
-function previewFindSetDomObserver(host = null, running = true) {
-  const observer = host?._pmView?.domObserver;
-  if (!observer) return;
-  if (running) observer.start?.();
-  else observer.stop?.();
 }
 
 function previewFindUpdateOverview(host = null) {
@@ -32944,6 +32936,10 @@ function previewFindSelectMatch(host = null, index = 0) {
     const range = state.matches[state.index];
     const element = range.startContainer.parentElement;
     element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else if (host?._pmView?.dom) {
+    const range = state.matches[state.index];
+    range.getBoundingClientRect?.();
+    range.startContainer?.parentElement?.scrollIntoView?.({block: 'center', inline: 'nearest'});
   } else {
     state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
     state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
@@ -32968,7 +32964,8 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
   state.index = -1;
   const needle = state.query.toLocaleLowerCase();
   if (needle) {
-    const root = previewFindUsesTextHighlights(host) ? host._pmView.dom : preview;
+    const prosemirrorRoot = host?._pmView?.dom || null;
+    const root = prosemirrorRoot || preview;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
@@ -32983,7 +32980,7 @@ function previewFindApplyQuery(host = null, query = '', options = {}) {
       let from = 0;
       let index = folded.indexOf(needle, from);
       if (index < 0) continue;
-      if (previewFindUsesTextHighlights(host)) {
+      if (prosemirrorRoot) {
         for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
           const range = document.createRange();
           range.setStart(node, matchIndex);
@@ -33023,7 +33020,6 @@ function openPreviewFind(host = null) {
   const state = previewFindStateForHost(host, true);
   state.open = true;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   const input = panel.querySelector('input');
   previewFindApplyQuery(host, input?.value || '');
   input?.focus();
@@ -33036,7 +33032,6 @@ function closePreviewFind(host = null) {
   if (!panel) return false;
   previewFindClearMatches(host);
   previewFindSetReadOnly(host, false);
-  previewFindSetDomObserver(host, true);
   const state = previewFindStateForHost(host, true);
   state.open = false;
   state.matches = [];
@@ -33057,7 +33052,6 @@ function restorePreviewFindAfterRender(host = null) {
   if (!panel || !state || state.open !== true) return;
   panel.hidden = false;
   previewFindSetReadOnly(host, true);
-  previewFindSetDomObserver(host, false);
   previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
 }
 
@@ -71135,11 +71129,12 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
-function prosemirrorPreviewImageSource(image, path) {
+function prosemirrorPreviewImageSource(image, path, options = {}) {
   if (!image || !path) return Promise.resolve(false);
   const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
   if (!target || target.external) return Promise.resolve(false);
   return installRawFileMediaSource(image, target.path, {
+    isCurrent: options.isCurrent,
     onFailure: error => {
       image.classList.add('prosemirror-image-error');
       image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
@@ -78048,6 +78043,11 @@ function saveFileEditor(path, panel, options = {}) {
 const prosemirrorLoadPromise = {value: null};
 const PROSEMIRROR_SERIALIZE_DELAY_MS = 1250;
 
+// ProseMirror owns every descendant of EditorView.dom. After mount, visual metadata must flow
+// through schema DOM output, transactions, decorations, or an isolated node view that ignores its
+// own mutations. Calling Preview renderers or imperatively rewriting editable descendants can make
+// ProseMirror restore the DOM forever and starve the entire page event loop.
+
 function prosemirrorFailureMessage(error) {
   const raw = userMessageText(error, String(error?.message || error || 'unknown error'));
   const detail = raw.replace(/^ProseMirror ViewEditor failed:\s*/i, '');
@@ -78114,8 +78114,41 @@ function loadProseMirrorApi() {
   return promise;
 }
 
+function prosemirrorFenceLanguage(params) {
+  return String(params || '').trim().split(/\s+/, 1)[0].toLowerCase();
+}
+
+function prosemirrorCodeBlockDom(node) {
+  const params = String(node.attrs.params || '').trim();
+  const language = prosemirrorFenceLanguage(params);
+  return [
+    'pre',
+    params ? {'data-params': params} : {},
+    ['code', language ? {class: `language-${language}`} : {}, 0],
+  ];
+}
+
 function prosemirrorMarkdownSchema(api) {
   let nodes = api.addListNodes(api.defaultMarkdownParser.schema.spec.nodes, 'paragraph block*', 'block');
+  nodes = nodes.update('code_block', {
+    ...nodes.get('code_block'),
+    toDOM: prosemirrorCodeBlockDom,
+  });
+  nodes = nodes.update('list_item', {
+    ...nodes.get('list_item'),
+    attrs: {
+      taskLine: {default: 0},
+      taskChecked: {default: null},
+    },
+  });
+  nodes = nodes.update('bullet_list', {
+    ...nodes.get('bullet_list'),
+    attrs: {
+      ...nodes.get('bullet_list').attrs,
+      tight: {default: false},
+      bullet: {default: '*'},
+    },
+  });
   nodes = nodes.addBefore('blockquote', 'details', {
     group: 'block',
     content: 'block+',
@@ -78225,14 +78258,28 @@ function prosemirrorMarkdownParser(api, schema) {
     const normalizeHtmlTokens = (tokens, sourceLine = 0) => {
       const normalized = [];
       let listItemDepth = 0;
+      const listItemTokens = [];
+      const listTokens = [];
       for (const token of tokens || []) {
         const html = String(token.content || '').trim();
         const tokenLine = Array.isArray(token.map) ? Number(token.map[0]) + 1 : sourceLine;
-        if (token.type === 'list_item_open') listItemDepth += 1;
+        if (token.type === 'bullet_list_open' || token.type === 'ordered_list_open') listTokens.push(token);
+        if (token.type === 'list_item_open') {
+          listItemDepth += 1;
+          listItemTokens.push(token);
+        }
         if (token.type === 'inline' && listItemDepth > 0) {
           const firstText = token.children?.find(child => child.type === 'text');
           const taskMarker = String(firstText?.content || token.content || '').match(/^\[[ xX]\]\s+/);
           if (taskMarker) {
+            const listItemToken = listItemTokens[listItemTokens.length - 1];
+            listItemToken.meta = {
+              ...(listItemToken.meta || {}),
+              taskLine: tokenLine,
+              taskChecked: taskMarker[0][1].toLowerCase() === 'x',
+            };
+            const listToken = listTokens[listTokens.length - 1];
+            if (listToken) listToken.meta = {...(listToken.meta || {}), hasTasks: true};
             token.content = token.content.slice(taskMarker[0].length);
             let remaining = taskMarker[0].length;
             for (const child of token.children || []) {
@@ -78294,7 +78341,11 @@ function prosemirrorMarkdownParser(api, schema) {
         }
         if (token.children) token.children = normalizeHtmlTokens(token.children, tokenLine);
         normalized.push(token);
-        if (token.type === 'list_item_close') listItemDepth = Math.max(0, listItemDepth - 1);
+        if (token.type === 'list_item_close') {
+          listItemTokens.pop();
+          listItemDepth = Math.max(0, listItemDepth - 1);
+        }
+        if (token.type === 'bullet_list_close' || token.type === 'ordered_list_close') listTokens.pop();
       }
       return normalized;
     };
@@ -78353,6 +78404,15 @@ function prosemirrorMarkdownParser(api, schema) {
   };
   const tokens = {
     ...parser.tokens,
+    bullet_list: {
+      ...parser.tokens.bullet_list,
+      getAttrs: (token, tokenStream, index) => ({
+        ...(parser.tokens.bullet_list.getAttrs?.(token, tokenStream, index) || {}),
+        ...(token.meta?.hasTasks ? {tight: true} : {}),
+        bullet: ['-', '+', '*'].includes(token.markup) ? token.markup : '*',
+      }),
+    },
+    list_item: {block: 'list_item', getAttrs: token => token.meta || {}},
     softbreak: {node: 'soft_break'},
     html_break: {node: 'hard_break'},
     html_image: {node: 'image', getAttrs: token => token.meta},
@@ -78417,6 +78477,10 @@ function prosemirrorMarkdownSerializer(api) {
     // Keep an explicit end-of-line break valid Markdown. HTML is disabled in the parser, so
     // serializing `<br>` would round-trip as literal text in the next ViewEditor refresh.
     hard_break(state) { state.write('\\\n'); },
+    list_item(state, node) {
+      if (node.attrs.taskChecked !== null) state.write(`[${node.attrs.taskChecked ? 'x' : ' '}] `);
+      state.renderContent(node);
+    },
     markdown_comment_block(state, node) {
       state.write(node.attrs.source || '<!---->');
       state.closeBlock(node);
@@ -78477,7 +78541,11 @@ function prosemirrorDetailsNodeView(node) {
   summary.textContent = node.attrs.summary;
   const contentDOM = document.createElement('div');
   dom.append(summary, contentDOM);
-  return {dom, contentDOM};
+  return {
+    dom,
+    contentDOM,
+    ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open',
+  };
 }
 
 function prosemirrorImageNodeView(node, panel, markdownPath) {
@@ -78491,6 +78559,10 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   image.decoding = 'async';
   image.style.display = 'inline-block';
   image.style.verticalAlign = 'text-bottom';
+  let active = true;
+  let loadFrame = 0;
+  let resolveScheduledLoad = null;
+  const isCurrent = () => active && image.isConnected;
   const target = markdownPreviewImageTarget(original, markdownPath);
   if (!target) {
     image.src = original;
@@ -78503,37 +78575,74 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   } else {
     image.dataset.resolvedPath = target.path;
     panel._pmMediaPromises ||= [];
-    panel._pmMediaPromises.push(new Promise(resolve => requestAnimationFrame(() => (
-      prosemirrorPreviewImageSource(image, markdownPath).then(resolve)
-    ))));
-    image.addEventListener('error', () => {
+    panel._pmMediaPromises.push(new Promise(resolve => {
+      resolveScheduledLoad = resolve;
+      loadFrame = requestAnimationFrame(() => {
+        loadFrame = 0;
+        if (!isCurrent()) {
+          resolveScheduledLoad = null;
+          resolve(false);
+          return;
+        }
+        prosemirrorPreviewImageSource(image, markdownPath, {isCurrent}).then(result => {
+          resolveScheduledLoad = null;
+          resolve(result);
+        });
+      });
+    }));
+    const onError = () => {
+      if (!active) return;
       image.classList.add('prosemirror-image-error');
       image.title = t('preview.markdown.imageUnavailable', {path: target.path});
-    }, {once: true});
+    };
+    image.addEventListener('error', onError, {once: true});
+    image._prosemirrorErrorHandler = onError;
   }
-  return {dom: image, destroy() { releaseRawFileMediaSource(image); }};
+  return {
+    dom: image,
+    destroy() {
+      active = false;
+      if (loadFrame) cancelAnimationFrame(loadFrame);
+      loadFrame = 0;
+      resolveScheduledLoad?.(false);
+      resolveScheduledLoad = null;
+      if (image._prosemirrorErrorHandler) image.removeEventListener('error', image._prosemirrorErrorHandler);
+      delete image._prosemirrorErrorHandler;
+      releaseRawFileMediaSource(image);
+    },
+    ignoreMutation: () => true,
+  };
 }
 
 function prosemirrorCodeBlockNodeView(node, panel, markdownPath) {
-  const language = String(node.attrs.params || '').trim().split(/\s+/, 1)[0].toLowerCase();
+  const language = prosemirrorFenceLanguage(node.attrs.params);
   if (!isMermaidFenceLanguage(language)) return null;
+  return prosemirrorMermaidCodeBlockNodeView(node, panel, markdownPath);
+}
+
+function prosemirrorMermaidCodeBlockNodeView(node, panel, markdownPath) {
   const host = document.createElement('div');
   host.className = 'mermaid-preview-host';
+  host.contentEditable = 'false';
   let active = true;
   panel._pmMediaPromises ||= [];
-  panel._pmMediaPromises.push(renderMermaidSourceInto(host, node.textContent || '', {
+  const render = renderMermaidSourceInto(host, node.textContent || '', {
     full: false,
+    controlsOnly: true,
     path: markdownPath,
     zoomKey: 'mermaid',
     wheelScrollParent: true,
     isCurrent: () => active,
-  }));
+  });
+  panel._pmMediaPromises.push(render);
   return {
     dom: host,
     destroy() {
       active = false;
       disposeMermaidPreviewHost(host);
     },
+    ignoreMutation: () => true,
+    stopEvent: event => event.type !== 'contextmenu',
   };
 }
 
@@ -78549,85 +78658,121 @@ function hydrateProseMirrorExternalImages(panel, path) {
   if (promises.length) panel._pmMediaPromises = [...(panel._pmMediaPromises || []), ...promises];
 }
 
-function prosemirrorTaskListItemNodeView(task) {
+function prosemirrorTaskListItemNodeView(node, view, getPos) {
   const dom = document.createElement('li');
   const contentDOM = document.createElement('div');
-  if (task) {
-    const input = document.createElement('input');
+  const taskLine = Number(node.attrs.taskLine || 0);
+  let input = null;
+  if (taskLine > 0) {
+    input = document.createElement('input');
     input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
     input.type = 'checkbox';
-    input.checked = task.checked;
-    input.dataset.sourceLine = String(task.line);
+    input.checked = node.attrs.taskChecked === true;
+    input.disabled = readOnlyMode;
+    input.dataset.sourceLine = String(taskLine);
+    input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: taskLine}));
+    input.addEventListener('change', () => {
+      const position = getPos();
+      if (!Number.isFinite(position)) return;
+      const current = view.state.doc.nodeAt(position);
+      if (current?.type.name !== 'list_item') return;
+      view.dispatch(view.state.tr.setNodeMarkup(position, undefined, {
+        ...current.attrs,
+        taskChecked: input.checked === true,
+      }));
+    });
     dom.appendChild(input);
   }
   dom.appendChild(contentDOM);
-  return {dom, contentDOM};
+  return {
+    dom,
+    contentDOM,
+    ignoreMutation: mutation => Boolean(input && (mutation.target === input || input.contains(mutation.target))),
+    stopEvent: event => Boolean(input && input.contains(event.target)),
+  };
+}
+
+function prosemirrorPreviewClassName() {
+  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
+  return [
+    'prosemirror-editor',
+    'markdown-body',
+    vanilla ? 'vanilla-preview-body' : '',
+    vanilla ? 'editor-preview-vanilla' : '',
+  ].filter(Boolean).join(' ');
 }
 
 function applyProseMirrorPreviewDisplayMode(container) {
-  const vanilla = fileEditorPreviewDisplayMode === 'vanilla';
-  container.classList.toggle('vanilla-preview-body', vanilla);
-  container.classList.toggle('editor-preview-vanilla', vanilla);
-  container.style.setProperty('background-color', vanilla ? '#ffffff' : '');
-  container.style.setProperty('color', vanilla ? '#111827' : '');
-  container.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(node => {
-    node.style.setProperty('color', vanilla ? '#111827' : '', 'important');
+  container.className = prosemirrorPreviewClassName();
+}
+
+function applyProseMirrorViewDisplayMode(view, path) {
+  view.setProps({
+    attributes: {
+      class: prosemirrorPreviewClassName(),
+      'data-md-path': path,
+      'data-prosemirror-editor': 'true',
+    },
   });
 }
 
-function bindProseMirrorTaskCheckboxes(container, source, markdownPath) {
-  if (!container) return;
-  if (markdownPath) container.dataset.mdPath = markdownPath;
-  const tasks = String(source || '').split('\n').map((line, index) => {
-    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
-    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
+function prosemirrorSourceLineMetadata(source, parseEnvironment) {
+  const headings = String(source || '').split('\n').map((line, index) => {
+    const match = line.match(/^\s*#{1,6}\s+(.+?)\s*$/);
+    return match ? {line: index + 1, text: match[1].trim()} : null;
   }).filter(Boolean);
-  const items = Array.from(container.querySelectorAll('li')).filter(item => item.parentElement?.tagName === 'UL' || item.parentElement?.tagName === 'OL');
-  for (const [index, item] of items.entries()) {
-    const task = tasks[index];
-    if (!task) continue;
-    const input = Array.from(item.children).find(child => child.tagName === 'INPUT' && child.type === 'checkbox') || document.createElement('input');
-    input.className = `${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS} markdown-task-checkbox`;
-    input.type = 'checkbox';
-    input.checked = task.checked;
-    input.dataset.sourceLine = String(task.line);
-    input.disabled = readOnlyMode || container._markdownReadOnly === true;
-    input.dataset.sourceLine = String(task.line || index + 1);
-    if (!input.parentElement) item.insertBefore(input, item.firstChild);
-  }
-  if (markdownPath) {
-    bindMarkdownTaskCheckboxes(container, source, markdownPath);
-    container.addEventListener('change', event => {
-      const input = event.target?.closest?.('input.markdown-task-checkbox[data-source-line]');
-      if (!input) return;
-      updateMarkdownTaskFromPreview(container, input);
-    }, {once: true});
-  }
+  return {
+    headings,
+    topLevel: parseEnvironment.yolomuxTopLevelSourceLines || [],
+  };
 }
 
-function applyProseMirrorCodeBlockLanguages(view, source = '') {
-  if (!view?.dom) return;
-  const sourceLanguages = String(source).split('\n')
-    .filter(line => line.startsWith('```'))
-    .map(line => line.slice(3).trim().split(/\s+/, 1)[0].toLowerCase());
-  Array.from(view.dom.querySelectorAll('pre')).forEach((pre, index) => {
-    const code = pre?.querySelector('code');
-    const language = String(pre.dataset.params || code?.dataset.params || '').trim().split(/\s+/, 1)[0].toLowerCase()
-      || sourceLanguages[index] || '';
-    if (code && language) {
-      pre.dataset.params = language;
-      code.classList.add(`language-${language}`);
-    }
+function prosemirrorSourceLineDecorations(api, doc, metadata) {
+  const decorations = [];
+  const decoratedPositions = new Set();
+  doc.forEach((node, offset, index) => {
+    const sourceLine = Number(metadata?.topLevel?.[index]);
+    if (!Number.isFinite(sourceLine) || sourceLine <= 0) return;
+    decorations.push(api.Decoration.node(offset, offset + node.nodeSize, {'data-source-line': String(sourceLine)}));
+    decoratedPositions.add(offset);
   });
-  refreshMarkdownFenceHighlights(view.dom);
+  let headingSearchFrom = 0;
+  doc.descendants((node, position) => {
+    if (node.type.name !== 'heading') return true;
+    const headingText = String(node.textContent || '').trim();
+    const sourceHeading = metadata?.headings?.find(candidate => (
+      candidate.line > headingSearchFrom && candidate.text === headingText
+    ));
+    if (!sourceHeading) return false;
+    if (!decoratedPositions.has(position)) {
+      decorations.push(api.Decoration.node(position, position + node.nodeSize, {
+        'data-source-line': String(sourceHeading.line),
+      }));
+    }
+    headingSearchFrom = sourceHeading.line;
+    return false;
+  });
+  return api.DecorationSet.create(doc, decorations);
 }
 
-function scheduleProseMirrorCodeBlockHighlight(view, source) {
-  const apply = () => applyProseMirrorCodeBlockLanguages(view, source);
-  requestAnimationFrame(apply);
-  setTimeout(apply, 0);
-  setTimeout(apply, 50);
-  setTimeout(apply, 250);
+function prosemirrorSourceLinePlugin(api, panel) {
+  let plugin = null;
+  plugin = new api.Plugin({
+    state: {
+      init(_config, state) {
+        return prosemirrorSourceLineDecorations(api, state.doc, panel._pmSourceLineMetadata);
+      },
+      apply(transaction, decorations) {
+        const metadata = transaction.getMeta(plugin);
+        if (metadata) return prosemirrorSourceLineDecorations(api, transaction.doc, metadata);
+        return transaction.docChanged ? decorations.map(transaction.mapping, transaction.doc) : decorations;
+      },
+    },
+    props: {
+      decorations(state) { return plugin.getState(state); },
+    },
+  });
+  return plugin;
 }
 
 function normalizeProseMirrorEndBreakSource(text) {
@@ -78640,8 +78785,12 @@ function normalizeLegacyBreakMarkup(text) {
   return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\s*(?=\n|$)/gi, '$1$2\\\n');
 }
 
-function destroyProseMirrorPanel(panel) {
-  const view = panel?._pmView;
+function destroyProseMirrorPanel(panel, options = {}) {
+  if (!panel) return;
+  if (options.invalidateEnsure !== false) {
+    panel._pmEnsureGeneration = Number(panel._pmEnsureGeneration || 0) + 1;
+  }
+  const view = panel._pmView;
   if (!view) return;
   panel._pmContextMenuGeneration = Number(panel._pmContextMenuGeneration || 0) + 1;
   panel._pmContextMenuDispose?.();
@@ -78653,6 +78802,7 @@ function destroyProseMirrorPanel(panel) {
   delete panel._pmPath;
   delete panel._pmSource;
   delete panel._pmPlugins;
+  delete panel._pmSourceLinePlugin;
   delete panel._pmPreviewPane;
 }
 
@@ -78686,7 +78836,7 @@ function setProseMirrorSelection(view, from, to) {
 function syncProseMirrorPanelSource(panel, path, state, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path || !state) return false;
   restoreProseMirrorPanelDom(panel, {previewPane: panel._pmPreviewPane});
-  applyProseMirrorPreviewDisplayMode(panel._pmView.dom);
+  applyProseMirrorViewDisplayMode(panel._pmView, path);
   const next = normalizeLegacyBreakMarkup(state.content || '');
   const textEditorCommit = options.sourceSurface === 'text-editor';
   if (textEditorCommit) {
@@ -78701,15 +78851,17 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
   panel._pmSerializeTimer = null;
   panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
   try {
-    const doc = panel._pmParser.parse(next);
+    const parseEnvironment = {};
+    const doc = panel._pmParser.parse(next, parseEnvironment);
+    panel._pmSourceLineMetadata = prosemirrorSourceLineMetadata(next, parseEnvironment);
+    panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
+    panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
     const selection = panel._pmView.state.selection;
     const api = window.YOLOmuxProseMirror;
     const options = {doc, plugins: panel._pmPlugins || []};
     const nextSelection = prosemirrorSelectionForDocument(api, doc, selection.anchor, selection.head);
     if (nextSelection) options.selection = nextSelection;
     panel._pmView.updateState(api.EditorState.create(options));
-    bindProseMirrorTaskCheckboxes(panel._pmView.dom, next, path);
-    applyProseMirrorCodeBlockLanguages(panel._pmView);
     panel._pmSource = next;
     return true;
   } catch (error) {
@@ -78742,15 +78894,51 @@ function clearProseMirrorFallback(parts) {
 
 function serializeProseMirrorSource(panel) {
   if (!panel?._pmSerializer || !panel._pmView) return null;
-  return panel._pmSerializer.serialize(panel._pmView.state.doc);
+  return panel._pmSerializer.serialize(panel._pmView.state.doc).replace(
+    /^(\s*[-+*]\s+\[[ x]\]\s+)(\d+)\\\.(?=\s)/gm,
+    '$1$2.',
+  );
+}
+
+function refreshProseMirrorSourceLines(panel, source) {
+  if (!panel?._pmView || !panel._pmParser || !panel._pmSourceLinePlugin) return;
+  const parseEnvironment = {};
+  const parsedDoc = panel._pmParser.parse(source, parseEnvironment);
+  const metadata = prosemirrorSourceLineMetadata(source, parseEnvironment);
+  panel._pmSourceLineMetadata = metadata;
+  panel._pmSourceLines = metadata.topLevel;
+  panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
+  const parsedTaskLines = [];
+  parsedDoc.descendants(node => {
+    if (node.type.name === 'list_item' && node.attrs.taskChecked !== null) {
+      parsedTaskLines.push(Number(node.attrs.taskLine || 0));
+    }
+    return true;
+  });
+  let taskIndex = 0;
+  let transaction = panel._pmView.state.tr;
+  panel._pmView.state.doc.descendants((node, position) => {
+    if (node.type.name !== 'list_item' || node.attrs.taskChecked === null) return true;
+    const taskLine = parsedTaskLines[taskIndex++] || 0;
+    if (taskLine !== Number(node.attrs.taskLine || 0)) {
+      transaction = transaction.setNodeMarkup(position, undefined, {...node.attrs, taskLine});
+    }
+    return true;
+  });
+  transaction.setMeta(panel._pmSourceLinePlugin, metadata);
+  transaction.setMeta('yolomuxSourceLineRefresh', true);
+  transaction.setMeta('addToHistory', false);
+  panel._pmView.dispatch(transaction);
 }
 
 function commitProseMirrorSource(panel, path, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path) return false;
-  const next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
+  let next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
   if (next === null) return false;
   const state = fileEditorPanelState(panel);
   if (!state || state.historical === true) return false;
+  if (state.content.endsWith('\n') && !next.endsWith('\n')) next += '\n';
+  refreshProseMirrorSourceLines(panel, next);
   if (next === state.content) {
     panel._pmSource = next;
     return true;
@@ -79079,10 +79267,13 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     throw new Error(`unsupported HTML tag ${unsupportedHtml}`);
   }
   const doc = parser.parse(state.content || '', parseEnvironment);
+  panel._pmSourceLineMetadata = prosemirrorSourceLineMetadata(state.content || '', parseEnvironment);
   const container = document.createElement('div');
   container.className = 'prosemirror-editor markdown-body';
+  container.dataset.mdPath = path;
   applyProseMirrorPreviewDisplayMode(container);
   container.setAttribute('data-prosemirror-editor', 'true');
+  const sourceLinePlugin = prosemirrorSourceLinePlugin(api, panel);
   const plugins = [
     api.keymap({
       'Mod-s': () => {
@@ -79096,6 +79287,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     api.history(),
     api.keymap({'Mod-z': api.undo, 'Shift-Mod-z': api.redo, 'Mod-y': api.redo}),
     api.keymap(api.baseKeymap),
+    sourceLinePlugin,
   ];
   const editorState = api.EditorState.create({doc, plugins});
   if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) {
@@ -79105,11 +79297,6 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
     panel._pmContextMenuDispose?.();
     panel._pmView.destroy();
   }
-  const taskEntries = String(state.content || '').split('\n').map((line, index) => {
-    const match = line.match(/^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]/);
-    return match ? {line: index + 1, checked: match[1].toLowerCase() === 'x'} : null;
-  }).filter(Boolean);
-  let taskNodeViewIndex = 0;
   cleanupStandardPreviewStrategy(parts.previewPane);
   disposeMarkdownPreviewEditing(parts.previewPane);
   parts.previewPane._previewRendererId = null;
@@ -79117,22 +79304,23 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   clearProseMirrorFallback(parts);
   const view = new api.EditorView(container, {
     state: editorState,
+    attributes: {
+      class: prosemirrorPreviewClassName(),
+      'data-md-path': path,
+      'data-prosemirror-editor': 'true',
+    },
     nodeViews: {
       // Mermaid fences render as isolated images; ViewEdit never exposes the diagram source as a
       // contentDOM, so changing it remains a TextEdit operation.
       code_block: node => prosemirrorCodeBlockNodeView(node, panel, path),
       details: prosemirrorDetailsNodeView,
       image: node => prosemirrorImageNodeView(node, panel, path),
-      list_item: () => {
-        const index = taskNodeViewIndex++;
-        const task = taskEntries[index] || null;
-        return prosemirrorTaskListItemNodeView(task);
-      },
+      list_item: prosemirrorTaskListItemNodeView,
     },
     dispatchTransaction(transaction) {
       const nextState = view.state.apply(transaction);
       view.updateState(nextState);
-      if (transaction.docChanged) {
+      if (transaction.docChanged && transaction.getMeta('yolomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
         updateProseMirrorSource(panel, path);
         scheduleProseMirrorAutosave(panel, path);
@@ -79141,37 +79329,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   });
   panel._pmView = view;
   hydrateProseMirrorExternalImages(panel, path);
-  applyProseMirrorPreviewDisplayMode(view.dom);
-  bindMarkdownPreviewEditing(parts.previewPane, state.content || '', path);
   parts.previewPane._previewAsync = Promise.all(panel._pmMediaPromises || []);
-  applyProseMirrorCodeBlockLanguages(view, state.content || '');
-  scheduleProseMirrorCodeBlockHighlight(view, state.content || '');
-  requestAnimationFrame(() => requestAnimationFrame(() => refreshMarkdownFenceHighlights(view.dom)));
-  const attachSourceLines = () => Array.from(view.dom.children).forEach((element, index) => {
-    const sourceLine = Number(parseEnvironment.yolomuxTopLevelSourceLines?.[index]);
-    if (Number.isFinite(sourceLine) && sourceLine > 0) element.dataset.sourceLine = String(sourceLine);
-  });
-  attachSourceLines();
-  requestAnimationFrame(attachSourceLines);
-  const sourceLines = String(state.content || '').split('\n');
-  const sourceHeadings = sourceLines.map((line, index) => {
-    const match = line.match(/^\s*#{1,6}\s+(.+?)\s*$/);
-    return match ? {line: index + 1, text: match[1].trim()} : null;
-  }).filter(Boolean);
-  const attachHeadingSourceLines = () => {
-    let headingSearchFrom = 0;
-    for (const heading of Array.from(view.dom.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
-      const headingText = String(heading.textContent || '').trim();
-      if (!headingText) continue;
-      const sourceHeading = sourceHeadings.find(candidate => candidate.line > headingSearchFrom && candidate.text === headingText);
-      if (!sourceHeading) continue;
-      heading.dataset.sourceLine = String(sourceHeading.line);
-      headingSearchFrom = sourceHeading.line - 1;
-    }
-  };
-  attachHeadingSourceLines();
-  setTimeout(attachHeadingSourceLines, 0);
-  requestAnimationFrame(attachHeadingSourceLines);
   container._prosemirrorView = view;
   panel._pmPreviewPane = parts.previewPane;
   panel._pmPath = path;
@@ -79179,17 +79337,10 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmParser = parser;
   panel._pmSerializer = serializer;
   panel._pmPlugins = plugins;
+  panel._pmSourceLinePlugin = sourceLinePlugin;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
-  panel._pmSourceLines = parseEnvironment.yolomuxTopLevelSourceLines || [];
+  panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
   panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
-  bindProseMirrorTaskCheckboxes(view.dom, state.content || '', path);
-  attachSourceLines();
-  attachHeadingSourceLines();
-  setTimeout(() => bindProseMirrorTaskCheckboxes(view.dom, panel._pmSource, path), 0);
-  requestAnimationFrame(() => {
-    attachSourceLines();
-    attachHeadingSourceLines();
-  });
   delete panel._pmError;
   delete panel._pmFailureSource;
   parts.previewPane.dataset.prosemirrorState = 'ready';
@@ -79197,39 +79348,40 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   return true;
 }
 
-async function ensureProseMirrorPanel(panel, item, path, state, parts) {
+async function ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration) {
   if (!prosemirrorSupportedSource(path, state)) return false;
   if (panel._pmView && panel._pmPath === path) {
     restoreProseMirrorPanelDom(panel, parts);
     return syncProseMirrorPanelSource(panel, path, state);
   }
-  if (panel._pmEnsurePromise) return panel._pmEnsurePromise;
-  destroyProseMirrorPanel(panel);
-  const promise = (async () => {
+  destroyProseMirrorPanel(panel, {invalidateEnsure: false});
+  try {
+    const api = await loadProseMirrorApi();
+    const currentState = fileEditorPanelState(panel);
+    if (ensureGeneration !== panel._pmEnsureGeneration
+      || !panel.isConnected
+      || panel.dataset.filePath !== path
+      || currentState?.content !== state.content
+      || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
     try {
-      const api = await loadProseMirrorApi();
-      if (panel.dataset.filePath !== path || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
-      try {
-        const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
-        if (ready) {
-          delete panel._pmUnsupportedSource;
-          delete panel._pmError;
-        }
-        return ready;
-      } catch (error) {
-        renderProseMirrorFailure(panel, path, parts, error);
-        return false;
+      const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
+      if (ready) {
+        delete panel._pmUnsupportedSource;
+        delete panel._pmError;
       }
+      return ready;
     } catch (error) {
-      renderProseMirrorFailure(panel, path, parts, error);
+      if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+        renderProseMirrorFailure(panel, path, parts, error);
+      }
       return false;
     }
-  })();
-  panel._pmEnsurePromise = promise;
-  promise.finally(() => {
-    if (panel._pmEnsurePromise === promise) delete panel._pmEnsurePromise;
-  });
-  return promise;
+  } catch (error) {
+    if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+      renderProseMirrorFailure(panel, path, parts, error);
+    }
+    return false;
+  }
 }
 
 function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
@@ -79245,7 +79397,7 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
     renderProseMirrorFailure(panel, path, parts, panel._pmError);
     return true;
   }
-  const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts);
+  const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration);
   parts.previewPane._previewAsync = ensurePromise;
   void ensurePromise.then(ready => {
     if (ensureGeneration !== panel._pmEnsureGeneration) return;
