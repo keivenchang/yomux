@@ -1229,6 +1229,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    cleanup: (_item, panel) => destroyFileEditorPanel(panel),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       if (isHistoricalFileEditorItem(item)) return false;
@@ -31920,9 +31921,7 @@ function renameOpenFilePath(oldPath, newPath) {
     viewModes.delete(oldPath);
   }
   for (const item of panelItems) {
-    const panel = panelNodes.get(item);
-    if (panel) panel.remove();
-    panelNodes.delete(item);
+    removePanelForItem(item);
   }
   if (activeFile === oldPath) activeFile = newPath;
   syncFileLayoutItems();
@@ -75342,7 +75341,8 @@ function openFilePreviewPopout(path, panel = null) {
 // readable size): the CodeMirror panel lifecycle, extensions, theming, and diff/preview rendering.
 // Concatenated immediately after 90 by tools/static_build.py, so it shares the same bundle scope.
 
-function destroyCodeMirrorPanel(panel) {
+function destroyCodeMirrorPanel(panel, {invalidateEnsure = true} = {}) {
+  if (panel && invalidateEnsure) panel._cmGeneration = Number(panel._cmGeneration || 0) + 1;
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
   panel?._diffOverviewViewportCleanup?.();
@@ -75370,6 +75370,11 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmMode = '';
     panel._cmPlainFallback = false;
   }
+}
+
+function destroyFileEditorPanel(panel) {
+  destroyCodeMirrorPanel(panel);
+  destroyProseMirrorPanel(panel);
 }
 
 function codeMirrorPanelContent(panel) {
@@ -76311,7 +76316,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       return true;
     }
     captureFileEditorPanelViewState(item, panel);
-    destroyCodeMirrorPanel(panel);
+    destroyCodeMirrorPanel(panel, {invalidateEnsure: false});
     container.replaceChildren();
     panel._cmDiffLayout = layout;
     installCodeMirrorDiffResizeObserver(panel, item, path, container);
@@ -76449,7 +76454,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
     captureFileEditorPanelViewState(item, panel);
-    destroyCodeMirrorPanel(panel);
+    destroyCodeMirrorPanel(panel, {invalidateEnsure: false});
     container.textContent = t('editor.codemirrorLoading');
   }
   try {
@@ -79357,12 +79362,7 @@ async function ensureProseMirrorPanel(panel, item, path, state, parts, ensureGen
   destroyProseMirrorPanel(panel, {invalidateEnsure: false});
   try {
     const api = await loadProseMirrorApi();
-    const currentState = fileEditorPanelState(panel);
-    if (ensureGeneration !== panel._pmEnsureGeneration
-      || !panel.isConnected
-      || panel.dataset.filePath !== path
-      || currentState?.content !== state.content
-      || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
+    if (!prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) return false;
     try {
       const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
       if (ready) {
@@ -79371,17 +79371,25 @@ async function ensureProseMirrorPanel(panel, item, path, state, parts, ensureGen
       }
       return ready;
     } catch (error) {
-      if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+      if (prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
         renderProseMirrorFailure(panel, path, parts, error);
       }
       return false;
     }
   } catch (error) {
-    if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+    if (prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
       renderProseMirrorFailure(panel, path, parts, error);
     }
     return false;
   }
+}
+
+function prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration) {
+  return ensureGeneration === panel._pmEnsureGeneration
+    && panelNodes.get(item) === panel
+    && panel.dataset.filePath === path
+    && fileEditorPanelState(panel)?.content === state.content
+    && ['preview', 'split'].includes(editorViewModeFor(path, item));
 }
 
 function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
@@ -79400,8 +79408,7 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
   const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration);
   parts.previewPane._previewAsync = ensurePromise;
   void ensurePromise.then(ready => {
-    if (ensureGeneration !== panel._pmEnsureGeneration) return;
-    if (!ready && panel.dataset.filePath === path) {
+    if (!ready && prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
       renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
     }
   });

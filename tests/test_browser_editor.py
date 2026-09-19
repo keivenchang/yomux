@@ -5,7 +5,7 @@ from tests.browser_helpers.browser_console import assert_only_expected_browser_w
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
@@ -671,6 +671,378 @@ def test_markdown_prosemirror_async_init_keeps_latest_state_and_cancels_detached
     assert metrics["latestText"] == "Latest state" and metrics["oldVisible"] is False, metrics
     assert metrics["detachedView"] is False and metrics["detachedError"] == "", metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_init_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Tab detach\\n\\nThe ViewEditor must survive a temporary Dockview detach.';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            releaseLoad();
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+
+            await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {
+              timeoutMs: 5000,
+              description: 'ViewEditor after transient tab detach',
+            });
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              ready: Boolean(panel._pmView),
+              connected: Boolean(panel._pmView?.dom?.isConnected),
+              text: panel._pmView?.state?.doc?.textContent || '',
+              error: panel._pmError || '',
+              state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics or metrics["error"] == "", metrics
+    assert metrics["ready"] is True and metrics["connected"] is True, metrics
+    assert metrics["text"] == "Tab detachThe ViewEditor must survive a temporary Dockview detach.", metrics
+    assert metrics["state"] == "ready", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_failure_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            let rejectLoad = null;
+            const heldLoad = new Promise((_resolve, reject) => { rejectLoad = reject; });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH-FAILURE.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Tab detach failure';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            rejectLoad(new Error('specific transient-detach parser failure'));
+            await heldLoad.catch(() => {});
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.get(item) === panel,
+              connected: panel.isConnected,
+              error: panel._pmError || '',
+              status: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is True and metrics["connected"] is True, metrics
+    assert "specific transient-detach parser failure" in metrics["error"], metrics
+    assert metrics["status"] == "error", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_async_init_cancels_closed_tab(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadProseMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadProseMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/CLOSED-TAB.md';
+            const item = fileEditorItemFor(path);
+            const source = '# Closed tab';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            const generationBeforeClose = panel._pmEnsureGeneration || 0;
+            removePanelForItem(item);
+            releaseLoad();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadProseMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.has(item),
+              connected: panel.isConnected,
+              ready: Boolean(panel._pmView),
+              error: panel._pmError || '',
+              generationBeforeClose,
+              generationAfterClose: panel._pmEnsureGeneration || 0,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadProseMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is False and metrics["connected"] is False, metrics
+    assert metrics["ready"] is False and metrics["error"] == "", metrics
+    assert metrics["generationAfterClose"] > metrics["generationBeforeClose"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_codemirror_async_init_cancels_closed_tab(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadCodeMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadCodeMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/CLOSED-TAB.js';
+            const item = fileEditorItemFor(path);
+            const source = 'const closed = true;';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'javascript'});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            const generationBeforeClose = panel._cmGeneration || 0;
+            removePanelForItem(item);
+            releaseLoad();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            window.loadCodeMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.has(item),
+              connected: panel.isConnected,
+              ready: Boolean(panel._cmView),
+              generationBeforeClose,
+              generationAfterClose: panel._cmGeneration || 0,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadCodeMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is False and metrics["connected"] is False, metrics
+    assert metrics["ready"] is False, metrics
+    assert metrics["generationAfterClose"] > metrics["generationBeforeClose"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_codemirror_async_init_survives_transient_tab_detach(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalLoader = window.loadCodeMirrorApi;
+          try {
+            const api = await originalLoader();
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.loadCodeMirrorApi = () => heldLoad;
+            const path = '/home/test/yolomux.dev/TAB-DETACH.js';
+            const item = fileEditorItemFor(path);
+            const source = 'const detached = true;';
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'javascript'});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await Promise.resolve();
+
+            panel.remove();
+            releaseLoad();
+            await Promise.resolve();
+            document.getElementById('grid').append(panel);
+            await window.__yolomuxTestWaitFor(() => panel._cmView, {
+              timeoutMs: 5000,
+              description: 'CodeMirror after transient tab detach',
+            });
+            window.loadCodeMirrorApi = originalLoader;
+            done({
+              registered: panelNodes.get(item) === panel,
+              connected: panel._cmView?.dom?.isConnected === true,
+              text: panel._cmView?.state?.doc?.toString() || '',
+              mode: panel._cmMode || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            window.loadCodeMirrorApi = originalLoader;
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["registered"] is True and metrics["connected"] is True, metrics
+    assert metrics["text"] == "const detached = true;" and metrics["mode"] == "edit", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(browser, tmp_path):
+    paths = [
+        '/home/test/yolomux.dev/FIRST.md',
+        '/home/test/yolomux.dev/SECOND.md',
+    ]
+    items = ['file:' + path for path in paths]
+    encoded = [quote(item, safe='') for item in items]
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout=left&tabs=left:{encoded[0]}*,{encoded[1]}",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    initialized = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const api = await loadProseMirrorApi();
+            const items = arguments[0];
+            for (const [index, item] of items.entries()) {
+              const path = fileItemPath(item);
+              const source = `# File ${index + 1}\\n\\nDockview tab content ${index + 1}.`;
+              setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+              setFileEditorViewMode(path, 'preview', item);
+              const panel = panelNodes.get(item);
+              destroyProseMirrorPanel(panel);
+              delete panel._pmError;
+            }
+            const first = panelNodes.get(items[0]);
+            renderFileEditorPanel(first, items[0]);
+            await window.__yolomuxTestWaitFor(() => first._pmView || first._pmError, {
+              timeoutMs: 5000,
+              description: 'first Dockview ViewEditor',
+            });
+            let releaseLoad = null;
+            const heldLoad = new Promise(resolve => { releaseLoad = () => resolve(api); });
+            window.__dockviewOriginalProseMirrorLoader = window.loadProseMirrorApi;
+            window.loadProseMirrorApi = () => heldLoad;
+            window.__releaseDockviewProseMirrorLoad = releaseLoad;
+            done({ready: Boolean(first._pmView), error: first._pmError || '', panels: items.map(item => panelNodes.has(item))});
+          } catch (error) {
+            done({failure: String(error?.stack || error)});
+          }
+        })();
+        """,
+        items,
+    )
+    assert "failure" not in initialized and initialized["ready"] is True, initialized
+    assert initialized["error"] == "" and initialized["panels"] == [True, True], initialized
+
+    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[1]}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[1])
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return panelNodes.get(arguments[0])?.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState === 'loading'",
+            items[1],
+        )
+    )
+    browser.execute_script("window.__releaseDockviewProseMirrorLoad()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const panel = panelNodes.get(arguments[0]); return Boolean(panel?._pmView || panel?._pmError)",
+            items[1],
+        )
+    )
+    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[0]}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[0])
+    )
+    metrics = browser.execute_script(
+        """
+        window.loadProseMirrorApi = window.__dockviewOriginalProseMirrorLoader;
+        delete window.__dockviewOriginalProseMirrorLoader;
+        delete window.__releaseDockviewProseMirrorLoad;
+        return arguments[0].map(item => {
+          const panel = panelNodes.get(item);
+          return {
+            ready: Boolean(panel?._pmView),
+            connected: Boolean(panel?._pmView?.dom?.isConnected),
+            roots: panel?.querySelectorAll('.ProseMirror')?.length || 0,
+            error: panel?._pmError || '',
+          };
+        });
+        """,
+        items,
+    )
+    assert metrics == [
+        {"ready": True, "connected": True, "roots": 1, "error": ""},
+        {"ready": True, "connected": True, "roots": 1, "error": ""},
+    ], metrics
+    failures = browser.execute_script(
+        "return {errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};"
+    )
+    assert failures == {"errors": [], "rejections": []}
 
 
 def test_markdown_prosemirror_cancels_detached_local_image_hydration(browser, tmp_path):

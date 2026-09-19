@@ -1228,6 +1228,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    cleanup: (_item, panel) => destroyFileEditorPanel(panel),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       if (isHistoricalFileEditorItem(item)) return false;

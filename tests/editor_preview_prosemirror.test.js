@@ -90,7 +90,10 @@ assert.match(adapter, /parsedTaskLines\.push\(Number\(node\.attrs\.taskLine \|\|
 assert.match(adapter, /setMeta\('yolomuxSourceLineRefresh', true\)/);
 assert.match(adapter, /transaction\.getMeta\('yolomuxSourceLineRefresh'\) !== true/);
 assert.doesNotMatch(adapter, /_pmEnsurePromise/);
-assert.match(adapter, /ensureGeneration !== panel\._pmEnsureGeneration[\s\S]*!panel\.isConnected/);
+assert.match(adapter, /ensureGeneration === panel\._pmEnsureGeneration/);
+assert.doesNotMatch(adapter, /ensureGeneration === panel\._pmEnsureGeneration[\s\S]{0,160}!panel\.isConnected/);
+assert.match(adapter, /panelNodes\.get\(item\) === panel/);
+assert.match(adapter, /!ready && prosemirrorPanelInitializationCurrent\(panel, item, path, state, ensureGeneration\)/);
 assert.doesNotMatch(adapter, /function startProseMirrorImageLoads/);
 assert.match(adapter, /markdown-it collapses extra blank lines/);
 assert.match(adapter, /ignoredCommentLines/);

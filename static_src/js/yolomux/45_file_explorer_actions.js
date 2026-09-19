@@ -4420,9 +4420,7 @@ function renameOpenFilePath(oldPath, newPath) {
     viewModes.delete(oldPath);
   }
   for (const item of panelItems) {
-    const panel = panelNodes.get(item);
-    if (panel) panel.remove();
-    panelNodes.delete(item);
+    removePanelForItem(item);
   }
   if (activeFile === oldPath) activeFile = newPath;
   syncFileLayoutItems();

@@ -1315,12 +1315,7 @@ async function ensureProseMirrorPanel(panel, item, path, state, parts, ensureGen
   destroyProseMirrorPanel(panel, {invalidateEnsure: false});
   try {
     const api = await loadProseMirrorApi();
-    const currentState = fileEditorPanelState(panel);
-    if (ensureGeneration !== panel._pmEnsureGeneration
-      || !panel.isConnected
-      || panel.dataset.filePath !== path
-      || currentState?.content !== state.content
-      || !['preview', 'split'].includes(editorViewModeFor(path, item))) return false;
+    if (!prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) return false;
     try {
       const ready = createProseMirrorPanel(panel, item, path, state, parts, api);
       if (ready) {
@@ -1329,17 +1324,25 @@ async function ensureProseMirrorPanel(panel, item, path, state, parts, ensureGen
       }
       return ready;
     } catch (error) {
-      if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+      if (prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
         renderProseMirrorFailure(panel, path, parts, error);
       }
       return false;
     }
   } catch (error) {
-    if (ensureGeneration === panel._pmEnsureGeneration && panel.isConnected) {
+    if (prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
       renderProseMirrorFailure(panel, path, parts, error);
     }
     return false;
   }
+}
+
+function prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration) {
+  return ensureGeneration === panel._pmEnsureGeneration
+    && panelNodes.get(item) === panel
+    && panel.dataset.filePath === path
+    && fileEditorPanelState(panel)?.content === state.content
+    && ['preview', 'split'].includes(editorViewModeFor(path, item));
 }
 
 function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
@@ -1358,8 +1361,7 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
   const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration);
   parts.previewPane._previewAsync = ensurePromise;
   void ensurePromise.then(ready => {
-    if (ensureGeneration !== panel._pmEnsureGeneration) return;
-    if (!ready && panel.dataset.filePath === path) {
+    if (!ready && prosemirrorPanelInitializationCurrent(panel, item, path, state, ensureGeneration)) {
       renderProseMirrorFailure(panel, path, parts, panel._pmError || t('editor.prosemirrorDidNotInitialize'));
     }
   });
