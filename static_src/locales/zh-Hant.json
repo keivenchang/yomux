@@ -2507,6 +2507,7 @@
   "debug.system.roster.detail.sampler": "優!統計 取樣器",
   "gitDiff.binary": "二進位",
   "gitDiff.changedFiles": "已變更的檔案",
+  "gitDiff.dirty": "髒",
   "gitDiff.empty": "此範圍內沒有提交。",
   "gitDiff.filesTruncated": "檔案清單已截斷。",
   "gitDiff.firstParent": "與第一個父提交比較",

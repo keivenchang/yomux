@@ -137,6 +137,10 @@ const jsDebugStatsAgentStatusState = {
   revision: 0,
   inFlight: null,
   updatedAtMs: 0,
+  // Graph activation can be replayed by panel/layout lifecycle events. Keep a forced
+  // activation fresh, but do not let those replays turn one visible chart into a request
+  // stream; the endpoint is supplementary to the stats snapshot/SSE transport.
+  lastForcedAtMs: 0,
 };
 const jsDebugCurrentStatsClientState = {
   client: null,

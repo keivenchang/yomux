@@ -39,6 +39,57 @@ func TestTmuxCommandArgsIgnoresTestOnlySocketWhenProductionSocketIsAbsent(t *tes
 	}
 }
 
+func TestParseTmuxSessionsKeepsTheMachineRosterExact(t *testing.T) {
+	got := parseTmuxSessions("yo7220\nname with spaces\nyo7220\n\n")
+	want := map[string]struct{}{"yo7220": {}, "name with spaces": {}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tmux sessions = %#v, want %#v", got, want)
+	}
+}
+
+func TestTmuxScopedAgentRecordsDropsPaneLessProcesses(t *testing.T) {
+	records := tmuxScopedAgentRecords([]AgentRecord{
+		{Kind: "codex", PID: 1, TmuxSession: "yo7222", TmuxPaneID: "%7"},
+		{Kind: "codex", PID: 2, TmuxSession: "", TmuxPaneID: ""},
+		{Kind: "opencode", PID: 3, TmuxSession: "yo7220", TmuxPane: "2"},
+	})
+	if len(records) != 2 || records[0].PID != 1 || records[1].PID != 3 {
+		t.Fatalf("tmux-scoped records = %#v", records)
+	}
+}
+
+func TestTmuxNoServerErrorIsAnEmptyRoster(t *testing.T) {
+	for _, output := range []string{
+		"no server running on /tmp/tmux-1000/default",
+		"error connecting to /tmp/tmux-1000/default (No such file or directory)",
+	} {
+		if !TmuxNoServerError([]byte(output)) {
+			t.Fatalf("TmuxNoServerError(%q) = false", output)
+		}
+	}
+	if TmuxNoServerError([]byte("tmux: unknown option -- bad")) {
+		t.Fatal("unrelated tmux failure was classified as an empty roster")
+	}
+}
+
+func TestLinuxTmuxRosterTreatsMissingServerAsEmpty(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "tmux.sock"))
+	sessions, err := linuxTmuxSessions(context.Background())
+	if err != nil {
+		t.Fatalf("linuxTmuxSessions() error = %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("linuxTmuxSessions() = %#v, want empty", sessions)
+	}
+	panes, err := linuxTmuxPanes(context.Background())
+	if err != nil {
+		t.Fatalf("linuxTmuxPanes() error = %v", err)
+	}
+	if len(panes) != 0 {
+		t.Fatalf("linuxTmuxPanes() = %#v, want empty", panes)
+	}
+}
+
 func TestClassifyAgentRequiresEntryPoint(t *testing.T) {
 	tests := []struct {
 		command, executable, want string
@@ -163,6 +214,21 @@ func TestBuildOpenCodeInventoryKeepsProcessRowsWhenTmuxAnnotationFails(t *testin
 	case <-started:
 	default:
 		t.Fatal("tmux annotation was not attempted")
+	}
+}
+
+func TestBuildOpenCodeInventoryFailsClosedWhenTmuxScopeHasNoPanes(t *testing.T) {
+	processes := []AgentProcess{{PID: 702, PPID: 1, Command: "node /opt/opencode --session=outside", Executable: "/opt/opencode"}}
+	got, errs := BuildOpenCodeInventory(context.Background(), OpenCodeInventorySources{
+		Processes:       func(context.Context) ([]AgentProcess, error) { return processes, nil },
+		Panes:           func(context.Context) ([]AgentTmuxPane, error) { return nil, nil },
+		RequireTmuxPane: true,
+	})
+	if len(got) != 0 {
+		t.Fatalf("scoped inventory admitted pane-less process: %#v", got)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("empty scoped pane snapshot unexpectedly errored: %v", errs)
 	}
 }
 

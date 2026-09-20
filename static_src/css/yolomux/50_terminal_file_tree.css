@@ -3662,6 +3662,10 @@ body.app-vw-lte-980 .tabs {
   font-size: var(--file-explorer-font-size);
   line-height: 1.4;
   cursor: pointer;
+  /* A tap should activate the row without the browser waiting to classify it as a double tap.
+     manipulation keeps native vertical scrolling available while removing the touch ambiguity
+     caused by the draggable Finder row. */
+  touch-action: manipulation;
   white-space: nowrap;
   user-select: none;
 }

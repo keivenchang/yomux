@@ -21,7 +21,9 @@ YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh --golang 7221
 
 `boot.sh --golang` is equivalent to `boot.sh --backend go`. It finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs.
 
-Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The current Python launcher path does not forward Python `--cert`, `--key`, `--http`, `--dev`, or `--dang` behavior into Go. The Go binary accepts its own `--cert`, `--key`, and `--http` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
+Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
+ All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOLOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOLOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
+Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
 
 The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yolomux_lib.web`; it does not contain a second HTML shell.
 
@@ -47,11 +49,15 @@ flowchart LR
 
 One `yolomux-go` process owns:
 
-- HTTPS, TLS, authentication, static files, and the shared application bootstrap.
-- tmux discovery, session creation and deletion, PTY/WebSocket terminal I/O, and terminal status paths that have registered handlers.
-- An SSE event broker, durable accepted-operation journal, terminal operation events, acknowledgements, cancellation, and repair after restart.
-- Finder and Differ routes, descriptor-bound filesystem access, Git subprocesses, watches, uploads, previews, and bounded in-process schedulers.
-- YO!stats SQLite writing/reading, snapshots/deltas/SSE, materialization, bounded rings, pricing, host metrics, agent status, transcript tokens, and OpenCode ingestion.
+* HTTPS, TLS, authentication, static files, and the shared application bootstrap.
+
+* tmux discovery, session creation and deletion, PTY/WebSocket terminal I/O, and terminal status paths that have registered handlers.
+
+* An SSE event broker, durable accepted-operation journal, terminal operation events, acknowledgements, cancellation, and repair after restart.
+
+* Finder and Differ routes, descriptor-bound filesystem access, Git subprocesses, watches, uploads, previews, and bounded in-process schedulers.
+
+* YO!stats SQLite writing/reading, snapshots/deltas/SSE, materialization, bounded rings, pricing, host metrics, agent status, transcript tokens, and OpenCode ingestion.
 
 The Go process does not start or talk to Python `statsd`, `indexd`, `batchd`, `statusd`, `watchd`, or `approvald`. Those names describe the Python backend only.
 
@@ -76,17 +82,23 @@ The Go process does not start or talk to Python `statsd`, `indexd`, `batchd`, `s
 
 The current catalog marks these capabilities available:
 
-- `core.bootstrap.v1`, `core.diagnostics.v1`
-- `terminal.websocket.v1`, `terminal.tmux.v1`, `terminal.status.v1`
-- `session.roster.v1`, `session.create.v1`, `session.kill.v1`, `session.rename.v1`
-- `pane.finder.v1`, `pane.differ.v1`, `pane.stats.v1`
-- `finder.read.v1`, `finder.watch.v1`, `finder.write.v1`, `finder.search.v1`, `finder.batch.v1`, `finder.git.v1`, `finder.preview.v1`
+* `core.bootstrap.v1`, `core.diagnostics.v1`
+
+* `terminal.websocket.v1`, `terminal.tmux.v1`, `terminal.status.v1`
+
+* `session.roster.v1`, `session.create.v1`, `session.kill.v1`, `session.rename.v1`
+
+* `pane.finder.v1`, `pane.differ.v1`, `pane.stats.v1`
+
+* `finder.read.v1`, `finder.watch.v1`, `finder.write.v1`, `finder.search.v1`, `finder.batch.v1`, `finder.git.v1`, `finder.preview.v1`
 
 The current catalog marks these pane capabilities unavailable:
 
-- `pane.tabber.v1`
-- `pane.chat.v1`
-- `pane.agent.v1`
+* `pane.tabber.v1`
+
+* `pane.chat.v1`
+
+* `pane.agent.v1`
 
 There is one known catalog/handler mismatch: `session.rename.v1` is marked available, but the Go server does not register `/api/rename-session`. A stale client reaches the generic typed `501 feature_unavailable` handler. Until the implementation or catalog is corrected, documentation and UI code must not claim that Go session rename works.
 
@@ -98,32 +110,49 @@ The following routes have concrete handlers in `cmd/yolomux-go`.
 
 ### Core, Authentication, Events, And Operations
 
-- `/healthz`, `/livez`, authenticated `/readyz`
-- `/login`, `/logout`, `/api/auth-setup`
-- `/`, `/static/*`, `/api/ping`, `/api/capabilities`
-- `/api/client-events`, `/api/event`
-- `/api/operations/{id}`, `/api/operations/ack`, `/api/operations/cancel`, `/api/operations/accept`, `/api/operations/terminalize`
-- `/api/background/status`, `/api/background/claim`
-- `/api/system-status`, `/api/system-status/advanced`, `/api/logs`
+* `/healthz`, `/livez`, authenticated `/readyz`
+
+* `/login`, `/logout`, `/api/auth-setup`
+
+* `/`, `/static/*`, `/api/ping`, `/api/capabilities`
+
+* `/api/client-events`, `/api/event`
+
+* `/api/operations/{id}`, `/api/operations/ack`, `/api/operations/cancel`, `/api/operations/accept`, `/api/operations/terminalize`
+
+* `/api/background/status`, `/api/background/claim`
+
+* `/api/system-status`, `/api/system-status/advanced`, `/api/logs`
 
 ### Terminal And Sessions
 
-- `/ws`, `/api/tmux`, `/api/tmux-session-exists`
-- `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/kill-session`
-- `/api/transcripts`, `/api/transcript`, `/api/context`, `/api/context-items`, `/api/context-stream`
+* `/ws`, `/api/tmux`, `/api/tmux-signals`, `/api/tmux-session-exists`
 
-The shared browser must capability-gate other Python terminal/session paths. Auto-approval, activity APIs, self-update, and YO!agent are not made available merely because the terminal itself works. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
+* `/api/session-metadata`, `/api/activity`
+
+* `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/kill-session`
+
+* `/api/transcripts`, `/api/transcript`, `/api/context`, `/api/context-items`, `/api/context-stream`
+
+The shared browser must capability-gate other Python terminal/session paths. Auto-approval, self-update, and YO!agent are not made available merely because the terminal itself works. Go's Tabber activity route is admitted by the machine-wide tmux roster, so every live session gets one top-level row before pane metadata or agent enrichment arrives. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
 
 ### Finder, Editor, And Differ
 
-- `/api/fs/fast/list`, `/api/fs/list`, `/api/fs/read`, `/api/fs/info`, `/api/fs/raw`
-- `/api/fs/write`, `/api/fs/delete`, `/api/fs/rename`, `/api/fs/mkdir`, `/api/upload`
-- `/api/fs/search`, `/api/fs/search-stream`, `/api/fs/index-status`, `/api/fs/unindex`
-- `/api/fs/watch-diff`, `/api/watch/roots`
-- `/api/fs/batch`, `/api/fs/resolve-file-candidates`
-- `/api/fs/diff`, `/api/fs/git-history`, `/api/fs/git-commit`
-- `/api/batch/search`, `/api/batch/blame`, `/api/batch/zip`, `/api/batch/count`, `/api/batch/html-preview`
-- `/api/session-files`, `/api/session-files-batch`
+* `/api/fs/fast/list`, `/api/fs/list`, `/api/fs/read`, `/api/fs/info`, `/api/fs/raw`
+
+* `/api/fs/write`, `/api/fs/delete`, `/api/fs/rename`, `/api/fs/mkdir`, `/api/upload`
+
+* `/api/fs/search`, `/api/fs/search-stream`, `/api/fs/index-status`, `/api/fs/unindex`
+
+* `/api/fs/watch-diff`, `/api/watch/roots`
+
+* `/api/fs/batch`, `/api/fs/resolve-file-candidates`
+
+* `/api/fs/diff`, `/api/fs/git-history`, `/api/fs/git-commit`
+
+* `/api/batch/search`, `/api/batch/blame`, `/api/batch/zip`, `/api/batch/count`, `/api/batch/html-preview`
+
+* `/api/session-files`, `/api/session-files-batch`
 
 TextEdit and ViewEdit use the shared browser implementation and these Finder read/write/raw/upload/preview routes. There is no separate Go editor daemon or editor capability family.
 
@@ -133,9 +162,13 @@ Finder's fast path lists names without optional repository enrichment. The brows
 
 ### YO!stats
 
-- `/api/stats-agent-status`, `/api/stats-capabilities`
-- `/api/stats-observations`, `/api/stats-snapshot`, `/api/stats-delta`, `/api/stats-stream`
-- `/api/pricing-catalog`
+Tabber's Go API is separate from YO!stats storage: `/api/activity?scope=all` returns the global tmux session order plus live pane/window metadata and activity fields consumed by the shared Tabber tree. The Go command boundary clears inherited nested-tmux variables for this machine-wide read; tests use `YOLOMUX_TMUX_SOCKET` with synthetic sessions when isolation is required.
+
+* `/api/stats-agent-status`, `/api/stats-capabilities`
+
+* `/api/stats-observations`, `/api/stats-snapshot`, `/api/stats-delta`, `/api/stats-stream`
+
+* `/api/pricing-catalog`
 
 The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It does not use the Python statsd RPC protocol. See [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md) and [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) for the storage/wire split and remaining parity gaps.
 
@@ -160,13 +193,19 @@ Phase numbers are migration history, not runtime configuration. The capability c
 
 The Go backend preserves the shared response and async rules:
 
-- Auth and role checks run before route work.
-- Immediate work returns a terminal response envelope.
-- Accepted work receives a durable operation id and must publish exactly one terminal completion or failure.
-- Operation acknowledgements are persisted and pruned within bounds.
-- Request cancellation does not cancel work after the server has returned an accepted receipt; explicit operation cancellation owns that transition.
-- Events and operations survive bounded restart repair through `go-events.jsonl`, `go-operations.json`, and `go-operations.jsonl` under the selected private state/config root.
-- Unknown or unavailable routes return typed failures instead of HTTP 200 with embedded error text.
+* Auth and role checks run before route work.
+
+* Immediate work returns a terminal response envelope.
+
+* Accepted work receives a durable operation id and must publish exactly one terminal completion or failure.
+
+* Operation acknowledgements are persisted and pruned within bounds.
+
+* Request cancellation does not cancel work after the server has returned an accepted receipt; explicit operation cancellation owns that transition.
+
+* Events and operations survive bounded restart repair through `go-events.jsonl`, `go-operations.json`, and `go-operations.jsonl` under the selected private state/config root.
+
+* Unknown or unavailable routes return typed failures instead of HTTP 200 with embedded error text.
 
 The Go service uses separate bounded schedulers for interactive Finder work, background refresh, bulk work, and streamed search. Queue saturation returns a typed busy failure. It does not create Python `batchd` workers or rely on a cross-process queue.
 
@@ -188,47 +227,76 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 `//:go_tests` includes:
 
-- Go unit suites for the server, capabilities, Finder, stats, fake LLM, and scheduler.
-- Race-enabled Go suites for those owners.
-- Go binary/API contract and Bazel action-environment tests.
-- Docker runtime contract coverage.
-- Dockerized Chromium Finder/editor/Differ end-to-end coverage.
-- Dockerized Chromium YO!stats coverage.
-- Dockerized agent-status integration coverage.
+* Go unit suites for the server, capabilities, Finder, stats, fake LLM, and scheduler.
+
+* Race-enabled Go suites for those owners.
+
+* Go binary/API contract and Bazel action-environment tests.
+
+* Docker runtime contract coverage.
+
+* Dockerized Chromium Finder/editor/Differ end-to-end coverage.
+
+* Dockerized Chromium YO!stats coverage.
+
+* Dockerized agent-status integration coverage.
 
 `python3 tools/check.py` covers Python, the shared frontend, and the Dockerized Go suite once. A fixed live port is a manual smoke target only and cannot replace that gate.
 
 ## Remaining Gaps
 
-- Tabber, YO!chat, and YO!agent remain Python-only.
-- The Go catalog currently overstates session rename, as described above.
-- Python self-update/restart and several Python diagnostic/automation routes are not implemented in Go.
-- Go HTML rendering still depends on a Python subprocess and Python package environment.
-- Authentication storage and throttling are not at Python parity. Go reads the shared `auth.yaml` format and enforces route roles, but its browser-form limiter is an in-memory five-failure window keyed by socket peer and username; it is not durable or shared across ports, and Go HTTP Basic authentication does not pass through that limiter. Keep the preview behind a trusted network boundary.
-- Go consumes `YOLOMUX_CONFIG_DIR`, `YOLOMUX_STATE_DIR`, `YOLOMUX_ROOT`, and `YOLOMUX_STATS_DATABASE`, but it does not implement Python's `YOLOMUX_RUNTIME_DIR`/`YOLOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
-- Go YO!stats is not a drop-in implementation of Python statsd RPC/lifecycle ownership. Python remains the reference and rollback backend.
-- Transcript scan state is process memory except for the OpenCode cursor sidecar; restart behavior therefore differs from Python's mature collector state.
-- Runtime agent/OpenCode discovery currently uses Linux adapters. Cross-platform parity is not established.
-- Exact cross-backend output comparison, long-history migration evidence, and production-scale performance evidence remain incomplete.
-- The Go build/test/runtime path is Linux-first. Docker is the required certification environment for current Chromium and race coverage.
+* YO!chat and YO!agent remain Python-only; Go now serves the global tmux roster/activity API used by Tabber.
+
+* The Go catalog currently overstates session rename, as described above.
+
+* Python self-update/restart and several Python diagnostic/automation routes are not implemented in Go.
+
+* Go HTML rendering still depends on a Python subprocess and Python package environment.
+
+* Authentication storage and throttling are not at Python parity. Go reads the shared `auth.yaml` format and enforces route roles, but its browser-form limiter is an in-memory five-failure window keyed by socket peer and username; it is not durable or shared across ports, and Go HTTP Basic authentication does not pass through that limiter. Keep the preview behind a trusted network boundary.
+
+* Go consumes `YOLOMUX_CONFIG_DIR`, `YOLOMUX_STATE_DIR`, `YOLOMUX_ROOT`, and `YOLOMUX_STATS_DATABASE`, but it does not implement Python's `YOLOMUX_RUNTIME_DIR`/`YOLOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
+
+* Go YO!stats is not a drop-in implementation of Python statsd RPC/lifecycle ownership. Python remains the reference and rollback backend.
+
+* Transcript scan state is process memory except for the OpenCode cursor sidecar; restart behavior therefore differs from Python's mature collector state.
+
+* Runtime agent/OpenCode discovery currently uses Linux adapters. Cross-platform parity is not established.
+
+* Exact cross-backend output comparison, long-history migration evidence, and production-scale performance evidence remain incomplete.
+
+* The Go build/test/runtime path is Linux-first. Docker is the required certification environment for current Chromium and race coverage.
 
 ## Rollout Rules
 
 1. Build the exact worktree with Bazel.
+
 2. Run the complete Dockerized Bazel suite with fixture-owned state and ports.
+
 3. Fix product failures; do not hide them with retries, sleeps, lower concurrency, or a live-port substitution.
+
 4. Start an explicit non-production preview port through `boot.sh --golang` only after automated checks.
+
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
+
 6. Keep Python as the rollback/default backend until missing capabilities and parity evidence are closed.
 
 ## Related Documents
 
-- [`README.md`](README.md): operator quickstart and dual-backend overview.
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): prerequisites, source layout, build, tests, and restart commands.
-- [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md): Go YO!stats implementation and gaps.
-- [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): current Python and Go process ownership.
-- [`docs/specs/BACKEND_TEST_CONTRACT.md`](docs/specs/BACKEND_TEST_CONTRACT.md): test isolation and acceptance rules.
-- [`docs/specs/API_RESPONSE_CONTRACT.md`](docs/specs/API_RESPONSE_CONTRACT.md): response envelope and typed-error rules.
-- [`docs/specs/ASYNC_INTERACTION.md`](docs/specs/ASYNC_INTERACTION.md): accepted-operation lifecycle.
-- [`docs/specs/FS_INTERACTIVITY.md`](docs/specs/FS_INTERACTIVITY.md): Finder scheduling and fast-path behavior.
-- [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md): Python and Go YO!stats wire/storage contracts.
+* [`README.md`](README.md): operator quickstart and dual-backend overview.
+
+* [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): prerequisites, source layout, build, tests, and restart commands.
+
+* [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md): Go YO!stats implementation and gaps.
+
+* [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): current Python and Go process ownership.
+
+* [`docs/specs/BACKEND_TEST_CONTRACT.md`](docs/specs/BACKEND_TEST_CONTRACT.md): test isolation and acceptance rules.
+
+* [`docs/specs/API_RESPONSE_CONTRACT.md`](docs/specs/API_RESPONSE_CONTRACT.md): response envelope and typed-error rules.
+
+* [`docs/specs/ASYNC_INTERACTION.md`](docs/specs/ASYNC_INTERACTION.md): accepted-operation lifecycle.
+
+* [`docs/specs/FS_INTERACTIVITY.md`](docs/specs/FS_INTERACTIVITY.md): Finder scheduling and fast-path behavior.
+
+* [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md): Python and Go YO!stats wire/storage contracts.

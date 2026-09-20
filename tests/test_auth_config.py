@@ -149,6 +149,19 @@ def test_uncommented_auth_yaml_is_active(monkeypatch, tmp_path):
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_read_only_bridge_auth_config_does_not_rewrite_plaintext(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.yaml"
+    original = active_auth_yaml()
+    auth_path.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(auth.AUTH_CONFIG_READ_ONLY_ENV, "1")
+
+    users = auth.initialize_auth_config(auth_path)
+
+    assert [user.username for user in users] == ["keivenc", "guest"]
+    assert [user.password for user in users] == ["random-password", "guest"]
+    assert auth_path.read_text(encoding="utf-8") == original
+
+
 def test_auth_cookie_secret_persists(tmp_path):
     secret_path = tmp_path / "auth-cookie-secret"
 
@@ -346,14 +359,14 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert web.server_string("en", "menu.help.about.sha", sha="abcdef123456") in page
     assert web.server_string("en", "menu.help.about.commits", count="1234") in page
 
-    go_page = web.html_page([], backend_label="Go 0.1.0-phase4")
+    go_page = web.html_page([], backend_label="Go 0.9.1")
     go_match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', go_page, re.DOTALL)
     assert go_match
     go_payload = json.loads(go_match.group(1))
     assert go_payload["versionStatus"] == "0.8.1(3)*"
-    assert go_payload["backendLabel"] == "Go 0.1.0-phase4"
+    assert go_payload["backendLabel"] == "Go 0.9.1"
     assert ">0.8.1(3)*</span>" in go_page
-    assert "0.8.1(3)* [Go 0.1.0-phase4]" in go_page
+    assert "0.8.1(3)* [Go 0.9.1]" in go_page
 
 
 def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):

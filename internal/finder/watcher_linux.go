@@ -152,7 +152,7 @@ func (w *linuxNativeWatcher) SetRoots(ctx context.Context, roots []string) nativ
 				}
 				return nil
 			}
-			if isSecretPath(logicalPath) || filepath.Base(logicalPath) == ".git" {
+			if filepath.Base(logicalPath) == ".git" {
 				if logicalPath != root {
 					return fs.SkipDir
 				}
@@ -275,7 +275,7 @@ func isLinuxFDSet(set *syscall.FdSet, fd int) bool {
 func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRoot string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if isSecretPath(root) || filepath.Base(root) == ".git" {
+	if filepath.Base(root) == ".git" {
 		return
 	}
 	remaining := maxNativeWatchRegistrations - len(w.watches)
@@ -312,7 +312,7 @@ func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRo
 			}
 			return nil
 		}
-		if !entry.IsDir() || isSecretPath(logicalPath) || filepath.Base(logicalPath) == ".git" {
+		if !entry.IsDir() || filepath.Base(logicalPath) == ".git" {
 			if entry.IsDir() {
 				return fs.SkipDir
 			}

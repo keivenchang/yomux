@@ -2,10 +2,17 @@
 
 # Shared, source-only startup guards for boot.sh and yolo-dev-start.
 
-# A server deliberately watches the shared default tmux server; test and ad hoc
-# processes must not inherit that authority merely by omitting a socket target.
+# Managed/operator launches deliberately watch the shared default tmux server.
+# Test and ad hoc processes can still pass a private socket directly when they
+# need isolation, but operator launchers must not inherit one accidentally.
 yolomux_default_server_optin() {
   printf '%s' 'YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1'
+}
+
+yolomux_use_machine_tmux() {
+  unset TMUX TMUX_PANE
+  export YOLOMUX_TMUX_SOCKET=
+  export YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1
 }
 
 # Route startup through the same fail-closed Python census as runtime probes.

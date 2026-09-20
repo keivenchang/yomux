@@ -104,9 +104,12 @@ type HostCollectorConfig struct {
 	OwnerGeneration  uint64
 	SourceID         string
 	ProcessKey       string
-	GroupKeys        []string
-	LogicalCPUs      int
-	ActiveFunc       func() bool
+	// ProcessIdentity is the verified PID/start-time identity of the owned
+	// daemon. When set, CPU daemon series exclude same-named co-tenants.
+	ProcessIdentity string
+	GroupKeys       []string
+	LogicalCPUs     int
+	ActiveFunc      func() bool
 }
 
 const DefaultHostMemoryCadence = time.Minute
@@ -140,21 +143,57 @@ func (c HostCollectorConfig) withDefaults() HostCollectorConfig {
 }
 
 type HostCollectorCounters struct {
-	Cycles               uint64
-	AcceptedObservations uint64
-	UnavailableSpans     uint64
-	Errors               uint64
-	LastDuration         time.Duration
+	Cycles                uint64
+	AcceptedObservations  uint64
+	UnavailableSpans      uint64
+	Errors                uint64
+	LastDuration          time.Duration
+	DurationTotal         time.Duration
+	LastCPUProcessRows    uint64
+	LastMemoryProcessRows uint64
+	Family                map[string]CollectorTiming
+}
+
+// CollectorTiming is a runtime-only cost measure. It records wall time spent
+// inside one collector owner, including bounded source reads and its append.
+type CollectorTiming struct {
+	Runs                uint64
+	DurationTotal       time.Duration
+	LastDuration        time.Duration
+	SourceDurationTotal time.Duration
+	LastSourceDuration  time.Duration
 }
 
 type hostCollectorCounters struct {
 	cycles, accepted, unavailable, errors atomic.Uint64
 	lastDuration                          atomic.Int64
+	durationTotal                         atomic.Uint64
+	lastCPUProcessRows                    atomic.Uint64
+	lastMemoryProcessRows                 atomic.Uint64
+	family                                [3]hostFamilyTiming
+}
+
+type hostFamilyTiming struct {
+	runs, durationTotal, sourceDurationTotal atomic.Uint64
+	lastDuration, lastSourceDuration         atomic.Int64
 }
 
 func (c *hostCollectorCounters) snapshot() HostCollectorCounters {
-	return HostCollectorCounters{Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(), LastDuration: time.Duration(c.lastDuration.Load())}
+	family := make(map[string]CollectorTiming, len(hostCollectorFamilies))
+	for index, name := range hostCollectorFamilies {
+		family[name] = CollectorTiming{
+			Runs: c.family[index].runs.Load(), DurationTotal: time.Duration(c.family[index].durationTotal.Load()), LastDuration: time.Duration(c.family[index].lastDuration.Load()),
+			SourceDurationTotal: time.Duration(c.family[index].sourceDurationTotal.Load()), LastSourceDuration: time.Duration(c.family[index].lastSourceDuration.Load()),
+		}
+	}
+	return HostCollectorCounters{
+		Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(),
+		LastDuration: time.Duration(c.lastDuration.Load()), DurationTotal: time.Duration(c.durationTotal.Load()),
+		LastCPUProcessRows: c.lastCPUProcessRows.Load(), LastMemoryProcessRows: c.lastMemoryProcessRows.Load(), Family: family,
+	}
 }
+
+var hostCollectorFamilies = [...]string{"cpu", "system_memory", "gpu"}
 
 // HostCollector owns exactly one collection goroutine when started. RunOnce
 // is also safe for deterministic callers, but must not be called concurrently
@@ -192,7 +231,9 @@ func NewHostCollector(sources HostSources, writer BatchWriter, clock HostCollect
 	if logicalCPUs <= 0 {
 		logicalCPUs = runtime.NumCPU()
 	}
-	return &HostCollector{sources: sources, writer: writer, clock: clock, config: config, sampler: NewCPUDeltaSampler(config.ProcessKey, config.GroupKeys, logicalCPUs), familyEpochs: make(map[string]hostEpochState)}
+	sampler := NewCPUDeltaSampler(config.ProcessKey, config.GroupKeys, logicalCPUs)
+	sampler.processIdentity = config.ProcessIdentity
+	return &HostCollector{sources: sources, writer: writer, clock: clock, config: config, sampler: sampler, familyEpochs: make(map[string]hostEpochState)}
 }
 
 func (c *HostCollector) Counters() HostCollectorCounters { return c.counters.snapshot() }
@@ -259,6 +300,24 @@ func (c *HostCollector) runFamily(parent context.Context, family string) {
 }
 
 func (c *HostCollector) runFamilyWithCadence(parent context.Context, family string, cadence time.Duration) {
+	startedWall := time.Now()
+	var sourceStarted time.Time
+	var sourceDuration time.Duration
+	defer func() {
+		elapsed := time.Since(startedWall)
+		c.counters.durationTotal.Add(uint64(nonNegativeCollectorDuration(elapsed).Nanoseconds()))
+		for index, name := range hostCollectorFamilies {
+			if name != family {
+				continue
+			}
+			c.counters.family[index].runs.Add(1)
+			c.counters.family[index].durationTotal.Add(uint64(nonNegativeCollectorDuration(elapsed).Nanoseconds()))
+			c.counters.family[index].lastDuration.Store(elapsed.Nanoseconds())
+			c.counters.family[index].sourceDurationTotal.Add(uint64(nonNegativeCollectorDuration(sourceDuration).Nanoseconds()))
+			c.counters.family[index].lastSourceDuration.Store(sourceDuration.Nanoseconds())
+			break
+		}
+	}()
 	started := c.clock.Now()
 	if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
 		if family != "system_memory" {
@@ -267,6 +326,7 @@ func (c *HostCollector) runFamilyWithCadence(parent context.Context, family stri
 	}
 	fact := c.familyFactContext(family, started, cadence)
 	var batch AppendBatch
+	sourceStarted = time.Now()
 	if c.sources == nil {
 		c.counters.errors.Add(1)
 		batch = BuildUnavailableFacts(family, fact, "source_unavailable")
@@ -281,11 +341,19 @@ func (c *HostCollector) runFamilyWithCadence(parent context.Context, family stri
 			batch = c.collectGPU(parent, fact)
 		}
 	}
+	sourceDuration = time.Since(sourceStarted)
 	batch = c.finishFamilyBatch(family, fact, batch)
 	c.append(parent, batch)
 	if family == "cpu" {
 		c.counters.cycles.Add(1)
 	}
+}
+
+func nonNegativeCollectorDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 // Stop cancels the owner and waits for its current bounded collection to end.
@@ -404,6 +472,7 @@ func (c *HostCollector) collectCPU(parent context.Context, fact HostFactContext,
 		c.counters.errors.Add(1)
 		return BuildUnavailableFacts("cpu", fact, sourceReason(ctx, err))
 	}
+	c.counters.lastCPUProcessRows.Store(uint64(len(snapshot.Processes)))
 	sample := c.sampler.Sample(snapshot, sampleDuration)
 	return BuildCPUFacts(sample, sample.ProcessCPUPercent, fact)
 }
@@ -416,6 +485,7 @@ func (c *HostCollector) collectMemory(parent context.Context, fact HostFactConte
 		c.counters.errors.Add(1)
 		return BuildUnavailableFacts("system_memory", fact, sourceReason(ctx, err))
 	}
+	c.counters.lastMemoryProcessRows.Store(uint64(len(rows)))
 	return BuildSystemMemoryFacts(memory, rows, nil, fact)
 }
 

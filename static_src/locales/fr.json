@@ -2553,6 +2553,7 @@
   "debug.system.roster.detail.sampler": "Échantillonneur YO!stats",
   "gitDiff.binary": "binaire",
   "gitDiff.changedFiles": "Fichiers modifiés",
+  "gitDiff.dirty": "Sale",
   "gitDiff.empty": "Aucun commit dans ce périmètre.",
   "gitDiff.filesTruncated": "La liste des fichiers est tronquée.",
   "gitDiff.firstParent": "Comparé au premier parent",

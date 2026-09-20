@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -34,15 +35,49 @@ func TestBuildCPUFactsMatchesPythonShape(t *testing.T) {
 func TestBuildCPUFactsEmitsGroupedBinarySeries(t *testing.T) {
 	batch := BuildCPUFacts(CPUSample{
 		Host: hostMeasurement(12.5), Process: hostMeasurement(3.25), Reason: CPUValid,
+		OwnedProcessCPUPercent: map[string]float64{"yolomux-go": 137.5},
 	}, map[string]float64{"python": 8.5, "node": 2.25}, hostFactContext())
 	series, ok := batch.Observations[0].Payload["process_cpu_percent"].(map[string]any)
 	if !ok || !reflect.DeepEqual(series, map[string]any{"python": 8.5, "node": 2.25}) {
 		t.Fatalf("series = %#v", batch.Observations[0].Payload["process_cpu_percent"])
 	}
+	owned, ok := batch.Observations[0].Payload["owned_process_cpu_percent"].(map[string]any)
+	if !ok || !reflect.DeepEqual(owned, map[string]any{"yolomux-go": 137.5}) {
+		t.Fatalf("owned series = %#v", batch.Observations[0].Payload["owned_process_cpu_percent"])
+	}
+	if _, err := batch.Validate(); err != nil {
+		t.Fatalf("owned CPU payload does not validate: %v", err)
+	}
 }
 
 func hostMeasurement(value float64) CPUMeasurement {
 	return CPUMeasurement{Value: value, Valid: true}
+}
+
+func TestSyntheticHostSourcesUseOnlyReproducibleFixtureValues(t *testing.T) {
+	sources := NewSyntheticHostSources("7222:", "yolomux-go")
+	first, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Processes["7222:1"].CPU != 12 || second.Processes["7222:1"].CPU != 24 || second.Processes["synthetic-cotenant:1"].CPU != 100 {
+		t.Fatalf("synthetic CPU counters = first=%+v second=%+v", first, second)
+	}
+	if first.Processes["7222:1"].Binary != "yolomux-go" || first.Processes["synthetic-python:1"].Binary != "python" {
+		t.Fatalf("synthetic process identities = %+v", first.Processes)
+	}
+	memory, rows, err := sources.Memory(context.Background())
+	if err != nil || memory.UsedBytes != 8<<20 || len(rows) != 3 {
+		t.Fatalf("synthetic memory = %+v rows=%+v err=%v", memory, rows, err)
+	}
+	gpu, err := sources.GPU(context.Background())
+	if err != nil || len(gpu) != 1 || gpu[0].Label != "Synthetic GPU" {
+		t.Fatalf("synthetic GPU = %+v err=%v", gpu, err)
+	}
 }
 
 func TestBuildHostFactsValidPayloads(t *testing.T) {
@@ -147,6 +182,31 @@ func TestLinuxProcessCensusUsesInjectedBoundedInputs(t *testing.T) {
 	}
 }
 
+func BenchmarkLinuxProcessCensusSynthetic(b *testing.B) {
+	const processCount = 2000
+	names := make([]string, 0, processCount)
+	files := make(map[string][]byte, processCount)
+	for pid := 1; pid <= processCount; pid++ {
+		name := fmt.Sprintf("%d", pid)
+		names = append(names, name)
+		files["/proc/"+name+"/stat"] = []byte(fmt.Sprintf("%d (synthetic-worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22", pid))
+	}
+	inputs := HostCollectorInputs{
+		ReadDir:  func(string) ([]string, error) { return names, nil },
+		ReadFile: func(name string) ([]byte, error) { return files[name], nil },
+		ReadLink: func(string) (string, error) { return "/usr/bin/synthetic-worker", nil },
+		PageSize: 4096, ClockTick: 100, BinaryCache: make(map[string]string),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, ok := LinuxProcessCensus(inputs, "/proc")
+		if !ok || len(rows) != processCount {
+			b.Fatalf("synthetic census = %d rows, %t", len(rows), ok)
+		}
+	}
+}
+
 func TestLinuxHostSourcesKeepsProcessCounterRateWithSnapshot(t *testing.T) {
 	files := map[string][]byte{
 		"/proc/stat":     []byte("cpu  100 0 0 900 0\n"),
@@ -164,6 +224,53 @@ func TestLinuxHostSourcesKeepsProcessCounterRateWithSnapshot(t *testing.T) {
 	}
 	if snapshot.ProcessTicksPerSecond != 250 || snapshot.Processes["123:19"].CPU != 23 {
 		t.Fatalf("snapshot = %#v, want 250 Hz and 23 ticks", snapshot)
+	}
+}
+
+func TestLinuxHostSourcesCachesStableProcessBinaryResolution(t *testing.T) {
+	files := map[string][]byte{
+		"/proc/stat":     []byte("cpu  100 0 0 900 0\n"),
+		"/proc/123/stat": []byte("123 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"),
+	}
+	readLinks := 0
+	sources := &LinuxHostSources{
+		procRoot: "/proc", readFile: func(name string) ([]byte, error) { return files[name], nil },
+		readDir:  func(string) ([]string, error) { return []string{"123"}, nil },
+		readLink: func(string) (string, error) { readLinks++; return "/usr/bin/yolomux-go", nil },
+		pageSize: 4096, clockTick: 100,
+	}
+	if _, err := sources.CPU(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sources.CPU(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if readLinks != 1 {
+		t.Fatalf("stable process binary was resolved %d times, want once", readLinks)
+	}
+}
+
+func TestLinuxHostSourcesSharesOverlappingProcessCensusBetweenFamilies(t *testing.T) {
+	files := map[string][]byte{
+		"/proc/stat":     []byte("cpu  100 0 0 900 0\n"),
+		"/proc/meminfo":  []byte("MemTotal: 1024 kB\nMemAvailable: 512 kB\n"),
+		"/proc/123/stat": []byte("123 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"),
+	}
+	readDirs := 0
+	sources := &LinuxHostSources{
+		procRoot: "/proc", readFile: func(name string) ([]byte, error) { return files[name], nil },
+		readDir:  func(string) ([]string, error) { readDirs++; return []string{"123"}, nil },
+		readLink: func(string) (string, error) { return "/usr/bin/yolomux-go", nil },
+		pageSize: 4096, clockTick: 100,
+	}
+	if _, err := sources.CPU(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sources.Memory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if readDirs != 1 {
+		t.Fatalf("overlapping CPU/memory census reads = %d, want one shared read", readDirs)
 	}
 }
 

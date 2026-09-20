@@ -1539,7 +1539,11 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('auto-approve', () => {
     if (!clientCanUseUnscopedHostRequests()) return null;
     if (document.visibilityState === 'hidden') return null;
-    if (clientEventTransportState.connected === true) return null;
+    // Python publishes auto_approve_changed over the shared SSE stream. Go has
+    // no auto-approve route/event, so its activity fallback must keep repairing
+    // a transient unavailable sample while the general event stream is healthy.
+    if (clientEventTransportState.connected === true
+        && !(typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback())) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   if (itemInLayout(tabberItemId)) {

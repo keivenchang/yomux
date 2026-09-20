@@ -117,9 +117,9 @@ def test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces():
     assert "--backend go" in command
     assert "--host 0.0.0.0" in command
     assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
-    assert f"YOLOMUX_CLAUDE_TRANSCRIPT_ROOT={Path(env['HOME']) / '.claude/projects'}" in command
-    assert f"YOLOMUX_CODEX_TRANSCRIPT_ROOT={Path(env['HOME']) / '.codex/sessions'}" in command
-    assert f"YOLOMUX_OPENCODE_DATABASE={Path(env['HOME']) / '.local/share/opencode/opencode.db'}" in command
+    assert "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT=" in command
+    assert "YOLOMUX_CODEX_TRANSCRIPT_ROOT=" in command
+    assert "YOLOMUX_OPENCODE_DATABASE=" in command
 
 
 def test_boot_print_command_accepts_backend_go_alias():

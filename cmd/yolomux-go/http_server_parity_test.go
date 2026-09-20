@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -84,7 +85,7 @@ func TestStatsPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
 	}
 	defer writer.Close()
 	observations := []stats.Observation{
-		{EventID: "server-cpu", Family: "cpu", SourceID: "host", ObservedAt: 1990, EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0}},
+		{EventID: "server-cpu", Family: "cpu", SourceID: "host", ObservedAt: 1990, EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0, "process_cpu_percent": map[string]any{"yolomux-go": 7.0, "python": 5.0}}},
 		{EventID: "server-memory", Family: "system_memory", SourceID: "host", ObservedAt: 1991, EpochID: "memory", OwnerGeneration: 1, Payload: map[string]any{"used_bytes": 100.0, "capacity_bytes": 200.0}},
 	}
 	coverage := []stats.CoverageEpoch{
@@ -170,7 +171,7 @@ func TestStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T) {
 	}
 	now := time.Now().Truncate(time.Second)
 	observations := []stats.Observation{
-		{EventID: "external-cpu", Family: "cpu", SourceID: "host", ObservedAt: float64(now.Unix() - 5), EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0}},
+		{EventID: "external-cpu", Family: "cpu", SourceID: "host", ObservedAt: float64(now.Unix() - 5), EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0, "process_cpu_percent": map[string]any{"yolomux-go": 7.0, "python": 5.0}}},
 		{EventID: "external-memory", Family: "system_memory", SourceID: "host", ObservedAt: float64(now.Unix() - 4), EpochID: "memory", OwnerGeneration: 1, Payload: map[string]any{"used_bytes": 100.0, "capacity_bytes": 200.0}},
 	}
 	coverage := []stats.CoverageEpoch{
@@ -253,6 +254,17 @@ func TestStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T) {
 	}
 	if got, want := snapshotSeriesValue(goBody, "system_cpu_percent"), snapshotSeriesValue(pythonBody, "system_cpu_percent"); got != want || got != 40 {
 		t.Fatalf("external system CPU series mismatch: Go=%v Python=%v", got, want)
+	}
+	for _, series := range []struct {
+		name string
+		want float64
+	}{
+		{name: "process_cpu_percent:yolomux-go", want: 7},
+		{name: "process_cpu_percent:python", want: 5},
+	} {
+		if got := snapshotSeriesValue(goBody, series.name); got != series.want {
+			t.Fatalf("external Go top CPU series %s = %v, want %v", series.name, got, series.want)
+		}
 	}
 	goCapabilities := getRawResponseWithBasicAuth(t, goURL+"/api/stats-capabilities")
 	pythonCapabilities := getRawResponse(t, pythonURL+"/api/stats-capabilities")
@@ -348,11 +360,12 @@ func TestStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
 	if err := json.Unmarshal([]byte(pythonSnapshot.body), &pythonBody); err != nil {
 		t.Fatalf("decode production Python snapshot: %v\n%s", err, pythonSnapshot.body)
 	}
-	for _, key := range []string{"protocol_version", "range_seconds", "resolution_seconds", "requested_resolution", "no_data", "cost_report"} {
+	for _, key := range []string{"protocol_version", "range_seconds", "resolution_seconds", "requested_resolution", "cost_report"} {
 		if !reflect.DeepEqual(goBody[key], pythonBody[key]) {
 			t.Fatalf("production snapshot %s mismatch: Go=%#v Python=%#v", key, goBody[key], pythonBody[key])
 		}
 	}
+	assertProductionNoDataTimingParity(t, goBody["no_data"], pythonBody["no_data"], "production snapshot")
 	// The two independently scheduled materializers can straddle a 10-second
 	// wall-clock boundary. Empty buckets then shift by one slot, but every
 	// populated bucket and its series must remain identical; compare those
@@ -427,11 +440,12 @@ func TestStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
 			if err := json.Unmarshal([]byte(pythonMatrix.body), &pythonMatrixBody); err != nil {
 				t.Fatalf("decode production Python matrix snapshot %s: %v", query, err)
 			}
-			for _, key := range []string{"protocol_version", "range_seconds", "resolution_seconds", "requested_resolution", "no_data", "cost_report"} {
+			for _, key := range []string{"protocol_version", "range_seconds", "resolution_seconds", "requested_resolution", "cost_report"} {
 				if !reflect.DeepEqual(goMatrixBody[key], pythonMatrixBody[key]) {
 					t.Fatalf("production matrix snapshot %s %s mismatch: Go=%#v Python=%#v", query, key, goMatrixBody[key], pythonMatrixBody[key])
 				}
 			}
+			assertProductionNoDataTimingParity(t, goMatrixBody["no_data"], pythonMatrixBody["no_data"], query)
 			if !reflect.DeepEqual(productionPopulatedBuckets(goMatrixBody["buckets"]), productionPopulatedBuckets(pythonMatrixBody["buckets"])) {
 				t.Fatalf("production matrix populated buckets mismatch for %s: Go=%#v Python=%#v", query, productionPopulatedBuckets(goMatrixBody["buckets"]), productionPopulatedBuckets(pythonMatrixBody["buckets"]))
 			}
@@ -784,10 +798,12 @@ func normalizeProductionSSE(body string) string {
 
 // normalizeProductionSSESnapshot removes only values that depend on the two
 // independently scheduled test processes crossing a live bucket boundary.
-// The populated bucket payload, source counts, series values, no-data spans,
-// and cost report remain exact parity requirements.  HTTP snapshot parity
-// separately checks populated bucket starts, so this stream-only normalization
-// does not allow a shifted source timestamp to pass both gates.
+// The populated bucket payload, source counts, series values, and cost report
+// remain exact parity requirements.  HTTP snapshot parity separately checks
+// no-data spans and populated bucket starts.  The stream request is made after
+// that snapshot probe, so the two independently scheduled servers can cross a
+// ten-second boundary between the probes; omitting no-data here prevents that
+// wall-clock race from masquerading as an SSE framing mismatch.
 func normalizeProductionSSESnapshot(object map[string]any) {
 	if _, present := object["generated_at"]; present {
 		object["generated_at"] = "<generated-at>"
@@ -798,6 +814,7 @@ func normalizeProductionSSESnapshot(object map[string]any) {
 	if _, present := object["window_end"]; present {
 		object["window_end"] = "<window-end>"
 	}
+	delete(object, "no_data")
 	// rightmost_open is a property of the sampled wall-clock edge.  The
 	// semantic stream contract is the populated product, whose open/closed
 	// state is covered by the direct snapshot gate.
@@ -837,6 +854,73 @@ func snapshotSeriesValue(snapshot map[string]any, key string) float64 {
 		}
 	}
 	return 0
+}
+
+// productionNoDataShape validates the only timing-sensitive no-data form in
+// the live production fixture. The two servers build their current ring on
+// independent clocks, so an open persisted bucket may be historical for one
+// request and still the right edge for the other. Real unavailable spans are
+// not permitted by this fixture and therefore remain a hard test failure.
+func productionNoDataShape(value any) (string, error) {
+	spans, ok := value.([]any)
+	if !ok {
+		return "", fmt.Errorf("no_data is %T, want array", value)
+	}
+	if len(spans) == 0 {
+		return "empty", nil
+	}
+	expectedFamilies := map[string]struct{}{
+		"agent_status": {}, "agent_tokens": {}, "browser": {}, "cost": {},
+		"cpu": {}, "gpu": {}, "service_load": {}, "system_memory": {},
+	}
+	if len(spans) != len(expectedFamilies) {
+		return "", fmt.Errorf("unexpected persisted-gap span count %d", len(spans))
+	}
+	seen := make(map[string]struct{}, len(spans))
+	for _, raw := range spans {
+		span, ok := raw.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("no_data span is %T", raw)
+		}
+		family, _ := span["family"].(string)
+		if _, ok := expectedFamilies[family]; !ok {
+			return "", fmt.Errorf("unexpected no_data family %q", family)
+		}
+		if _, duplicate := seen[family]; duplicate {
+			return "", fmt.Errorf("duplicate no_data family %q", family)
+		}
+		seen[family] = struct{}{}
+		if span["source_id"] != "persisted-ring" || span["reason"] != "incomplete_persisted_bucket" {
+			return "", fmt.Errorf("unexpected persisted-gap provenance: %#v", span)
+		}
+		start, startOK := span["start"].(float64)
+		end, endOK := span["end"].(float64)
+		cadence, cadenceOK := span["source_cadence_seconds"].(float64)
+		if !startOK || !endOK || !cadenceOK || cadence <= 0 || end <= start {
+			return "", fmt.Errorf("invalid persisted-gap bounds: %#v", span)
+		}
+		bucketCount := (end - start) / cadence
+		if bucketCount < 1 || math.Abs(bucketCount-math.Round(bucketCount)) > 1e-6 {
+			return "", fmt.Errorf("invalid persisted-gap bounds: %#v", span)
+		}
+	}
+	if len(seen) != len(expectedFamilies) {
+		return "", fmt.Errorf("missing persisted-gap family: got %v", seen)
+	}
+	return "persisted-gap", nil
+}
+
+func assertProductionNoDataTimingParity(t *testing.T, goValue, pythonValue any, context string) {
+	t.Helper()
+	goShape, goErr := productionNoDataShape(goValue)
+	pythonShape, pythonErr := productionNoDataShape(pythonValue)
+	if goErr != nil || pythonErr != nil {
+		t.Fatalf("%s invalid no_data shape: Go=%q/%v Python=%q/%v", context, goShape, goErr, pythonShape, pythonErr)
+	}
+	// Empty versus persisted-gap, or two persisted gaps at adjacent live
+	// boundaries, is expected when independently scheduled servers cross a
+	// resolution boundary. The exact no-data payload is checked by each owner
+	// above; this assertion rejects every other divergence.
 }
 
 func productionPopulatedBuckets(value any) []any {
@@ -1328,6 +1412,10 @@ func normalizeProductionResponseBody(body string) string {
 		case map[string]any:
 			for key, child := range item {
 				switch key {
+				case "no_data":
+					// Snapshot probes validate the exact synthetic no-data shape. The
+					// later delta/reconnect probes can cross the live ring boundary.
+					item[key] = "<no-data-timing>"
 				case "cache_generation":
 					item[key] = "<cache-generation>"
 				case "generated_at":

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,9 +24,95 @@ import (
 
 	"github.com/keivenchang/yolomux/internal/capabilities"
 	"github.com/keivenchang/yolomux/internal/finder"
+	"github.com/keivenchang/yolomux/internal/stats"
 	"github.com/keivenchang/yolomux/internal/testsupport"
 	"github.com/keivenchang/yolomux/internal/work"
 )
+
+func TestUseMachineTmuxForOperatorLaunch(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/private-tmux,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
+	t.Setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "")
+
+	useMachineTmuxForOperatorLaunch()
+
+	if _, ok := os.LookupEnv("TMUX"); ok {
+		t.Fatal("TMUX must not select a nested/private server")
+	}
+	if _, ok := os.LookupEnv("TMUX_PANE"); ok {
+		t.Fatal("TMUX_PANE must not select a nested/private client")
+	}
+	if got := os.Getenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"); got != "1" {
+		t.Fatalf("default-server opt-in = %q, want 1", got)
+	}
+}
+
+func TestUseMachineTmuxPreservesExplicitFixtureSocket(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/private-tmux,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "/tmp/private-yolomux-tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "")
+
+	useMachineTmuxForOperatorLaunch()
+
+	if got := os.Getenv("TMUX"); got != "/tmp/private-tmux,123,0" {
+		t.Fatalf("TMUX = %q, want explicit fixture environment preserved", got)
+	}
+	if got := os.Getenv("TMUX_PANE"); got != "%7" {
+		t.Fatalf("TMUX_PANE = %q, want explicit fixture environment preserved", got)
+	}
+	if got := os.Getenv("YOLOMUX_TMUX_SOCKET"); got != "/tmp/private-yolomux-tmux.sock" {
+		t.Fatalf("YOLOMUX_TMUX_SOCKET = %q, want explicit fixture socket", got)
+	}
+	if got := os.Getenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"); got != "" {
+		t.Fatalf("default-server opt-in = %q, want unset for fixture", got)
+	}
+}
+
+func TestTmuxCommandContextClearsInheritedNestedClientForGlobalRoster(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/private-supervisor,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
+	t.Setenv("LANG", "")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_CTYPE", "")
+
+	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}")
+	for _, value := range command.Env {
+		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
+			t.Fatalf("global tmux command inherited nested client variable %q", value)
+		}
+	}
+	if !strings.Contains(strings.Join(command.Env, "\x00"), "LC_ALL=C.UTF-8") {
+		t.Fatal("global tmux command did not set the hermetic locale")
+	}
+}
+
+func TestTmuxCommandContextPreservesExplicitFixtureSocketEnvironment(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/private-supervisor,123,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "/tmp/private-fixture.sock")
+
+	command := (&server{}).tmuxCommand("list-sessions")
+	joined := strings.Join(command.Env, "\x00")
+	if !strings.Contains(joined, "TMUX=/tmp/private-supervisor,123,0") || !strings.Contains(joined, "TMUX_PANE=%7") {
+		t.Fatalf("explicit fixture command changed inherited fixture environment: %s", joined)
+	}
+}
+
+func TestPythonBridgeEnvironmentUsesReadOnlyAuthConfig(t *testing.T) {
+	env := strings.Join(pythonBridgeEnvironment("/fixture/root", "/fixture/config"), "\x00")
+	if !strings.Contains(env, "PYTHONPATH=/fixture/root") {
+		t.Fatal("python bridge did not receive the fixture root")
+	}
+	if !strings.Contains(env, "YOLOMUX_CONFIG_DIR=/fixture/config") {
+		t.Fatal("python bridge did not receive the fixture config")
+	}
+	if !strings.Contains(env, "YOLOMUX_AUTH_CONFIG_READ_ONLY=1") {
+		t.Fatal("python bridge must not rewrite auth.yaml")
+	}
+}
 
 func TestWriteAndReadMaskedFrame(t *testing.T) {
 	var wire bytes.Buffer
@@ -51,6 +138,114 @@ func TestHealthAndCapabilities(t *testing.T) {
 	s.health(record, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if record.Code != http.StatusOK || !bytes.Contains(record.Body.Bytes(), []byte(`"backend":"go"`)) {
 		t.Fatalf("health response = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestTmuxIgnoreSizeCapabilityProbeUsesTheRealAttachFlag(t *testing.T) {
+	tmuxDir, err := os.MkdirTemp("/tmp", "yolomux-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	socket := filepath.Join(tmuxDir, "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "probe").CombinedOutput(); err != nil {
+		t.Fatalf("start private tmux server: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	s := &server{}
+	if !s.supportsIgnoreSize() {
+		t.Fatal("tmux 3.4 capability probe rejected the supported ignore-size attach flag")
+	}
+	if !s.supportsIgnoreSize() {
+		t.Fatal("cached tmux capability probe changed between calls")
+	}
+}
+
+func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *testing.T) {
+	tmuxDir, err := os.MkdirTemp("/tmp", "ym-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
+	launchBin := t.TempDir()
+	for _, name := range []string{"claude", "codex"} {
+		path := filepath.Join(launchBin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", launchBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+
+	srv := &server{root: t.TempDir(), dangerouslyYolo: true}
+	cases := []struct {
+		name  string
+		query string
+		agent string
+		want  string
+	}{
+		{name: "bash", query: "agent=term&terminal=bash&dangerously_yolo=0", agent: "term", want: "bash"},
+		{name: "claude", query: "agent=claude&dangerously_yolo=1", agent: "claude", want: "claude --dangerously-skip-permissions"},
+		{name: "codex", query: "agent=codex&dangerously_yolo=1", agent: "codex", want: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/create-session?session=go-"+item.name+"&"+item.query, nil)
+			record := httptest.NewRecorder()
+			srv.createSession(record, request)
+			if record.Code != http.StatusOK {
+				t.Fatalf("create session status = %d, body=%s", record.Code, record.Body.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["agent"] != item.agent || payload["command"] != item.want || payload["created"] != true {
+				t.Fatalf("create session payload = %#v, want agent=%q command=%q", payload, item.agent, item.want)
+			}
+			pane, err := srv.tmuxCommand("list-panes", "-t", "="+"go-"+item.name+":", "-F", "#{pane_start_command}").Output()
+			if err != nil || !strings.Contains(string(pane), item.want) {
+				t.Fatalf("created pane command = %q, err=%v, want %q", pane, err, item.want)
+			}
+		})
+	}
+
+	denied := &server{root: t.TempDir(), dangerouslyYolo: false}
+	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=codex&dangerously_yolo=1", nil)
+	record := httptest.NewRecorder()
+	denied.createSession(record, request)
+	if record.Code != http.StatusForbidden || !bytes.Contains(record.Body.Bytes(), []byte("--dangerously-yolo")) {
+		t.Fatalf("dangerous launch without opt-in = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.T) {
+	srv := &server{}
+	var generations []int64
+	for range 2 {
+		record := httptest.NewRecorder()
+		srv.createSessionPlan(record, httptest.NewRequest(http.MethodGet, "/api/create-session-plan", nil))
+		if record.Code != http.StatusOK {
+			t.Fatalf("create session plan status = %d, body=%s", record.Code, record.Body.String())
+		}
+		var payload struct {
+			Generation int64 `json:"generation"`
+		}
+		if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		generations = append(generations, payload.Generation)
+	}
+	const javascriptMaxSafeInteger = int64(9007199254740991)
+	if generations[0] <= 0 || generations[0] > javascriptMaxSafeInteger {
+		t.Fatalf("first plan generation = %d, want a positive JavaScript-safe integer", generations[0])
+	}
+	if generations[1] <= generations[0] || generations[1] > javascriptMaxSafeInteger {
+		t.Fatalf("plan generations = %v, want strictly increasing JavaScript-safe integers", generations)
 	}
 }
 
@@ -144,6 +339,529 @@ func TestPhase3ProtectedRoutes(t *testing.T) {
 	if r.Code != http.StatusOK {
 		t.Fatalf("operation ack = %d %s", r.Code, r.Body.String())
 	}
+}
+
+func TestSystemStatusPublishesGoNativeLocalServicesSchema(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	cpu := 12.5
+	rss := uint64(64 * 1024 * 1024)
+	threads := uint64(17)
+	s := &server{
+		startedAt: started,
+		processMetricsFn: func(time.Time) goProcessMetrics {
+			return goProcessMetrics{PID: 7222, StartedAt: started, CPUPercent: &cpu, RSSBytes: &rss, ThreadCount: &threads}
+		},
+	}
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "no-server.sock"))
+	record := httptest.NewRecorder()
+	s.systemStatus(record, httptest.NewRequest(http.MethodGet, "/api/system-status", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("system status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	local, ok := payload["local_services"].(map[string]any)
+	if !ok || local["schema_version"] != float64(5) {
+		t.Fatalf("local services payload = %#v", payload["local_services"])
+	}
+	if got := local["inventory"].([]any); len(got) != 1 || got[0] != "yolomux-go" {
+		t.Fatalf("local service inventory = %#v", local["inventory"])
+	}
+	services := local["services"].([]any)
+	if len(services) != 1 {
+		t.Fatalf("local service rows = %#v", services)
+	}
+	service := services[0].(map[string]any)
+	if service["parent_id"] != "web" || service["state"] != "running" || service["pid"] != float64(7222) {
+		t.Fatalf("Go service identity = %#v", service)
+	}
+	serverPayload := payload["server"].(map[string]any)
+	if serverPayload["pid"] != float64(7222) || serverPayload["started_at"] != float64(started.Unix()) {
+		t.Fatalf("Go server identity = %#v", serverPayload)
+	}
+	serverCPU := serverPayload["cpu_percent"].(map[string]any)
+	serverRSS := serverPayload["rss_bytes"].(map[string]any)
+	serverUptime := serverPayload["uptime_seconds"].(map[string]any)
+	if serverCPU["state"] != "measured" || serverRSS["state"] != "measured" || serverUptime["state"] != "measured" {
+		t.Fatalf("Go server process metrics = %#v", serverPayload)
+	}
+	metrics := service["metrics"].(map[string]any)
+	if metrics["cpu_now_percent"].(map[string]any)["state"] != "measured" || metrics["rss_bytes"].(map[string]any)["state"] != "measured" {
+		t.Fatalf("Go service process metrics = %#v", metrics)
+	}
+	details := service["details"].(map[string]any)
+	if details["cpu_scope"] != "Go process plus verified descendant processes" || details["cpu_normalization"] == "" {
+		t.Fatalf("Go CPU semantics = %#v", details)
+	}
+	threadMetric := details["thread_count"].(map[string]any)
+	if threadMetric["state"] != "measured" || threadMetric["value"] != float64(threads) {
+		t.Fatalf("Go service thread metrics = %#v", details)
+	}
+	health := local["health"].(map[string]any)
+	if health["available"] != true || health["reason_code"] != "" {
+		t.Fatalf("Go service observer health = %#v", health)
+	}
+	if health["schema_version"] != float64(1) || health["observer_epoch_started_at"] != float64(started.Unix()) || health["observer_cycles"] != float64(1) {
+		t.Fatalf("Go in-process health = %#v", health)
+	}
+	for _, field := range []string{"history_coverage", "history_reset_reason", "persistence_state", "persistence_reason_code"} {
+		if _, ok := health[field]; !ok {
+			t.Fatalf("Go health missing Python-compatible field %q: %#v", field, health)
+		}
+	}
+	serviceHealth := service["health"].(map[string]any)
+	for _, field := range []string{"recovery_outcome", "process_epoch", "pid", "observed_at", "since_revision", "since_wall_time", "state_age_seconds", "transitions_truncated", "errors_by_reason"} {
+		if _, ok := serviceHealth[field]; !ok {
+			t.Fatalf("Go service health missing Python-compatible field %q: %#v", field, serviceHealth)
+		}
+	}
+	if serviceHealth["reason_code"] != "none" || serviceHealth["unavailable_reason_code"] != "" || serviceHealth["observed"] != true {
+		t.Fatalf("Go service health reason fields = %#v", serviceHealth)
+	}
+	runtimeDiagnostics, ok := payload["stats_runtime"].(map[string]any)
+	if !ok || runtimeDiagnostics["schema_version"] != float64(1) {
+		t.Fatalf("Go stats runtime diagnostics = %#v", payload["stats_runtime"])
+	}
+	nestedRuntime, ok := details["stats_runtime"].(map[string]any)
+	if !ok || nestedRuntime["schema_version"] != float64(1) {
+		t.Fatalf("Go service runtime diagnostics = %#v", details["stats_runtime"])
+	}
+	coverage := serviceHealth["coverage"].(map[string]any)
+	if coverage["counter_scope"] != "web_process" {
+		t.Fatalf("Go service health coverage = %#v", coverage)
+	}
+	healthMetrics := service["health"].(map[string]any)["metrics"].(map[string]any)
+	if healthMetrics["request_count"].(map[string]any)["state"] != "measured" || healthMetrics["request_count"].(map[string]any)["value"] != float64(0) {
+		t.Fatalf("Go service request metric = %#v", healthMetrics["request_count"])
+	}
+	if healthMetrics["process_start_count"].(map[string]any)["value"] != float64(1) || healthMetrics["observations"].(map[string]any)["value"] != float64(1) {
+		t.Fatalf("Go lifecycle metrics = %#v", healthMetrics)
+	}
+	if healthMetrics["restart_count"].(map[string]any)["state"] != "unavailable" || healthMetrics["restart_count"].(map[string]any)["reason_code"] != "go_health_history_unavailable" {
+		t.Fatalf("Go restart metric = %#v", healthMetrics["restart_count"])
+	}
+	for _, field := range []string{"latency_average_ms", "latency_max_ms"} {
+		metric := healthMetrics[field].(map[string]any)
+		if metric["state"] != "unavailable" || metric["reason_code"] != "no_completed_request" {
+			t.Fatalf("Go service latency metric %q = %#v", field, metric)
+		}
+	}
+}
+
+func TestProcessIdentityForRuntimeScopesHostCPUToThisPID(t *testing.T) {
+	want := fmt.Sprintf("%d:", os.Getpid())
+	if got := processIdentityForRuntime(); got != want {
+		t.Fatalf("runtime process identity = %q, want %q", got, want)
+	}
+}
+
+func TestStatsProjectionRefreshGateWaitsForDurablePublication(t *testing.T) {
+	gate := statsProjectionRefreshGate{}
+	first := stats.LifecycleCounters{Runs: 1}
+	if !gate.needsRefresh(first) {
+		t.Fatal("first lifecycle state must refresh the projection")
+	}
+	gate.record(first)
+	if gate.needsRefresh(stats.LifecycleCounters{Runs: 2}) {
+		t.Fatal("unchanged publication state must not reread ring products")
+	}
+	if !gate.needsRefresh(stats.LifecycleCounters{Runs: 3, Publications: 1}) {
+		t.Fatal("new durable publication must refresh the projection")
+	}
+	gate.record(stats.LifecycleCounters{Runs: 3, Publications: 1})
+	if !gate.needsRefresh(stats.LifecycleCounters{Runs: 4, Errors: 1}) {
+		t.Fatal("new lifecycle error must retry projection refresh")
+	}
+}
+
+func TestGoChildProcessMetricsCachesSyntheticRoster(t *testing.T) {
+	var calls int
+	rootPID := os.Getpid()
+	s := &server{processEntriesFn: func() ([]procEntry, error) {
+		calls++
+		return []procEntry{{PID: rootPID + 1, PPID: rootPID, Command: "synthetic-child", Executable: "/bin/synthetic-child"}}, nil
+	}}
+	first := time.Unix(1_700_000_000, 0)
+	if got := s.readGoChildProcessMetrics(first); len(got) != 1 || got[0].PID != rootPID+1 {
+		t.Fatalf("first synthetic child metrics = %#v", got)
+	}
+	if got := s.readGoChildProcessMetrics(first.Add(time.Second)); len(got) != 1 || got[0].PID != rootPID+1 {
+		t.Fatalf("cached synthetic child metrics = %#v", got)
+	}
+	if calls != 1 {
+		t.Fatalf("synthetic process roster calls inside cache window = %d, want 1", calls)
+	}
+	if got := s.readGoChildProcessMetrics(first.Add(goProcessEntriesCacheTTL)); len(got) != 1 || got[0].PID != rootPID+1 {
+		t.Fatalf("refreshed synthetic child metrics = %#v", got)
+	}
+	if calls != 2 {
+		t.Fatalf("synthetic process roster calls after cache expiry = %d, want 2", calls)
+	}
+	s.processEntriesCacheMu.Lock()
+	hits, misses := s.processEntriesCacheHits, s.processEntriesCacheMisses
+	s.processEntriesCacheMu.Unlock()
+	if hits != 1 || misses != 2 {
+		t.Fatalf("synthetic roster cache counters = hits %d misses %d, want 1/2", hits, misses)
+	}
+}
+
+func TestGoChildProcessMetricsUsesScopedSyntheticDescendantReader(t *testing.T) {
+	rootPID := os.Getpid()
+	var seenRoot int
+	s := &server{childProcessEntriesFn: func(pid int) ([]procEntry, error) {
+		seenRoot = pid
+		return []procEntry{{PID: pid + 1, PPID: pid, Command: "synthetic-child"}}, nil
+	}}
+	metrics := s.readGoChildProcessMetrics(time.Unix(1_700_000_010, 0))
+	if seenRoot != rootPID || len(metrics) != 1 || metrics[0].PID != rootPID+1 {
+		t.Fatalf("scoped synthetic descendants = root %d metrics %#v, want root %d and one child", seenRoot, metrics, rootPID)
+	}
+}
+
+func TestParseProcessChildrenAcceptsOnlyPositiveSyntheticPIDs(t *testing.T) {
+	got := parseProcessChildren("101 202 bad -3 0 303")
+	want := []int{101, 202, 303}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("synthetic children = %#v, want %#v", got, want)
+	}
+}
+
+func TestGoHealthLedgerCountsConcurrentRequestsAndLatency(t *testing.T) {
+	started := time.Unix(1_700_000_300, 0)
+	ledger := newGoHealthLedger(started)
+	const total = 64
+	var wait sync.WaitGroup
+	wait.Add(total)
+	for index := 0; index < total; index++ {
+		go func(index int) {
+			defer wait.Done()
+			finish := ledger.begin(false)
+			if index%2 == 0 {
+				finish(http.StatusOK, true, 2*time.Millisecond)
+				return
+			}
+			finish(http.StatusBadGateway, false, 7*time.Millisecond)
+		}(index)
+	}
+	wait.Wait()
+	snapshot := ledger.snapshot()
+	if snapshot.requestCount != total || snapshot.completedCount != total/2 || snapshot.errorCount != total/2 {
+		t.Fatalf("ledger counters = %+v", snapshot)
+	}
+	if got := snapshot.latencyTotal / time.Millisecond; got != total/2*2 || snapshot.latencyMax != 2*time.Millisecond {
+		t.Fatalf("ledger latency = total %s max %s", snapshot.latencyTotal, snapshot.latencyMax)
+	}
+	if snapshot.errorsByReason["http_5xx"] != total/2 {
+		t.Fatalf("ledger errors by reason = %#v", snapshot.errorsByReason)
+	}
+}
+
+func TestGoHealthLedgerExcludesProbeRoutesAndPublishesMeasuredLatency(t *testing.T) {
+	started := time.Unix(1_700_000_400, 0)
+	s := &server{startedAt: started, port: 7222, healthLedger: newGoHealthLedger(started)}
+	handler := s.logging(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/error" {
+			http.Error(w, "synthetic failure", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ok", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/error", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	snapshot := s.healthLedger.snapshot()
+	if snapshot.requestCount != 2 || snapshot.completedCount != 1 || snapshot.errorCount != 1 {
+		t.Fatalf("logged request counters = %+v", snapshot)
+	}
+	if snapshot.latencyTotal <= 0 || snapshot.latencyMax <= 0 {
+		t.Fatalf("logged latency = total %s max %s", snapshot.latencyTotal, snapshot.latencyMax)
+	}
+}
+
+func TestGoHealthLifecycleFailsClosedAcrossRestartHistory(t *testing.T) {
+	started := time.Unix(1_700_000_500, 0)
+	s := &server{startedAt: started, port: 7222, healthLedger: newGoHealthLedger(started)}
+	payload := s.goLocalServicesPayloadFromMetrics(started.Add(4*time.Second), goProcessMetrics{PID: 7222, StartedAt: started})
+	service := payload["services"].([]any)[0].(map[string]any)
+	health := service["health"].(map[string]any)
+	metrics := health["metrics"].(map[string]any)
+	for _, name := range []string{"restart_count", "unexpected_restart_count"} {
+		metric := metrics[name].(map[string]any)
+		if metric["state"] != "unavailable" || metric["value"] != nil {
+			t.Fatalf("%s should fail closed: %#v", name, metric)
+		}
+	}
+	if metrics["process_start_count"].(map[string]any)["value"] != float64(1) || health["process_epoch"] == "" {
+		t.Fatalf("current epoch measurement = %#v", health)
+	}
+}
+
+func TestGoHealthLifecyclePersistsDemandAndUnexpectedRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-backend-health", "7222.json")
+	firstStarted := time.Unix(1_700_001_000, 0)
+	first, err := newGoHealthLifecycle(path, "pid:100:start:1", 100, firstStarted, "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := first.snapshotNow(); !snapshot.Available || snapshot.RestartCount != 0 || snapshot.DemandStartCount != 0 || snapshot.UnexpectedRestartCount != 0 {
+		t.Fatalf("initial lifecycle = %+v", snapshot)
+	}
+	first.markCleanShutdown()
+	second, err := newGoHealthLifecycle(path, "pid:101:start:2", 101, firstStarted.Add(time.Minute), "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := second.snapshotNow(); !snapshot.Available || snapshot.RestartCount != 1 || snapshot.DemandStartCount != 1 || snapshot.UnexpectedRestartCount != 0 {
+		t.Fatalf("demand restart lifecycle = %+v", snapshot)
+	}
+	// Leave the second epoch unclean to model a crash before the next launch.
+	third, err := newGoHealthLifecycle(path, "pid:102:start:3", 102, firstStarted.Add(2*time.Minute), "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := third.snapshotNow()
+	if !snapshot.Available || snapshot.RestartCount != 2 || snapshot.DemandStartCount != 1 || snapshot.UnexpectedRestartCount != 1 {
+		t.Fatalf("unexpected restart lifecycle = %+v", snapshot)
+	}
+	server := &server{port: 7222, healthLifecycle: third, startedAt: firstStarted.Add(2 * time.Minute), healthLedger: newGoHealthLedger(firstStarted.Add(2 * time.Minute))}
+	payload := server.goLocalServicesPayloadFromMetrics(firstStarted.Add(2*time.Minute+time.Second), goProcessMetrics{PID: 102, StartedAt: firstStarted.Add(2 * time.Minute)})
+	service := payload["services"].([]any)[0].(map[string]any)
+	metrics := service["health"].(map[string]any)["metrics"].(map[string]any)
+	for name, want := range map[string]float64{"restart_count": 2, "demand_start_count": 1, "unexpected_restart_count": 1} {
+		metric := metrics[name].(map[string]any)
+		if metric["state"] != "measured" || metric["value"] != want {
+			t.Fatalf("%s = %#v", name, metric)
+		}
+	}
+}
+
+func TestGoLocalServicesThreadMetricFailsClosedWhenUnavailable(t *testing.T) {
+	now := time.Unix(1_700_000_100, 0)
+	payload := (&server{}).goLocalServicesPayloadFromMetrics(now, goProcessMetrics{PID: 7222, StartedAt: now})
+	services := payload["services"].([]any)
+	details := services[0].(map[string]any)["details"].(map[string]any)
+	metric := details["thread_count"].(map[string]any)
+	if metric["state"] != "unavailable" || metric["reason_code"] != "process_threads_unavailable" {
+		t.Fatalf("unavailable Go thread metric = %#v", metric)
+	}
+}
+
+func TestGoProcessMetricsCacheAvoidsRepeatedProcessTreeReads(t *testing.T) {
+	now := time.Now()
+	reads := 0
+	s := &server{processEntriesFn: func() ([]procEntry, error) {
+		reads++
+		return nil, nil
+	}}
+	first := s.readGoProcessMetrics(now)
+	if first.PID == 0 {
+		t.Fatal("first process metrics sample has no PID")
+	}
+	_ = s.readGoProcessMetrics(now.Add(100 * time.Millisecond))
+	if reads != 1 {
+		t.Fatalf("process tree reads within one-second cache = %d, want 1", reads)
+	}
+	_ = s.readGoProcessMetrics(now.Add(goProcessEntriesCacheTTL + time.Millisecond))
+	if reads != 2 {
+		t.Fatalf("process tree reads after cache expiry = %d, want 2", reads)
+	}
+}
+
+func TestGoAgentInventoryCacheSharesSyntheticSnapshot(t *testing.T) {
+	processReads, paneReads := 0, 0
+	s := &server{}
+	sources := stats.AgentInventorySources{
+		Processes: func(context.Context) ([]stats.AgentProcess, error) {
+			processReads++
+			return []stats.AgentProcess{{PID: 123, PPID: 1, Command: "claude --mock", Executable: "/usr/bin/claude"}}, nil
+		},
+		Panes: func(context.Context) ([]stats.AgentTmuxPane, error) {
+			paneReads++
+			return []stats.AgentTmuxPane{{Session: "synthetic", PaneID: "%1", PID: 123}}, nil
+		},
+	}
+	first, firstErrs := s.cachedAgentInventory(context.Background(), sources)
+	second, secondErrs := s.cachedAgentInventory(context.Background(), sources)
+	if len(firstErrs) != 0 || len(secondErrs) != 0 || len(first) != 1 || len(second) != 1 {
+		t.Fatalf("synthetic cached inventory = first=%+v/%v second=%+v/%v", first, firstErrs, second, secondErrs)
+	}
+	if processReads != 1 || paneReads != 1 || s.agentInventoryCacheHits != 1 || s.agentInventoryCacheMisses != 1 {
+		t.Fatalf("inventory cache counters = process=%d panes=%d hits=%d misses=%d", processReads, paneReads, s.agentInventoryCacheHits, s.agentInventoryCacheMisses)
+	}
+	if s.agentInventoryLastDuration < 0 || s.agentInventoryDurationTotal < s.agentInventoryLastDuration {
+		t.Fatalf("inventory timing counters = last=%s total=%s", s.agentInventoryLastDuration, s.agentInventoryDurationTotal)
+	}
+}
+
+func TestFilterOpenCodeAgentRecordsPreservesSharedInventoryScope(t *testing.T) {
+	records := filterOpenCodeAgentRecords([]stats.AgentRecord{
+		{PID: 10, Kind: "claude", TmuxSession: "claude-session"},
+		{PID: 20, Kind: "opencode", TmuxSession: "opencode-session"},
+		{PID: 30, Kind: "codex", TmuxSession: "codex-session"},
+		{PID: 40, Kind: "opencode", TmuxSession: "second-opencode-session"},
+	})
+	if got := []int{records[0].PID, records[1].PID}; !reflect.DeepEqual(got, []int{20, 40}) {
+		t.Fatalf("filtered OpenCode inventory PIDs = %v, want [20 40]", got)
+	}
+}
+
+func TestGoLocalServicesPublishesGoRuntimeAndChildProcessMetrics(t *testing.T) {
+	now := time.Unix(1_700_000_200, 0)
+	goroutines := uint64(23)
+	threads := uint64(7)
+	childCPU := 4.5
+	childRSS := uint64(4096)
+	payload := (&server{}).goLocalServicesPayloadFromMetrics(now, goProcessMetrics{
+		PID: 7222, StartedAt: now, GoroutineCount: &goroutines, ThreadCount: &threads,
+		ChildProcesses: []goChildProcessMetric{{PID: 7300, PPID: 7222, Label: "git", State: "running", CPUPercent: &childCPU, RSSBytes: &childRSS}},
+	})
+	services := payload["services"].([]any)
+	service := services[0].(map[string]any)
+	details := service["details"].(map[string]any)
+	for name, want := range map[string]uint64{"process_count": 2, "goroutine_count": 23, "thread_count": 7} {
+		metric := details[name].(map[string]any)
+		if metric["state"] != "measured" || metric["value"] != want {
+			t.Fatalf("Go runtime metric %q = %#v", name, metric)
+		}
+	}
+	children := details["child_processes"].([]any)
+	if len(children) != 1 {
+		t.Fatalf("child process details = %#v", children)
+	}
+	child := children[0].(map[string]any)
+	if child["pid"] != 7300 || child["parent_pid"] != 7222 || child["label"] != "git" || child["state"] != "running" {
+		t.Fatalf("child process identity = %#v", child)
+	}
+	if child["cpu_now_percent"].(map[string]any)["value"] != childCPU || child["rss_bytes"].(map[string]any)["value"] != childRSS {
+		t.Fatalf("child process resources = %#v", child)
+	}
+	if totals := payload["totals"].(map[string]any); totals["processes"] != uint64(2) {
+		t.Fatalf("local service process total = %#v", totals)
+	}
+}
+
+func TestGoLocalServicesTotalsExposeMultiCoreProcessCPU(t *testing.T) {
+	now := time.Unix(1_700_000_250, 0)
+	goCPU, childCPU := 180.0, 44.0
+	payload := (&server{}).goLocalServicesPayloadFromMetrics(now, goProcessMetrics{
+		PID: 7222, StartedAt: now, CPUPercent: &goCPU,
+		ChildProcesses: []goChildProcessMetric{{PID: 7300, PPID: 7222, Label: "synthetic-child", CPUPercent: &childCPU}},
+	})
+	totals := payload["totals"].(map[string]any)
+	if totals["cpu_percent"] != 224.0 {
+		t.Fatalf("multi-core process total = %#v, want 224%%", totals["cpu_percent"])
+	}
+}
+
+func TestLinuxChildProcessStateUsesSyntheticStatRows(t *testing.T) {
+	for _, test := range []struct {
+		state, want string
+	}{
+		{state: "R", want: "running"}, {state: "S", want: "sleeping"},
+		{state: "T", want: "stopped"}, {state: "Z", want: "zombie"}, {state: "X", want: "dead"},
+	} {
+		stat := fmt.Sprintf("123 (synthetic child) %s 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22", test.state)
+		if got := linuxChildProcessState(stat); got != test.want {
+			t.Fatalf("state %q = %q, want %q", test.state, got, test.want)
+		}
+	}
+}
+
+func TestTmuxSignalWatcherStatusDescribesInProcessRoster(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		sessions   []string
+		err        error
+		state      string
+		healthy    bool
+		reasonCode string
+		thread     bool
+	}{
+		{name: "attached", sessions: []string{"yo7222"}, state: "attached", healthy: true, reasonCode: "attached", thread: true},
+		{name: "empty", sessions: []string{}, state: "no-sessions", healthy: true, reasonCode: "no_sessions", thread: true},
+		{name: "failed", err: errors.New("tmux unavailable"), state: "exited", healthy: false, reasonCode: "tmux_unavailable", thread: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status := tmuxSignalWatcherStatusFor(test.sessions, test.err)
+			if status["state"] != test.state || status["healthy"] != test.healthy || status["reason_code"] != test.reasonCode || status["thread_alive"] != test.thread {
+				t.Fatalf("status = %#v", status)
+			}
+			if status["process_pid"] != 0 || status["demanded"] != true {
+				t.Fatalf("in-process identity = %#v", status)
+			}
+		})
+	}
+}
+
+func TestTmuxSessionRosterTreatsMissingServerAsEmpty(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", shortSyntheticTmuxSocket(t))
+	sessions, err := (&server{}).tmuxSessionRoster()
+	if err != nil {
+		t.Fatalf("tmuxSessionRoster() error = %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("tmuxSessionRoster() = %#v, want empty", sessions)
+	}
+}
+
+func TestTmuxRoutePublishesGlobalRosterAndPythonCompatibleCapture(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"synthetic-tmux-tab-a", "synthetic-tmux-tab-b"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	roster := httptest.NewRecorder()
+	(&server{}).tmux(roster, httptest.NewRequest(http.MethodGet, "/api/tmux", nil))
+	if roster.Code != http.StatusOK {
+		t.Fatalf("tmux roster status = %d, body=%s", roster.Code, roster.Body.String())
+	}
+	var rosterPayload map[string]any
+	if err := json.Unmarshal(roster.Body.Bytes(), &rosterPayload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := rosterPayload["session_order"].([]any)
+	if !ok || !reflect.DeepEqual(order, []any{"synthetic-tmux-tab-a", "synthetic-tmux-tab-b"}) {
+		t.Fatalf("tmux roster session_order = %#v", rosterPayload["session_order"])
+	}
+	if rosterPayload["session_scope"] != "all" {
+		t.Fatalf("tmux roster session_scope = %#v, want all", rosterPayload["session_scope"])
+	}
+
+	if output, err := exec.Command("tmux", "-S", socket, "send-keys", "-t", "=synthetic-tmux-tab-a:", "printf synthetic-capture", "Enter").CombinedOutput(); err != nil {
+		t.Fatalf("write synthetic pane output: %v (%s)", err, output)
+	}
+	capture := httptest.NewRecorder()
+	(&server{}).tmux(capture, httptest.NewRequest(http.MethodGet, "/api/tmux?session=synthetic-tmux-tab-a&lines=12", nil))
+	if capture.Code != http.StatusOK {
+		t.Fatalf("tmux capture status = %d, body=%s", capture.Code, capture.Body.String())
+	}
+	var capturePayload map[string]any
+	if err := json.Unmarshal(capture.Body.Bytes(), &capturePayload); err != nil {
+		t.Fatal(err)
+	}
+	if capturePayload["session"] != "synthetic-tmux-tab-a" || capturePayload["lines"] != float64(12) {
+		t.Fatalf("tmux capture identity = %#v", capturePayload)
+	}
+	if _, ok := capturePayload["text"].(string); !ok {
+		t.Fatalf("tmux capture text = %#v", capturePayload["text"])
+	}
+}
+
+func shortSyntheticTmuxSocket(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "yo-go-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return filepath.Join(directory, "tmux.sock")
 }
 
 func TestDiagnosticsPerformanceCapturesMarkedHTTPRequests(t *testing.T) {
@@ -519,12 +1237,10 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 	catalog := capabilities.New("go-test")
 	s := &server{config: config, port: 7221, capabilities: catalog}
 	cases := map[string]string{
-		"/api/settings":       "core.settings.v1",
 		"/api/update-status":  "core.integrations.v1",
 		"/api/watched-prs":    "core.integrations.v1",
 		"/api/auto-approve":   "terminal.status.v1",
 		"/api/chat/bootstrap": "pane.chat.v1",
-		"/api/activity":       "pane.tabber.v1",
 	}
 	for path, wantCapability := range cases {
 		t.Run(path, func(t *testing.T) {
@@ -543,6 +1259,447 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 				t.Fatalf("unimplemented route envelope = %#v, want capability %q", body, wantCapability)
 			}
 		})
+	}
+}
+
+func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "settings.yaml"), []byte("general:\n  startup_tips: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if _, statErr := os.Stat(filepath.Join(root, "yolomux_lib")); statErr == nil {
+			break
+		}
+		root = filepath.Dir(root)
+	}
+	s := &server{root: root, config: config}
+
+	get := httptest.NewRecorder()
+	s.settings(get, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings status = %d, body=%s", get.Code, get.Body.String())
+	}
+	var initial map[string]any
+	if err := json.Unmarshal(get.Body.Bytes(), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if got := initial["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != true {
+		t.Fatalf("initial startup_tips = %#v, want true", got)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"general":{"startup_tips":false}}}`))
+	request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{role: "admin"}))
+	post := httptest.NewRecorder()
+	s.settings(post, request)
+	if post.Code != http.StatusOK {
+		t.Fatalf("POST /api/settings status = %d, body=%s", post.Code, post.Body.String())
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(post.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if got := saved["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != false {
+		t.Fatalf("saved startup_tips = %#v, want false", got)
+	}
+
+	fresh := httptest.NewRecorder()
+	s.settings(fresh, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("fresh GET /api/settings status = %d, body=%s", fresh.Code, fresh.Body.String())
+	}
+	var reloaded map[string]any
+	if err := json.Unmarshal(fresh.Body.Bytes(), &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != false {
+		t.Fatalf("reloaded startup_tips = %#v, want false", got)
+	}
+
+	unsupported := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"appearance":{"theme":"light"}}}`))
+	unsupported = unsupported.WithContext(context.WithValue(unsupported.Context(), authContextKey{}, authUser{role: "admin"}))
+	unsupportedResponse := httptest.NewRecorder()
+	s.settings(unsupportedResponse, unsupported)
+	if unsupportedResponse.Code != http.StatusNotImplemented {
+		t.Fatalf("unsupported settings status = %d, body=%s", unsupportedResponse.Code, unsupportedResponse.Body.String())
+	}
+
+	malformedConfig := t.TempDir()
+	if err := os.WriteFile(filepath.Join(malformedConfig, "settings.yaml"), []byte("general: [unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	malformed := httptest.NewRecorder()
+	(&server{root: root, config: malformedConfig}).settings(malformed, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if malformed.Code != http.StatusServiceUnavailable || !bytes.Contains(malformed.Body.Bytes(), []byte(`"code":"settings_file_malformed"`)) {
+		t.Fatalf("malformed settings response = %d %s", malformed.Code, malformed.Body.String())
+	}
+}
+
+func TestSettingsRouteRejectsReadonlyMutation(t *testing.T) {
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: readonly\n    password: readonly\n    role: readonly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := capabilities.New("go-test")
+	catalog.Set("core.settings.v1", capabilities.Entry{Available: true})
+	s := &server{root: "..", config: config, port: 7222, capabilities: catalog}
+	request := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"general":{"startup_tips":false}}}`))
+	request.SetBasicAuth("readonly", "readonly")
+	response := httptest.NewRecorder()
+	s.protected(http.HandlerFunc(s.settings), "readonly").ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("readonly settings mutation status = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestActivityRouteIncludesEveryGlobalTmuxSession(t *testing.T) {
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"synthetic-activity-a", "synthetic-activity-b"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	record := httptest.NewRecorder()
+	(&server{}).activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?hours=48&visible=0&scope=all", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 2 || order[0] != "synthetic-activity-a" || order[1] != "synthetic-activity-b" {
+		t.Fatalf("activity session_order = %#v", payload["session_order"])
+	}
+	if _, ok := payload["activity"].(map[string]any); !ok {
+		t.Fatalf("activity payload missing activity map: %#v", payload["activity"])
+	}
+	if got := payload["session_file_hours"]; got != float64(48) {
+		t.Fatalf("activity session_file_hours = %#v, want 48", got)
+	}
+	if got := payload["session_scope"]; got != "all" {
+		t.Fatalf("activity session_scope = %#v, want all", got)
+	}
+	metadata, ok := payload["sessions"].(map[string]any)
+	if !ok || len(metadata) != 2 {
+		t.Fatalf("activity payload sessions = %#v", payload["sessions"])
+	}
+	for _, session := range []string{"synthetic-activity-a", "synthetic-activity-b"} {
+		info, ok := metadata[session].(map[string]any)
+		if !ok {
+			t.Fatalf("activity payload session %q = %#v", session, metadata[session])
+		}
+		if info["session"] != session || info["label"] != session {
+			t.Fatalf("activity payload session %q identity = %#v", session, map[string]any{"session": info["session"], "label": info["label"]})
+		}
+		panes, ok := info["panes"].([]any)
+		if !ok || len(panes) != 1 {
+			t.Fatalf("activity payload session %q panes = %#v", session, info["panes"])
+		}
+	}
+}
+
+func TestLiveSessionMetadataPublishesWorkingAgentState(t *testing.T) {
+	var classified stats.AgentStatusRequest
+	s := &server{
+		agentStatusClassifier: func(_ context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+			classified = request
+			return stats.AgentStatusResult{Status: stats.AgentStatusRun}
+		},
+	}
+	output := []byte("synthetic-codex\t0\tmain\t0\t%42\t/tmp/synthetic\tcodex\tCodex\t42\t1\t1\n")
+	info := s.liveSessionMetadataFromOutput("synthetic-codex", output, nil)
+	agents, ok := info["agents"].([]map[string]any)
+	if !ok || len(agents) != 1 {
+		t.Fatalf("metadata agents = %#v", info["agents"])
+	}
+	if got := agents[0]["status"]; got != "working" {
+		t.Fatalf("metadata agent status = %#v, want working", got)
+	}
+	if classified.Kind != "codex" || classified.PaneTarget != "%42" || classified.PID != 42 {
+		t.Fatalf("classifier request = %+v", classified)
+	}
+}
+
+func TestLiveSessionMetadataClassifiesNodeCodexWrapperAsWorking(t *testing.T) {
+	var classified stats.AgentStatusRequest
+	s := &server{
+		processEntriesFn: func() ([]procEntry, error) {
+			return []procEntry{{PID: 42, PPID: 10, Command: "node /home/test/.local/bin/codex --resume thread", Executable: "/usr/bin/node"}}, nil
+		},
+		agentStatusClassifier: func(_ context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+			classified = request
+			if request.Executable != "/usr/bin/node" {
+				return stats.AgentStatusResult{Status: stats.AgentStatusUnavailable, Reason: "missing-wrapper-executable"}
+			}
+			return stats.AgentStatusResult{Status: stats.AgentStatusRun}
+		},
+	}
+	output := []byte("synthetic-codex\t0\tmain\t0\t%42\t/tmp/synthetic\tnode\tCodex\t10\t1\t1\n")
+	info := s.liveSessionMetadataFromOutput("synthetic-codex", output, nil)
+	agents, ok := info["agents"].([]map[string]any)
+	if !ok || len(agents) != 1 {
+		t.Fatalf("metadata agents = %#v", info["agents"])
+	}
+	if got := agents[0]["status"]; got != "working" {
+		t.Fatalf("wrapped Node Codex status = %#v, want working", got)
+	}
+	if classified.Kind != "codex" || classified.PID != 42 || classified.Executable != "/usr/bin/node" {
+		t.Fatalf("wrapped Node Codex classifier request = %+v", classified)
+	}
+}
+
+func TestActivityRouteKeepsRosterWhenActivityReadFails(t *testing.T) {
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"synthetic-activity-roster-a", "synthetic-activity-roster-b"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	s := &server{tmuxSessionActivityFn: func() (map[string]float64, error) {
+		return nil, errors.New("synthetic activity read failed")
+	}}
+	record := httptest.NewRecorder()
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 2 {
+		t.Fatalf("activity roster disappeared after activity read failure: %#v", payload["session_order"])
+	}
+	errorsPayload, ok := payload["errors"].([]any)
+	if !ok || len(errorsPayload) != 1 || errorsPayload[0] != "synthetic activity read failed" {
+		t.Fatalf("activity read diagnostic = %#v", payload["errors"])
+	}
+}
+
+func TestActivityRoutePublishesPerWindowTmuxRecency(t *testing.T) {
+	s := &server{
+		tmuxSessionRosterFn: func() ([]string, error) { return []string{"synthetic-window-activity"}, nil },
+		tmuxSessionActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{"synthetic-window-activity": 100}, nil
+		},
+		tmuxWindowActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{"synthetic-window-activity:0": 125}, nil
+		},
+	}
+	record := httptest.NewRecorder()
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	activity, ok := payload["activity"].(map[string]any)
+	if !ok {
+		t.Fatalf("activity map = %#v", payload["activity"])
+	}
+	window, ok := activity["synthetic-window-activity:0"].(map[string]any)
+	if !ok || window["active_recency_ts"] != float64(125) || window["last_output_ts"] != float64(125) {
+		t.Fatalf("window recency = %#v", activity["synthetic-window-activity:0"])
+	}
+}
+
+func TestSessionMetadataDoesNotClearRosterOnInitialDiscoveryFailure(t *testing.T) {
+	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return nil, errors.New("synthetic initial tmux roster failure")
+	}}
+	record := httptest.NewRecorder()
+	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if record.Code != http.StatusServiceUnavailable {
+		t.Fatalf("initial metadata failure status = %d, body=%s", record.Code, record.Body.String())
+	}
+	if !bytes.Contains(record.Body.Bytes(), []byte(`"status":"unavailable"`)) || !bytes.Contains(record.Body.Bytes(), []byte("synthetic initial tmux roster failure")) {
+		t.Fatalf("initial metadata failure payload = %s", record.Body.String())
+	}
+}
+
+func TestSessionMetadataKeepsRosterAndReportsPaneInventoryFailure(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "missing-tmux.sock"))
+	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return []string{"synthetic-pane-failure"}, nil
+	}}
+	record := httptest.NewRecorder()
+	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("pane inventory failure status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 1 || order[0] != "synthetic-pane-failure" {
+		t.Fatalf("pane inventory failure cleared roster: %#v", payload["session_order"])
+	}
+	errorsPayload, ok := payload["errors"].([]any)
+	if !ok || len(errorsPayload) == 0 || strings.TrimSpace(fmt.Sprint(errorsPayload[0])) == "" {
+		t.Fatalf("pane inventory failure diagnostic = %#v", payload["errors"])
+	}
+}
+
+func TestTmuxSignalsRouteIncludesGlobalWindowsAndPanes(t *testing.T) {
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"synthetic-signal-a", "synthetic-signal-b"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	record := httptest.NewRecorder()
+	(&server{}).tmuxSignals(record, httptest.NewRequest(http.MethodGet, "/api/tmux-signals?force=1", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("tmux signals status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ok"] != true {
+		t.Fatalf("tmux signals payload not ok: %#v", payload)
+	}
+	windows, ok := payload["windows"].([]any)
+	if !ok || len(windows) != 2 {
+		t.Fatalf("tmux signals windows = %#v", payload["windows"])
+	}
+	for _, raw := range windows {
+		window, ok := raw.(map[string]any)
+		if !ok || window["key"] == "" || window["session"] == "" {
+			t.Fatalf("tmux signal window = %#v", raw)
+		}
+		for _, field := range []string{"activity_ts", "activity_flag", "bell_flag", "silence_flag", "active_client_details", "authoritative_client"} {
+			if _, present := window[field]; !present {
+				t.Fatalf("tmux signal window missing Python-compatible field %q: %#v", field, window)
+			}
+		}
+		panes, ok := window["panes"].([]any)
+		if !ok || len(panes) != 1 {
+			t.Fatalf("tmux signal panes = %#v", window["panes"])
+		}
+	}
+	filtered := httptest.NewRecorder()
+	(&server{}).tmuxSignals(filtered, httptest.NewRequest(http.MethodGet, "/api/tmux-signals?session=synthetic-signal-b", nil))
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("filtered tmux signals status = %d, body=%s", filtered.Code, filtered.Body.String())
+	}
+	var filteredPayload map[string]any
+	if err := json.Unmarshal(filtered.Body.Bytes(), &filteredPayload); err != nil {
+		t.Fatal(err)
+	}
+	filteredWindows, ok := filteredPayload["windows"].([]any)
+	if !ok || len(filteredWindows) != 1 {
+		t.Fatalf("filtered tmux signal windows = %#v", filteredPayload["windows"])
+	}
+}
+
+func TestTmuxSignalsFilteredSessionUsesExactTmuxTarget(t *testing.T) {
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"1", "12"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	record := httptest.NewRecorder()
+	(&server{}).tmuxSignals(record, httptest.NewRequest(http.MethodGet, "/api/tmux-signals?session=1", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("exact tmux signal status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 1 || order[0] != "1" {
+		t.Fatalf("filtered tmux signal roster = %#v, want [1]", payload["session_order"])
+	}
+}
+
+func TestTmuxSessionSortKeyMatchesPythonRosterOrdering(t *testing.T) {
+	got := []string{"zeta", "project10", "yolomux10", "project2", "yolomux2", "Alpha"}
+	sort.SliceStable(got, func(i, j int) bool {
+		left := tmuxSessionSortKey(got[i])
+		right := tmuxSessionSortKey(got[j])
+		if left.rank != right.rank {
+			return left.rank < right.rank
+		}
+		if left.group != right.group {
+			return left.group < right.group
+		}
+		return left.number < right.number
+	})
+	want := []string{"yolomux2", "yolomux10", "project2", "project10", "Alpha", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tmux session order = %#v, want %#v", got, want)
+	}
+}
+
+func TestTmuxSessionRosterNormalizesInjectedAndCommandRows(t *testing.T) {
+	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return []string{" project10 ", "yolomux10", "project2", "", "project2", " yolomux2"}, nil
+	}}
+	got, err := s.tmuxSessionRoster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"yolomux2", "yolomux10", "project2", "project10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized tmux roster = %#v, want %#v", got, want)
+	}
+	cached, known := s.cachedTmuxSessionRoster()
+	if !known || !reflect.DeepEqual(cached, want) {
+		t.Fatalf("cached normalized tmux roster = %#v (known=%v), want %#v", cached, known, want)
+	}
+}
+
+func TestActivityHoursMatchesPythonBounds(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want float64
+	}{
+		{raw: "", want: 24},
+		{raw: "48", want: 48},
+		{raw: "99999", want: maxActivityHours},
+	} {
+		got, err := activityHours(test.raw)
+		if err != nil || got != test.want {
+			t.Fatalf("activityHours(%q) = %v, %v; want %v", test.raw, got, err, test.want)
+		}
+	}
+	for _, raw := range []string{"-1", "NaN", "+Inf", "not-a-number"} {
+		if _, err := activityHours(raw); err == nil {
+			t.Fatalf("activityHours(%q) accepted invalid value", raw)
+		}
 	}
 }
 
@@ -585,7 +1742,7 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.1`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.2`)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
@@ -624,6 +1781,12 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if statsPage.Code != http.StatusOK || !bytes.Contains(statsPage.Body.Bytes(), []byte(`"statsOnly":true`)) {
 		t.Fatalf("explicit stats-only root = %d, body=%s", statsPage.Code, statsPage.Body.String())
 	}
+	dangerous := &server{root: testsupport.RepoRoot(t), config: config, port: 7221, dangerouslyYolo: true, capabilities: catalog}
+	dangerousPage := httptest.NewRecorder()
+	dangerous.index(dangerousPage, httptest.NewRequest(http.MethodGet, "/", nil))
+	if dangerousPage.Code != http.StatusOK || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`"dangerouslyYolo":true`)) || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`--dangerously-bypass-approvals-and-sandbox`)) {
+		t.Fatalf("Go dangerous bootstrap = %d, body=%s", dangerousPage.Code, dangerousPage.Body.String())
+	}
 	capabilityDocument, ok := bootstrap["capabilities"].(map[string]any)
 	if !ok {
 		t.Fatalf("root bootstrap capabilities = %#v", bootstrap["capabilities"])
@@ -636,13 +1799,17 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if !ok || statsEntry["available"] != true {
 		t.Fatalf("root bootstrap stats capability = %#v", capabilityEntries["pane.stats.v1"])
 	}
+	tabberEntry, ok := capabilityEntries["pane.tabber.v1"].(map[string]any)
+	if !ok || tabberEntry["available"] != true {
+		t.Fatalf("root bootstrap Tabber capability = %#v", capabilityEntries["pane.tabber.v1"])
+	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/activity", nil)
 	request.SetBasicAuth("admin", "secret")
 	response := httptest.NewRecorder()
-	s.protected(http.HandlerFunc(s.unsupported), "readonly").ServeHTTP(response, request)
-	if response.Code != http.StatusNotImplemented || !bytes.Contains(response.Body.Bytes(), []byte(`"capability":"pane.tabber.v1"`)) {
-		t.Fatalf("unsupported unrelated route = %d %s", response.Code, response.Body.String())
+	s.protected(http.HandlerFunc(s.activity), "readonly").ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"session_order"`)) {
+		t.Fatalf("Tabber activity route = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -872,9 +2039,39 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 	if history.Code != http.StatusOK || !bytes.Contains(history.Body.Bytes(), []byte(`"commits"`)) || !bytes.Contains(history.Body.Bytes(), []byte(`"subject":"initial"`)) {
 		t.Fatalf("readonly history route = %d %s", history.Code, history.Body.String())
 	}
+	var historyEnvelope map[string]any
+	if err := json.Unmarshal(history.Body.Bytes(), &historyEnvelope); err != nil {
+		t.Fatalf("history envelope: %v", err)
+	}
+	historyData, ok := historyEnvelope["data"].(map[string]any)
+	if !ok || historyData["snapshot_cursor"] == nil {
+		t.Fatalf("history snapshot cursor = %#v", historyEnvelope)
+	}
+	snapshotCursor, ok := historyData["snapshot_cursor"].(string)
+	if !ok || snapshotCursor == "" {
+		t.Fatalf("history snapshot cursor value = %#v", historyData["snapshot_cursor"])
+	}
 	historyStats := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1&stats=1")
 	if historyStats.Code != http.StatusOK || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"files":1`)) || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"added":1`)) || !bytes.Contains(historyStats.Body.Bytes(), []byte(`"removed":0`)) {
 		t.Fatalf("readonly history stats route = %d %s", historyStats.Code, historyStats.Body.String())
+	}
+	historyStatsWindow := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history?path="+url.QueryEscape(root)+"&limit=1&cursor="+url.QueryEscape(snapshotCursor)+"&stats=1&stats_offset=0")
+	if historyStatsWindow.Code != http.StatusOK || !bytes.Contains(historyStatsWindow.Body.Bytes(), []byte(`"files":1`)) || !bytes.Contains(historyStatsWindow.Body.Bytes(), []byte(`"added":1`)) || !bytes.Contains(historyStatsWindow.Body.Bytes(), []byte(`"removed":0`)) {
+		t.Fatalf("readonly history independent stats route = %d %s", historyStatsWindow.Code, historyStatsWindow.Body.String())
+	}
+	historyStatsStream := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history-stats-stream?path="+url.QueryEscape(root)+"&cursor="+url.QueryEscape(snapshotCursor)+"&count=1&batch_size=1")
+	streamBody := historyStatsStream.Body.String()
+	if historyStatsStream.Code != http.StatusOK || historyStatsStream.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" || strings.Count(streamBody, "event: chunk") != 1 || !strings.Contains(streamBody, "event: start") || !strings.Contains(streamBody, "event: done") || !strings.Contains(streamBody, `"files":1`) {
+		t.Fatalf("readonly history stats stream route = %d headers=%v body=%s", historyStatsStream.Code, historyStatsStream.Header(), streamBody)
+	}
+	scheduledHistoryStatsStream := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history-stats-stream?path="+url.QueryEscape(root)+"&cursor="+url.QueryEscape(snapshotCursor)+"&batch_sizes=1%2B2")
+	scheduledStreamBody := scheduledHistoryStatsStream.Body.String()
+	if scheduledHistoryStatsStream.Code != http.StatusOK || strings.Count(scheduledStreamBody, "event: chunk") != 1 || !strings.Contains(scheduledStreamBody, `"batch_sizes":[1,2]`) || !strings.Contains(scheduledStreamBody, `"files":1`) || !strings.Contains(scheduledStreamBody, "event: done") {
+		t.Fatalf("scheduled readonly history stats stream route = %d headers=%v body=%s", scheduledHistoryStatsStream.Code, scheduledHistoryStatsStream.Header(), scheduledStreamBody)
+	}
+	invalidScheduledHistoryStatsStream := serve("readonly", "readonly", http.MethodGet, "/api/fs/git-history-stats-stream?path="+url.QueryEscape(root)+"&cursor="+url.QueryEscape(snapshotCursor)+"&batch_sizes=0")
+	if invalidScheduledHistoryStatsStream.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scheduled history stats stream route = %d body=%s", invalidScheduledHistoryStatsStream.Code, invalidScheduledHistoryStatsStream.Body.String())
 	}
 	headOutput, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -1286,6 +2483,242 @@ func TestSessionMetadataRouteProvidesBootIdentity(t *testing.T) {
 	cache, ok := payload["cache"].(map[string]any)
 	if !ok || cache["pending_identity"] == nil || cache["stale"] != true {
 		t.Fatalf("forced metadata cache = %#v", payload["cache"])
+	}
+	pending, ok := cache["pending_identity"].(map[string]any)
+	pendingGeneration, pendingGenerationOK := pending["generation"].(float64)
+	servedGeneration, servedGenerationOK := identity["generation"].(float64)
+	if !ok || !pendingGenerationOK || !servedGenerationOK || pending["epoch"] != identity["epoch"] || pendingGeneration <= servedGeneration {
+		t.Fatalf("forced metadata pending identity = %#v, served = %#v", pending, identity)
+	}
+}
+
+func TestForcedSessionMetadataRefreshPublishesThePendingGeneration(t *testing.T) {
+	s := &server{events: newEventBroker()}
+	request := httptest.NewRequest(http.MethodGet, "/api/session-metadata?force=1", nil)
+	record := httptest.NewRecorder()
+	s.sessionMetadata(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d %s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	cache := payload["cache"].(map[string]any)
+	pending := cache["pending_identity"].(map[string]any)
+	wantGeneration := uint64(pending["generation"].(float64))
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		s.metadataMu.Lock()
+		generation := s.metadataGeneration
+		s.metadataMu.Unlock()
+		if generation >= wantGeneration {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("forced metadata generation did not publish: got %d, want %d", generation, wantGeneration)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	events := s.events.snapshot()
+	if events["published"] == 0 {
+		t.Fatal("forced metadata refresh did not publish a client event")
+	}
+}
+
+func TestSessionMetadataIncludesEveryGlobalTmuxSessionAsTabSource(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	for _, session := range []string{"synthetic-tab-a", "synthetic-tab-b"} {
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", session, err, output)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	record := httptest.NewRecorder()
+	(&server{events: newEventBroker()}).sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	sessions, ok := payload["sessions"].(map[string]any)
+	if !ok || len(sessions) != 2 {
+		t.Fatalf("session metadata sessions = %#v", payload["sessions"])
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 2 || order[0] != "synthetic-tab-a" || order[1] != "synthetic-tab-b" {
+		t.Fatalf("session metadata session_order = %#v", payload["session_order"])
+	}
+	if got := payload["session_scope"]; got != "all" {
+		t.Fatalf("session metadata session_scope = %#v, want all", got)
+	}
+	for _, session := range []string{"synthetic-tab-a", "synthetic-tab-b"} {
+		info, ok := sessions[session].(map[string]any)
+		if !ok {
+			t.Fatalf("session %q metadata = %#v", session, sessions[session])
+		}
+		panes, ok := info["panes"].([]any)
+		if !ok || len(panes) != 1 {
+			t.Fatalf("session %q panes = %#v", session, info["panes"])
+		}
+		windows, ok := info["window_metadata"].([]any)
+		if !ok || len(windows) != 1 {
+			t.Fatalf("session %q window metadata = %#v", session, info["window_metadata"])
+		}
+	}
+	second := httptest.NewRecorder()
+	(&server{events: newEventBroker()}).sessionMetadata(second, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second session metadata status = %d, body=%s", second.Code, second.Body.String())
+	}
+	var secondPayload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := secondPayload["topology_generation"]; got != float64(1) {
+		t.Fatalf("isolated second server topology generation = %#v, want 1", got)
+	}
+
+	shared := &server{events: newEventBroker()}
+	firstShared := httptest.NewRecorder()
+	shared.sessionMetadata(firstShared, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	secondShared := httptest.NewRecorder()
+	shared.sessionMetadata(secondShared, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	var firstSharedPayload, secondSharedPayload map[string]any
+	if err := json.Unmarshal(firstShared.Body.Bytes(), &firstSharedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(secondShared.Body.Bytes(), &secondSharedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if firstSharedPayload["topology_generation"] != float64(1) || secondSharedPayload["topology_generation"] != float64(2) {
+		t.Fatalf("shared metadata topology generations = %#v then %#v, want 1 then 2", firstSharedPayload["topology_generation"], secondSharedPayload["topology_generation"])
+	}
+}
+
+func TestSessionMetadataKeepsLastKnownGlobalRosterWhenDiscoveryFails(t *testing.T) {
+	reads := 0
+	s := &server{
+		events: newEventBroker(),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			reads++
+			if reads == 1 {
+				return []string{"synthetic-tab-a", "synthetic-tab-b"}, nil
+			}
+			return nil, errors.New("synthetic tmux roster read failed")
+		},
+	}
+	first := httptest.NewRecorder()
+	s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first metadata status = %d, body=%s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	s.sessionMetadata(second, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if second.Code != http.StatusOK {
+		t.Fatalf("cached metadata status = %d, body=%s", second.Code, second.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order, ok := payload["session_order"].([]any)
+	if !ok || len(order) != 2 || order[0] != "synthetic-tab-a" || order[1] != "synthetic-tab-b" {
+		t.Fatalf("cached metadata session_order = %#v", payload["session_order"])
+	}
+	errorsPayload, ok := payload["errors"].([]any)
+	if !ok || len(errorsPayload) < 1 || len(errorsPayload) > 2 || errorsPayload[0] != "synthetic tmux roster read failed" {
+		t.Fatalf("cached metadata errors = %#v", payload["errors"])
+	}
+	if len(errorsPayload) == 2 && errorsPayload[1] != "exit status 1" {
+		t.Fatalf("cached metadata enrichment error = %#v", errorsPayload[1])
+	}
+	s.tmuxSessionActivityFn = func() (map[string]float64, error) { return map[string]float64{}, nil }
+	activity := httptest.NewRecorder()
+	s.activity(activity, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if activity.Code != http.StatusOK {
+		t.Fatalf("cached activity status = %d, body=%s", activity.Code, activity.Body.String())
+	}
+	var activityPayload map[string]any
+	if err := json.Unmarshal(activity.Body.Bytes(), &activityPayload); err != nil {
+		t.Fatal(err)
+	}
+	activityOrder, ok := activityPayload["session_order"].([]any)
+	if !ok || len(activityOrder) != 2 || activityOrder[0] != "synthetic-tab-a" || activityOrder[1] != "synthetic-tab-b" {
+		t.Fatalf("cached activity session_order = %#v", activityPayload["session_order"])
+	}
+}
+
+func TestSessionMetadataAndActivitySerializeRosterReadBeforeStampingTopologyGeneration(t *testing.T) {
+	firstStarted := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	s := &server{events: newEventBroker(), tmuxSessionRosterFn: func() ([]string, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		if call == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return []string{"synthetic-old"}, nil
+		}
+		close(secondEntered)
+		return []string{"synthetic-new"}, nil
+	}, tmuxSessionActivityFn: func() (map[string]float64, error) {
+		return map[string]float64{}, nil
+	}, tmuxWindowActivityFn: func() (map[string]float64, error) {
+		return map[string]float64{}, nil
+	}}
+	first := httptest.NewRecorder()
+	second := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+		close(firstDone)
+	}()
+	<-firstStarted
+	go func() {
+		s.activity(second, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+		close(secondDone)
+	}()
+	premature := false
+	select {
+	case <-secondEntered:
+		premature = true
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	<-firstDone
+	<-secondDone
+	if premature {
+		t.Fatal("second roster read entered before the first read was assigned its generation")
+	}
+	var firstPayload, secondPayload map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	if firstPayload["topology_generation"] != float64(1) || secondPayload["topology_generation"] != float64(2) {
+		t.Fatalf("serialized topology generations = %#v then %#v, want 1 then 2", firstPayload["topology_generation"], secondPayload["topology_generation"])
+	}
+	if got := firstPayload["session_order"].([]any); len(got) != 1 || got[0] != "synthetic-old" {
+		t.Fatalf("first roster = %#v", firstPayload["session_order"])
+	}
+	if got := secondPayload["session_order"].([]any); len(got) != 1 || got[0] != "synthetic-new" {
+		t.Fatalf("second roster = %#v", secondPayload["session_order"])
 	}
 }
 

@@ -116,6 +116,51 @@ func TestOpenCodeReadStepFinishPartsForSelectionsSharesBoundAndAttribution(t *te
 	}
 }
 
+func TestOpenCodeReadStepFinishPartsForSelectionsCombinesActiveAndCursorRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode-cursor-window.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, agent TEXT, model TEXT, time_created INTEGER, time_updated INTEGER, cost REAL, parent_id TEXT)`,
+		`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)`,
+		`CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)`,
+		`INSERT INTO session VALUES ('root', '/repo', 'build', '{"providerID":"openai","id":"gpt"}', 1, 1000, 0, NULL)`,
+		`INSERT INTO message VALUES ('msg-old', 'root', 100, 100, '{"role":"assistant"}')`,
+		`INSERT INTO message VALUES ('msg-active', 'root', 900, 900, '{"role":"assistant"}')`,
+		`INSERT INTO message VALUES ('msg-cursor', 'root', 100, 100, '{"role":"assistant"}')`,
+		`INSERT INTO part VALUES ('part-old', 'msg-old', 'root', 100, 100, '{"type":"step-finish","tokens":{"input":1}}')`,
+		`INSERT INTO part VALUES ('part-active', 'msg-active', 'root', 900, 900, '{"type":"step-finish","tokens":{"input":2}}')`,
+		`INSERT INTO part VALUES ('part-cursor', 'msg-cursor', 'root', 100, 100, '{"type":"step-finish","tokens":{"input":3}}')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := OpenOpenCodeReadOnly(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	window, err := readOnly.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{{
+		SessionID: "root", RootSessionID: "root", ActiveSince: 800, CursorRowID: 1,
+	}}, 1000, map[string]OpenCodePartCursor{"root": {RowID: 1}}, MaxOpenCodePartReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window.Parts) != 2 {
+		t.Fatalf("cursor window rows = %#v, want active and cursor rows exactly once", window.Parts)
+	}
+	if window.Parts[0].PartID != "part-active" || window.Parts[1].PartID != "part-cursor" {
+		t.Fatalf("cursor window rows = %#v", window.Parts)
+	}
+}
+
 func TestOpenCodeReadStepFinishPartsForSelectionsBoundsActualShapedHistory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "opencode-many-roots.db")
 	writeOpenCodeManyRootHistory(t, path, 64, 5000)

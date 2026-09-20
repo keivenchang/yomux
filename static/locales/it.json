@@ -815,6 +815,7 @@
   "git.status.untracked": "non tracciato",
   "gitDiff.binary": "binario",
   "gitDiff.changedFiles": "File modificati",
+  "gitDiff.dirty": "Sporco",
   "gitDiff.empty": "Nessun commit in questo ambito.",
   "gitDiff.filesTruncated": "L’elenco dei file è troncato.",
   "gitDiff.firstParent": "Confrontato con il primo genitore",

@@ -1,12 +1,15 @@
 package stats
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/keivenchang/yolomux/internal/testsupport"
 )
@@ -25,6 +28,72 @@ func TestPricingCatalogLoadsPythonFixtureAndResolvesCacheDimensions(t *testing.T
 	}
 	if catalog.Resolve("openai", "unknown-fixture", "input", "text", "none", "tokens", "", "", "9999-12-31T23:59:59Z") != nil {
 		t.Fatal("unknown model was priced")
+	}
+}
+
+func TestPricingCatalogPublicPayloadReportsJSONSourceLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.json")
+	checkedAt := time.Now().UTC().Truncate(time.Second)
+	fixture := func(source string) []byte {
+		return []byte(fmt.Sprintf(`{"schema_version":1,"catalog_revision":7,"models":[{"provider":"fixture","model":"model-a","aliases":["model-a"],"source":{"kind":"official","url":"https://example.invalid/pricing","checked_at":"%s"},"rates":[{"direction":"input","modality":"text","cache_role":"none","unit":"tokens","scale":1000000,"usd":"1.00","effective_from":"1970-01-01T00:00:00Z"}]}]}`, source))
+	}
+	if err := os.WriteFile(path, fixture(checkedAt.Format(time.RFC3339)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadPricingCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := catalog.PublicPayload()["status"].(map[string]any)
+	if status["state"] != "fresh" || status["catalog_revision"] != int64(7) || status["seed_revision"] != int64(0) {
+		t.Fatalf("fresh status = %#v", status)
+	}
+	if got := status["last_checked_at"].(float64); got != float64(checkedAt.Unix()) {
+		t.Fatalf("last_checked_at = %v, want %d", got, checkedAt.Unix())
+	}
+	if status["database"] != "" {
+		t.Fatalf("Go JSON catalog fabricated a database identity: %#v", status["database"])
+	}
+
+	old := checkedAt.Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	if err := os.WriteFile(path, fixture(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	status = catalog.PublicPayload()["status"].(map[string]any)
+	if status["state"] != "stale" {
+		t.Fatalf("stale status = %#v", status)
+	}
+
+	if err := os.WriteFile(path, []byte("not-json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Refresh(); err == nil {
+		t.Fatal("invalid pricing refresh unexpectedly succeeded")
+	}
+	status = catalog.PublicPayload()["status"].(map[string]any)
+	if status["state"] != "review-needed" {
+		t.Fatalf("failed-refresh status = %#v", status)
+	}
+}
+
+func TestPricingCatalogSeedPayloadDoesNotUseEmbeddedCheckedAtAsRefreshEvidence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.json")
+	fixture := `{"schema_version":1,"catalog_revision":11,"models":[{"provider":"fixture","model":"model-a","aliases":["model-a"],"source":{"kind":"seed","url":"https://example.invalid/pricing","checked_at":"2026-09-17T00:00:00Z"},"rates":[{"direction":"input","modality":"text","cache_role":"none","unit":"tokens","scale":1000000,"usd":"1.00","effective_from":"1970-01-01T00:00:00Z"}]}]}`
+	if err := os.WriteFile(path, []byte(fixture), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadPricingCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := catalog.PublicPayload()["status"].(map[string]any)
+	if status["state"] != "seed-only" || status["seed_revision"] != int64(11) || status["last_checked_at"] != float64(0) {
+		t.Fatalf("seed status = %#v", status)
 	}
 }
 
@@ -154,6 +223,93 @@ func TestPricingCatalogRefreshIsBoundedAndTransactional(t *testing.T) {
 	}
 	if catalog.Resolve("p", "m", "input", "text", "none", "tokens", "", "", "9999-12-31T23:59:59Z") == nil {
 		t.Fatal("refresh corrupted active catalog")
+	}
+}
+
+func TestPricingCatalogRefreshInvalidatesPublishedUsageCost(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "catalog.json")
+	fixture := func(revision int, usd string) []byte {
+		return []byte(fmt.Sprintf(`{"schema_version":1,"catalog_revision":%d,"models":[{"provider":"p","model":"m","aliases":["m"],"source":{"kind":"fixture","url":"https://example.invalid/pricing"},"rates":[{"direction":"input","modality":"text","cache_role":"none","unit":"tokens","scale":1000000,"usd":"%s","effective_from":"1970-01-01T00:00:00Z"}]}]}`, revision, usd))
+	}
+	if err := os.WriteFile(path, fixture(1, "1.00"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadPricingCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsPath := filepath.Join(dir, "stats.sqlite3")
+	writer, err := OpenWriter(ctx, statsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	now := time.Unix(1000, 0)
+	resolver := PricingResolver(catalog)
+	if _, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: []UsageAtom{{
+		EventID: "pricing-refresh-atom", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 990,
+		Payload: map[string]any{"quantity": 100.0, "provider": "p", "model": "m", "agent_id": "fixture-agent", "thread_id": "fixture-thread", "execution_source": "codex"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 64, Price: resolver, Now: func() time.Time { return now }})
+	lifecycle.DemandProduct(100, 10)
+	service := NewStatsService(writer, StatsServiceConfig{Products: []ProductKey{{RangeSeconds: 100, ResolutionSeconds: 10}}, Price: resolver, Now: func() time.Time { return now }})
+	refresh := func() StatsSnapshot {
+		for attempt := 0; attempt < 64; attempt++ {
+			if err := lifecycle.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := service.Refresh(ctx); err != nil && !errors.Is(err, ErrProductPending) {
+				t.Fatal(err)
+			}
+			if service.State().Ready {
+				break
+			}
+		}
+		if !service.State().Ready {
+			t.Fatalf("pricing product did not become ready: %+v", service.State())
+		}
+		snapshot, err := service.Snapshot(ctx, SnapshotRequest{Start: 910, End: 1010, Resolution: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	initial := refresh()
+	initialCost := int64(0)
+	for _, bucket := range initial.Materialized.Buckets {
+		initialCost += bucket.Cost.MicroUSD
+	}
+	if initialCost != 100 {
+		t.Fatalf("initial materialized cost = %d, snapshot=%+v", initialCost, initial)
+	}
+	if err := os.WriteFile(path, fixture(2, "2.00"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := writer.InvalidatePricingCatalog(ctx, float64(now.Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || writer.PendingCount() <= 0 {
+		t.Fatalf("pricing invalidation generation=%d pending=%d", generation, writer.PendingCount())
+	}
+	updated := refresh()
+	updatedCost := int64(0)
+	evidenceRevision := int64(0)
+	for _, bucket := range updated.Materialized.Buckets {
+		updatedCost += bucket.Cost.MicroUSD
+		for _, evidence := range bucket.Cost.Evidence {
+			evidenceRevision = evidence.CatalogRevision
+		}
+	}
+	if updatedCost != 200 || evidenceRevision != 2 {
+		t.Fatalf("refreshed materialized cost=%d evidence revision=%d, snapshot=%+v", updatedCost, evidenceRevision, updated)
 	}
 }
 

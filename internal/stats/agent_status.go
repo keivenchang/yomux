@@ -136,7 +136,7 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		if err != nil || !process.Alive {
 			return unavailable("agent-process-unavailable")
 		}
-		if process.Command != "" && ClassifyAgent(process.Command, request.Executable) != kind {
+		if process.Command != "" && !agentProcessMatchesKind(kind, process.Command, request.Executable) {
 			return unavailable("agent-process-identity-mismatch")
 		}
 		if strings.TrimSpace(process.Command) != "" && request.Command == "" {
@@ -216,15 +216,52 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 }
 
 func classifyVisibleAgentText(text string) AgentStatusResult {
-	lower := strings.ToLower(text)
-	ask := containsAny(lower, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve", "allow this")
-	run := containsAny(lower, "esc to interrupt", "thinking", "running ", "pursuing goal", "goal active", "still running", "tool use", "working")
-	transition := containsAny(lower, "goal achieved", "all tasks complete", "all tasks completed", "completed", "finished")
+	// The Python detector evaluates the current prompt/footer before looking at
+	// stale transcript prose. A visible Codex pane commonly contains old
+	// completion text above the live `Ask Codex to do anything` composer; a
+	// whole-screen substring search incorrectly reports a conflict and drops the
+	// agent. Keep the same precedence by limiting activity evidence to the
+	// current tail and letting a current idle composer win over stale completion
+	// words.
+	lower := strings.ToLower(strings.ReplaceAll(text, "\r", ""))
+	lines := strings.Split(lower, "\n")
+	tailStart := 0
+	if len(lines) > 24 {
+		tailStart = len(lines) - 24
+	}
+	tail := strings.Join(lines[tailStart:], "\n")
+	ask := containsAny(tail, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
+	run := containsAny(tail, "esc to interrupt", "thinking", "pursuing goal", "goal active", "still running", "tool use", "working")
+	transition := containsAny(tail, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
 	// Generic words such as "errors" can be part of an idle suggestion. Keep
 	// error evidence to explicit failure-shaped markers, matching the prompt
 	// detector's actionable error screens rather than classifying prose.
-	errorState := containsAny(lower, "error:", "fatal", "traceback", "command failed", "exited with code")
-	idle := containsAny(lower, "ask anything", "type your message", "use /", "new task", "› ", "❯ ", "claude code")
+	errorState := containsAny(tail, "error:", "fatal", "traceback", "command failed", "exited with code")
+	// A Codex/Claude working footer is the current screen boundary. Tool output
+	// above it can contain a traceback or command failure from an earlier turn;
+	// treating that scrollback as simultaneous current evidence paints a false
+	// unavailable state over a live working pane. Only error evidence at or below
+	// the current working footer can conflict with that footer.
+	workingFooter := currentWorkingFooterIndex(lines[tailStart:])
+	if workingFooter >= 0 {
+		// Completion and failure text from an earlier turn can remain above the
+		// current working footer. Treat the footer as the live screen boundary
+		// for every terminal state, not only explicit error markers; otherwise a
+		// still-running Codex pane is downgraded to unavailable by stale "goal
+		// achieved" prose in its visible scrollback.
+		transition = false
+		errorState = false
+	}
+	idle := containsAny(tail, "ask anything", "ask codex to do anything", "type your message", "use /", "new task", "claude code") || hasIdleComposerLine(lines[tailStart:])
+	// A live status counter is stronger than generic footer words such as
+	// "background terminals running". Require the current interrupt affordance
+	// or a line that starts with a working marker, as the Python detector does.
+	if !containsAny(tail, "esc to interrupt", "working", "thinking", "pursuing goal", "goal active", "still running", "tool use") {
+		run = false
+	}
+	if idle && !ask && !run && !errorState {
+		return result(AgentStatusIdle, []string{"idle-composer"})
+	}
 	if ask && (run || transition || errorState) {
 		return unavailable("conflicting-pane-evidence")
 	}
@@ -252,11 +289,36 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	return unavailable("ambiguous-pane-evidence")
 }
 
+func currentWorkingFooterIndex(lines []string) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.ToLower(strings.TrimSpace(lines[index]))
+		if strings.Contains(line, "esc to interrupt") && containsAny(line, "working", "thinking", "pursuing goal", "goal active", "still running", "tool use") {
+			return index
+		}
+	}
+	return -1
+}
+
 func containsAny(text string, needles ...string) bool {
 	for _, needle := range needles {
 		if strings.Contains(text, needle) {
 			return true
 		}
+	}
+	return false
+}
+
+func hasIdleComposerLine(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) < 2 || (!strings.HasPrefix(trimmed, "› ") && !strings.HasPrefix(trimmed, "❯ ")) {
+			continue
+		}
+		composer := strings.TrimSpace(trimmed[2:])
+		if composer == "" || (len(composer) >= 2 && composer[0] >= '0' && composer[0] <= '9' && composer[1] == '.') {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -302,7 +364,24 @@ func OpenCodeSQLiteStateReader(database string) func(context.Context, AgentStatu
 				return "", nil, errors.New("opencode-session-unavailable")
 			}
 		}
-		rows, err := db.reader.Rows(ctx, `SELECT delivery, admitted_seq, promoted_seq FROM session_input WHERE session_id = ? ORDER BY time_created DESC LIMIT 2`, request.OpenCodeSession)
+		// An explicit process session must exist in the selected database. An
+		// empty or mismatched database otherwise falls through to zero
+		// session_input/part rows and is incorrectly reported as idle.
+		rows, err := db.reader.Rows(ctx, `SELECT id FROM session WHERE id = ? LIMIT 2`, request.OpenCodeSession)
+		if err != nil {
+			return "", nil, errors.New("opencode-state-unavailable")
+		}
+		if len(rows) == 0 {
+			return "", nil, errors.New("opencode-session-unavailable")
+		}
+		if len(rows) > 1 || len(rows[0]) != 1 {
+			return "", nil, errors.New("opencode-state-malformed")
+		}
+		storedSession, ok := openCodeString(rows[0][0])
+		if !ok || storedSession != request.OpenCodeSession {
+			return "", nil, errors.New("opencode-state-malformed")
+		}
+		rows, err = db.reader.Rows(ctx, `SELECT delivery, admitted_seq, promoted_seq FROM session_input WHERE session_id = ? ORDER BY time_created DESC LIMIT 2`, request.OpenCodeSession)
 		if err != nil {
 			return "", nil, errors.New("opencode-state-unavailable")
 		}
@@ -387,37 +466,41 @@ type AgentStatusCollectorCounters struct {
 	UnavailableSpans     uint64
 	Errors               uint64
 	LastDuration         time.Duration
+	DurationTotal        time.Duration
 }
 
 type agentStatusCounters struct {
 	cycles, accepted, unavailable, errors atomic.Uint64
 	lastDuration                          atomic.Int64
+	durationTotal                         atomic.Uint64
 }
 
 func (c *agentStatusCounters) snapshot() AgentStatusCollectorCounters {
-	return AgentStatusCollectorCounters{Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(), LastDuration: time.Duration(c.lastDuration.Load())}
+	return AgentStatusCollectorCounters{Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(), LastDuration: time.Duration(c.lastDuration.Load()), DurationTotal: time.Duration(c.durationTotal.Load())}
 }
 
 // AgentStatusCollector owns one collection goroutine. RunOnce is intended for
 // deterministic callers and must not overlap Start.
 type AgentStatusCollector struct {
-	inventory    AgentStatusInventory
-	classifier   AgentStatusClassifier
-	writer       BatchWriter
-	clock        HostCollectorClock
-	config       AgentStatusCollectorConfig
-	counters     agentStatusCounters
-	mu           sync.Mutex
-	run          bool
-	stop         context.CancelFunc
-	done         chan struct{}
-	stateMu      sync.Mutex
-	hadSuccess   bool
-	epochID      string
-	epochStart   float64
-	lastRevision uint64
-	lastCadence  float64
-	statusCache  map[string]agentStatusCacheEntry
+	inventory     AgentStatusInventory
+	classifier    AgentStatusClassifier
+	writer        BatchWriter
+	clock         HostCollectorClock
+	config        AgentStatusCollectorConfig
+	counters      agentStatusCounters
+	mu            sync.Mutex
+	run           bool
+	stop          context.CancelFunc
+	done          chan struct{}
+	stateMu       sync.Mutex
+	hadSuccess    bool
+	epochID       string
+	epochStart    float64
+	lastRevision  uint64
+	lastCadence   float64
+	statusCache   map[string]agentStatusCacheEntry
+	lastSignature string
+	revisionSet   bool
 }
 
 type agentStatusCacheEntry struct {
@@ -528,7 +611,12 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 		c.counters.accepted.Add(uint64(result.ObservationsAccepted))
 		c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
 	}
-	c.counters.lastDuration.Store(c.clock.Now().Sub(started).Nanoseconds())
+	elapsed := c.clock.Now().Sub(started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	c.counters.lastDuration.Store(elapsed.Nanoseconds())
+	c.counters.durationTotal.Add(uint64(elapsed.Nanoseconds()))
 }
 
 func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactContext) AppendBatch {
@@ -553,10 +641,7 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		index  int
 	}
 	rows := make([]row, 0, len(records))
-	for index, record := range records {
-		if tmuxPaneTarget(record) == "" {
-			continue
-		}
+	for index, record := range tmuxScopedAgentRecords(records) {
 		key, ok := agentStatusIdentity(record, index)
 		if !ok {
 			return BuildUnavailableFacts("agent_status", fact, "ambiguous-agent-identity")
@@ -572,7 +657,6 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 	roster := make([]map[string]any, 0, len(rows))
 	counts := AgentStatusCounts{}
 	seen := make(map[string]bool)
-	firstUnavailableReason := ""
 	for _, item := range rows {
 		record, key := item.record, item.key
 		if seen[key] {
@@ -608,12 +692,6 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		}
 		c.statusCache[key] = entry
 		c.stateMu.Unlock()
-		if result.Status == AgentStatusUnavailable {
-			if firstUnavailableReason == "" {
-				firstUnavailableReason = result.Reason
-			}
-			continue
-		}
 		state := string(result.Status)
 		rosterEntry := map[string]any{"id": key, "kind": strings.ToLower(strings.TrimSpace(record.Kind)), "state": state, "session": record.TmuxSession, "pane": tmuxPaneTarget(record)}
 		roster = append(roster, rosterEntry)
@@ -626,7 +704,12 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		case AgentStatusTransition:
 			counts.Yellow++
 		default:
-			states[key] = state
+			// `unavailable` is retained in the roster so a discovered pane is
+			// never silently omitted. The compact states/session_states maps
+			// intentionally contain only materialized activity states.
+			if result.Status != AgentStatusUnavailable {
+				states[key] = state
+			}
 		}
 		if result.Status != AgentStatusUnavailable && result.Status != AgentStatusError {
 			states[key] = state
@@ -639,13 +722,8 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 			sessions[session] = mergeAgentStatus(sessions[session], result.Status)
 		}
 	}
-	if len(rows) > 0 && len(roster) == 0 {
-		if firstUnavailableReason == "" {
-			firstUnavailableReason = "pane-capture-unavailable"
-		}
-		return BuildUnavailableFacts("agent_status", fact, firstUnavailableReason)
-	}
-	snapshotRevision := agentStatusRevision(c.config, &c.stateMu, &c.lastRevision)
+	signature := agentStatusPayloadSignature(states, sessions, counts, roster)
+	snapshotRevision := c.agentStatusRevision(signature)
 	return BuildAgentStatusFacts(states, sessions, snapshotRevision, counts, roster, fact)
 }
 
@@ -690,19 +768,43 @@ func mergeAgentStatus(old, next AgentStatus) AgentStatus {
 	return old
 }
 
-func agentStatusRevision(config AgentStatusCollectorConfig, stateMu *sync.Mutex, lastRevision *uint64) uint64 {
-	if config.SnapshotRevision == nil {
+func agentStatusPayloadSignature(states map[string]any, sessions map[string]AgentStatus, counts AgentStatusCounts, roster []map[string]any) string {
+	payload := struct {
+		States   map[string]any         `json:"states"`
+		Sessions map[string]AgentStatus `json:"session_states"`
+		Counts   AgentStatusCounts      `json:"counts"`
+		Roster   []map[string]any       `json:"agents"`
+	}{States: states, Sessions: sessions, Counts: counts, Roster: roster}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	// encoding/json sorts string map keys, so this is deterministic across
+	// collector cycles while retaining the complete bounded status projection.
+	return string(encoded)
+}
+
+func (c *AgentStatusCollector) agentStatusRevision(signature string) uint64 {
+	if c.config.SnapshotRevision == nil {
 		// No status snapshot was supplied. Python publishes the neutral revision,
 		// not a timestamp from a different source.
 		return 0
 	}
-	candidate := config.SnapshotRevision()
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	if candidate <= *lastRevision {
-		candidate = *lastRevision + 1
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.revisionSet && c.lastSignature == signature {
+		return c.lastRevision
 	}
-	*lastRevision = candidate
+	candidate := c.config.SnapshotRevision()
+	if c.revisionSet && candidate <= c.lastRevision {
+		candidate = c.lastRevision + 1
+	}
+	if !c.revisionSet && candidate == 0 {
+		candidate = 1
+	}
+	c.lastRevision = candidate
+	c.lastSignature = signature
+	c.revisionSet = true
 	return candidate
 }
 

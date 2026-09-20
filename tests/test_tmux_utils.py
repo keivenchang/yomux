@@ -65,6 +65,56 @@ def test_tmux_command_uses_configured_socket(monkeypatch):
     assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yolomux-test-tmux.sock", "list-sessions"]
 
 
+def test_direct_operator_launch_uses_machine_tmux(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+
+    tmux_utils.use_machine_tmux_for_operator_launch()
+
+    assert "TMUX" not in os.environ
+    assert "TMUX_PANE" not in os.environ
+    assert os.environ[tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV] == "1"
+
+
+def test_direct_fixture_launch_keeps_explicit_private_tmux(monkeypatch):
+    private_socket = "/tmp/private-yolomux-tmux.sock"
+    monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, private_socket)
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+
+    tmux_utils.use_machine_tmux_for_operator_launch()
+
+    assert os.environ["TMUX"] == "/tmp/private-tmux,123,0"
+    assert os.environ["TMUX_PANE"] == "%7"
+    assert os.environ[tmux_utils.YOLOMUX_TMUX_SOCKET_ENV] == private_socket
+    assert tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV not in os.environ
+
+
+def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/private-yolomux-tmux.sock")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source tools/startup_common.sh; yolomux_use_machine_tmux; printf '%s|%s|%s|%s' "
+            '"${TMUX-unset}" "${TMUX_PANE-unset}" "${YOLOMUX_TMUX_SOCKET-unset}" "${YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}"',
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+
+    assert result.stdout == "unset|unset||1"
+
+
 def test_list_tmux_session_activity_reads_the_roster_in_one_bulk_call(monkeypatch):
     calls = []
 
@@ -145,7 +195,17 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
         text=True,
         check=True,
     ).stdout
-    assert 'extra_env+=("$(yolomux_default_server_optin)")' in (root / "boot.sh").read_text(encoding="utf-8")
+    launcher = subprocess.run(
+        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "YOLOMUX_TMUX_SOCKET=" in launcher
+    boot_source = (root / "boot.sh").read_text(encoding="utf-8")
+    assert 'extra_env+=("$(yolomux_default_server_optin)")' in boot_source
+    assert 'extra_env+=("YOLOMUX_TMUX_SOCKET=")' in boot_source
 
 
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):

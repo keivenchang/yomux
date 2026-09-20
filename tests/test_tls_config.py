@@ -167,6 +167,25 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.print_runtime_report is False
 
 
+def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path):
+    binary = tmp_path / "yolomux-go"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    captured = {}
+    monkeypatch.setenv("YOLOMUX_GO_BINARY", str(binary))
+    monkeypatch.setattr(cli.os, "execv", lambda path, command: captured.update(path=path, command=command))
+
+    result = cli.exec_go_backend(
+        argparse.Namespace(host="0.0.0.0", port=7221, dangerously_yolo=True)
+    )
+
+    assert result == 127
+    assert captured == {
+        "path": str(binary),
+        "command": [str(binary), "--host", "0.0.0.0", "--port", "7221", "--root", str(Path(__file__).resolve().parents[1]), "--dangerously-yolo"],
+    }
+
+
 def test_parse_args_supports_explicit_http_opt_out(monkeypatch):
     monkeypatch.setattr(cli.sys, "argv", ["yolomux.py", "--http"])
 

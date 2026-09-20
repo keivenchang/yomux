@@ -815,6 +815,7 @@
   "git.status.untracked": "לא במעקב",
   "gitDiff.binary": "בינארי",
   "gitDiff.changedFiles": "קבצים שהשתנו",
+  "gitDiff.dirty": "מלוכלך",
   "gitDiff.empty": "אין commits בתחום זה.",
   "gitDiff.filesTruncated": "רשימת הקבצים נקטעה.",
   "gitDiff.firstParent": "השוואה להורה הראשון",

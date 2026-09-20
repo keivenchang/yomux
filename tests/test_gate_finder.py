@@ -396,6 +396,219 @@ def test_deferred_git_info_patches_after_fast_paint_in_bounded_waves(browser, tm
 
 
 @pytest.mark.browser
+def test_finder_fast_paint_wins_when_session_files_completes_first(browser, tmp_path):
+    _load_finder(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        let releaseFastList = null;
+        const requestOrder = [];
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === '/home/test') {
+            requestOrder.push('fast-list-start');
+            return new Promise(resolve => { releaseFastList = () => { requestOrder.push('fast-list-end'); resolve(jsonResponse({path: '/home/test', entries: [{name: 'project', kind: 'dir', mtime: 1, is_repo: true, repo_info_deferred: true}]})); }; });
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          const tree = document.querySelector('#panel-__finder__ .file-explorer-tree-panel');
+          tree.replaceChildren();
+          activateFileExplorerSurface('__finder__');
+          await waitFor(() => requestOrder.includes('fast-list-start'), {timeoutMs: 2000, description: 'held Finder fast listing'});
+          // Rich metadata can arrive from the Go server's background owner before the direct list.
+          // It is valid data, but it must not delay or decorate the first visible directory rows.
+          retireSessionFilesRequest('finder', 'test completion owns Finder payload');
+          if (!finderSessionFilesDiffIsDeferred()) throw new Error('the production Finder first-paint gate was not active');
+          setSessionFilesPayloadForDestination('finder', {
+            session: '1',
+            files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, mtime: 1}],
+            repos: [{repo: '/home/test/project', count: 1, added: 5, removed: 2}],
+            refs_by_repo: {}, errors: [], warnings: [], from_ref: 'HEAD', to_ref: 'current', loaded: true,
+          }, {invalidateRequest: false});
+          // Model the completion tail after its payload publication: the finite request no longer
+          // owns the Finder destination, but the first-paint gate still does.
+          fileExplorerFinderSessionFilesState.abortController = null;
+          releaseFastList();
+          await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]'), {timeoutMs: 2000, description: 'Finder fast first paint'});
+          const firstPaintDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const released = releaseFinderSessionFilesDiffBackfillIfReady();
+          updateFileTreeGitStatusRows();
+          const backfilledDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
+          window.fetch = originalFetch;
+          done({firstPaintDiff, backfilledDiff, released, pending: fileExplorerFinderSessionFilesState.diffBackfillPending, target: fileExplorerFinderTargetSession(), payload: fileExplorerFinderSessionFilesState.payload, requestOrder, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({error: String(error?.stack || error), requestOrder, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        });
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["firstPaintDiff"] == "", metrics
+    assert metrics["pending"] is False, metrics
+    assert metrics["backfilledDiff"] == "+5 -2", metrics
+    assert metrics["requestOrder"] == ["fast-list-start", "fast-list-end"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_finder_fast_paint_wins_when_an_existing_session_files_request_completes_first(browser, tmp_path):
+    _load_finder(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        const sessionFilesStreamResponse = value => new Response([
+          `event: repo\ndata: ${JSON.stringify({session: value.session, repos: value.repos, files: value.files, refs_by_repo: value.refs_by_repo})}\n\n`,
+          `event: done\ndata: ${JSON.stringify({session: value.session, from_ref: value.from_ref, to_ref: value.to_ref})}\n\n`,
+        ].join(''), {headers: {'Content-Type': 'text/event-stream'}});
+        let releaseFastList = null;
+        const requestOrder = [];
+        const payload = {
+          session: '1',
+          files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, mtime: 1}],
+          repos: [{repo: '/home/test/project', count: 1, added: 5, removed: 2}],
+          refs_by_repo: {}, errors: [], warnings: [], from_ref: 'HEAD', to_ref: 'current', loaded: true,
+        };
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === '/home/test') {
+            requestOrder.push('fast-list-start');
+            return new Promise(resolve => { releaseFastList = () => { requestOrder.push('fast-list-end'); resolve(jsonResponse({path: '/home/test', entries: [{name: 'project', kind: 'dir', mtime: 1, is_repo: true, repo_info_deferred: true}]})); }; });
+          }
+          if (url.pathname === '/api/session-files' || url.pathname === '/api/session-files-stream') {
+            requestOrder.push('session-files-start');
+            const response = url.pathname === '/api/session-files-stream' ? sessionFilesStreamResponse(payload) : jsonResponse(payload);
+            return Promise.resolve(response).then(response => {
+              requestOrder.push('session-files-end');
+              return response;
+            });
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          retireSessionFilesRequest('finder', 'test existing request reset');
+          fileExplorerFinderSessionFilesState.payload = {session: '', files: [], repos: [], refs_by_repo: {}, errors: [], warnings: [], loaded: false};
+          fileExplorerFinderSessionFilesState.signature = '';
+          fileExplorerFinderSessionFilesState.loading = false;
+          fileExplorerFinderSessionFilesState.diffBackfillPending = false;
+          fileExplorerFinderSessionFilesState.fastListingPainted = false;
+          const tree = document.querySelector('#panel-__finder__ .file-explorer-tree-panel');
+          tree.replaceChildren();
+          const existingRequest = fetchSessionFiles({destination: 'finder', session: '1', silent: true, force: true});
+          activateFileExplorerSurface('__finder__');
+          await waitFor(() => requestOrder.includes('fast-list-start'), {timeoutMs: 2000, description: 'held Finder fast listing'});
+          await waitFor(() => requestOrder.includes('session-files-end'), {timeoutMs: 2000, description: 'existing session-files completion'});
+          if (tree.querySelector('.file-tree-row[data-path]')) throw new Error('held listing unexpectedly painted a row');
+          if (!finderSessionFilesDiffIsDeferred()) throw new Error('Finder did not defer metadata while the listing was held');
+          releaseFastList();
+          await existingRequest;
+          await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]'), {timeoutMs: 2000, description: 'Finder fast first paint'});
+          const firstPaintDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
+          await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.textContent.includes('+5 -2'), {timeoutMs: 2000, description: 'Finder metadata backfill'});
+          window.fetch = originalFetch;
+          done({firstPaintDiff, finalDiff: tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '', requestOrder, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({error: String(error?.stack || error), requestOrder, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        });
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["firstPaintDiff"] == "", metrics
+    assert metrics["finalDiff"] == "+5 -2", metrics
+    assert metrics["requestOrder"] == ["session-files-start", "fast-list-start", "session-files-end", "fast-list-end"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_finder_fast_listing_paints_before_session_files_backfill_starts(browser, tmp_path):
+    _load_finder(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        const sessionFilesStreamResponse = payload => new Response([
+          `event: repo\ndata: ${JSON.stringify({session: payload.session, repos: payload.repos, files: payload.files, refs_by_repo: payload.refs_by_repo})}\n\n`,
+          `event: done\ndata: ${JSON.stringify({session: payload.session, from_ref: payload.from_ref, to_ref: payload.to_ref})}\n\n`,
+        ].join(''), {headers: {'Content-Type': 'text/event-stream'}});
+        let releaseFastList = null;
+        let releaseSessionFiles = null;
+        const requestOrder = [];
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === '/home/test') {
+            requestOrder.push('fast-list-start');
+            return new Promise(resolve => { releaseFastList = () => { requestOrder.push('fast-list-end'); resolve(jsonResponse({path: '/home/test', entries: [{name: 'project', kind: 'dir', mtime: 1, is_repo: true, repo_info_deferred: true}]})); }; });
+          }
+          if (url.pathname === '/api/fs/batch') {
+            const requests = JSON.parse(options.body || '{}').requests || [];
+            return Promise.resolve(jsonResponse({responses: requests.map(request => ({
+              id: request.id,
+              ok: true,
+              status: 200,
+              payload: {path: request.path, name: 'project', kind: 'dir', realpath: request.path, repo: {root: request.path, name: 'project', branch: 'main', dirty_count: 0, ahead: 0, behind: 0}},
+            }))}));
+          }
+          if (url.pathname === '/api/session-files' || url.pathname === '/api/session-files-stream') {
+            requestOrder.push('session-files-start');
+            return new Promise(resolve => { releaseSessionFiles = () => { requestOrder.push('session-files-end'); const payload = {session: '1', files: [{repo: '/home/test/project', path: 'nested.txt', abs_path: '/home/test/project/nested.txt', status: 'M', added: 5, removed: 2, mtime: 1}], repos: [{repo: '/home/test/project', count: 1, added: 5, removed: 2}], refs_by_repo: {}, errors: [], warnings: [], from_ref: 'HEAD', to_ref: 'current', loaded: true}; resolve(url.pathname === '/api/session-files-stream' ? sessionFilesStreamResponse(payload) : jsonResponse(payload)); }; });
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          invalidateFileExplorerFsCaches();
+          // Keep stale repository totals in the browser while the next session-files request is
+          // pending. The direct listing must still paint without those slower +/- annotations.
+          fileExplorerFinderSessionFilesState.payload = {session: 'files', files: [], repos: [{repo: '/home/test/project', count: 1, added: 99, removed: 77}], refs_by_repo: {}, errors: [], warnings: [], loaded: false};
+          fileExplorerFinderSessionFilesState.signature = '';
+          fileExplorerFinderSessionFilesState.loading = false;
+          const tree = document.querySelector('#panel-__finder__ .file-explorer-tree-panel');
+          tree.replaceChildren();
+          activateFileExplorerSurface('__finder__');
+          await waitFor(() => requestOrder.includes('fast-list-start'), {timeoutMs: 2000, description: 'Finder fast listing request'});
+          const beforeFastList = {order: requestOrder.slice(), sessionStarted: requestOrder.includes('session-files-start'), rows: tree.querySelectorAll('.file-tree-row[data-path]').length};
+          if (beforeFastList.sessionStarted) throw new Error(`session-files started before fast listing completed: ${JSON.stringify(beforeFastList)}`);
+          releaseFastList();
+          await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]'), {timeoutMs: 2000, description: 'Finder fast listing paint'});
+          const fastPaintDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
+          await waitFor(() => requestOrder.includes('session-files-start'), {timeoutMs: 2000, description: 'deferred session-files backfill'});
+          const pendingBackfillDiff = tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.querySelector(':scope > .file-tree-diff')?.textContent.trim() || '';
+          if (pendingBackfillDiff) throw new Error(`stale +/- appeared before session-files backfill completed: ${pendingBackfillDiff}`);
+          releaseSessionFiles();
+          await waitFor(() => fileExplorerFinderSessionFilesState.payload.loaded === true, {timeoutMs: 2000, description: 'session-files backfill completion'});
+          await waitFor(() => tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.textContent.includes('+5 -2'), {timeoutMs: 2000, description: 'Finder session-files diff backfill'});
+          window.fetch = originalFetch;
+          done({beforeFastList, fastPaintDiff, order: requestOrder, rows: tree.querySelectorAll('.file-tree-row[data-path]').length, diffText: tree.querySelector('.file-tree-row[data-path="/home/test/project"]')?.textContent.trim() || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({error: String(error?.stack || error), order: requestOrder, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        });
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["beforeFastList"] == {"order": ["fast-list-start"], "sessionStarted": False, "rows": 0}, metrics
+    assert metrics["fastPaintDiff"] == "", metrics
+    assert metrics["order"] == ["fast-list-start", "fast-list-end", "session-files-start", "session-files-end"], metrics
+    assert metrics["rows"] == 1, metrics
+    assert "+5 -2" in metrics["diffText"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
 def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(browser, tmp_path):
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(

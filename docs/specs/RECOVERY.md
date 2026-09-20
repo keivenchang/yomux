@@ -1,6 +1,6 @@
 # Recovery and Lost Sessions
 
-Backend scope: tmux session survival and fixture-isolation principles apply to both backends. The detailed lost-session product plan and recovery matrices below are a historical v0.7.7-era Python design record; the recovery suite that supplied its `Covered` and `Partial` labels is not present on the current branch. Go currently provides terminal/session discovery, create/kill, PTY/WebSocket attach, events, and operation-journal repair, but it does not claim Python Tabber, transcript/activity, auto-approval, or full lost-session recovery parity.
+Backend scope: tmux session survival and fixture-isolation principles apply to both backends. The detailed lost-session product plan and recovery matrices below are a historical v0.7.7-era Python design record; the recovery suite that supplied its `Covered` and `Partial` labels is not present on the current branch. Go currently provides terminal/session discovery, the global Tabber roster/activity surface, create/kill, PTY/WebSocket attach, events, and operation-journal repair, but it does not claim Python's full transcript/activity, auto-approval, or lost-session recovery parity.
 
 How YOLOmux decides which tmux sessions are worth saving, how it classifies a session's disappearance as clean or unclean, and what it may honestly claim to cover.
 

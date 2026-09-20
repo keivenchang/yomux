@@ -1275,7 +1275,11 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
   // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
   // promoted in its place, and there is no aggregate `cpu` fallback series.
-  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
+  // Python's legacy web process uses a `port:N` owner and keeps an empty current
+  // port line visible across a no-sample window. Go owns a named daemon process
+  // instead; do not add an unrelated empty Python/web line beside it.
+  const hasLegacyPortProcess = [...processes.keys()].some(key => String(key).startsWith('port:'));
+  if (!processes.has(currentProcessId) && (!processes.size || hasLegacyPortProcess)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
@@ -2896,8 +2900,15 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
   const startMs = Math.floor(nowMs / durationMs) * durationMs;
   const xStart = debugGraphXForTime(startMs, domain);
   const xLimit = debugGraphXForTime(startMs + durationMs, domain);
-  const width = Math.max(0.5, xLimit - xStart);
-  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
+  // At one-second resolution a live cell is sub-pixel on the 1200-unit viewBox. A
+  // sub-pixel strip at the right edge is effectively invisible (and gets clipped),
+  // even though the animation is running. Keep a small, bounded strip inside the
+  // plot so the live green pulse is visible at every supported chart width.
+  const graphWidth = Math.max(1, Number(jsDebugGraphGeometry.width) || 1);
+  const minimumWidth = Math.max(8, graphWidth / 120);
+  const width = Math.min(graphWidth, Math.max(minimumWidth, xLimit - xStart));
+  const visibleXStart = Math.max(0, Math.min(graphWidth - width, xStart));
+  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(visibleXStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
 function debugGraphStatsAgentState(state) {
@@ -2944,12 +2955,41 @@ function debugGraphStatsAgentWindowRows() {
   return {rows, revision};
 }
 
-async function refreshDebugStatsAgentStatus() {
+const jsDebugStatsAgentStatusFreshnessMs = 10_000;
+
+function debugStatsAgentStatusConsumerVisible() {
+  // The Go-only roster is supplementary data for the live Agents detail under the
+  // activity chart. Stats snapshots and SSE already carry aggregate counts and
+  // revisions, so polling this endpoint while another Debug subtab is active (or
+  // while the activity chart is hidden) only creates traffic with no visible consumer.
+  // The full Go page uses the same supplementary roster: its activity fallback is
+  // intentionally unversioned, so without this read the detail permanently labels
+  // otherwise-current Go rows as stale and can hide the working marker behind the
+  // compatibility row.
+  const statsOnly = typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled();
+  const goBackend = typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback();
+  if (!statsOnly && !goBackend) return false;
+  if (typeof jsDebugStatsPanelVisible === 'function' && !jsDebugStatsPanelVisible()) return false;
+  if (typeof debugRuntimeState !== 'undefined' && debugRuntimeState.subTab !== 'graph') return false;
+  if (typeof debugGraphChartVisible === 'function' && !debugGraphChartVisible('activity')) return false;
+  return true;
+}
+
+async function refreshDebugStatsAgentStatus({force = false} = {}) {
   // Python's full application boot has no stats-agent-status route because it
   // already owns /api/auto-approve. This supplementary stats projection is
   // only needed for the negotiated Go stats-only surface.
-  if (typeof statsOnlyBootEnabled !== 'function' || !statsOnlyBootEnabled()) return null;
+  if (typeof debugStatsAgentStatusConsumerVisible === 'function' && !debugStatsAgentStatusConsumerVisible()) return null;
   if (jsDebugStatsAgentStatusState.inFlight) return jsDebugStatsAgentStatusState.inFlight;
+  const nowMs = Date.now();
+  const updatedAtMs = Number(jsDebugStatsAgentStatusState.updatedAtMs || 0);
+  const lastForcedAtMs = Number(jsDebugStatsAgentStatusState.lastForcedAtMs || 0);
+  const fresh = updatedAtMs > 0 && nowMs - updatedAtMs < jsDebugStatsAgentStatusFreshnessMs;
+  const forcedFresh = lastForcedAtMs > 0 && nowMs - lastForcedAtMs < jsDebugStatsAgentStatusFreshnessMs;
+  if ((!force && fresh) || (force && forcedFresh && jsDebugStatsAgentStatusState.payload)) {
+    return jsDebugStatsAgentStatusState.payload;
+  }
+  if (force) jsDebugStatsAgentStatusState.lastForcedAtMs = nowMs;
   const request = (async () => {
     try {
       const payload = await apiFetchJson('/api/stats-agent-status', {cache: 'no-store'});
@@ -2976,9 +3016,36 @@ async function refreshDebugStatsAgentStatus() {
 
 function debugGraphLiveAgentWindowRows() {
   const rows = [];
-  const seen = new Set();
+  const rowIndexes = new Map();
   const revisions = new Set();
   const sessionRevisions = new Map();
+  const appendRow = row => {
+    const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
+    const existingIndex = rowIndexes.get(key);
+    if (existingIndex === undefined) {
+      rowIndexes.set(key, rows.length);
+      rows.push(row);
+      return;
+    }
+    const existing = rows[existingIndex];
+    // Activity fallback rows identify the live pane but have no immutable snapshot
+    // revision. A revisioned stats row normally replaces them, except that an
+    // unavailable stats row is a capture failure, not a newer assertion that the
+    // pane stopped working. Preserve a concrete Go activity state in that case so
+    // the JS Agents detail does not turn a live Codex pane gray while Tabber is green.
+    const existingUnavailable = typeof agentWindowStateKey === 'function'
+      && agentWindowStateKey(existing.agent?.state) === 'unavailable';
+    const incomingUnavailable = typeof agentWindowStateKey === 'function'
+      && agentWindowStateKey(row.agent?.state) === 'unavailable';
+    const activityFallback = typeof goAgentStatusUsesActivityFallback === 'function'
+      && goAgentStatusUsesActivityFallback();
+    if (activityFallback && incomingUnavailable && !existingUnavailable) return;
+    if (activityFallback && existingUnavailable && !incomingUnavailable) {
+      rows[existingIndex] = row;
+      return;
+    }
+    if (Number(row.revision || 0) >= Number(existing.revision || 0)) rows[existingIndex] = row;
+  };
   for (const [session, payload] of autoApproveStates.entries()) {
     const revision = agentWindowSnapshotRevision(payload);
     if (revision > 0) revisions.add(revision);
@@ -2987,23 +3054,34 @@ function debugGraphLiveAgentWindowRows() {
       const kind = agentWindowKind(agent?.kind);
       const physical = agentWindowPhysicalKey(agent);
       if (!kind || !physical) continue;
-      const key = `${session}\u0000${physical}\u0000${kind}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push({session, agent, kind, revision});
+      appendRow({session, agent, kind, revision});
     }
   }
-  rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
-    || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
-    || left.kind.localeCompare(right.kind));
   const statsRows = typeof debugGraphStatsAgentWindowRows === 'function'
     ? debugGraphStatsAgentWindowRows()
     : {rows: [], revision: 0};
+  const statsStatus = typeof jsDebugStatsAgentStatusState !== 'undefined'
+    ? jsDebugStatsAgentStatusState.payload
+    : null;
+  const statsRosterAuthoritative = statsStatus?.available === true && Number(statsRows.revision || 0) > 0;
+  if (statsRosterAuthoritative) {
+    // A revisioned empty roster is a real transition, not a missing response.
+    // Retire fallback rows that disappeared from the stats owner's global roster
+    // before merging the new rows, otherwise a closed working pane remains visible.
+    const authoritativeKeys = new Set(statsRows.rows.map(row => (
+      `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`
+    )));
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
+      if (authoritativeKeys.has(key)) continue;
+      rows.splice(index, 1);
+    }
+    rowIndexes.clear();
+    rows.forEach((row, index) => rowIndexes.set(`${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`, index));
+  }
   for (const row of statsRows.rows) {
-    const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push(row);
+    appendRow(row);
     sessionRevisions.set(String(row.session), row.revision);
     if (row.revision > 0) revisions.add(row.revision);
   }
@@ -4380,13 +4458,19 @@ function jsDebugCurrentBucketRecord(bucket) {
       record.system_cpu_total_percent = jsDebugCurrentCpuProjectionValue(series, name, 'system_cpu_max_percent', duration);
       record.system_cpu_count = 1;
     } else if (name.startsWith('cpu_percent:')) {
+      // `cpu_percent:*` is the host/process-family sample. It is not a daemon
+      // ownership record: putting it in `record.servers` makes host CPU appear
+      // in the Daemons chart and can double-count the same process. The Go
+      // backend publishes its daemon-owned line as
+      // `owned_process_cpu_percent:*`; the ordinary process series stays
+      // host-wide so same-named co-tenants remain visible as host users.
       const source = name.slice('cpu_percent:'.length);
       const projected = jsDebugCurrentCpuProjectionValue(series, name, `cpu_max_percent:${source}`, duration);
-      record.servers[source] = {label: source, cpu_total_percent: projected, cpu_count: 1};
-      // No serving-port preference: the exact serving port owns the solid CPU series in
-      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      // Every cpu_percent source contributes the aggregate CPU line. The source
+      // label is diagnostic metadata, not a daemon identity; fixtures and older
+      // backends may use a source name other than "host".
       if (!record.cpu_count) {
-        record.cpu_total_percent = value;
+        record.cpu_total_percent = projected;
         record.cpu_count = 1;
       }
     } else if (name === 'ask_agents') record.ask_agent_total = value;
@@ -4404,6 +4488,12 @@ function jsDebugCurrentBucketRecord(bucket) {
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('owned_process_cpu_percent:')) {
+      const binary = name.slice('owned_process_cpu_percent:'.length);
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `owned_process_cpu_max_percent:${binary}`, duration);
+      const normalizedBinary = String(binary || '').trim().toLowerCase();
+      const label = normalizedBinary === 'yolomux_go' || normalizedBinary === 'yolomux-go' ? 'yolomux-go' : binary;
+      record.servers[binary] = {label, cpu_total_percent: projected, cpu_count: 1};
     } else if (name.startsWith('process_cpu_percent:')) {
       const binary = name.slice('process_cpu_percent:'.length);
       const projected = jsDebugCurrentCpuProjectionValue(series, name, `process_cpu_max_percent:${binary}`, duration);
@@ -4563,8 +4653,19 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
   debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
-  jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
-  if (typeof refreshDebugStatsAgentStatus === 'function') void refreshDebugStatsAgentStatus();
+  const nextAgentWindowRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
+  jsDebugStatsPollState.agentWindowSnapshotRevision = nextAgentWindowRevision;
+  // The stats stream already carries the agent-window snapshot revision. The detailed
+  // `/api/stats-agent-status` roster is needed only for its names and states, so do not
+  // re-read it on every ordinary 10-second chart delta when the roster revision is unchanged.
+  // A zero revision still gets one bootstrap read; Graph activation retains its explicit
+  // force-refresh path below.
+  const agentStatusState = typeof jsDebugStatsAgentStatusState === 'undefined' ? null : jsDebugStatsAgentStatusState;
+  const agentStatusRevision = Number(agentStatusState?.revision || 0);
+  const agentStatusNeedsRefresh = typeof refreshDebugStatsAgentStatus === 'function'
+    && (!agentStatusState?.payload
+      || (nextAgentWindowRevision > 0 && nextAgentWindowRevision !== agentStatusRevision));
+  if (agentStatusNeedsRefresh) void refreshDebugStatsAgentStatus();
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
   jsDebugStatsPollState.firstSampleReceived = true;
@@ -4731,7 +4832,11 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSubviewActivation({pollNow: visible});
+    // Visibility changes re-run subview activation so the live ticker resumes, but they are not
+    // a new Graph navigation. Let the ten-second roster cache decide whether a status read is
+    // needed; forcing here made every focus/visibility round-trip issue another request even when
+    // the SSE stream had not published a newer agent-window revision.
+    syncDebugSubviewActivation({pollNow: visible, forceAgentStatus: false});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
   });
@@ -4826,12 +4931,19 @@ const DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS = Object.freeze({
   'no-sessions': 'No tmux sessions are configured to watch',
   attached: 'Control client is attached',
   exited: 'Tmux control client exited',
+  unsupported: 'Tmux signal watcher is not reported by this backend',
 });
+
+function debugSystemTmuxSignalWatcherState(watcher = null) {
+  if (!watcher || typeof watcher !== 'object') return 'unsupported';
+  const state = String(watcher.state || '');
+  return DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(state) ? state : 'unsupported';
+}
 
 // The ONE predicate for "this watcher is an actionable problem". An exited control client is one;
 // so is a watcher that was demanded and never started. An undemanded watcher never is.
 function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   return state === 'exited' || (state === 'never-started' && watcher?.demanded !== false);
 }
 
@@ -4849,7 +4961,7 @@ function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
 // three process metrics; only the number formatting differs.
 const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set([
   'restart_count', 'process_start_count', 'demand_start_count', 'unexpected_restart_count',
-  'observations', 'request_count', 'error_count', 'completed_count',
+  'observations', 'request_count', 'error_count', 'completed_count', 'process_count', 'goroutine_count', 'thread_count',
 ]);
 // The three measurements the local-service projection publishes per process, versus the retained
 // health measurements. They carry different DOM attributes because they have different producers
@@ -4893,6 +5005,7 @@ const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
   // request, error or latency series for the web process itself, and the tmux signal watcher
   // is an in-process subsystem with no separate process to measure.
   web_process_not_observed: 'the backend-health observer watches the local services from this web process, so it has never observed this web process itself',
+  resource_metrics_owned_by_nested_service: 'this process is represented by the nested service row, so its CPU and memory are shown there once',
   subsystem_not_observed: 'this is an in-process subsystem, not a separate process, so it has no independent process or traffic measurement',
   schema_unsupported: 'the backend published a local-services schema this panel does not render',
   // Diagnostics the sampler and the watcher publish only once they have run. Before that the field
@@ -4934,6 +5047,7 @@ const DEBUG_SYSTEM_STATE_TONES = Object.freeze({
   idle: 'muted',
   'no-sessions': 'muted',
   'never-started': 'muted',
+  unsupported: 'muted',
   not_running: 'muted',
   not_demanded: 'muted',
   starting: 'warn',
@@ -5315,10 +5429,11 @@ const DEBUG_SYSTEM_ROSTER_METRIC_KEYS = Object.freeze([
 ]);
 const debugSystemRosterAbsentMetrics = reasonCode =>
   Object.fromEntries(DEBUG_SYSTEM_ROSTER_METRIC_KEYS.map(key => [key, debugSystemAbsentMetric(reasonCode)]));
-// The tmux control-client states this panel knows, and how each one reads as a roster state.
-// `never-started` is only an issue when something actually demanded the watcher; undemanded is
-// idle-by-design and must stay gray and non-alerting.
-const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
+// The tmux control-client states this panel knows, plus the explicit unsupported state used when a
+// backend does not publish this in-process subsystem. `never-started` is only an issue when
+// something actually demanded the watcher; undemanded is idle-by-design and must stay gray and
+// non-alerting.
+const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited', 'unsupported']);
 const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
   running: 'debug.system.roster.state.ready',
   idle: 'state.idle',
@@ -5334,6 +5449,7 @@ const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
   'no-sessions': 'debug.system.roster.state.noSessions',
   'never-started': 'debug.system.roster.state.neverStarted',
   exited: 'debug.system.roster.state.exited',
+  unsupported: 'debug.system.roster.state.unsupported',
   schema_unsupported: 'debug.system.roster.state.unsupported',
 });
 
@@ -5361,7 +5477,17 @@ function debugSystemRosterStatusHtml(state, toneOverride = '') {
 // with its reason code rather than letting the cell fall back to a bare zero.
 function debugSystemRosterWebRow(payload = {}, port = '') {
   const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
-  const absent = debugSystemAbsentMetric('web_process_not_observed');
+  const serverPid = Number(server.pid || 0);
+  const localServices = debugSystemRenderableLocalServices(payload);
+  const nestedServiceOwnsProcess = serverPid > 0
+    && Array.isArray(localServices.services)
+    && localServices.services.some(service => (
+      String(service?.parent_id || service?.parentId || '') === DEBUG_SYSTEM_ROSTER_WEB_ID
+      && Number(service?.pid || 0) === serverPid
+    ));
+  const absent = debugSystemAbsentMetric(
+    nestedServiceOwnsProcess ? 'resource_metrics_owned_by_nested_service' : 'web_process_not_observed',
+  );
   return {
     id: DEBUG_SYSTEM_ROSTER_WEB_ID,
     kind: 'web',
@@ -5375,8 +5501,8 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
       // here from raw floats until the producer started publishing the envelope, which is what
       // let an unsampled `0` render as `measured 0.0B` / `measured 0%` and be summed into the
       // strip's Memory and CPU totals while ~160MB of real RSS went uncounted.
-      cpu_now_percent: server.cpu_percent,
-      rss_bytes: server.rss_bytes,
+      cpu_now_percent: nestedServiceOwnsProcess ? absent : server.cpu_percent,
+      rss_bytes: nestedServiceOwnsProcess ? absent : server.rss_bytes,
       uptime_seconds: server.uptime_seconds,
       // The backend-health observer runs IN this web process and observes the six local services;
       // it has never observed this process, so these four have no series at all. Rendering them as
@@ -5394,8 +5520,8 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
 }
 
 function debugSystemRosterTmuxWatcherRow(payload = {}) {
-  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : {};
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : null;
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   return {
     id: DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID,
     kind: 'child',
@@ -5405,9 +5531,10 @@ function debugSystemRosterTmuxWatcherRow(payload = {}) {
     state,
     // Undemanded and never started is idle by design, not an outage; demanded and never started is
     // the outage. The one issue predicate decides the paint here and the compact alert above, and
-    // `data-subsystem-state` keeps saying which of the five typed states was actually published.
+    // `data-subsystem-state` keeps saying which typed state was published, or that this backend
+    // does not publish the watcher at all.
     tone: debugSystemTmuxSignalWatcherIsIssue(watcher) ? 'bad' : (state === 'attaching' ? 'warn' : (state === 'attached' ? 'good' : 'muted')),
-    reason: String(watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
+    reason: String(watcher?.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
     metrics: debugSystemRosterAbsentMetrics('subsystem_not_observed'),
     health: {},
   };
@@ -5447,7 +5574,7 @@ function debugSystemRosterServiceRow(service = {}) {
   return {
     id,
     kind: 'service',
-    parentId: '',
+    parentId: String(service?.parent_id || service?.parentId || ''),
     label: String(service?.label || id),
     qualifier: id,
     state: String(service?.state || 'unavailable'),
@@ -5579,12 +5706,33 @@ function debugSystemRosterSummary(rows = []) {
     population: rows.length, resourcePopulation: 0,
     cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0,
   };
+  const measuredResource = row => (
+    row?.metrics?.cpu_now_percent?.state === 'measured'
+    || row?.metrics?.rss_bytes?.state === 'measured'
+  );
+  const resourceOwner = row => {
+    if (!row?.parentId) {
+      return row?.metrics?.cpu_now_percent?.reason_code !== 'resource_metrics_owned_by_nested_service';
+    }
+    const parent = rows.find(candidate => String(candidate?.id || '') === String(row.parentId));
+    // A nested row is an independent resource owner only when its parent has no
+    // measured process metrics. This handles the Go monolith (the child owns the
+    // one process) while preserving Python's parent-owned web process accounting.
+    // The tmux watcher is an in-process subsystem and has no process of its own;
+    // a nested service row is still an owner even when its sample is unavailable.
+    return !resourceOwner(parent) && (row?.kind === 'service' || measuredResource(row));
+  };
   for (const row of rows) {
-    if (!row.parentId) counts.resourcePopulation += 1;
+    const ownsResources = resourceOwner(row);
+    if (ownsResources) counts.resourcePopulation += 1;
     const tone = row.tone || debugSystemStateTone(row.state);
     if (tone === 'good') counts.ready += 1;
     else if (tone === 'muted') counts.idle += 1;
     else counts.issues += 1;
+    // A nested service runs inside its parent process. Its CPU/RSS are already represented by
+    // that parent row, so including the child here would double-count one process in the summary
+    // even though the Daemons chart correctly exposes one owned process series.
+    if (!ownsResources || !measuredResource(row)) continue;
     const cpu = row.metrics?.cpu_now_percent;
     if (cpu?.state === 'measured') {
       counts.cpuPercent += Number(cpu.value) || 0;
@@ -5999,7 +6147,7 @@ function debugSystemWebProcessDetailHtml(payload = {}) {
 }
 
 function debugSystemTmuxSignalWatcherDetailHtml(watcher = {}) {
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   const demandKnown = typeof watcher?.demanded === 'boolean';
   const demanded = watcher?.demanded === true;
   const sessions = Array.isArray(watcher?.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
@@ -6040,14 +6188,94 @@ const DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL = Object.freeze({
   indexd: payload => debugSystemSearchCachesDetailHtml(payload),
 });
 
+function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
+  if (!runtimeDiagnostics || typeof runtimeDiagnostics !== 'object') return '';
+  const runtimeDuration = value => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? debugGraphTerseTimeText(number) : '—';
+  };
+  const process = runtimeDiagnostics.process_diagnostics && typeof runtimeDiagnostics.process_diagnostics === 'object'
+    ? runtimeDiagnostics.process_diagnostics : {};
+  const collectors = runtimeDiagnostics.collectors && typeof runtimeDiagnostics.collectors === 'object'
+    ? runtimeDiagnostics.collectors : {};
+  const lifecycle = runtimeDiagnostics.lifecycle && typeof runtimeDiagnostics.lifecycle === 'object'
+    ? runtimeDiagnostics.lifecycle : {};
+  const processRows = debugSystemRowsHtml([
+    ['Roster rows', process.last_roster_rows],
+    ['Roster cache', `${debugSystemNumber(process.roster_cache_hits)} hits / ${debugSystemNumber(process.roster_cache_misses)} misses`],
+    ['Roster time', runtimeDuration(process.last_roster_duration_ms)],
+    ['Metrics cache', `${debugSystemNumber(process.metrics_cache_hits)} hits / ${debugSystemNumber(process.metrics_cache_misses)} misses`],
+    ['Metrics time', runtimeDuration(process.last_metrics_duration_ms)],
+    ['Agent inventory cache', `${debugSystemNumber(process.agent_inventory_cache_hits)} hits / ${debugSystemNumber(process.agent_inventory_cache_misses)} misses`],
+    ['Agent inventory rows', process.last_agent_inventory_rows],
+    ['Thread rows', process.last_thread_rows],
+    ['Child rows', process.last_child_rows],
+  ]);
+  const collectorEntries = Object.entries(collectors).filter(([, value]) => value && typeof value === 'object');
+  const collectorHtml = collectorEntries.length ? `<h4 class="js-debug-roster-detail-title">Collector work</h4><div data-go-runtime-collectors><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Owner</th><th>Runs</th><th>Last</th><th>Total</th><th>Rows</th></tr></thead><tbody>${collectorEntries.map(([name, value]) => {
+    const families = value.families && typeof value.families === 'object' ? Object.entries(value.families) : [];
+    const rows = families.length ? families.map(([family, familyValue]) => `<tr data-go-runtime-family="${esc(family)}"><th scope="row">${esc(`${name}:${family}`)}</th><td>${esc(debugSystemNumber(familyValue.runs))}</td><td>${esc(runtimeDuration(familyValue.last_duration_ms))}</td><td>${esc(runtimeDuration(familyValue.duration_total_ms))}</td><td>${esc(debugSystemNumber(name === 'host' && family === 'cpu' ? value.last_cpu_process_rows : name === 'host' && family === 'system_memory' ? value.last_memory_process_rows : 0))}</td></tr>`).join('') : `<tr data-go-runtime-owner="${esc(name)}"><th scope="row">${esc(name)}</th><td>${esc(debugSystemNumber(value.cycles))}</td><td>${esc(runtimeDuration(value.last_duration_ms))}</td><td>${esc(runtimeDuration(value.duration_total_ms))}</td><td>—</td></tr>`;
+    const opencode = name === 'agent_tokens' && ('opencode_database_opens' in value || 'opencode_database_reuses' in value || 'opencode_collection_last_duration_ms' in value)
+      ? `<tr data-go-runtime-owner="agent_tokens:opencode"><th scope="row">agent_tokens:opencode</th><td>${esc(`${debugSystemNumber(value.opencode_database_opens)} opens / ${debugSystemNumber(value.opencode_database_reuses)} reuses`)}</td><td>${esc(runtimeDuration(value.opencode_database_last_open_duration_ms))}</td><td>${esc(runtimeDuration(value.opencode_collection_duration_total_ms))}</td><td>—</td></tr>`
+      : '';
+    return rows + opencode;
+  }).join('')}</tbody></table></div>` : '';
+  const serviceRefresh = runtimeDiagnostics.service_refresh && typeof runtimeDiagnostics.service_refresh === 'object'
+    ? runtimeDiagnostics.service_refresh : null;
+  const serviceRefreshHtml = serviceRefresh ? `<h4 class="js-debug-roster-detail-title">Published-ring projection</h4><div data-go-runtime-service-refresh><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Runs</th><th>Ring reads</th><th>Ring rows</th><th>Decodes</th><th>Products</th><th>Last</th><th>Total</th></tr></thead><tbody><tr><td>${esc(debugSystemNumber(serviceRefresh.runs))}</td><td>${esc(debugSystemNumber(serviceRefresh.ring_reads))}</td><td>${esc(debugSystemNumber(serviceRefresh.ring_rows))}</td><td>${esc(debugSystemNumber(serviceRefresh.bucket_decodes))}</td><td>${esc(debugSystemNumber(serviceRefresh.products_built))}</td><td>${esc(runtimeDuration(serviceRefresh.last_duration_ms))}</td><td>${esc(runtimeDuration(serviceRefresh.duration_total_ms))}</td></tr></tbody></table></div>` : '';
+  const tokenCollector = collectors.agent_tokens && typeof collectors.agent_tokens === 'object' ? collectors.agent_tokens : null;
+  const phaseEntries = tokenCollector && tokenCollector.opencode_phases && typeof tokenCollector.opencode_phases === 'object'
+    ? Object.entries(tokenCollector.opencode_phases).sort(([left], [right]) => left.localeCompare(right)) : [];
+  const phaseHtml = phaseEntries.length ? `<h4 class="js-debug-roster-detail-title">OpenCode phases</h4><div data-go-runtime-opencode-phases><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Phase</th><th>Runs</th><th>Last</th><th>Total</th></tr></thead><tbody>${phaseEntries.map(([name, value]) => `<tr data-go-runtime-opencode-phase="${esc(name)}"><th scope="row">${esc(name)}</th><td>${esc(debugSystemNumber(value?.runs))}</td><td>${esc(runtimeDuration(value?.last_duration_ms))}</td><td>${esc(runtimeDuration(value?.duration_total_ms))}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const resolutions = lifecycle.by_resolution && typeof lifecycle.by_resolution === 'object'
+    ? (Array.isArray(lifecycle.by_resolution) ? lifecycle.by_resolution : Object.values(lifecycle.by_resolution)) : [];
+  const lifecycleHtml = resolutions.length ? `<h4 class="js-debug-roster-detail-title">SQLite/materialization work</h4><div data-go-runtime-lifecycle><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Resolution</th><th>Cells</th><th>Rows</th><th>Select</th><th>Materialize</th></tr></thead><tbody>${resolutions.map(value => `<tr data-go-runtime-resolution="${esc(value.resolution_seconds || '')}"><th scope="row">${esc(`${value.resolution_seconds || '?'}s`)}</th><td>${esc(debugSystemNumber(value.selected_cells))}</td><td>${esc(debugSystemNumber(value.fact_rows_read))}</td><td>${esc(debugGraphTerseTimeText(Number(value.selection_duration_ms || 0)))}</td><td>${esc(debugGraphTerseTimeText(Number(value.materialization_duration_ms || 0)))}</td></tr>`).join('')}</tbody></table></div>` : '';
+  return `<h4 class="js-debug-roster-detail-title">Measured runtime work</h4>${processRows}${collectorHtml}${serviceRefreshHtml}${phaseHtml}${lifecycleHtml}`;
+}
+
 function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const processDetails = row.service?.details && typeof row.service.details === 'object' ? row.service.details : {};
+  const processMetric = processDetails.process_count;
+  const goroutineMetric = processDetails.goroutine_count;
+  const threadMetric = processDetails.thread_count;
+  const goroutineScopeReason = String(processDetails.goroutine_scope_reason || '').trim();
+  const cpuScope = String(processDetails.cpu_scope || '').trim();
+  const cpuNormalization = String(processDetails.cpu_normalization || '').trim();
+  const goRuntimeHtml = row.id === 'yolomux-go' ? debugSystemGoRuntimeDetailHtml(processDetails.stats_runtime) : '';
+  const threads = Array.isArray(processDetails.threads) ? processDetails.threads : [];
+  const childProcesses = Array.isArray(processDetails.child_processes) ? processDetails.child_processes : [];
+  const childProcessHtml = childProcesses.length ? `<h4 class="js-debug-roster-detail-title">Child processes</h4><div data-go-child-processes>${childProcesses.map(child => {
+    const label = String(child?.label || `pid:${child?.pid || '?'}`);
+    const cpu = child?.cpu_now_percent;
+    const rss = child?.rss_bytes;
+    return `<div class="js-debug-go-child-process" data-go-child-pid="${esc(child?.pid || '')}">${debugSystemRowsHtml([
+      ['Process', label], ['PID', Number(child?.pid) > 0 ? child.pid : '—'],
+      ['State', child?.state || '—'], ['CPU', debugSystemMetricText(cpu, 'cpu_now_percent')],
+      ['Memory', debugSystemMetricText(rss, 'rss_bytes')],
+    ])}</div>`;
+  }).join('')}</div>` : '';
+  const threadHtml = threads.length ? `<h4 class="js-debug-roster-detail-title">OS threads</h4><div data-go-threads>${threads.map(thread => {
+    const cpu = thread?.cpu_now_percent;
+    return `<div class="js-debug-go-thread" data-go-thread-tid="${esc(thread?.tid || '')}">${debugSystemRowsHtml([
+      ['Thread', thread?.name || `tid:${thread?.tid || '?'}`], ['TID', Number(thread?.tid) > 0 ? thread.tid : '—'],
+      ['State', thread?.state || '—'], ['CPU', debugSystemMetricText(cpu, 'cpu_now_percent')],
+    ])}</div>`;
+  }).join('')}</div>` : '';
   const identity = debugSystemRowsHtml([
     ['Service id', row.id],
     ['PID', Number(row.pid) > 0 ? row.pid : '—', Number(row.pid) > 0 ? '' : debugSystemHealthReasonText('process_not_running')],
     ['Reason', row.reason || '—', row.reason ? '' : debugSystemHealthReasonText('state_reason_unpublished')],
+    ...(cpuScope ? [['CPU scope', cpuScope]] : []),
+    ...(cpuNormalization ? [['CPU scale', cpuNormalization]] : []),
   ]);
   const owned = DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL[row.id];
   return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    ${(processMetric || goroutineMetric || threadMetric || goroutineScopeReason) ? debugSystemRowsHtml([
+      ...(processMetric ? [['Processes', debugSystemMetricText(processMetric, 'process_count')]] : []),
+      ...(goroutineMetric ? [['Goroutines', debugSystemMetricText(goroutineMetric, 'goroutine_count')]] : []),
+      ...(goroutineScopeReason ? [['Goroutine detail', goroutineScopeReason]] : []),
+      ...(threadMetric ? [['Threads', debugSystemMetricText(threadMetric, 'thread_count')]] : []),
+    ]) : ''}${threadHtml}${childProcessHtml}${goRuntimeHtml}
     ${debugSystemServiceHealthDetailHtml(row.health, nowSeconds)}
     ${owned ? owned(payload, nowSeconds) : ''}`;
 }
@@ -6165,7 +6393,7 @@ function debugSystemAlertsHtml(payload = {}) {
   const alerts = [...debugSystemHealthExplanations(health).alerts];
   if (debugSystemTmuxSignalWatcherIsIssue(payload.tmux_signal_watcher)) {
     const watcher = payload.tmux_signal_watcher || {};
-    const watcherState = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+    const watcherState = debugSystemTmuxSignalWatcherState(watcher);
     alerts.push(['tmux-signal-watcher', `${t('debug.system.roster.tmuxSignalWatcher')}: ${watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[watcherState]}`]);
   }
   for (const event of Array.isArray(localServices.recovery_events) ? localServices.recovery_events : []) {
@@ -6607,7 +6835,10 @@ const DEBUG_SUBVIEWS = Object.freeze([
       bindDebugGraphTouchSelection(panel);
       bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
     },
-    activate: () => syncDebugGraphLiveTicker(),
+    activate: ({forceAgentStatus = true} = {}) => {
+      void refreshDebugStatsAgentStatus({force: forceAgentStatus});
+      return syncDebugGraphLiveTicker();
+    },
     deactivate: () => syncDebugGraphLiveTicker(),
   }),
   debugSubviewDescriptor({
@@ -6636,11 +6867,11 @@ function debugPanelSubviewDescriptors() {
   return DEBUG_SUBVIEWS;
 }
 
-function syncDebugSubviewActivation({pollNow = false} = {}) {
+function syncDebugSubviewActivation({pollNow = false, forceAgentStatus = true} = {}) {
   for (const view of debugPanelSubviewDescriptors()) {
     if (view.id !== debugRuntimeState.subTab) view.deactivate();
   }
-  return debugSubview(debugRuntimeState.subTab).activate({pollNow});
+  return debugSubview(debugRuntimeState.subTab).activate({pollNow, forceAgentStatus});
 }
 
 function debugPanelHtml() {

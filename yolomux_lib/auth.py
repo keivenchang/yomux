@@ -217,6 +217,11 @@ def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
     transaction: two processes that derive independently could otherwise each
     return a valid but different hash, immediately invalidating one login.
     """
+    if os.environ.get(AUTH_CONFIG_READ_ONLY_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        if not path.exists():
+            return ()
+        return read_auth_users(path)
+
     with shared_config_lock(path):
         secure_auth_config_permissions(path)
         if path.exists():
@@ -285,6 +290,7 @@ AUTH_COOKIE_NAME = "yolomux_auth"
 AUTH_LOGOUT_COOKIE_NAME = "yolomux_logged_out"
 AUTH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 AUTH_COOKIE_SECRET_PATH = CONFIG_DIR / "auth-cookie-secret"
+AUTH_CONFIG_READ_ONLY_ENV = "YOLOMUX_AUTH_CONFIG_READ_ONLY"
 
 
 def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:

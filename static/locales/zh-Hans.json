@@ -800,6 +800,7 @@
   "git.status.untracked": "未跟踪",
   "gitDiff.binary": "二进制",
   "gitDiff.changedFiles": "已更改的文件",
+  "gitDiff.dirty": "脏",
   "gitDiff.empty": "此范围内没有提交。",
   "gitDiff.filesTruncated": "文件列表已截断。",
   "gitDiff.firstParent": "与第一个父提交比较",

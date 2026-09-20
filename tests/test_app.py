@@ -5081,8 +5081,10 @@ def test_activity_payload_all_scope_uses_visible_tmux_sessions(monkeypatch):
     assert ["1"] in discovered
     assert ["1", "external"] in discovered
     assert [row["session"] for row in configured["agents"]] == ["1"]
+    assert configured["session_order"] == ["1"]
     assert configured["session_scope"] == "configured"
     assert [row["session"] for row in all_sessions["agents"]] == ["external", "1"]
+    assert all_sessions["session_order"] == ["external", "1"]
     assert all_sessions["session_scope"] == "all"
     assert all_sessions["session_file_hours"] == 0.5
     assert activity_hours[-1] == 0.5
@@ -7591,6 +7593,30 @@ def test_activity_payload_keeps_last_good_cache_during_source_generation_change(
     assert result["activity"] == payload["activity"]
     assert result["cache"]["stale"] is True
     assert result["cache"]["refreshing"] is True
+
+
+def test_activity_payload_does_not_reuse_configured_cache_for_global_scope(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["configured"])
+    configured_payload = {
+        "activity": {"configured": {"last_user_input_ts": 100}},
+        "agents": [],
+        "agent_windows": {},
+        "errors": [],
+        "session_scope": "configured",
+        "session_file_hours": 24.0,
+    }
+    try:
+        monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: (configured_payload, False, 1.0))
+        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda **kwargs: kwargs.get("session_scope") == "all")
+        payload, status = webapp.activity_payload(session_scope="all")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["session_scope"] == "all"
+    assert payload["cache"]["refreshing"] is True
+    assert payload["activity"] == {}
 
 
 def test_tabber_activity_parallel_cache_state_is_retired():

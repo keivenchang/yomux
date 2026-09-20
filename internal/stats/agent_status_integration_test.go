@@ -147,7 +147,8 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 		if !strings.HasPrefix(record.TmuxPaneID, "%") {
 			t.Fatalf("live pane ID session=%s target=%q", session, record.TmuxPaneID)
 		}
-		if output, err := exec.Command(tmux, "-S", socket, "capture-pane", "-p", "-J", "-S", "-12", "-t", record.TmuxPaneID).CombinedOutput(); err != nil || strings.TrimSpace(string(output)) == "" {
+		captureArgs := append([]string{"-S", socket}, linuxAgentPaneCaptureArgs(record.TmuxPaneID)...)
+		if output, err := exec.Command(tmux, captureArgs...).CombinedOutput(); err != nil || strings.TrimSpace(string(output)) == "" {
 			t.Fatalf("direct PaneID capture session=%s target=%q err=%v output=%q", session, record.TmuxPaneID, err, output)
 		}
 	}
@@ -156,7 +157,7 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 		if got, err := linuxCaptureAgentPane(ctx, record.TmuxPaneID); err != nil {
 			t.Fatalf("live pane capture session=%s target=%q: %v", session, record.TmuxPaneID, err)
 		} else {
-			t.Logf("tmux args=%q inventory=%+v pane target=%q capture bytes=%d", tmuxCommandArgs("capture-pane", "-p", "-J", "-S", "-12", "-t", record.TmuxPaneID), record, got.Target, len(got.VisibleText))
+			t.Logf("tmux args=%q inventory=%+v pane target=%q capture bytes=%d", tmuxCommandArgs(linuxAgentPaneCaptureArgs(record.TmuxPaneID)...), record, got.Target, len(got.VisibleText))
 			if strings.TrimSpace(got.VisibleText) == "" {
 				t.Fatalf("live pane capture was empty for %s", session)
 			}

@@ -5,7 +5,8 @@ bazel_dep(name = "gazelle", version = "0.36.0")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 # Keep the compiler independent of the host package manager and runtime network access. The explicit
-# archive map avoids rules_go's versions.json lookup when tests run with repository downloads disabled.
+# archive map avoids rules_go's versions.json lookup when tests run with repository downloads disabled;
+# it also keeps local preview builds reproducible.
 go_sdk.download(
     version = "1.22.2",
     sdks = {

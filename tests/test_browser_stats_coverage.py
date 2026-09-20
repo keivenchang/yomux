@@ -60,7 +60,7 @@ def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_
 
 
 def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(browser, tmp_path):
-    """Stats-only boot must not probe routes outside the negotiated stats surface."""
+    """Stats-only boot must not probe routes outside stats plus the live agent-activity surface."""
 
     load_live_runtime_boot_fixture(
         browser,
@@ -104,7 +104,12 @@ def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(brows
         return window.__bootFetches.filter(item => !item.path.startsWith('/api/stats-'));
         """
     )
-    assert not non_stats_boot_fetches, non_stats_boot_fetches
+    assert non_stats_boot_fetches == [{
+        "body": None,
+        "method": "GET",
+        "path": "/api/activity",
+        "search": "?hours=24&visible=1&scope=all",
+    }], non_stats_boot_fetches
     boot_failures = browser.execute_script(
         """
         return (typeof jsDebugFailureEvents === 'function' ? jsDebugFailureEvents() : []).filter(event => event.type === 'api');
@@ -118,7 +123,7 @@ def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(brows
           '/api/settings', '/api/session-metadata', '/api/background/status',
           '/api/auto-approve', '/api/fs/index-status', '/api/watched-prs',
           '/api/update-status', '/api/chat/bootstrap', '/api/transcripts',
-          '/api/activity', '/api/unrelated-boot-route',
+          '/api/unrelated-boot-route',
         ];
         Promise.all(paths.map(path => fetch(path, {cache: 'no-store'}).then(response =>
           response.json().then(body => ({path, status: response.status, body})))))
@@ -158,6 +163,87 @@ def test_stats_only_boot_keeps_stats_ready_without_unrelated_route_traffic(brows
     assert readiness_after_unrelated_404["phase"] == "ready", readiness_after_unrelated_404
     assert readiness_after_unrelated_404["graphWidth"] > 0 and readiness_after_unrelated_404["graphHeight"] > 0, readiness_after_unrelated_404
     browser.execute_script("clearJsDebugEvents();")
+
+
+def test_stats_only_graph_renders_live_green_edge_pulse(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=debug&layout=left&tabs=left:__debug__",
+        sessions=("debug",),
+        terminal_only=True,
+        stats_only=True,
+    )
+    result = WebDriverWait(browser, 15, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
+            const graph = document.querySelector('[data-js-debug-graph]');
+            if (!graph || typeof jsDebugHistoryReadiness === 'undefined' || jsDebugHistoryReadiness.phase !== 'ready') return false;
+            const pulse = graph.querySelectorAll('[data-js-debug-live-pulse]');
+            const node = pulse[0];
+            const style = node ? getComputedStyle(node) : null;
+            return {
+              pulseCount: pulse.length,
+              animationName: style?.animationName || '',
+              fill: style?.fill || '',
+              pulseWidth: node?.getBoundingClientRect().width || 0,
+              graphHidden: graph.offsetParent === null,
+            };
+            """
+        )
+    )
+    assert result["pulseCount"] > 0, result
+    assert result["animationName"] == "agent-status-opacity-pulse", result
+    assert result["fill"] != "none", result
+    assert result["pulseWidth"] >= 2, result
+    assert result["graphHidden"] is False, result
+
+
+def test_stats_only_activity_adopts_working_codex_marker_for_visible_terminal(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=1,debug&layout=left&tabs=left:__debug__,1",
+        sessions=("1", "debug"),
+        terminal_only=True,
+        stats_only=True,
+        auto_approve_payload={
+            "agent_window_snapshot_revision": 1,
+            "session_order": ["1"],
+            "sessions": {
+                "1": {
+                    "target": "1",
+                    "enabled": False,
+                    "agent_windows": [{
+                        "kind": "codex",
+                        "state": "working",
+                        "window_index": 0,
+                        "window_label": "0:codex",
+                        "pane_target": "%73",
+                        "current": True,
+                    }],
+                },
+            },
+        },
+    )
+    result = WebDriverWait(browser, 15, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
+            const tab = document.querySelector('[data-pane-tab="1"]');
+            const marker = tab?.querySelector('.session-agent-activity-marker');
+            const dot = marker?.querySelector('.agent-window-status-dot');
+            if (!tab || !marker || !dot) return false;
+            return {
+              state: dot.className,
+              animationName: getComputedStyle(dot).animationName,
+              color: getComputedStyle(dot).color,
+            };
+            """
+        )
+    )
+    assert "status-indicator--working" in result["state"], result
+    assert "heartbeat-pulse" in result["state"], result
+    assert result["animationName"] == "agent-status-opacity-pulse", result
 
 
 def _load_current_stats(browser, tmp_path, view="stats"):

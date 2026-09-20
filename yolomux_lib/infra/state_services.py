@@ -325,7 +325,7 @@ class TabberActivityCacheRecord:
     refresh_worker: threading.Thread | None = None
     session_signatures: dict[str, str] = field(default_factory=dict)
     session_rows: dict[str, dict[str, Any]] = field(default_factory=dict)
-    inflight_by_key: dict[tuple[float, str], Future[dict[str, Any]]] = field(default_factory=dict)
+    inflight_by_key: dict[tuple[float, str, str], Future[dict[str, Any]]] = field(default_factory=dict)
     session_scope: str = ""
     session_file_hours: float = 0.0
 

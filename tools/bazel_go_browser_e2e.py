@@ -3,22 +3,28 @@
 
 import argparse
 import atexit
+import fcntl
 import hashlib
 import http.cookiejar
 import json
 import os
+import pty
+import signal
 import shutil
 from pathlib import Path
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import urllib.error
 import urllib.request
 
 from selenium import webdriver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.keys import Keys
@@ -151,15 +157,65 @@ def main(binary: str) -> None:
         subprocess.run(("git", "-C", str(git_root), "config", "user.name", "YOLOmux E2E"), check=True)
         subprocess.run(("git", "-C", str(git_root), "add", "note.txt"), check=True)
         subprocess.run(("git", "-C", str(git_root), "commit", "-qm", "base"), check=True)
+        subprocess.run(("git", "-C", str(git_root), "branch", "-M", "e2e-feature"), check=True)
         git_note.write_text("changed\n", encoding="utf-8")
         subprocess.run(("git", "-C", str(git_root), "commit", "-qam", "changed"), check=True)
         git_head = subprocess.check_output(("git", "-C", str(git_root), "rev-parse", "HEAD"), text=True).strip()
         git_note.write_text("working\n", encoding="utf-8")
+        unreadable_file = root / "unreadable.txt"
+        unreadable_file.write_text("permission denied\n", encoding="utf-8")
+        unreadable_file.chmod(0)
+        agent_bin = fixture_home / "bin"
+        agent_bin.mkdir()
+        launch_record = root / "launch-record.txt"
+        launcher_source = """#!/bin/sh
+case "$1" in
+  --version|auth|login) exit 0 ;;
+esac
+if [ -n "${YOLOMUX_E2E_LAUNCH_RECORD:-}" ]; then
+  printf '%s %s\\n' "$0" "$*" >> "$YOLOMUX_E2E_LAUNCH_RECORD"
+fi
+exec /bin/sleep 300
+"""
+        for name in ("bash", "claude", "codex"):
+            launcher = agent_bin / name
+            launcher.write_text(launcher_source, encoding="utf-8")
+            launcher.chmod(0o755)
+        precreated_bin = fixture_home / "precreated-bin"
+        precreated_bin.mkdir()
+        precreated_claude_launcher = precreated_bin / "claude"
+        precreated_claude_launcher.symlink_to("/bin/sleep")
         created_sessions = []
-        for session_name in sessions:
+        for index, session_name in enumerate(sessions):
             if subprocess.run((*tmux, "has-session", "-t", session_name), check=False, stderr=subprocess.DEVNULL).returncode != 0:
-                subprocess.run((*tmux, "new-session", "-d", "-s", session_name), check=True)
+                command = [*tmux, "new-session", "-d", "-s", session_name, "-c", str(git_root)]
+                if index == 0:
+                    command.extend((str(precreated_claude_launcher), "300"))
+                subprocess.run(command, check=True)
                 created_sessions.append(session_name)
+        second_window = [*tmux, "new-window", "-d", "-t", f"={session}:", "-n", "claude-second", "-c", str(git_root), str(precreated_claude_launcher), "300"]
+        subprocess.run(second_window, check=True)
+        subprocess.run((*tmux, "select-window", "-t", f"={session}:0"), check=True)
+        agent_pane_pid = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:0.0", "#{pane_pid}"), text=True).strip()
+        second_agent_pane_pid = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:1.0", "#{pane_pid}"), text=True).strip()
+        second_agent_pane_target = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:1.0", "#{pane_id}"), text=True).strip()
+        claude_transcript = private_environment_roots["YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"] / "fixture" / "claude-session.jsonl"
+        claude_transcript.parent.mkdir(parents=True)
+        claude_transcript.write_text(
+            json.dumps({"type": "assistant", "cwd": str(git_root), "message": {"role": "assistant", "content": "Docker transcript first"}}) + "\n",
+            encoding="utf-8",
+        )
+        second_claude_transcript = private_environment_roots["YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"] / "fixture" / "claude-session-2.jsonl"
+        second_claude_transcript.write_text(
+            json.dumps({"type": "assistant", "cwd": str(git_root), "message": {"role": "assistant", "content": "Docker transcript second"}}) + "\n",
+            encoding="utf-8",
+        )
+        claude_metadata = fixture_home / ".claude" / "sessions" / f"{agent_pane_pid}.json"
+        claude_metadata.parent.mkdir(parents=True)
+        claude_metadata.write_text(json.dumps({"sessionId": "claude-session", "cwd": str(git_root)}), encoding="utf-8")
+        (fixture_home / ".claude" / "sessions" / f"{second_agent_pane_pid}.json").write_text(
+            json.dumps({"sessionId": "claude-session-2", "cwd": str(git_root)}), encoding="utf-8",
+        )
 
         def stop_process(process, label, force=False):
             if process is None or process.poll() is not None:
@@ -198,7 +254,7 @@ def main(binary: str) -> None:
                 detail = probe.stderr.strip() or probe.stdout.strip() or f"tmux has-session exited {probe.returncode}"
                 cleanup_errors.append(f"could not prove tmux session {session_name} was retired: {detail}")
 
-        def start_server():
+        def start_server(dangerously_yolo=True):
             nonlocal port
             generation = len(list(root.glob("server-*.txt"))) + 1
             log_path = root / f"server-{generation}.txt"
@@ -211,6 +267,10 @@ def main(binary: str) -> None:
                 "YOLOMUX_STATS_DISABLE_COLLECTORS": "1",
             })
             environment["YOLOMUX_TMUX_SOCKET"] = tmux_socket
+            environment["PATH"] = str(agent_bin) + os.pathsep + environment.get("PATH", "")
+            environment["YOLOMUX_E2E_LAUNCH_RECORD"] = str(launch_record)
+            subprocess.run((*tmux, "set-environment", "-g", "PATH", environment["PATH"]), env=environment, check=True)
+            subprocess.run((*tmux, "set-environment", "-g", "YOLOMUX_E2E_LAUNCH_RECORD", str(launch_record)), env=environment, check=True)
             # Keep this deliberate backpressure fixture private to the uncached browser contract:
             # the normal queue remains 256, while Chromium proves that an evicted resource reaches
             # the browser's repair path instead of silently disappearing.
@@ -221,7 +281,10 @@ def main(binary: str) -> None:
                 probe.bind(("0.0.0.0", port))
                 probe.listen(128)
                 port = int(probe.getsockname()[1])
-                process = subprocess.Popen([binary, "--host", "0.0.0.0", "--port", str(port), "--listen-fd", str(probe.fileno()), "--root", str(private_source_root), "--config", str(config)], env=environment, stdout=log_file, stderr=subprocess.STDOUT, pass_fds=(probe.fileno(),))
+                command = [binary, "--host", "0.0.0.0", "--port", str(port), "--listen-fd", str(probe.fileno()), "--root", str(private_source_root), "--config", str(config)]
+                if dangerously_yolo:
+                    command.append("--dangerously-yolo")
+                process = subprocess.Popen(command, env=environment, stdout=log_file, stderr=subprocess.STDOUT, pass_fds=(probe.fileno(),))
             log_file.close()
             for _ in range(80):
                 try:
@@ -254,6 +317,17 @@ def main(binary: str) -> None:
             """)
             if identity.get("status") != 200 or identity.get("body", {}).get("server", {}).get("pid") != process.pid:
                 raise SystemExit(f"Go Phase 3 listener identity failed: expected pid {process.pid}, got {identity}")
+
+        def tmux_window_dimensions():
+            output = subprocess.check_output(
+                (*tmux, "display-message", "-p", "-t", f"={session}:0", "#{window_width}\\t#{window_height}"),
+                text=True,
+            ).strip()
+            width, height = output.split("\\t", 1)
+            return int(width), int(height)
+
+        def set_pty_dimensions(fd, rows, cols):
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
         try:
             options = Options()
@@ -329,7 +403,262 @@ def main(binary: str) -> None:
                     result["diagnostics"] = diagnostics
                     result["browser_log"] = driver.get_log("browser")
                     raise SystemExit(f"Go Chromium terminal E2E failed: {result}")
+                # A second, larger non-ignore-size client is the regression fixture for the shared
+                # tmux window. The focused browser client must take authority, otherwise
+                # `window-size largest` leaves tmux at the larger sibling dimensions even though
+                # xterm itself resized locally.
+                secondary_master, secondary_slave = pty.openpty()
+                set_pty_dimensions(secondary_slave, 70, 220)
+                secondary_client = subprocess.Popen(
+                    (*tmux, "attach-session", "-t", f"={session}:"),
+                    stdin=secondary_slave,
+                    stdout=secondary_slave,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                    close_fds=True,
+                    env={**os.environ, "TERM": "xterm-256color"},
+                )
+                os.close(secondary_slave)
+                try:
+                    secondary_deadline = time.time() + 5
+                    while time.time() < secondary_deadline:
+                        if secondary_client.poll() is not None:
+                            error = secondary_client.stderr.read().decode("utf-8", "replace").strip() if secondary_client.stderr else ""
+                            raise SystemExit(
+                                "secondary tmux resize client exited: "
+                                f"{secondary_client.returncode}; stderr={error!r}; "
+                                f"sessions={subprocess.run((*tmux, 'list-sessions', '-F', '#S'), capture_output=True, text=True).stdout!r}"
+                            )
+                        try:
+                            secondary_width, secondary_height = tmux_window_dimensions()
+                            if secondary_width >= 200 and secondary_height >= 60:
+                                break
+                        except (subprocess.CalledProcessError, ValueError):
+                            pass
+                        time.sleep(0.05)
+                    else:
+                        raise SystemExit(f"secondary tmux client did not establish large window: {tmux_window_dimensions()}")
+                    resized = driver.execute_script("""
+                        const item = terminals.get(arguments[0]);
+                        fitTerminal(arguments[0], {force: true, claim: true});
+                        return {cols: item.term.cols, rows: item.term.rows};
+                    """, session)
+                    resized_width, resized_height = resized["cols"], resized["rows"]
+                    dimensions_deadline = time.time() + 5
+                    observed_dimensions = None
+                    while time.time() < dimensions_deadline:
+                        observed_dimensions = tmux_window_dimensions()
+                        if observed_dimensions[0] == resized_width and observed_dimensions[1] in (resized_height, resized_height - 1):
+                            break
+                        time.sleep(0.05)
+                    if observed_dimensions[0] != resized_width or observed_dimensions[1] not in (resized_height, resized_height - 1):
+                        clients = subprocess.run(
+                            (*tmux, "list-clients", "-F", "#{client_tty}\\t#{client_session}\\t#{client_width}\\t#{client_height}\\t#{client_flags}"),
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                        raise SystemExit(
+                            "Go tmux resize E2E failed: "
+                            f"xterm={resized_width}x{resized_height}, tmux={observed_dimensions}, "
+                            f"secondary={secondary_width}x{secondary_height}, clients={clients!r}"
+                        )
+                finally:
+                    if secondary_client.poll() is None:
+                        os.killpg(secondary_client.pid, signal.SIGTERM)
+                        try:
+                            secondary_client.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(secondary_client.pid, signal.SIGKILL)
+                            secondary_client.wait(timeout=5)
+                    os.close(secondary_master)
                 assert_server_identity(driver, proc)
+                refresh = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const button = document.getElementById('refreshMeta');
+                    const before = Number(transcriptMetadataState?.generation || 0);
+                    if (!button || typeof button.onclick !== 'function') {
+                      done({error: 'top-right refresh button is not wired', button: Boolean(button)});
+                      return;
+                    }
+                    button.click();
+                    const deadline = performance.now() + 12000;
+                    const poll = () => {
+                      const generation = Number(transcriptMetadataState?.generation || 0);
+                      if (generation > before && transcriptMetadataState?.loading !== true) {
+                        done({before, generation, loading: false});
+                        return;
+                      }
+                      if (performance.now() >= deadline) {
+                        done({error: 'top-right refresh did not converge', before, generation, loading: transcriptMetadataState?.loading, lastApply: transcriptMetadataState?.lastApply || null});
+                        return;
+                      }
+                      setTimeout(poll, 40);
+                    };
+                    poll();
+                """)
+                if refresh.get("error"):
+                    refresh["browser_log"] = driver.get_log("browser")
+                    raise SystemExit(f"Go top-right refresh E2E failed: {refresh}")
+                launch_contract = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const json = async (url, options = {}) => {
+                      const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin', ...options});
+                      const body = await response.json();
+                      return {status: response.status, body};
+                    };
+                    const cases = [
+                      {agent: 'term', terminal: 'bash', dangerous: false, command: 'bash'},
+                      {agent: 'claude', terminal: '', dangerous: false, command: 'claude'},
+                      {agent: 'claude', terminal: '', dangerous: true, command: 'claude --dangerously-skip-permissions'},
+                      {agent: 'codex', terminal: '', dangerous: false, command: 'codex'},
+                      {agent: 'codex', terminal: '', dangerous: true, command: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust'},
+                    ];
+                    (async () => {
+                      try {
+                        const launches = [];
+                        for (const item of cases) {
+                          const plan = await json('/api/create-session-plan');
+                          if (plan.status !== 200 || !Number.isSafeInteger(Number(plan.body?.generation))) {
+                            throw new Error(`unsafe create-session plan: ${JSON.stringify(plan)}`);
+                          }
+                          const params = new URLSearchParams({
+                            agent: item.agent,
+                            dangerously_yolo: item.dangerous ? '1' : '0',
+                            session: String(plan.body.session),
+                            generation: String(plan.body.generation),
+                          });
+                          if (item.terminal) params.set('terminal', item.terminal);
+                          const created = await json('/api/create-session?' + params, {method: 'POST'});
+                          if (created.status !== 200 || created.body?.command !== item.command || created.body?.created !== true) {
+                            throw new Error(`launch mismatch for ${item.agent}: ${JSON.stringify(created)}`);
+                          }
+                          launches.push(created.body);
+                        }
+                        done({launches});
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                """)
+                if launch_contract.get("error") or len(launch_contract.get("launches", [])) != 5:
+                    raise SystemExit(f"Go File -> New launch contract failed: {launch_contract}")
+                for launch in launch_contract["launches"]:
+                    created_sessions.append(launch["session"])
+                expected_launch_commands = {
+                    "bash",
+                    "claude",
+                    "claude --dangerously-skip-permissions",
+                    "codex",
+                    "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+                }
+                def read_recorded_commands():
+                    if not launch_record.exists():
+                        return set()
+                    commands = set()
+                    for line in launch_record.read_text(encoding="utf-8").splitlines():
+                        executable, separator, arguments = line.partition(" ")
+                        if separator:
+                            commands.add(" ".join((Path(executable).name, arguments.strip())).strip())
+                    return commands
+
+                def wait_for_recorded_command(command):
+                    launch_deadline = time.time() + 5
+                    observed = set()
+                    while time.time() < launch_deadline:
+                        observed = read_recorded_commands()
+                        if command in observed:
+                            return observed
+                        time.sleep(0.05)
+                    raise SystemExit(f"Go File -> New launch command did not reach fixture process: {command!r}, observed={sorted(observed)!r}")
+
+                recorded = set()
+                for command in expected_launch_commands:
+                    recorded = wait_for_recorded_command(command)
+                surfaces = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const session = arguments[0];
+                    const expectedPath = arguments[1];
+                    const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + timeoutMs;
+                      const poll = () => {
+                        try {
+                          const value = predicate();
+                          if (value) { resolve(value); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
+                        setTimeout(poll, 40);
+                      };
+                      poll();
+                    });
+                    const json = async (url, options = {}) => {
+                      const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin', ...options});
+                      const body = await response.json();
+                      return {status: response.status, body};
+                    };
+                    (async () => {
+                      try {
+                        const metadata = await json('/api/session-metadata?force=1');
+                        if (metadata.status !== 200) throw new Error(`session metadata status ${metadata.status}`);
+                        // This direct probe owns the same response that the production refresh path
+                        // applies. Apply it before inspecting rendered surfaces; otherwise the test
+                        // can validate fresh graph bytes while the DOM still shows an earlier empty
+                        // bootstrap snapshot.
+                        if (typeof applyTranscriptsPayload !== 'function') throw new Error('session metadata apply helper is unavailable');
+                        await applyTranscriptsPayload(metadata.body, {refreshAuto: false, refreshContext: false, refreshActivity: false, source: 'e2e-probe'});
+                        const info = metadata.body.sessions?.[session] || {};
+                        const graph = info.work_graph || {};
+                        const repos = Object.values(graph.git_worktrees || {});
+                        if (graph.version !== 1 || !repos.length) throw new Error(`metadata graph missing repository: ${JSON.stringify(info)}`);
+                        const agents = Array.isArray(info.agents) ? info.agents : [];
+                        const firstAgent = agents.find(agent => String(agent?.window || '') === '0');
+                        const secondAgent = agents.find(agent => String(agent?.window || '') === '1');
+                        if (!firstAgent?.pane_target || !secondAgent?.pane_target) throw new Error(`multi-window agents missing: ${JSON.stringify(agents)}`);
+                        const transcript = async query => json(`/api/transcript?session=${encodeURIComponent(session)}&${query}`);
+                        const firstTranscript = await transcript(`pane_target=${encodeURIComponent(firstAgent.pane_target)}`);
+                        const secondTranscript = await transcript(`pane_target=${encodeURIComponent(secondAgent.pane_target)}`);
+                        const activeTranscript = await json(`/api/transcript?session=${encodeURIComponent(session)}`);
+                        const secondWindowContext = await json(`/api/context-items?session=${encodeURIComponent(session)}&window=1&messages=200`);
+                        if (firstTranscript.status !== 200 || !firstTranscript.body.text.includes('Docker transcript first')) throw new Error(`first pane transcript mismatch: ${JSON.stringify(firstTranscript)}`);
+                        if (secondTranscript.status !== 200 || !secondTranscript.body.text.includes('Docker transcript second')) throw new Error(`second pane transcript mismatch: ${JSON.stringify(secondTranscript)}`);
+                        if (activeTranscript.status !== 200 || !activeTranscript.body.text.includes('Docker transcript first')) throw new Error(`active pane transcript mismatch: ${JSON.stringify(activeTranscript)}`);
+                        if (secondWindowContext.status !== 200 || !secondWindowContext.body.items.some(item => item.text.includes('Docker transcript second'))) throw new Error(`window context mismatch: ${JSON.stringify(secondWindowContext)}`);
+                        await waitFor(() => {
+                          const text = document.getElementById(`meta-${session}`)?.textContent || '';
+                          return text.includes('e2e-feature') && text.includes('git-fixture');
+                        }, 'Info Bar metadata');
+                        const tab = document.querySelector(`[data-tab="${CSS.escape(session)}"]`);
+                        showTabContextMenu(session, 24, 24, {tab});
+                        const moreDescription = document.querySelector('.tab-action-description')?.textContent || '';
+                        closeSessionContextMenu();
+                        if (!moreDescription.includes('e2e-feature') || !moreDescription.includes('git-fixture')) {
+                          throw new Error(`More Desc omitted metadata: ${moreDescription}`);
+                        }
+                        const initialStatus = await json(`/api/tmux-status?session=${encodeURIComponent(session)}`);
+                        if (initialStatus.status !== 200) throw new Error(`tmux status GET ${initialStatus.status}`);
+                        const statusCycle = [initialStatus.body.status];
+                        for (let index = 0; index < 3; index += 1) {
+                          const next = await json(`/api/tmux-status?session=${encodeURIComponent(session)}`, {method: 'POST'});
+                          if (next.status !== 200) throw new Error(`tmux status POST ${next.status}`);
+                          statusCycle.push(next.body.status);
+                        }
+                        if (new Set(statusCycle).size !== 3 || statusCycle[3] !== statusCycle[0]) {
+                          throw new Error(`tmux status did not cycle top/bottom/none: ${JSON.stringify(statusCycle)}`);
+                        }
+                        const event = await json('/api/event', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session, type: 'surface_probe', message: 'Docker event surface ready', details: {source: 'surface-e2e'}})});
+                        if (event.status !== 200) throw new Error(`event POST ${event.status}`);
+                        activateTab(session, 'events', {userInitiated: true});
+                        await waitFor(() => document.querySelector(`#events-${CSS.escape(session)} .event-item`)?.textContent?.includes('Docker event surface ready'), 'Event Log');
+                        activateTab(session, 'transcript', {userInitiated: true});
+                        await waitFor(() => document.querySelector(`#transcript-${CSS.escape(session)} .transcript-item`)?.textContent?.includes('Docker transcript first'), 'Transcript');
+                        done({graphVersion: graph.version, repositoryCount: repos.length, infoBar: document.getElementById(`meta-${session}`)?.textContent || '', moreDescription, statusCycle, eventLoaded: true, transcriptLoaded: true, expectedPath});
+                      } catch (error) {
+                        done({error: String(error?.stack || error), body: document.body.innerText.slice(0, 1200), console: 'see browser log'});
+                      }
+                    })();
+                """, session, str(git_root))
+                if surfaces.get("error") or surfaces.get("eventLoaded") is not True or surfaces.get("transcriptLoaded") is not True:
+                    surfaces["browser_log"] = driver.get_log("browser")
+                    raise SystemExit(f"Go Chromium session surface E2E failed: {surfaces}")
                 phase3 = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const events = new EventSource('/api/client-events?channels=core,events&client_id=phase3-e2e');
@@ -909,29 +1238,32 @@ def main(binary: str) -> None:
                       uploadForm.append('files', new Blob(['uploaded'], {type: 'text/plain'}), 'asset.txt');
                       const upload = await operationPayload('/api/upload?editor_path=' + encodeURIComponent(note), 'upload', {method: 'POST', body: uploadForm});
                       if (upload.target_source !== 'editor_file_directory' || upload.files?.length !== 1) throw new Error('upload mismatch: ' + JSON.stringify(upload));
-                      const forbidden = await json('/api/fs/read?path=%2Fetc%2Fpasswd');
-                      if (forbidden.status !== 403) throw new Error('permission failure mismatch: ' + JSON.stringify(forbidden));
+                      const external = await json('/api/fs/read?path=%2Fetc%2Fpasswd');
+                      if (external.status !== 200 || !external.body.content?.includes('root:')) throw new Error('external path access mismatch');
+                      const forbidden = await json('/api/fs/read?path=' + encodeURIComponent(arguments[1]));
+                      if (forbidden.status !== 403) throw new Error('permission failure mismatch: ' + forbidden.status);
                       const watch = requireStatus(await json('/api/watch/roots', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({client_id: 'finder-e2e', roots: [root]})}), 200, 'watch roots');
                       done({listing: listing.entries.length, read: read.content, infoKind: info.kind, batch: batch.responses.length, candidate: candidate.path, count: count.files, zipBytes: zipBytes.byteLength, htmlPreview: true, stream: true, recursiveSearch: terminal.body.data.count, upload: upload.files[0].relative_path, watchToken: watch.watch_token});
                     })().catch(error => done({error: String(error)}));
-                """, str(finder_root))
+                """, str(finder_root), str(unreadable_file))
                 if finder.get('error'):
                     raise SystemExit(f"Go Phase 4/5 Finder Chromium E2E failed: {finder}")
                 driver.get(f"https://127.0.0.1:{port}/?sessions=files,{session}&layout=left&tabs=left:files")
                 ui_deadline = time.time() + 15
                 while time.time() < ui_deadline and not driver.find_elements("css selector", "#panel-__finder__ .file-explorer-tree-panel"):
                     time.sleep(0.1)
-                finder_ui = driver.execute_async_script("""
+                finder_setup = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const root = arguments[0];
-                    const waitFor = (predicate, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                    const gitRoot = arguments[1];
+                    const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
                       const deadline = performance.now() + timeoutMs;
                       const poll = () => {
                         try {
                           const value = predicate();
                           if (value) { resolve(value); return; }
                         } catch (error) { reject(error); return; }
-                        if (performance.now() >= deadline) { reject(new Error('Finder UI condition timed out')); return; }
+                        if (performance.now() >= deadline) { reject(new Error('Finder setup condition timed out')); return; }
                         setTimeout(poll, 50);
                       };
                       poll();
@@ -962,23 +1294,99 @@ def main(binary: str) -> None:
                         expanded: row(root + '/nested')?.getAttribute('aria-expanded') || null,
                         needle: Boolean(row(root + '/nested/needle.txt')),
                       };
+                      const gitRow = row(gitRoot);
+                      if (!gitRow) throw new Error('Finder Git repository row is missing during setup');
+                      const initialRepo = gitRow.dataset.isRepo === 'true';
+                      try {
+                        await waitFor(() => row(gitRoot)?.dataset.isRepo === 'true');
+                      } catch (error) {
+                        throw new Error(`Finder Git repository enrichment timed out: ${JSON.stringify({initialRepo, row: row(gitRoot)?.outerHTML || '', pending: [...fileExplorerRepoInfoEnrichmentState.pending], inFlight: [...fileExplorerRepoInfoEnrichmentState.inFlight], resolved: [...fileExplorerRepoInfoEnrichmentState.resolved]})}`, {cause: error});
+                      }
+                      window.__yolomuxFinderContextMenuProbe = {defaultPrevented: false};
+                      gitRow.addEventListener('contextmenu', event => {
+                        window.__yolomuxFinderContextMenuProbe.defaultPrevented = event.defaultPrevented;
+                      }, {once: true});
+                      done({initial, expanded, reexpanded, initialRepo, repoEnriched: row(gitRoot)?.dataset.isRepo === 'true'});
+                    })().catch(error => done({error: String(error?.stack || error)}));
+                """, str(finder_root), str(git_root))
+                if finder_setup.get('error'):
+                    raise SystemExit(f"Go Phase 4/5 Finder setup Chromium E2E failed: {finder_setup}")
+                git_row = driver.find_element("css selector", f'#panel-__finder__ .file-tree-row[data-path="{git_root}"]')
+                ActionChains(driver).context_click(git_row).perform()
+                finder_ui = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const root = arguments[0];
+                    const gitRoot = arguments[1];
+                    const gitHead = arguments[2];
+                    const setup = arguments[3];
+                    const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + timeoutMs;
+                      const poll = () => {
+                        try {
+                          const value = predicate();
+                          if (value) { resolve(value); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error(`Finder UI condition timed out: ${description}`)); return; }
+                        setTimeout(poll, 50);
+                      };
+                      poll();
+                    });
+                    const row = path => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
+                    (async () => {
+                      const gitRow = row(gitRoot);
+                      if (!gitRow) throw new Error('Finder Git repository row is missing');
+                      const gitDiffButton = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff'), 'context-menu Diff action');
+                      if (!gitDiffButton || gitDiffButton.disabled) throw new Error('Finder Git repository Diff action is missing or disabled');
+                      gitDiffButton.click();
+                      const gitDiffItem = gitDiffItemFor(gitRoot);
+                      let gitDiffPanel;
+                      try {
+                        gitDiffPanel = await waitFor(() => {
+                          const panel = panelNodes.get(gitDiffItem);
+                          return panel && panel.querySelectorAll('.git-diff-commit-row').length >= 2 ? panel : null;
+                        }, 'Git history rows');
+                      } catch (error) {
+                        const historyState = gitDiffTabState.get(gitDiffItem);
+                        throw new Error(`${error.message}: ${JSON.stringify({
+                          state: historyState ? {
+                            path: historyState.path,
+                            loading: historyState.loading === true,
+                            loadAttempted: historyState.loadAttempted === true,
+                            loaded: historyState.loaded === true,
+                            error: historyState.error,
+                            commits: historyState.commits?.length || 0,
+                          } : null,
+                          panel: panelNodes.get(gitDiffItem)?.outerHTML?.slice(0, 2000) || '',
+                          gitHistoryRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history')),
+                        })}`, {cause: error});
+                      }
+                      const gitRows = Array.from(gitDiffPanel.querySelectorAll('.git-diff-commit-row'));
+                      const shaRows = gitRows.filter(row => row.dataset.gitDiffCommit);
+                      const gitHistory = {
+                        nativeSuppressed: Boolean(window.__yolomuxFinderContextMenuProbe?.defaultPrevented),
+                        item: gitDiffItem,
+                        active: itemIsActivePaneTab(gitDiffItem),
+                        head: shaRows[0]?.dataset.gitDiffCommit || '',
+                        commits: shaRows.length,
+                      };
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;
                       window.confirm = () => true;
                       removable.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
-                      await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /^delete$/i.test(button.textContent.trim())));
+                      await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /^delete$/i.test(button.textContent.trim())), 'context-menu Delete action');
                       const deleteButton = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /^delete$/i.test(button.textContent.trim()));
                       if (!deleteButton) throw new Error('Finder delete context-menu action is missing');
                       deleteButton.click();
-                      await waitFor(() => !row(root + '/ui-remove-me.txt'));
+                      await waitFor(() => !row(root + '/ui-remove-me.txt'), 'Finder delete convergence');
                       window.confirm = originalConfirm;
                       const deletedInfo = await fetch('/api/fs/info?path=' + encodeURIComponent(root + '/ui-remove-me.txt'), {cache: 'no-store', credentials: 'same-origin'});
                       if (deletedInfo.status !== 404) throw new Error(`Finder delete did not remove the file: ${deletedInfo.status}`);
-                      done({initial, expanded, reexpanded, deletedViaFinder: true});
+                      done({initial: setup.initial, expanded: setup.expanded, reexpanded: setup.reexpanded, initialRepo: setup.initialRepo, repoEnriched: setup.repoEnriched, gitHistory, deletedViaFinder: true});
                     })().catch(error => done({error: String(error?.stack || error)}));
-                """, str(finder_root))
-                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('deletedViaFinder') is not True:
+                """, str(finder_root), str(git_root), git_head, finder_setup)
+                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('deletedViaFinder') is not True:
                     raise SystemExit(f"Go Phase 4/5 Finder UI Chromium E2E failed: {finder_ui}")
                 git_views = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
@@ -1187,6 +1595,62 @@ def main(binary: str) -> None:
                 """)
                 if no_replay.get('error') or no_replay.get('seen') != ['ready']:
                     raise SystemExit(f"Go Phase 3 acknowledged replay failed: {no_replay}")
+                ui_launch_cases = (
+                    ("bash", "bash"),
+                    ("new Claude", "claude"),
+                    ("new Codex", "codex"),
+                    ("new Claude (dangerously auto approve)", "claude --dangerously-skip-permissions"),
+                    ("new Codex (dangerously auto approve)", "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"),
+                )
+                for label, command in ui_launch_cases:
+                    click_result = driver.execute_script("""
+                        const label = arguments[0];
+                        const wrapper = document.querySelector('[data-app-menu="file"]');
+                        if (!wrapper) return {error: 'File menu is not rendered'};
+                        const button = wrapper.querySelector(':scope > .app-menu-button');
+                        if (!button) return {error: 'File menu button is not rendered'};
+                        button.click();
+                        const normalize = node => (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                        const target = Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).find(node => normalize(node) === label);
+                        if (!target) return {error: `File menu command not found: ${label}`, labels: Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command')).map(normalize)};
+                        target.click();
+                        return {clicked: label};
+                    """, label)
+                    if click_result.get("error"):
+                        raise SystemExit(f"Go File menu -> New Chromium contract failed: {click_result}")
+                    recorded = wait_for_recorded_command(command)
+                if not expected_launch_commands.issubset(recorded):
+                    raise SystemExit(f"Go File -> New launch arguments did not reach fixture processes: {sorted(recorded)!r}")
+                stop_server(force=True)
+                proc = start_server(dangerously_yolo=False)
+                driver.get(f"https://127.0.0.1:{port}/?sessions={session}&layout=left&tabs=left:{session}")
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if driver.find_elements("css selector", '[data-app-menu="file"] > .app-menu-button'):
+                        break
+                    time.sleep(0.1)
+                non_yolo_contract = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const session = arguments[0];
+                    (async () => {
+                      try {
+                        const response = await fetch('/api/create-session?agent=codex&dangerously_yolo=1&session=' + encodeURIComponent(session + '-denied'), {method: 'POST', cache: 'no-store', credentials: 'same-origin'});
+                        const body = await response.json();
+                        const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap')?.textContent || '{}');
+                        const wrapper = document.querySelector('[data-app-menu="file"]');
+                        const button = wrapper?.querySelector(':scope > .app-menu-button');
+                        button?.click();
+                        const normalize = node => (node.querySelector('.app-menu-label')?.textContent || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                        const labels = Array.from(wrapper?.querySelectorAll(':scope > .app-menu-popover .app-menu-command') || []).map(normalize);
+                        done({status: response.status, body, dangerouslyYolo: bootstrap.dangerouslyYolo, labels});
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                """, session)
+                forbiddenMessage = "full-access agent launches require YOLOmux --dangerously-yolo"
+                if (non_yolo_contract.get("error") or non_yolo_contract.get("status") != 403 or non_yolo_contract.get("body", {}).get("error") != forbiddenMessage or non_yolo_contract.get("dangerouslyYolo") is not False or any("dangerously" in label for label in non_yolo_contract.get("labels", []))):
+                    raise SystemExit(f"Go non-dangerous launch contract failed: {non_yolo_contract}")
                 stop_server(force=True)
                 journal_path = config / "go-operations.jsonl"
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -1211,7 +1675,13 @@ def main(binary: str) -> None:
                 except WebDriverException as error:
                     cleanup_errors.append(f"Go browser E2E WebDriver cleanup failed: {error}")
             stop_server()
-            for session_name in created_sessions:
+            all_sessions = set(created_sessions)
+            listed_sessions = subprocess.run((*tmux, "list-sessions", "-F", "#S"), check=False, capture_output=True, text=True)
+            if listed_sessions.returncode == 0:
+                all_sessions.update(line.strip() for line in listed_sessions.stdout.splitlines() if line.strip())
+            elif listed_sessions.returncode != 1:
+                cleanup_errors.append(f"could not list fixture tmux sessions during cleanup: {listed_sessions.stderr.strip()}")
+            for session_name in sorted(all_sessions):
                 cleanup_tmux_session(session_name)
             cleanup_tmux_socket_dir()
             if cleanup_errors:

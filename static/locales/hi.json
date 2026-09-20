@@ -800,6 +800,7 @@
   "git.status.untracked": "अनट्रैक्ड",
   "gitDiff.binary": "बाइनरी",
   "gitDiff.changedFiles": "बदली गई फ़ाइलें",
+  "gitDiff.dirty": "गंदा",
   "gitDiff.empty": "इस दायरे में कोई कमिट नहीं है।",
   "gitDiff.filesTruncated": "फ़ाइल सूची काटी गई है।",
   "gitDiff.firstParent": "पहले पैरेंट से तुलना की गई",

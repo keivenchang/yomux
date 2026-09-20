@@ -1590,6 +1590,19 @@ body.app-topbar-touch-compact .pane-tab-close {
   height: 36px;
   touch-action: manipulation;
 }
+/* Pane-frame actions use Dockview's separate header-actions strip, so the tab-close rule above
+   does not reach the actual minimize button. Give that button the same one-tap touch target while
+   leaving the desktop 20px geometry unchanged. */
+body.app-topbar-touch-compact .tabs .pane-minimize {
+  flex-basis: 36px;
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
+  touch-action: manipulation;
+}
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
 .file-explorer-close.pc-window-control,
 .file-explorer-panel-close.pc-window-control,

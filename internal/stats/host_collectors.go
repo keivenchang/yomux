@@ -58,6 +58,18 @@ func BuildCPUFacts(sample CPUSample, processCPUPercent map[string]float64, conte
 		}
 		payload["process_cpu_percent"] = series
 	}
+	if sample.OwnedProcessCPUPercent != nil {
+		series := make(map[string]any, len(sample.OwnedProcessCPUPercent))
+		for binary, value := range sample.OwnedProcessCPUPercent {
+			if !finite(value) {
+				continue
+			}
+			series[binary] = value
+		}
+		if len(series) > 0 {
+			payload["owned_process_cpu_percent"] = series
+		}
+	}
 	return singleHostFacts("cpu", context, payload)
 }
 
@@ -204,12 +216,13 @@ func floatPointer(value float64) *float64 { return &value }
 // HostCollectorInputs keeps platform collection testable. Production callers may
 // use the OS adapters below; parsers themselves never perform I/O.
 type HostCollectorInputs struct {
-	ReadFile  func(string) ([]byte, error)
-	ReadDir   func(string) ([]string, error)
-	ReadLink  func(string) (string, error)
-	Run       func([]string) (CommandOutput, error)
-	PageSize  uint64
-	ClockTick uint64
+	ReadFile    func(string) ([]byte, error)
+	ReadDir     func(string) ([]string, error)
+	ReadLink    func(string) (string, error)
+	Run         func([]string) (CommandOutput, error)
+	PageSize    uint64
+	ClockTick   uint64
+	BinaryCache map[string]string
 }
 
 type CommandOutput struct {
@@ -370,6 +383,7 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 	}
 	sort.Strings(names)
 	rows := make([]ProcessCensusRow, 0, len(names))
+	retainedBinaries := make(map[string]string, len(names))
 	for _, name := range names {
 		if _, err := strconv.Atoi(name); err != nil {
 			continue
@@ -378,12 +392,36 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 		if err != nil {
 			continue
 		}
+		// Parse once without an executable path to obtain the stable process
+		// identity and command name. The identity+command key survives ordinary
+		// samples but changes when a PID is reused or a process renames itself.
+		candidate, ok := ParseLinuxProcessStat(string(data), "", inputs.PageSize, inputs.ClockTick)
+		if !ok {
+			continue
+		}
+		cacheKey := candidate.Identity + "\x00" + candidate.Binary
+		binary, cached := inputs.BinaryCache[cacheKey]
+		if cached {
+			candidate.Binary = binary
+			retainedBinaries[cacheKey] = binary
+			rows = append(rows, candidate)
+			continue
+		}
 		executable := ""
 		if inputs.ReadLink != nil {
 			executable, _ = inputs.ReadLink(path.Join(procRoot, name, "exe"))
 		}
-		if row, ok := ParseLinuxProcessStat(string(data), executable, inputs.PageSize, inputs.ClockTick); ok {
+		if row, rowOK := ParseLinuxProcessStat(string(data), executable, inputs.PageSize, inputs.ClockTick); rowOK {
+			retainedBinaries[cacheKey] = row.Binary
 			rows = append(rows, row)
+		}
+	}
+	if inputs.BinaryCache != nil {
+		for key := range inputs.BinaryCache {
+			delete(inputs.BinaryCache, key)
+		}
+		for key, binary := range retainedBinaries {
+			inputs.BinaryCache[key] = binary
 		}
 	}
 	if len(names) > 0 && len(rows) == 0 {

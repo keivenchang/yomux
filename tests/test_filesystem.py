@@ -3036,6 +3036,7 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert first["path"] == str(repo.root)
     assert first["repo"] == str(repo.root)
     assert first["relative_path"] == ""
+    assert first["branch"] == repo.git("branch", "--show-current").stdout.strip()
     assert first["head"] == repo.merge_sha
     assert [item["sha"] for item in first["commits"]] == expected[:2]
     assert first["snapshot_cursor"]

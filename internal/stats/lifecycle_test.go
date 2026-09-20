@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -9,6 +10,89 @@ import (
 	"testing"
 	"time"
 )
+
+func emptyRingBucketPayload(t *testing.T, start, duration float64, generation int64, generatedAt float64) string {
+	t.Helper()
+	payload, err := encodeRingBucketPayload(MaterializedBucket{Start: start, Duration: duration, Complete: true}, nil, generation, generatedAt)
+	if err != nil {
+		t.Fatalf("encode empty ring bucket: %v", err)
+	}
+	return payload
+}
+
+func TestLifecycleReconcilesExternalUnavailableSpanWhenGenerationIsReused(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	seed := make([]RingBucketWrite, 0, 90)
+	for bucket := int64(100); bucket < 1000; bucket += 10 {
+		seed = append(seed, RingBucketWrite{
+			ResolutionSeconds: 10,
+			BucketStart:       bucket,
+			BucketJSON:        emptyRingBucketPayload(t, float64(bucket), 10, 1, 1000),
+			Complete:          true,
+		})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, seed, 1, 1000, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `UPDATE schema_meta SET source_generation=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	writer.sourceGeneration.Store(1)
+
+	// A legacy/direct owner can commit facts through another connection without
+	// advancing the generation. The SQLite data_version signal must preserve
+	// reconciliation even when ordinary Go writes later reuse that watermark.
+	external, err := sql.Open("sqlite3", writerURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := external.ExecContext(ctx, `INSERT INTO unavailable_spans VALUES ('gpu','gpu:0','same-generation',950,970,10,'driver unavailable',1)`); err != nil {
+		_ = external.Close()
+		t.Fatal(err)
+	}
+	if err := external.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds: 900,
+		MaxCells:      2,
+		Now:           func() time.Time { return time.Unix(1000, 0) },
+	})
+	lifecycle.DemandProduct(900, 10)
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	window, err := writer.ReadRingWindow(ctx, 900, 10, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byStart := make(map[int64]RingBucketRow, len(window.Rows))
+	for _, row := range window.Rows {
+		byStart[row.BucketStart] = row
+	}
+	for _, bucketStart := range []int64{950, 960} {
+		row, ok := byStart[bucketStart]
+		if !ok {
+			t.Fatalf("reconciled unavailable bucket %d missing: %+v", bucketStart, window)
+		}
+		_, noData, decodeErr := decodeRingBucketPayload(row.BucketJSON)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if len(noData) != 1 || noData[0].Family != "gpu" || noData[0].Start != float64(bucketStart) || noData[0].End != float64(bucketStart+10) {
+			t.Fatalf("bucket %d no-data = %+v", bucketStart, noData)
+		}
+	}
+}
 
 func TestFactPagesUseStableKeysetsAcrossEqualTimestamps(t *testing.T) {
 	ctx := context.Background()
@@ -117,6 +201,174 @@ func TestLifecyclePublishesFactsAndRepairsMutation(t *testing.T) {
 	}
 }
 
+func TestLifecycleAppendNotificationsDoNotBypassCadence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		Cadence:       25 * time.Millisecond,
+		WindowSeconds: 100,
+		MaxCells:      1,
+		Now:           time.Now,
+	})
+	writer.AttachLifecycle(lifecycle)
+	if err := lifecycle.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.Stop()
+
+	deadline := time.NewTimer(140 * time.Millisecond)
+	defer deadline.Stop()
+	appendTicker := time.NewTicker(time.Millisecond)
+	defer appendTicker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			counters := lifecycle.Counters()
+			// A trigger storm must not add one run per append. Allow one small
+			// scheduling margin around the six expected cadence ticks.
+			if counters.Runs > 8 {
+				t.Fatalf("append notifications bypassed cadence: runs=%d counters=%+v", counters.Runs, counters)
+			}
+			return
+		case <-appendTicker.C:
+			if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+				EventID: fmt.Sprintf("storm-%d", time.Now().UnixNano()), Family: "cpu", SourceID: "host",
+				ObservedAt: float64(time.Now().UnixNano()) / 1e9, EpochID: "storm",
+				Payload: map[string]any{"process_percent": 1},
+			}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestLifecycleDemandLeavesBudgetForUnrelatedPendingCells(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	buckets := make([]RingBucketWrite, 0, 4)
+	for start := int64(100); start < 140; start += 10 {
+		buckets = append(buckets, RingBucketWrite{
+			ResolutionSeconds: 10,
+			BucketStart:       start,
+			BucketJSON:        fmt.Sprintf(`{"start":%d,"duration":10,"series":{},"source":{"count":0,"first_timestamp":null,"last_timestamp":null},"open":false}`, start),
+			Complete:          true,
+		})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, buckets, 1, 1000, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `INSERT INTO unavailable_spans(family,source_id,epoch_id,started_at,ended_at,native_cadence_seconds,reason,owner_generation) VALUES (?,?,?,?,?,?,?,?)`, "gpu", "gpu:0", "demand-gap", 100, 140, 10, "synthetic", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `INSERT INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at) VALUES (?,?,?,?,?,NULL)`, 1, 900, 2, "unrelated", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `UPDATE schema_meta SET source_generation=2 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 900, MaxCells: 4, Now: func() time.Time { return time.Unix(1000, 0) }})
+	lifecycle.DemandProduct(900, 10)
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writer.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range pending {
+		if cell.ResolutionSeconds == 1 && cell.BucketStart == 900 {
+			t.Fatalf("demand-derived cells starved unrelated pending work: selected=%+v counters=%+v", pending, lifecycle.Counters())
+		}
+	}
+}
+
+func TestLifecycleSingleCellDemandBeatsUnrelatedPendingCell(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{
+		ResolutionSeconds: 10,
+		BucketStart:       990,
+		BucketJSON:        `{"start":990,"duration":10,"series":{},"source":{"count":0,"first_timestamp":null,"last_timestamp":null},"open":false}`,
+		Complete:          true,
+	}}, 1, 1000, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `INSERT INTO ring_invalidations(resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at) VALUES (?,?,?,?,?,NULL)`, 1, 900, 2, "unrelated", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `UPDATE schema_meta SET source_generation=2 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "demanded-single-cell", Family: "cpu", SourceID: "host", ObservedAt: 995, EpochID: "epoch",
+		Payload: map[string]any{"process_percent": 7},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Unix(1000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, MaxCells: 1, Now: func() time.Time { return now }})
+	lifecycle.DemandProduct(900, 10)
+	cells, err := lifecycle.selectCells(ctx, now, writer.sourceGeneration.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) != 1 || cells[0].ResolutionSeconds != 10 || cells[0].BucketStart != 990 {
+		t.Fatalf("single-cell demand was displaced by unrelated pending work: cells=%+v", cells)
+	}
+}
+
+func TestLifecycleDefersOpenCoarseCellUntilLiveCadence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	now := time.Unix(2_000_000_000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds: 86400,
+		MaxCells:      1,
+		Now:           func() time.Time { return now },
+	})
+	lifecycle.DemandProduct(86400, 300)
+	current := lifecycleCell{ResolutionSeconds: 300, BucketStart: NextWindowEnd(now, 300) - 300}
+	lifecycle.lastMaterializedAt[[2]int64{300, current.BucketStart}] = now
+
+	cells, err := lifecycle.selectCells(ctx, now, writer.sourceGeneration.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) == 1 && cells[0] == current {
+		t.Fatalf("open coarse cell was selected before its live cadence: cells=%+v", cells)
+	}
+
+	now = now.Add(60 * time.Second)
+	if !lifecycle.openCellDue(now, current) {
+		t.Fatalf("open coarse cell was still deferred at its live cadence")
+	}
+}
+
 func TestLifecycleDefaultRetentionUsesEachRingHorizon(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -131,6 +383,77 @@ func TestLifecycleDefaultRetentionUsesEachRingHorizon(t *testing.T) {
 	}
 	if lifecycle.Counters().Publications != 1 {
 		t.Fatalf("publications = %+v, want one coherent publication", lifecycle.Counters())
+	}
+}
+
+func TestLifecycleDefersUnrequestedColdBackfill(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	now := time.Unix(2_000_000_000, 0)
+	current := now
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds:                  RetentionSeconds,
+		BackgroundBackfillCadence:      time.Minute,
+		BackgroundBackfillInitialDelay: time.Minute,
+		Now:                            func() time.Time { return current },
+	})
+	bucketStart := current.Unix() - 1
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{
+		ResolutionSeconds: 1,
+		BucketStart:       bucketStart,
+		BucketJSON:        fmt.Sprintf(`{"start":%d,"duration":1,"series":{},"source":{"count":0},"open":false}`, bucketStart),
+		Complete:          true,
+	}}, writer.SourceGeneration(), float64(current.Unix()), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "deferred-pending", Family: "cpu", SourceID: "host", ObservedAt: float64(bucketStart), EpochID: "epoch",
+		Payload: map[string]any{"process_percent": 7},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := lifecycle.Counters().MaterializedBuckets; got != 0 {
+		t.Fatalf("unrequested cold backfill materialized %d buckets before delay", got)
+	}
+	if cells, err := lifecycle.selectCells(ctx, current, writer.SourceGeneration()); err != nil {
+		t.Fatal(err)
+	} else if len(cells) != 0 {
+		t.Fatalf("unrequested cold backfill selected cells before delay: %+v", cells)
+	}
+
+	// A real stats request bypasses the low-priority gate immediately.
+	lifecycle.DemandProduct(300, 1)
+	cells, err := lifecycle.selectCells(ctx, current, writer.SourceGeneration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) == 0 {
+		t.Fatal("explicit stats demand did not select a cold product")
+	}
+
+	// Without a request, eventual convergence resumes after the configured
+	// delay rather than being abandoned permanently.
+	lifecycle = NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds:                  RetentionSeconds,
+		BackgroundBackfillCadence:      time.Minute,
+		BackgroundBackfillInitialDelay: time.Minute,
+		Now:                            func() time.Time { return current },
+	})
+	current = now.Add(time.Minute)
+	cells, err = lifecycle.selectCells(ctx, current, writer.SourceGeneration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) == 0 {
+		t.Fatal("delayed background backfill did not resume")
 	}
 }
 
@@ -179,6 +502,48 @@ func TestLifecycleDemandPrioritizesRequestedProductWindow(t *testing.T) {
 	for _, cell := range cells {
 		if cell.ResolutionSeconds != 10 || cell.BucketStart < 110 || cell.BucketStart >= 1010 {
 			t.Fatalf("selected unrelated cold-ring cell = %+v", cell)
+		}
+	}
+}
+
+func TestLifecycleDemandDoesNotMaterializeUnrequestedColdResolutions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	// Leave one demanded 300-second bucket missing, but make the rest of the
+	// requested product ready. The other rings remain completely cold. A
+	// bounded pass should spend its remaining cells on the demanded resolution,
+	// not on generic carriers and missing cells from unrelated rings.
+	buckets := make([]RingBucketWrite, 0, 11)
+	for bucket := int64(6600); bucket < 9900; bucket += 300 {
+		buckets = append(buckets, RingBucketWrite{
+			ResolutionSeconds: 300,
+			BucketStart:       bucket,
+			BucketJSON:        fmt.Sprintf(`{"start":%d,"duration":300,"series":{},"source":{"count":0,"first_timestamp":null,"last_timestamp":null},"open":false}`, bucket),
+			Complete:          true,
+		})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, buckets, 1, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(10000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 3600, MaxCells: 4, Now: func() time.Time { return now }})
+	lifecycle.DemandProduct(3600, 300)
+	cells, err := lifecycle.selectCells(ctx, now, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) == 0 {
+		t.Fatalf("selected cells = %+v, want the demanded product repair", cells)
+	}
+	for _, cell := range cells {
+		if cell.ResolutionSeconds != 300 {
+			t.Fatalf("selected unrequested cold resolution: cells=%+v", cells)
 		}
 	}
 }
@@ -757,6 +1122,45 @@ func TestLifecycleFactBudgetLeavesOversizedCellUnpublished(t *testing.T) {
 	}
 }
 
+func TestLifecycleFactBudgetDoesNotStarveLaterCells(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	observations := make([]Observation, 0, 301)
+	for index := 0; index < 300; index++ {
+		observations = append(observations, Observation{
+			EventID: fmt.Sprintf("dense-%03d", index), Family: "cpu", SourceID: "host", ObservedAt: 1000 + float64(index)/1000, EpochID: "epoch",
+			Payload: map[string]any{"process_percent": float64(index)},
+		})
+	}
+	observations = append(observations, Observation{
+		EventID: "later-cell", Family: "cpu", SourceID: "host", ObservedAt: 1015, EpochID: "epoch",
+		Payload: map[string]any{"process_percent": 7},
+	})
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: observations}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1100, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 200, MaxCells: 64, MaxFactRows: 2, Now: func() time.Time { return now }})
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	window, err := writer.ReadRingWindow(ctx, 200, 10, 1100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range window.Rows {
+		if row.BucketStart == 1010 {
+			return
+		}
+	}
+	t.Fatalf("later cell was starved by dense cell: rows=%+v missing=%v pending=%v", window.Rows, window.MissingBucketStarts, window.PendingInvalidations)
+}
+
 func TestLifecycleDemandedPendingCellPublishesBeforeColdRingBacklog(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -849,6 +1253,106 @@ func TestLifecycleFineDemandConvergesWithCatalogAndPriorDemand(t *testing.T) {
 	if len(snapshot.Materialized.Buckets) != 300 {
 		t.Fatalf("fine demanded product buckets=%d, want 300", len(snapshot.Materialized.Buckets))
 	}
+}
+
+func TestLifecycleDemandedCoarseRangeSplitsOversizedFold(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	observations := make([]Observation, 0, 12000)
+	for index := 0; index < cap(observations); index++ {
+		observations = append(observations, Observation{
+			EventID: fmt.Sprintf("coarse-%05d", index), Family: "cpu", SourceID: "host",
+			ObservedAt: float64(180000 + index), EpochID: "coarse",
+			Payload: map[string]any{"process_percent": float64(index % 100)},
+		})
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: observations}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds: RetentionSeconds,
+		MaxCells:      40,
+		Now:           func() time.Time { return now },
+	})
+	lifecycle.DemandProduct(86400, 300)
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writer.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range pending {
+		if cell.ResolutionSeconds == 300 && cell.BucketStart >= 180000 && cell.BucketStart < 192000 {
+			t.Fatalf("demanded coarse cells remain pending after bounded folds: %+v", pending)
+		}
+	}
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 86400, ResolutionSeconds: 300}},
+		Now:      func() time.Time { return now },
+	})
+	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {
+		if err := lifecycle.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Refresh(ctx); err != nil && !errors.Is(err, ErrProductPending) {
+			t.Fatal(err)
+		}
+	}
+	if !service.State().Ready {
+		t.Fatalf("24-hour coarse product did not converge: state=%+v counters=%+v", service.State(), lifecycle.Counters())
+	}
+	snapshot, err := service.CurrentSnapshot(ctx, 86400, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(snapshot.Materialized.Buckets); got != 288 {
+		t.Fatalf("24-hour coarse bucket count = %d, want 288", got)
+	}
+	if len(snapshot.Materialized.NoData) != 0 {
+		t.Fatalf("24-hour coarse product has unexpected no-data spans: %+v", snapshot.Materialized.NoData)
+	}
+	counters := lifecycle.Counters()
+	if counters.SelectedCells == 0 || counters.MaterializedBuckets == 0 || counters.FactRowsRead < uint64(len(observations)) || counters.DecodedBytes == 0 {
+		t.Fatalf("large-backlog work counters = %+v", counters)
+	}
+	if counters.SelectionDuration <= 0 || counters.MaterializationDuration <= 0 {
+		t.Fatalf("large-backlog timing counters = %+v", counters)
+	}
+	resolutionCounters, ok := counters.ByResolution[300]
+	if !ok || resolutionCounters.SelectionRuns == 0 || resolutionCounters.MaterializationRuns == 0 || resolutionCounters.SelectedCells == 0 || resolutionCounters.MaterializedBuckets == 0 || resolutionCounters.FactRowsRead < uint64(len(observations)) || resolutionCounters.DecodedBytes == 0 || resolutionCounters.SelectionDuration <= 0 || resolutionCounters.MaterializationDuration <= 0 {
+		t.Fatalf("per-resolution work counters = %+v", counters.ByResolution)
+	}
+}
+
+func BenchmarkEstimateDecodedBytes(b *testing.B) {
+	payload := map[string]any{"process_percent": 42.5, "system_percent": 17.25, "rss_bytes": 123456, "binary": "yolomux-go"}
+	observations := make([]Observation, 256)
+	for index := range observations {
+		observations[index] = Observation{EventID: fmt.Sprintf("event-%d", index), Family: "cpu", SourceID: "host", EpochID: "epoch", Payload: payload, payloadBytes: len(mustJSON(payload))}
+	}
+	b.Run("stored_payload_size", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			_ = estimateDecodedBytes(observations, nil, nil, nil)
+		}
+	})
+	b.Run("legacy_remarshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			bytes := 0
+			for _, value := range observations {
+				bytes += len(mustJSON(value.Payload)) + len(value.EventID) + len(value.Family) + len(value.SourceID) + len(value.EpochID) + 64
+			}
+			_ = bytes
+		}
+	})
 }
 
 func TestLifecycleVacuumFailureHonorsRetryDeadline(t *testing.T) {
@@ -953,7 +1457,7 @@ func TestLifecycleRepairsUnavailableSpanAfterExternalGenerationBump(t *testing.T
 		seed = append(seed, RingBucketWrite{
 			ResolutionSeconds: 10,
 			BucketStart:       bucket,
-			BucketJSON:        fmt.Sprintf(`{"start":%d,"duration":10,"series":{},"source":{"count":0,"first_timestamp":null,"last_timestamp":null},"open":false}`, bucket),
+			BucketJSON:        emptyRingBucketPayload(t, float64(bucket), 10, 1, 1000),
 			Complete:          true,
 		})
 	}
@@ -996,6 +1500,74 @@ func TestLifecycleRepairsUnavailableSpanAfterExternalGenerationBump(t *testing.T
 		}
 		if len(noData) != 1 || noData[0].Family != "gpu" || noData[0].Start != float64(bucketStart) || noData[0].End != float64(bucketStart+10) {
 			t.Fatalf("bucket %d no-data = %+v", bucketStart, noData)
+		}
+	}
+}
+
+func TestLifecycleDoesNotReselectIncompleteUnavailableHistoryAfterUnrelatedGenerationAdvance(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	now := time.Unix(10000, 0)
+	windowEnd := NextWindowEnd(now, 300)
+	targetBucket := windowEnd - 600
+	seed := make([]RingBucketWrite, 0, 12)
+	for bucket := windowEnd - 3600; bucket < windowEnd; bucket += 300 {
+		seed = append(seed, RingBucketWrite{
+			ResolutionSeconds: 300,
+			BucketStart:       bucket,
+			BucketJSON:        fmt.Sprintf(`{"start":%d,"duration":300,"series":{},"source":{"count":0,"first_timestamp":null,"last_timestamp":null},"open":false}`, bucket),
+			Complete:          bucket != targetBucket,
+		})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, seed, 1, float64(windowEnd), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `INSERT INTO unavailable_spans VALUES ('gpu','gpu:0','historical-gap',?,?,300,'driver unavailable',1)`, targetBucket, targetBucket+300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, `UPDATE schema_meta SET source_generation=1 WHERE singleton=1`); err != nil {
+		t.Fatal(err)
+	}
+	writer.sourceGeneration.Store(1)
+
+	// Advance the source through an unrelated current cell. Its durable
+	// invalidation must not make the old incomplete no-data cell a retry loop.
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "unrelated-current", Family: "cpu", SourceID: "host", ObservedAt: float64(windowEnd - 1), EpochID: "epoch",
+		Payload: map[string]any{"process_percent": 7},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 3600, MaxCells: 64, Now: func() time.Time { return now }})
+	lifecycle.DemandProduct(3600, 300)
+	database, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	snapshot, closeSnapshot, err := database.beginReadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSnapshot()
+	generation, err := snapshot.snapshotGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cells, err := lifecycle.selectCellsFromSnapshot(ctx, now, generation, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range cells {
+		if cell.ResolutionSeconds == 300 && cell.BucketStart == targetBucket {
+			t.Fatalf("historical incomplete unavailable cell was reselected after unrelated generation advance: %+v", cells)
 		}
 	}
 }

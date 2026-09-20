@@ -5335,6 +5335,63 @@ function autoApproveSnapshotIsFresh() {
     && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
 }
 
+function goAgentStatusUsesActivityFallback() {
+  return statsOnlyBootEnabled() || /^go(?:\s|$)/i.test(String(bootstrap?.backendLabel || '').trim());
+}
+
+function adoptTabberActivityAsAutoStatusFallback() {
+  const payload = tabberActivityPayload;
+  const sessionsPayload = payload?.agent_windows;
+  if (!sessionsPayload || typeof sessionsPayload !== 'object' || Array.isArray(sessionsPayload)) return 0;
+  const snapshotRevision = agentWindowSnapshotRevision(payload);
+  const rosterSessions = new Set(
+    Array.isArray(payload?.session_order)
+      ? payload.session_order.map(session => String(session || '').trim()).filter(Boolean)
+      : [],
+  );
+  let adopted = 0;
+  // The stats-only layout can mount only the Debug/JS surface, so its layout
+  // session list may not contain the machine-wide tmux sessions yet. The
+  // activity payload itself is the authoritative roster; include both sources
+  // so a working pane receives its marker before Tabber is opened.
+  const candidateSessions = new Set([...activeSessions, ...Object.keys(sessionsPayload)]);
+  for (const session of [...candidateSessions].filter(session => (
+    isTmuxSession(session) || rosterSessions.has(String(session))
+  ))) {
+    // Metadata/roster fallbacks may carry agent-window identity without a state. Do not
+    // promote those rows and accidentally erase a previously known canonical status.
+    const rows = agentWindowPayloadRows(sessionsPayload[String(session)])
+      .filter(row => String(row?.state || '').trim() !== '');
+    if (!rows.length) continue;
+    const existing = autoApproveStates.get(session);
+    const existingRevision = agentWindowSnapshotRevision(existing);
+    // Activity responses can complete out of order. Never let an older (or an
+    // unversioned compatibility) sample erase a newer canonical state.
+    if (existingRevision > 0 && (snapshotRevision === 0 || snapshotRevision < existingRevision)) continue;
+    // A Go pane capture can briefly fail while the Codex process is still running. `unavailable`
+    // is a transport/evidence failure, not a stop signal; retaining the last concrete state keeps
+    // the green marker alive until a later sample says idle, ask, or working explicitly. Without
+    // this merge, a single transient capture miss clears the pane marker while the Agents graph
+    // (which has its own aggregate sample) still shows the run.
+    const existingRows = agentWindowPayloadRows(existing?.agent_windows);
+    const mergedRows = rows.map(row => {
+      if (agentWindowStateKey(row?.state) !== 'unavailable') return row;
+      const prior = existingRows.find(candidate => agentWindowPayloadKey(candidate) === agentWindowPayloadKey(row));
+      if (!prior || agentWindowStateKey(prior?.state) === 'unavailable') return row;
+      return {...prior, ...row, state: prior.state};
+    });
+    const nextState = autoApproveStateWithSnapshotRevision({
+      target: session,
+      enabled: false,
+      agent_windows: mergedRows,
+    }, snapshotRevision);
+    autoApproveStates.set(session, nextState);
+    reconcileTmuxWindowMetadataFromAgentWindows(session, nextState);
+    adopted += 1;
+  }
+  return adopted;
+}
+
 function loadAutoStatuses(options = {}) {
   if (!clientCanUseUnscopedHostRequests()) {
     return Promise.resolve({applied: false, sessionsChanged: false, previousActive: activeSessions.slice()});
@@ -5347,26 +5404,47 @@ function loadAutoStatuses(options = {}) {
   const request = (async () => {
   let result = null;
   try {
-    let payload;
-    try {
-      payload = await apiFetchJson('/api/auto-approve');
-    } catch (error) {
-      if (!isApiPendingResponse(error)) throw error;
-      payload = await waitForApiOperationResult(error, {
-        kind: String(error?.operation?.kind || ''),
-        url: '/api/auto-approve',
-        method: 'GET',
-      });
+    if (goAgentStatusUsesActivityFallback()) {
+      // Go owns live agent status in the activity product and does not expose
+      // Python's auto-approve route. Read that one shared snapshot directly so
+      // a transient unavailable sample can be repaired without a 501 probe.
+      await fetchTabberActivity({visible: true, allowHidden: true});
+      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+      const adopted = adoptTabberActivityAsAutoStatusFallback();
+      result = {applied: adopted > 0, sessionsChanged: false, previousActive: activeSessions.slice()};
+    } else {
+      let payload;
+      try {
+        payload = await apiFetchJson('/api/auto-approve');
+      } catch (error) {
+        if (!isApiPendingResponse(error)) throw error;
+        payload = await waitForApiOperationResult(error, {
+          kind: String(error?.operation?.kind || ''),
+          url: '/api/auto-approve',
+          method: 'GET',
+        });
+      }
+      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+      result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
     }
-    if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-    result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
     if (requestIsCurrent()) {
       loadAutoStatuses.lastResult = result;
       loadAutoStatuses.updatedAt = Date.now();
     }
   } catch (_) {
     if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-    if (options.sessionFallback !== false) {
+    // Go owns the machine-wide agent status product but does not expose Python's
+    // auto-approve worker route.  Keep the terminal/tab status authoritative by
+    // consuming that shared activity snapshot when the canonical route is absent;
+    // otherwise metadata-only fallback downgrades a working Codex pane to merely
+    // "Active" and drops the green working marker.
+    if (typeof fetchTabberActivity === 'function') {
+      try {
+        await fetchTabberActivity({visible: true, allowHidden: true});
+        if (requestIsCurrent()) adoptTabberActivityAsAutoStatusFallback();
+      } catch (_) {}
+    }
+    if (options.sessionFallback !== false && !goAgentStatusUsesActivityFallback()) {
       for (const session of activeSessions.filter(isTmuxSession)) {
         if (!requestIsCurrent() || !tmuxSessionLifecycleAllowsTopologySession(session)) continue;
         try {
@@ -5981,7 +6059,9 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // still cannot touch shared identity: a late reply from the server that was just replaced would
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return finalizeSessionMetadataOutcome(false, 'malformed_payload', payload);
-  const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
+  const requestIsCurrent = typeof options.requestIsCurrentPayload === 'function'
+    ? () => options.requestIsCurrentPayload(payload)
+    : (typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true);
   if (!requestIsCurrent()) {
     // A superseded response still carries a true fact about the SERVER's build queue: which build
     // will observe the request that produced it. That fact is not about whether THIS client request
@@ -6312,7 +6392,16 @@ async function refreshSessionMetadata(options = {}) {
           refreshContext: true,
           refreshActivity: options.refreshActivity !== false,
           source: 'request',
-          requestIsCurrent,
+          // Opening the client-event stream adopts this same server epoch while the metadata
+          // request is in flight. Its epochGeneration counter is newer by the time the response
+          // arrives, but the payload is still current; only a different epoch is stale.
+          requestIsCurrentPayload: payload => {
+            const payloadEpoch = sessionMetadataPayloadIdentity(payload)?.epoch || '';
+            return requestIsCurrent()
+              || (topologyEpoch === tmuxTopologyEpoch
+                && payloadEpoch !== ''
+                && payloadEpoch === clientEventTransportState.resourceEpoch);
+          },
           onServerEpochAdopted,
         }),
       );
@@ -7109,7 +7198,27 @@ async function boot() {
   // Stats-only Go boot owns the stats surface and app shell. Do not start
   // unrelated route work that the negotiated backend explicitly does not
   // implement; those requests used to create misleading boot failures.
-  if (statsOnlyBootEnabled()) return;
+  if (statsOnlyBootEnabled()) {
+    // Tabber is a read-only topology consumer, not one of the full application
+    // routes disabled by stats-only boot. Load session metadata when Tabber is
+    // present, but always load the global activity snapshot: pane tabs and the
+    // JS stats Agents view need the same live Codex/Claude marker even when the
+    // operator has not mounted Tabber. Keep auto-status, terminals, filesystem
+    // watchers, and other full-app producers disabled on this partial backend.
+    if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) {
+      await refreshTranscripts({refreshAuto: false, refreshContext: false, refreshActivity: false});
+    }
+    await fetchTabberActivity({visible: true, allowHidden: true});
+    // Go's stats-only surface deliberately has no `/api/auto-approve` route. The
+    // activity snapshot is therefore the canonical live-status source for this
+    // boot path as well as the full-app error fallback. Adopt it before painting
+    // pane tabs, otherwise every session keeps the neutral placeholder even when
+    // the activity payload says the Codex pane is working.
+    adoptTabberActivityAsAutoStatusFallback();
+    renderPaneTabStrips();
+    if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) refreshTabberPanels();
+    return;
+  }
   refreshBackgroundOwnerStatus({render: false}).catch(error => {
     console.warn('initial background-owner status refresh failed', error);
     return false;

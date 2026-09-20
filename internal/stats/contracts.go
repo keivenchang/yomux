@@ -24,6 +24,10 @@ type Observation struct {
 	EpochID         string
 	OwnerGeneration uint64
 	Payload         map[string]any
+	// payloadBytes is the validated JSON size read from SQLite. Keeping this
+	// decode-side fact avoids marshaling the payload again when lifecycle
+	// accounting enforces its decoded-byte budget.
+	payloadBytes int
 }
 
 type CoverageEpoch struct {
@@ -55,6 +59,8 @@ type UsageAtom struct {
 	Unit       string
 	ObservedAt float64
 	Payload    map[string]any
+	// payloadBytes has the same purpose as Observation.payloadBytes.
+	payloadBytes int
 }
 
 type UsageTombstone struct {
@@ -375,7 +381,7 @@ func validateCurrentFamilyObservation(item Observation) error {
 			}
 		}
 	}
-	for _, name := range []string{"process_cpu_percent", "process_memory_bytes"} {
+	for _, name := range []string{"process_cpu_percent", "owned_process_cpu_percent", "process_memory_bytes"} {
 		if value, ok := item.Payload[name]; ok {
 			if err := validateCurrentProcessSeries(item.Family, name, value); err != nil {
 				return err
@@ -411,7 +417,7 @@ func validateCurrentFamilyObservation(item Observation) error {
 
 func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
 	fields := map[string][]string{
-		"cpu":           {"process_percent", "system_percent", "process_cpu_percent"},
+		"cpu":           {"process_percent", "system_percent", "process_cpu_percent", "owned_process_cpu_percent"},
 		"agent_status":  {"states", "session_states", "snapshot_revision", "counts", "agents"},
 		"gpu":           {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
 		"service_load":  {"running", "cpu_percent", "rss_bytes"},
@@ -476,7 +482,7 @@ func validateCurrentProcessSeries(family, name string, value any) error {
 		return invalid("observation", "payload", fmt.Sprintf("%s.%s must be an object", family, name))
 	}
 	maximum := 8
-	if name == "process_cpu_percent" {
+	if name == "process_cpu_percent" || name == "owned_process_cpu_percent" {
 		maximum = 4
 	}
 	if len(rows) > maximum {

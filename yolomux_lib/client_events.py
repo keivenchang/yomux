@@ -323,6 +323,23 @@ class ClientEventBroker:
         envelope_json = cls.canonical_json({**event, "payload": None})
         return len(envelope_json.encode("utf-8")) - len("null") + len(payload_json.encode("utf-8"))
 
+    def _new_event_locked(self, safe_type: str, event_payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        resource = client_event_resource(safe_type, event_payload)
+        resource_revision = self.resource_revisions.get(resource, 0) + 1
+        self.resource_revisions[resource] = resource_revision
+        event = {
+            "id": self.next_event_id,
+            "type": safe_type,
+            "time": time.time(),
+            "payload": event_payload,
+            "epoch": self.epoch,
+            "resource": resource,
+            "base_resource_revision": resource_revision - 1,
+            "resource_revision": resource_revision,
+        }
+        self.next_event_id += 1
+        return event, resource
+
     def publish(self, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         safe_type = str(event_type or "event")
         # The event's own copy of the payload, taken before anything is measured. The copy is
@@ -377,20 +394,7 @@ class ClientEventBroker:
             # non-dict that `dict()` accepts -- `[("operation", {"id": "X"})]` now keys
             # `operation_terminal:X` instead of the bare type -- which no caller passes;
             # `App.publish_client_event` already normalises to a dict before it gets here.
-            resource = client_event_resource(safe_type, event_payload)
-            resource_revision = self.resource_revisions.get(resource, 0) + 1
-            self.resource_revisions[resource] = resource_revision
-            event = {
-                "id": self.next_event_id,
-                "type": safe_type,
-                "time": time.time(),
-                "payload": event_payload,
-                "epoch": self.epoch,
-                "resource": resource,
-                "base_resource_revision": resource_revision - 1,
-                "resource_revision": resource_revision,
-            }
-            self.next_event_id += 1
+            event, resource = self._new_event_locked(safe_type, event_payload)
             if safe_type in CLIENT_EVENT_RETAINED_TYPES and (
                 resource in self.retained_events or len(self.retained_events) < CLIENT_EVENT_RETAINED_LIMIT
             ):
@@ -424,6 +428,37 @@ class ClientEventBroker:
                 self.increment_type_counter(self.delivered_by_type, safe_type, event_bytes)
                 self.increment_type_counter(self.delivered_by_resource, resource, event_bytes)
         return event
+
+    def publish_to_subscriber(self, subscriber_id: int, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Publish one recovery event to exactly one already-subscribed client."""
+        safe_type = str(event_type or "event")
+        event_payload = dict(payload or {})
+        payload_json = self.canonical_json(event_payload)
+        with self.lock:
+            subscriber = self.subscribers.get(subscriber_id)
+            if subscriber is None:
+                return None
+            event_channels = client_event_type_channels(safe_type)
+            if subscriber.channels.isdisjoint(event_channels):
+                return None
+            event, resource = self._new_event_locked(safe_type, event_payload)
+            event_bytes = self.event_accounting_bytes(event, payload_json)
+            self.published_events += 1
+            self.published_bytes += event_bytes
+            self.increment_type_counter(self.published_by_type, safe_type, event_bytes)
+            self.increment_type_counter(self.published_by_resource, resource, event_bytes)
+            enqueue_result = self.enqueue(subscriber, event, event_bytes)
+            if enqueue_result == "coalesced":
+                subscriber.coalesced_events += 1
+                self.coalesced_events += 1
+                self.increment_type_counter(self.coalesced_by_resource, resource, event_bytes)
+            elif enqueue_result == "enqueued":
+                subscriber.delivered_events += 1
+                subscriber.delivered_bytes += event_bytes
+                self.delivered_events += 1
+                self.delivered_bytes += event_bytes
+                self.increment_type_counter(self.delivered_by_type, safe_type, event_bytes)
+            return event
 
     def aggregate_channels(self) -> frozenset[str]:
         with self.lock:

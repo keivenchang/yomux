@@ -17,10 +17,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -46,65 +48,148 @@ import (
 	"github.com/keivenchang/yolomux/internal/work"
 )
 
-const version = "0.1.0-phase4"
+const version = "0.9.2"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 type server struct {
-	root                    string
-	host                    string
-	port                    int
-	config                  string
-	httpMode                bool
-	mu                      sync.Mutex
-	children                map[*exec.Cmd]struct{}
-	events                  *eventBroker
-	operationsMu            sync.Mutex
-	operations              map[string]*goOperation
-	operationsPath          string
-	operationsJournal       string
-	eventLogPath            string
-	background              *goBackgroundOwner
-	finder                  *finder.Service
-	finderJobs              *work.Scheduler
-	finderBulkJobs          *work.Scheduler
-	finderStreamJobs        *work.Scheduler
-	capabilities            *capabilities.Catalog
-	statsPath               string
-	statsNow                func() time.Time
-	statsHeartbeat          time.Duration
-	statsWriter             *stats.Writer
-	statsService            *stats.StatsService
-	statsLifecycle          *stats.Lifecycle
-	statsMigration          map[string]any
-	statsDeltaMu            sync.Mutex
-	statsDeltaHistory       map[statsDeltaKey]map[int64]map[string]any
-	statsDeltaNextRevision  map[statsDeltaKey]int64
-	statsDemand             atomic.Int64
-	tokenCollector          *stats.AgentTokenCollector
-	pricing                 *stats.PricingCatalog
-	pricingRefreshMu        sync.Mutex
-	pricingRefreshing       bool
-	pricingRefreshState     map[string]any
-	pricingRefreshEpoch     uint64
-	metadataMu              sync.Mutex
-	metadataGeneration      uint64
-	logRing                 *goLogRing
-	rootLease               *os.File
-	shutdownOnce            sync.Once
-	startedAt               time.Time
-	authMu                  sync.Mutex
-	authFailures            map[string]authFailure
-	performanceMu           sync.Mutex
-	performanceRecords      []goPerformanceRecord
-	performanceCaptureTotal uint64
-	state                   string
-	finderBackgroundJobs    *work.Scheduler
-	sessionFilesCacheMu     sync.Mutex
-	sessionFilesCache       map[string]sessionFilesCacheRecord
-	sessionFilesRefresh     map[string]bool
+	root                             string
+	host                             string
+	port                             int
+	dangerouslyYolo                  bool
+	config                           string
+	httpMode                         bool
+	mu                               sync.Mutex
+	children                         map[*exec.Cmd]struct{}
+	events                           *eventBroker
+	operationsMu                     sync.Mutex
+	operations                       map[string]*goOperation
+	operationsPath                   string
+	operationsJournal                string
+	eventLogPath                     string
+	background                       *goBackgroundOwner
+	finder                           *finder.Service
+	finderJobs                       *work.Scheduler
+	finderBulkJobs                   *work.Scheduler
+	finderStreamJobs                 *work.Scheduler
+	capabilities                     *capabilities.Catalog
+	statsPath                        string
+	statsNow                         func() time.Time
+	statsHeartbeat                   time.Duration
+	statsWriter                      *stats.Writer
+	statsService                     *stats.StatsService
+	statsLifecycle                   *stats.Lifecycle
+	statsMigration                   map[string]any
+	statsDeltaMu                     sync.Mutex
+	statsDeltaHistory                map[statsDeltaKey]map[int64]map[string]any
+	statsDeltaNextRevision           map[statsDeltaKey]int64
+	statsDemand                      atomic.Int64
+	hostCollector                    *stats.HostCollector
+	agentStatusCollector             *stats.AgentStatusCollector
+	tokenCollector                   *stats.AgentTokenCollector
+	pricing                          *stats.PricingCatalog
+	pricingRefreshMu                 sync.Mutex
+	pricingRefreshing                bool
+	pricingRefreshState              map[string]any
+	pricingRefreshEpoch              uint64
+	metadataMu                       sync.Mutex
+	metadataGeneration               uint64
+	metadataNextGeneration           uint64
+	metadataPayload                  map[string]any
+	metadataBuiltAt                  time.Time
+	metadataBuilding                 bool
+	metadataQueuedGeneration         uint64
+	metadataBuildDone                chan struct{}
+	ignoreSizeMu                     sync.Mutex
+	ignoreSizeChecked                bool
+	ignoreSizeSupported              bool
+	sessionPlanGeneration            atomic.Int64
+	logRing                          *goLogRing
+	rootLease                        *os.File
+	shutdownOnce                     sync.Once
+	startedAt                        time.Time
+	healthLedgerMu                   sync.Mutex
+	healthLedger                     *goHealthLedger
+	healthLifecycle                  *goHealthLifecycle
+	authMu                           sync.Mutex
+	authFailures                     map[string]authFailure
+	performanceMu                    sync.Mutex
+	performanceRecords               []goPerformanceRecord
+	performanceCaptureTotal          uint64
+	state                            string
+	finderBackgroundJobs             *work.Scheduler
+	sessionFilesCacheMu              sync.Mutex
+	sessionFilesCache                map[string]sessionFilesCacheRecord
+	sessionFilesRefresh              map[string]bool
+	tmuxRosterMu                     sync.RWMutex
+	tmuxRosterFetchMu                sync.Mutex
+	tmuxRoster                       []string
+	tmuxRosterKnown                  bool
+	tmuxRosterSampledAt              time.Time
+	tmuxSessionRosterFn              func() ([]string, error)
+	tmuxSessionActivityFn            func() (map[string]float64, error)
+	tmuxWindowActivityFn             func() (map[string]float64, error)
+	processEntriesFn                 func() ([]procEntry, error)
+	processEntriesCacheMu            sync.Mutex
+	processEntriesCacheAt            time.Time
+	processEntriesCache              []procEntry
+	processEntriesCacheValid         bool
+	processEntriesCacheHits          uint64
+	processEntriesCacheMisses        uint64
+	processEntriesCacheLastDuration  time.Duration
+	processEntriesCacheDurationTotal time.Duration
+	childProcessEntriesFn            func(int) ([]procEntry, error)
+	agentStatusClassifier            func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult
+	processMetricsFn                 func(time.Time) goProcessMetrics
+	childProcessMetricsFn            func(time.Time) []goChildProcessMetric
+	goroutineCountFn                 func() int
+	agentInventoryMu                 sync.Mutex
+	agentInventoryAt                 time.Time
+	agentInventoryRecords            []stats.AgentRecord
+	agentInventoryErrors             []error
+	agentInventoryCacheValid         bool
+	agentInventoryCacheHits          uint64
+	agentInventoryCacheMisses        uint64
+	agentInventoryLastDuration       time.Duration
+	agentInventoryDurationTotal      time.Duration
+	processMetricsCacheMu            sync.Mutex
+	processMetricsCacheAt            time.Time
+	processMetricsCache              goProcessMetrics
+	processMetricsCacheValid         bool
+	processMetricsCacheHits          uint64
+	processMetricsCacheMisses        uint64
+	processMetricsLastDuration       time.Duration
+	processMetricsDurationTotal      time.Duration
+	processMetricsLastThreadRows     uint64
+	processMetricsLastChildRows      uint64
+	processMetricsMu                 sync.Mutex
+	processMetricsAt                 time.Time
+	processCPUSeconds                float64
+	processCPUValid                  bool
+	childCPU                         map[string]childCPUState
+	threadCPU                        map[string]childCPUState
 }
 
 const goPerformanceRecordLimit = 4096
+const goMetadataCacheTTL = 15 * time.Second
+
+// Process/thread/descendant metrics are diagnostic snapshots, not a request
+// counter. Sampling them more than once per second only repeats /proc work and
+// tmux-independent process-tree reads while the browser is polling the panel.
+const goProcessMetricsCacheTTL = time.Second
+
+// The fallback descendant topology changes much more slowly than the status
+// endpoint is polled. Keep that fallback roster scan on a bounded diagnostic
+// cadence, while still sampling each cached descendant's stat file on every
+// process-metrics refresh. Production uses the scoped proc-children reader;
+// this cache protects injected/fallback readers from repeated roster work.
+const goProcessEntriesCacheTTL = 5 * time.Second
+
+// Status and token collectors wake on the same ten-second cadence and consume
+// the same global Claude/Codex inventory. Retain one coherent snapshot for one
+// native cadence so collectors that wake a little apart do not duplicate a
+// full /proc plus tmux walk. The status product itself is no fresher than this
+// cadence, so this does not add a new stale-data interval.
+const goAgentInventoryCacheTTL = 10 * time.Second
 
 type goPerformanceRecord struct {
 	Role         string
@@ -114,6 +199,54 @@ type goPerformanceRecord struct {
 	PayloadBytes int
 	CacheStatus  string
 	Details      map[string]any
+}
+
+type goProcessMetrics struct {
+	PID                 int
+	StartedAt           time.Time
+	RSSBytes            *uint64
+	CPUPercent          *float64
+	ThreadCount         *uint64
+	GoroutineCount      *uint64
+	Threads             []goThreadMetric
+	ChildProcesses      []goChildProcessMetric
+	CPUReasonCode       string
+	CPUReason           string
+	RSSReasonCode       string
+	RSSReason           string
+	ThreadReasonCode    string
+	ThreadReason        string
+	GoroutineReasonCode string
+	GoroutineReason     string
+}
+
+// goThreadMetric is an OS-thread view. Go does not expose a stable per-
+// goroutine CPU counter, so goroutines remain an aggregate runtime count while
+// Linux OS threads can be sampled from /proc/<pid>/task/<tid>/stat.
+type goThreadMetric struct {
+	TID           int
+	Name          string
+	State         string
+	CPUPercent    *float64
+	CPUReasonCode string
+	CPUReason     string
+}
+
+// goChildProcessMetric is a verified descendant of the Go server. It is kept
+// nested under the Go service rather than promoted to a top-level daemon: these
+// processes are short-lived implementation details (tmux attach, git, or the
+// HTML renderer), not independently managed YOLOmux services.
+type goChildProcessMetric struct {
+	PID           int
+	PPID          int
+	Label         string
+	State         string
+	CPUPercent    *float64
+	RSSBytes      *uint64
+	CPUReasonCode string
+	CPUReason     string
+	RSSReasonCode string
+	RSSReason     string
 }
 
 type authFailure struct {
@@ -2450,7 +2583,11 @@ type authContextKey struct{}
 
 type winsize struct{ rows, cols, x, y uint16 }
 
-type ptyPair struct{ master, slave *os.File }
+type ptyPair struct {
+	master *os.File
+	slave  *os.File
+	tty    string
+}
 
 func clampDimension(value, minimum, maximum, fallback int) int {
 	if value <= 0 {
@@ -2485,7 +2622,11 @@ func openPTY(rows, cols int) (*ptyPair, error) {
 		_ = syscall.Close(masterFD)
 		return nil, err
 	}
-	pair := &ptyPair{master: os.NewFile(uintptr(masterFD), "pty-master"), slave: os.NewFile(uintptr(slaveFD), "pty-slave")}
+	pair := &ptyPair{
+		master: os.NewFile(uintptr(masterFD), "pty-master"),
+		slave:  os.NewFile(uintptr(slaveFD), "pty-slave"),
+		tty:    fmt.Sprintf("/dev/pts/%d", ptyNumber),
+	}
 	if err := pair.resize(rows, cols); err != nil {
 		pair.close()
 		return nil, err
@@ -2512,6 +2653,7 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 
 func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/session-files", s.protected(http.HandlerFunc(s.sessionFiles), "readonly"))
+	mux.Handle("/api/session-files-stream", s.protected(http.HandlerFunc(s.sessionFilesStream), "readonly"))
 	mux.Handle("/api/session-files-batch", s.protected(http.HandlerFunc(s.sessionFilesBatch), "readonly"))
 	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
 	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
@@ -2519,6 +2661,7 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo), "readonly"))
 	mux.Handle("/api/fs/diff", s.protected(http.HandlerFunc(s.fsDiff), "readonly"))
 	mux.Handle("/api/fs/git-history", s.protected(http.HandlerFunc(s.fsGitHistory), "readonly"))
+	mux.Handle("/api/fs/git-history-stats-stream", s.protected(http.HandlerFunc(s.fsGitHistoryStatsStream), "readonly"))
 	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit), "readonly"))
 	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw), "readonly"))
 	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
@@ -2565,7 +2708,17 @@ func explicitCollectorPaths() (claudeRoot, codexRoot, opencodeDatabase string, e
 	return claudeRoot, codexRoot, opencodeDatabase, nil
 }
 
+func useMachineTmuxForOperatorLaunch() {
+	if strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET")) != "" {
+		return
+	}
+	_ = os.Unsetenv("TMUX")
+	_ = os.Unsetenv("TMUX_PANE")
+	_ = os.Setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "1")
+}
+
 func main() {
+	useMachineTmuxForOperatorLaunch()
 	port := flag.Int("port", 7221, "HTTP port")
 	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
 	host := flag.String("host", "127.0.0.1", "bind address")
@@ -2575,6 +2728,8 @@ func main() {
 	httpMode := flag.Bool("http", false, "serve plain HTTP instead of the default HTTPS")
 	certPath := flag.String("cert", "", "TLS certificate PEM path")
 	keyPath := flag.String("key", "", "TLS private key PEM path")
+	dangerouslyYolo := flag.Bool("dangerously-yolo", false, "allow new Claude/Codex sessions to use dangerous bypass flags")
+	flag.BoolVar(dangerouslyYolo, "dang", false, "alias for --dangerously-yolo")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
 	if *showVersion {
@@ -2607,12 +2762,27 @@ func main() {
 	if stateDir == "" {
 		stateDir = *configDir
 	}
-	s := &server{root: rootPath, host: *host, port: *port, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	// The Go server has no parent observer to retain lifecycle history. Keep the
+	// port-scoped ledger in the configured state directory so normal operator
+	// restarts expose measured restart/demand counters instead of zeros or an
+	// unconditional unavailable envelope. A launch without an explicit reason
+	// remains partial rather than being guessed as demand-driven.
+	healthEpoch := fmt.Sprintf("pid:%d:start:%d", os.Getpid(), s.startedAt.UnixNano())
+	healthHistoryPath := filepath.Join(stateDir, "go-backend-health", fmt.Sprintf("%d.json", *port))
+	if lifecycle, lifecycleErr := newGoHealthLifecycle(healthHistoryPath, healthEpoch, os.Getpid(), s.startedAt, os.Getenv("YOLOMUX_GO_START_REASON")); lifecycleErr != nil {
+		slog.Warn("Go backend-health history unavailable", "error", lifecycleErr)
+	} else {
+		s.healthLifecycle = lifecycle
+	}
 	// Stats routes are implemented as soon as the server starts. Materialization readiness is a
 	// separate runtime state: capability discovery and the typed pending response must reach the
 	// stats handlers while the first ring build is still in flight, or the browser cannot ever learn
 	// the matrix it needs to start that build's read path.
 	s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{}}})
+	// Settings use the shared Python schema/serializer below, so the Go backend exposes the
+	// same validated payload and persistence contract as the Python backend.
+	s.capabilities.Set("core.settings.v1", capabilities.Entry{Available: true})
 	finderService, finderErr := finder.NewWithLimits(rootPath, func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
 		return err
@@ -2665,10 +2835,12 @@ func main() {
 	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
 	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus), "readonly"))
 	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance), "admin"))
+	mux.Handle("/api/settings", s.protected(http.HandlerFunc(s.settings), "readonly"))
 	// The browser requests session metadata during boot, before it opens the
 	// stats surface. Keep this route on the Go mux so a stats-capable process
 	// does not turn a boot identity probe into the generic unsupported response.
 	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata), "readonly"))
+	mux.Handle("/api/activity", s.protected(http.HandlerFunc(s.activity), "readonly"))
 	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim), "admin"))
 	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept), "admin"))
 	mux.Handle("/api/operations/terminalize", s.protected(http.HandlerFunc(s.operationTerminalize), "admin"))
@@ -2685,6 +2857,7 @@ func main() {
 	mux.Handle("/api/context-items", s.protected(http.HandlerFunc(s.contextItems), "readonly"))
 	mux.Handle("/api/context-stream", s.protected(http.HandlerFunc(s.contextStream), "readonly"))
 	mux.Handle("/api/tmux-status", s.protected(http.HandlerFunc(s.tmuxStatus), "readonly"))
+	mux.Handle("/api/tmux-signals", s.protected(http.HandlerFunc(s.tmuxSignals), "readonly"))
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
 	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
@@ -2785,24 +2958,39 @@ func main() {
 		},
 	})
 	s.statsService = statsService
-	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second, Busy: func() bool {
-		return s.statsDemand.Load() > 0
-	}, StateFunc: func(counters stats.LifecycleCounters) {
-		_ = statsService.Refresh(shutdownContext)
-		serviceState := statsService.State()
-		pending := 0
-		if cells, pendingErr := statsWriter.PendingInvalidationCells(shutdownContext); pendingErr == nil {
-			pending = len(cells)
-		}
-		if counters.Runs > 0 && (counters.LastRunSucceeded || counters.Errors == 0) && pending == 0 && serviceState.Ready {
-			s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true})
-			return
-		}
-		// Availability describes the implemented route surface; readiness is reported separately by
-		// /readyz and by the typed stats pending response. Keep the route admitted while materialization
-		// catches up so a fresh browser can discover capabilities and receive a retryable state.
-		s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{"pending_cells": pending, "pending_products": serviceState.PendingProducts}}})
-	}, Price: stats.PricingResolver(pricing)})
+	var statsRefreshGate statsProjectionRefreshGate
+	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second,
+		// Cold history is demand-driven for the Go server. Keep a slow eventual
+		// backfill for unrequested products, but do not decode every advertised
+		// resolution on each one-second tick while the operator is using other
+		// panels or the server is only serving health/status traffic.
+		BackgroundBackfillCadence:      30 * time.Second,
+		BackgroundBackfillInitialDelay: 30 * time.Second,
+		Busy: func() bool {
+			return s.statsDemand.Load() > 0
+		}, StateFunc: func(counters stats.LifecycleCounters) {
+			if statsRefreshGate.needsRefresh(counters) {
+				_ = statsService.Refresh(shutdownContext)
+				statsRefreshGate.record(counters)
+			} else {
+				// Keep the independently-cadenced status projection fresh while
+				// avoiding a ring metadata/read pass when no bucket was published.
+				_ = statsService.RefreshAgentStatusIfDue(shutdownContext)
+			}
+			serviceState := statsService.State()
+			pending := 0
+			if cells, pendingErr := statsWriter.PendingInvalidationCells(shutdownContext); pendingErr == nil {
+				pending = len(cells)
+			}
+			if counters.Runs > 0 && (counters.LastRunSucceeded || counters.Errors == 0) && pending == 0 && serviceState.Ready {
+				s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true})
+				return
+			}
+			// Availability describes the implemented route surface; readiness is reported separately by
+			// /readyz and by the typed stats pending response. Keep the route admitted while materialization
+			// catches up so a fresh browser can discover capabilities and receive a retryable state.
+			s.capabilities.Set("pane.stats.v1", capabilities.Entry{Available: true, Degraded: true, Reason: &capabilities.Reason{Code: "stats_pending", MessageKey: "capability.statsPending", MessageParams: map[string]any{"pending_cells": pending, "pending_products": serviceState.PendingProducts}}})
+		}, Price: stats.PricingResolver(pricing)})
 	statsWriter.AttachLifecycle(statsLifecycle)
 	s.statsLifecycle = statsLifecycle
 	if err := statsLifecycle.Start(shutdownContext); err != nil {
@@ -2822,19 +3010,41 @@ func main() {
 			fatal("stats collector setup failed: " + collectorErr.Error())
 		}
 	}
+	// The live Tabber metadata path and the persisted YO!stats collector must
+	// use the same screen classifier. Tests replace this seam with a synthetic
+	// classifier so no host pane, process, transcript, or database is needed.
+	statusSources := stats.LinuxAgentStatusSources(opencodeDatabase)
+	if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
+		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
+	}
+	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+		return stats.ClassifyAgentStatus(ctx, request, statusSources)
+	}
 	if !collectorsDisabled {
+		agentInventorySources := stats.LinuxAgentInventorySources()
+		if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
+			agentInventorySources = stats.SyntheticAgentInventorySources()
+		}
 		agentInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
-			return stats.BuildAgentInventory(ctx, stats.LinuxAgentInventorySources())
+			return s.cachedAgentInventory(ctx, agentInventorySources)
 		}
+		// Reuse the full machine-wide inventory for OpenCode token collection.
+		// The status collector already pays for the bounded /proc and global-tmux
+		// snapshot; running LinuxOpenCodeInventorySources separately would repeat
+		// the process census on the same cadence. Filtering the shared records
+		// preserves the global tmux scope because the token collector applies its
+		// existing RequireTmuxPane admission after this callback returns.
 		openCodeInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
-			return stats.BuildOpenCodeInventory(ctx, stats.LinuxOpenCodeInventorySources())
+			records, inventoryErrors := s.cachedAgentInventory(ctx, agentInventorySources)
+			return filterOpenCodeAgentRecords(records), inventoryErrors
 		}
-		statusCollector := stats.NewAgentStatusCollector(agentInventory, func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
-			return stats.ClassifyAgentStatus(ctx, request, stats.LinuxAgentStatusSources(opencodeDatabase))
-		}, statsWriter, nil, stats.AgentStatusCollectorConfig{
+		statusCollector := stats.NewAgentStatusCollector(agentInventory, s.agentStatusClassifier, statsWriter, nil, stats.AgentStatusCollectorConfig{
+			// Agent activity is a persisted product, not a browser-only cache.
+			// Keep polling at the native cadence even without an SSE subscriber:
+			// direct status reads are freshness consumers and go stale after 10s.
 			ActiveCadence: 10 * time.Second, IdleCadence: time.Minute,
 			EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
 			SnapshotRevision: func() uint64 { return uint64(time.Now().UnixNano()) },
 		})
 		if err := statusCollector.Start(shutdownContext); err != nil {
@@ -2842,13 +3052,15 @@ func main() {
 			s.shutdown()
 			fatal("agent status collector setup failed: " + err.Error())
 		}
+		s.agentStatusCollector = statusCollector
 		defer statusCollector.Stop()
 		tokenCollector := stats.NewAgentTokenCollector(statsWriter, nil, stats.AgentTokenCollectorConfig{
 			Inventory: agentInventory, OpenCodeInventory: openCodeInventory,
 			ClaudeTranscriptRoot: claudeTranscriptRoot, CodexTranscriptRoot: codexTranscriptRoot,
 			OpenCodeDatabase: opencodeDatabase, CursorPath: filepath.Join(*configDir, "opencode-token-cursors.json"),
-			EpochID: fmt.Sprintf("agent-tokens-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+			RequireTmuxPane: true,
+			EpochID:         fmt.Sprintf("agent-tokens-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
 		})
 		s.tokenCollector = tokenCollector
 		if err := tokenCollector.Start(shutdownContext); err != nil {
@@ -2857,16 +3069,30 @@ func main() {
 			fatal("agent token collector setup failed: " + err.Error())
 		}
 		defer tokenCollector.Stop()
-		hostCollector := stats.NewHostCollector(stats.NewHostSources(), statsWriter, nil, stats.HostCollectorConfig{
+		hostSources := stats.NewHostSources()
+		if os.Getenv("YOLOMUX_STATS_SYNTHETIC_HOST") == "1" {
+			// Development and integration fixtures must not inspect the host's
+			// /proc, process table, memory, or GPU state. The explicit opt-in
+			// source is deterministic and carries a same-named co-tenant so the
+			// host/owned CPU split remains exercised without host input.
+			hostSources = stats.NewSyntheticHostSources(processIdentityForRuntime(), processKeyForRuntime())
+		}
+		hostCollector := stats.NewHostCollector(hostSources, statsWriter, nil, stats.HostCollectorConfig{
 			ActiveCadence: time.Second, IdleCadence: time.Minute, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
 			EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
-			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(), ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
+			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(), ProcessIdentity: processIdentityForRuntime(),
+			// CPU is a host view: keep the bounded top process binaries so the Go
+			// chart retains Python's top-user behavior. Daemon ownership is applied
+			// separately by the local-services payload, which samples this Go PID
+			// and its verified descendants.
+			ActiveFunc: func() bool { return s.statsDemand.Load() > 0 },
 		})
 		if err := hostCollector.Start(shutdownContext); err != nil {
 			_ = listener.Close()
 			s.shutdown()
 			fatal("stats host collector setup failed: " + err.Error())
 		}
+		s.hostCollector = hostCollector
 		defer hostCollector.Stop()
 	}
 	scheme := "https"
@@ -2874,6 +3100,7 @@ func main() {
 		scheme = "http"
 	}
 	slog.Info("YOLOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
+	defer s.markGoHealthCleanShutdown()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
 	select {
@@ -2900,6 +3127,37 @@ func processKeyForRuntime() string {
 		return filepath.Base(os.Args[0])
 	}
 	return "yolomux-go"
+}
+
+// processIdentityForRuntime scopes the Go CPU series to this server instance.
+// The host census contains every process on the machine, and multiple Go
+// previews or test fixtures may share the same executable basename. A PID
+// prefix still lets the sampler detect PID reuse through the full
+// PID:start-time identity carried by each census row.
+func processIdentityForRuntime() string {
+	return fmt.Sprintf("%d:", os.Getpid())
+}
+
+// statsProjectionRefreshGate keeps the immutable ring projection aligned with
+// durable publications without rereading every ring on every one-second
+// lifecycle tick. Agent-status freshness is handled separately by the
+// cadence-aware status refresh below.
+type statsProjectionRefreshGate struct {
+	initialized  bool
+	publications uint64
+	repairs      uint64
+	errors       uint64
+}
+
+func (g *statsProjectionRefreshGate) needsRefresh(counters stats.LifecycleCounters) bool {
+	return !g.initialized || g.publications != counters.Publications || g.repairs != counters.Repairs || g.errors != counters.Errors
+}
+
+func (g *statsProjectionRefreshGate) record(counters stats.LifecycleCounters) {
+	g.initialized = true
+	g.publications = counters.Publications
+	g.repairs = counters.Repairs
+	g.errors = counters.Errors
 }
 
 func defaultConfigDir() string {
@@ -3220,6 +3478,9 @@ func filesystemRouteRequiresAdmin(r *http.Request) bool {
 	if r.URL.Path == "/api/fs/write" || r.URL.Path == "/api/fs/delete" || r.URL.Path == "/api/fs/unindex" || r.URL.Path == "/api/fs/rename" || r.URL.Path == "/api/fs/mkdir" || r.URL.Path == "/api/upload" {
 		return true
 	}
+	if r.URL.Path == "/api/settings" {
+		return r.Method == http.MethodPost
+	}
 	return r.URL.Path == "/api/batch/zip" || r.URL.Path == "/api/batch/count" || r.URL.Path == "/api/batch/html-preview"
 }
 
@@ -3377,7 +3638,7 @@ print(login_html(next_path=sys.argv[1], error=sys.argv[2], secure=sys.argv[3] ==
 	}
 	command := exec.Command("python3", "-c", script, next, message, secure, locale, r.Header.Get("Accept-Language"))
 	command.Dir = s.root
-	command.Env = append(os.Environ(), "PYTHONPATH="+s.root)
+	command.Env = pythonBridgeEnvironment(s.root, s.config)
 	body, err := command.Output()
 	if err != nil {
 		http.Error(w, "login page unavailable", http.StatusInternalServerError)
@@ -3535,13 +3796,23 @@ func (w *loggingResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
 func (s *server) logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		finishHealth := s.ensureGoHealthLedger(start).begin(goHealthRequestExcluded(r.URL.Path))
 		logged := &loggingResponseWriter{ResponseWriter: w}
+		completed := false
+		status := 0
+		defer func() {
+			if status == 0 {
+				status = http.StatusInternalServerError
+			}
+			finishHealth(status, completed, time.Since(start))
+		}()
 		next.ServeHTTP(logged, r)
 		elapsed := time.Since(start)
-		status := logged.status
+		status = logged.status
 		if status == 0 {
 			status = http.StatusOK
 		}
+		completed = true
 		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", elapsed.Milliseconds())
 		s.recordPerformance(r, status, logged.bytes, elapsed)
 	})
@@ -3745,13 +4016,142 @@ func (s *server) fsGitHistory(w http.ResponseWriter, r *http.Request) {
 	limit := r.URL.Query().Get("limit")
 	cursor := r.URL.Query().Get("cursor")
 	withStats := r.URL.Query().Get("stats") == "1"
+	statsOffsetRaw := r.URL.Query().Get("stats_offset")
+	statsOffset := -1
+	if statsOffsetRaw != "" {
+		if !withStats {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "stats_offset requires stats=1"})
+			return
+		}
+		parsed, err := strconv.Atoi(statsOffsetRaw)
+		if err != nil || parsed < 0 {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "stats_offset must be a non-negative integer"})
+			return
+		}
+		statsOffset = parsed
+	}
 	scheduler := s.finderJobs
 	if withStats {
 		scheduler = s.finderBackgroundScheduler()
 	}
 	s.enqueueFinderJSONWithScheduler(w, r.Context(), scheduler, r.URL.Path, "git_history", path, 0, func(ctx context.Context) (map[string]any, *finder.Error) {
+		if statsOffset >= 0 {
+			return s.finder.GitHistoryAtOffset(ctx, path, limit, cursor, statsOffset)
+		}
 		return s.finder.GitHistory(ctx, path, limit, cursor, withStats)
 	})
+}
+
+func parseGitHistoryBatchSizes(raw string) ([]int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	raw = strings.ReplaceAll(raw, "+", " ")
+	fields := strings.Fields(strings.ReplaceAll(raw, ",", " "))
+	if len(fields) == 0 || len(fields) > finder.MaxGitHistoryScheduledBatches() {
+		return nil, fmt.Errorf("batch_sizes must contain 1-%d positive integers", finder.MaxGitHistoryScheduledBatches())
+	}
+	batchSizes := make([]int, 0, len(fields))
+	total := 0
+	for _, field := range fields {
+		batchSize, err := strconv.Atoi(field)
+		if err != nil || batchSize < 1 || batchSize > finder.MaxGitHistoryLimit() {
+			return nil, fmt.Errorf("batch_sizes entries must be integers from 1 to %d", finder.MaxGitHistoryLimit())
+		}
+		if total > finder.MaxGitHistoryOffset()-batchSize {
+			return nil, fmt.Errorf("batch_sizes total is too large")
+		}
+		total += batchSize
+		batchSizes = append(batchSizes, batchSize)
+	}
+	return batchSizes, nil
+}
+
+func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	cursor := r.URL.Query().Get("cursor")
+	if path == "" || cursor == "" {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "path and cursor are required"})
+		return
+	}
+	count, err := strconv.Atoi(r.URL.Query().Get("count"))
+	batchSizes, scheduleErr := parseGitHistoryBatchSizes(r.URL.Query().Get("batch_sizes"))
+	if scheduleErr != nil || (len(batchSizes) == 0 && (err != nil || count < 1 || count > finder.MaxGitHistoryOffset())) {
+		message := "count must be a positive integer"
+		if r.URL.Query().Get("batch_sizes") != "" {
+			message = scheduleErr.Error()
+		}
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: message})
+		return
+	}
+	batchSize := 0
+	if len(batchSizes) == 0 {
+		batchSize, err = strconv.Atoi(r.URL.Query().Get("batch_size"))
+		if err != nil || batchSize < 1 || batchSize > finder.MaxGitHistoryLimit() {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "batch_size must be a positive integer"})
+			return
+		}
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusInternalServerError, Code: "streaming_unavailable", MessageKey: "common.requestFailed", Path: path, Message: "streaming unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	writeSSE := func(event string, value any) error {
+		body, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, writeErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, body); writeErr != nil {
+			return writeErr
+		}
+		flusher.Flush()
+		return nil
+	}
+	startPayload := map[string]any{"path": path}
+	if len(batchSizes) > 0 {
+		startPayload["batch_sizes"] = batchSizes
+	} else {
+		startPayload["count"], startPayload["batch_size"] = count, batchSize
+	}
+	if writeErr := writeSSE("start", startPayload); writeErr != nil {
+		return
+	}
+	emitted := 0
+	var nextCursor string
+	_, finderErr := s.runFinderStreamProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
+		emit := func(payload map[string]any) error {
+			commits, _ := payload["commits"].([]map[string]any)
+			emitted += len(commits)
+			return writeSSE("chunk", payload)
+		}
+		var finderErr *finder.Error
+		if len(batchSizes) > 0 {
+			nextCursor, finderErr = s.finder.GitHistoryStatsScheduled(ctx, path, cursor, batchSizes, emit)
+		} else {
+			finderErr = s.finder.GitHistoryStatsStream(ctx, path, cursor, count, batchSize, func(payload map[string]any) error {
+				nextCursor, _ = payload["next_cursor"].(string)
+				return emit(payload)
+			})
+		}
+		return finderProduct{}, finderErr
+	})
+	if finderErr != nil {
+		if r.Context().Err() == nil {
+			_ = writeSSE("error", finderErr.Payload())
+		}
+		return
+	}
+	_ = writeSSE("done", map[string]any{"count": emitted, "next_cursor": nextCursor})
 }
 
 func (s *server) fsGitCommit(w http.ResponseWriter, r *http.Request) {
@@ -5243,6 +5643,601 @@ func (s *server) eventsList(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"events": s.eventLogTail(session, limit), "session": session, "limit": minInt(limit, 1000)})
 }
+
+func goMetric(value any, reasonCode, reason string) map[string]any {
+	if number, ok := value.(float64); ok && !math.IsNaN(number) && !math.IsInf(number, 0) {
+		return map[string]any{"state": "measured", "value": number, "reason_code": "", "reason": ""}
+	}
+	if number, ok := value.(uint64); ok {
+		return map[string]any{"state": "measured", "value": number, "reason_code": "", "reason": ""}
+	}
+	return map[string]any{"state": "unavailable", "value": nil, "reason_code": reasonCode, "reason": reason}
+}
+
+func (s *server) readGoProcessMetrics(now time.Time) goProcessMetrics {
+	s.processMetricsCacheMu.Lock()
+	defer s.processMetricsCacheMu.Unlock()
+	if s.processMetricsCacheValid && !now.Before(s.processMetricsCacheAt) && now.Sub(s.processMetricsCacheAt) < goProcessMetricsCacheTTL {
+		s.processMetricsCacheHits++
+		return s.processMetricsCache
+	}
+	started := time.Now()
+	result := s.readGoProcessMetricsUncached(now)
+	duration := time.Since(started)
+	s.processMetricsCacheMisses++
+	s.processMetricsLastDuration = duration
+	s.processMetricsDurationTotal += duration
+	s.processMetricsLastThreadRows = uint64(len(result.Threads))
+	s.processMetricsLastChildRows = uint64(len(result.ChildProcesses))
+	s.processMetricsCache = result
+	s.processMetricsCacheAt = now
+	s.processMetricsCacheValid = true
+	return result
+}
+
+func (s *server) readGoProcessMetricsUncached(now time.Time) goProcessMetrics {
+	result := goProcessMetrics{
+		PID:                 os.Getpid(),
+		StartedAt:           s.startedAt,
+		CPUReasonCode:       "process_cpu_unavailable",
+		CPUReason:           "The operating system did not return a usable Go process CPU sample",
+		RSSReasonCode:       "process_read_failed",
+		RSSReason:           "The operating system did not return Go process memory",
+		ThreadReasonCode:    "process_threads_unavailable",
+		ThreadReason:        "The operating system did not return Go process thread details",
+		GoroutineReasonCode: "process_goroutines_unavailable",
+		GoroutineReason:     "The Go runtime did not return a goroutine count",
+	}
+	if result.StartedAt.IsZero() {
+		result.StartedAt = now
+	}
+	goroutineCount := runtime.NumGoroutine()
+	if s.goroutineCountFn != nil {
+		goroutineCount = s.goroutineCountFn()
+	}
+	if goroutineCount > 0 {
+		count := uint64(goroutineCount)
+		result.GoroutineCount = &count
+		result.GoroutineReasonCode = ""
+		result.GoroutineReason = ""
+	}
+	if s.childProcessMetricsFn != nil {
+		result.ChildProcesses = s.childProcessMetricsFn(now)
+	} else {
+		result.ChildProcesses = s.readGoChildProcessMetrics(now)
+	}
+	if runtime.GOOS != "linux" {
+		return result
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(result.PID), "stat"))
+	if err != nil {
+		return result
+	}
+	row, ok := stats.ParseLinuxProcessStat(string(data), "", uint64(os.Getpagesize()), 100)
+	if !ok {
+		return result
+	}
+	rss := row.RSSBytes
+	result.RSSBytes = &rss
+	result.RSSReasonCode = ""
+	result.RSSReason = ""
+	tasks, taskErr := os.ReadDir(filepath.Join("/proc", strconv.Itoa(result.PID), "task"))
+	if taskErr == nil {
+		var threadCount uint64
+		for _, task := range tasks {
+			if task.IsDir() {
+				if _, parseErr := strconv.ParseUint(task.Name(), 10, 32); parseErr == nil {
+					threadCount++
+				}
+			}
+		}
+		if threadCount > 0 {
+			result.ThreadCount = &threadCount
+			result.ThreadReasonCode = ""
+			result.ThreadReason = ""
+		}
+		result.Threads = s.readGoThreadMetrics(now, result.PID, tasks)
+	}
+	s.processMetricsMu.Lock()
+	if s.processCPUValid && now.After(s.processMetricsAt) && row.CPUSeconds >= s.processCPUSeconds {
+		elapsed := now.Sub(s.processMetricsAt).Seconds()
+		if elapsed > 0 {
+			percent := (row.CPUSeconds - s.processCPUSeconds) / elapsed * 100
+			if !math.IsNaN(percent) && !math.IsInf(percent, 0) && percent >= 0 {
+				result.CPUPercent = &percent
+				result.CPUReasonCode = ""
+				result.CPUReason = ""
+			}
+		}
+	}
+	s.processCPUSeconds = row.CPUSeconds
+	s.processMetricsAt = now
+	s.processCPUValid = true
+	s.processMetricsMu.Unlock()
+	return result
+}
+
+const maxGoThreads = 256
+
+func (s *server) readGoThreadMetrics(now time.Time, pid int, tasks []os.DirEntry) []goThreadMetric {
+	threads := make([]goThreadMetric, 0, minInt(len(tasks), maxGoThreads))
+	for _, task := range tasks {
+		if len(threads) >= maxGoThreads || !task.IsDir() {
+			continue
+		}
+		tid, err := strconv.Atoi(task.Name())
+		if err != nil || tid <= 0 {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "task", task.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		row, ok := stats.ParseLinuxProcessStat(string(data), "", uint64(os.Getpagesize()), 100)
+		if !ok {
+			continue
+		}
+		metric := goThreadMetric{
+			TID: tid, Name: row.Binary, State: linuxChildProcessState(string(data)),
+			CPUReasonCode: "thread_cpu_first_sample",
+			CPUReason:     "The operating system needs a second thread sample to calculate CPU",
+		}
+		if percent := s.threadCPUPercent(now, row.Identity, row.CPUSeconds); percent != nil {
+			metric.CPUPercent = percent
+			metric.CPUReasonCode = ""
+			metric.CPUReason = ""
+		}
+		threads = append(threads, metric)
+	}
+	sort.Slice(threads, func(i, j int) bool {
+		if threads[i].Name != threads[j].Name {
+			return threads[i].Name < threads[j].Name
+		}
+		return threads[i].TID < threads[j].TID
+	})
+	return threads
+}
+
+const maxGoChildProcesses = 64
+
+// readGoChildProcessMetrics samples only the Go server's descendant tree. It
+// deliberately does not scan all host processes: a machine-wide process list
+// would make unrelated agents appear to be YOLOmux daemons. The process table
+// seam is injectable in tests, so production /proc state is never needed by a
+// deterministic test.
+func (s *server) readGoChildProcessMetrics(now time.Time) []goChildProcessMetric {
+	var entries []procEntry
+	var err error
+	if s.childProcessEntriesFn != nil {
+		entries, err = s.cachedProcessEntriesWith(now, func() ([]procEntry, error) {
+			return s.childProcessEntriesFn(os.Getpid())
+		})
+	} else {
+		entries, err = s.cachedProcessEntries(now)
+	}
+	if err != nil {
+		return nil
+	}
+	byParent := make(map[int][]procEntry)
+	for _, entry := range entries {
+		if entry.PID > 0 && entry.PPID > 0 && entry.PID != os.Getpid() {
+			byParent[entry.PPID] = append(byParent[entry.PPID], entry)
+		}
+	}
+	queue := append([]procEntry(nil), byParent[os.Getpid()]...)
+	result := make([]goChildProcessMetric, 0, len(queue))
+	seen := make(map[int]struct{})
+	for len(queue) > 0 && len(result) < maxGoChildProcesses {
+		entry := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[entry.PID]; ok {
+			continue
+		}
+		seen[entry.PID] = struct{}{}
+		queue = append(queue, byParent[entry.PID]...)
+		metric := goChildProcessMetric{
+			PID: entry.PID, PPID: entry.PPID, Label: childProcessLabel(entry), State: "running",
+			CPUReasonCode: "child_process_cpu_unavailable",
+			CPUReason:     "The operating system did not return a usable child-process CPU sample",
+			RSSReasonCode: "child_process_memory_unavailable",
+			RSSReason:     "The operating system did not return child-process memory",
+		}
+		if metric.Label == "" {
+			metric.Label = fmt.Sprintf("pid:%d", entry.PID)
+		}
+		if runtime.GOOS == "linux" {
+			data, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(entry.PID), "stat"))
+			if readErr == nil {
+				metric.State = linuxChildProcessState(string(data))
+				row, ok := stats.ParseLinuxProcessStat(string(data), entry.Executable, uint64(os.Getpagesize()), 100)
+				if ok {
+					rss := row.RSSBytes
+					metric.RSSBytes = &rss
+					metric.RSSReasonCode = ""
+					metric.RSSReason = ""
+					metric.CPUPercent = s.childCPUPercent(now, row.Identity, row.CPUSeconds)
+					if metric.CPUPercent != nil {
+						metric.CPUReasonCode = ""
+						metric.CPUReason = ""
+					}
+				}
+			}
+		}
+		result = append(result, metric)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Label != result[j].Label {
+			return result[i].Label < result[j].Label
+		}
+		return result[i].PID < result[j].PID
+	})
+	return result
+}
+
+func cloneProcEntries(entries []procEntry) []procEntry {
+	if entries == nil {
+		return nil
+	}
+	return append([]procEntry(nil), entries...)
+}
+
+func cloneAgentRecords(records []stats.AgentRecord) []stats.AgentRecord {
+	if records == nil {
+		return nil
+	}
+	return append([]stats.AgentRecord(nil), records...)
+}
+
+func filterOpenCodeAgentRecords(records []stats.AgentRecord) []stats.AgentRecord {
+	filtered := make([]stats.AgentRecord, 0, len(records))
+	for _, record := range records {
+		if record.Kind == "opencode" {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+// cachedAgentInventory shares the short-lived global process/tmux snapshot
+// between the status and token collectors. The cache is deliberately tiny:
+// it removes same-cadence duplicate scans without turning agent attribution
+// into a stale long-lived roster.
+func (s *server) cachedAgentInventory(ctx context.Context, sources stats.AgentInventorySources) ([]stats.AgentRecord, []error) {
+	if err := ctx.Err(); err != nil {
+		return nil, []error{err}
+	}
+	s.agentInventoryMu.Lock()
+	defer s.agentInventoryMu.Unlock()
+	now := time.Now()
+	if s.agentInventoryCacheValid && !now.Before(s.agentInventoryAt) && now.Sub(s.agentInventoryAt) < goAgentInventoryCacheTTL {
+		s.agentInventoryCacheHits++
+		return cloneAgentRecords(s.agentInventoryRecords), append([]error(nil), s.agentInventoryErrors...)
+	}
+	s.agentInventoryCacheMisses++
+	started := time.Now()
+	records, inventoryErrors := stats.BuildAgentInventory(ctx, sources)
+	duration := time.Since(started)
+	s.agentInventoryLastDuration = duration
+	s.agentInventoryDurationTotal += duration
+	if len(inventoryErrors) == 0 {
+		s.agentInventoryRecords = cloneAgentRecords(records)
+		s.agentInventoryErrors = nil
+		s.agentInventoryAt = now
+		s.agentInventoryCacheValid = true
+	}
+	return records, inventoryErrors
+}
+
+// cachedProcessEntries is the fallback topology reader used when a scoped
+// descendant reader is not installed. The per-child stat files are still read
+// by readGoChildProcessMetrics on every uncached metrics sample, so CPU/RSS
+// values remain current; only roster discovery is bounded to five seconds.
+// Tests inject processEntriesFn and therefore never touch host /proc.
+func (s *server) cachedProcessEntries(now time.Time) ([]procEntry, error) {
+	entriesFn := s.processEntriesFn
+	if entriesFn == nil {
+		entriesFn = processEntries
+	}
+	return s.cachedProcessEntriesWith(now, entriesFn)
+}
+
+func (s *server) cachedProcessEntriesWith(now time.Time, entriesFn func() ([]procEntry, error)) ([]procEntry, error) {
+	s.processEntriesCacheMu.Lock()
+	defer s.processEntriesCacheMu.Unlock()
+	if s.processEntriesCacheValid && !now.Before(s.processEntriesCacheAt) && now.Sub(s.processEntriesCacheAt) < goProcessEntriesCacheTTL {
+		s.processEntriesCacheHits++
+		return cloneProcEntries(s.processEntriesCache), nil
+	}
+	started := time.Now()
+	entries, err := entriesFn()
+	duration := time.Since(started)
+	s.processEntriesCacheMisses++
+	s.processEntriesCacheLastDuration = duration
+	s.processEntriesCacheDurationTotal += duration
+	if err != nil {
+		return nil, err
+	}
+	s.processEntriesCache = cloneProcEntries(entries)
+	s.processEntriesCacheAt = now
+	s.processEntriesCacheValid = true
+	return cloneProcEntries(entries), nil
+}
+
+func linuxChildProcessState(stat string) string {
+	closeParen := strings.LastIndex(stat, ") ")
+	if closeParen < 0 {
+		return "unknown"
+	}
+	fields := strings.Fields(stat[closeParen+2:])
+	if len(fields) == 0 {
+		return "unknown"
+	}
+	switch fields[0] {
+	case "R":
+		return "running"
+	case "S", "D", "I":
+		return "sleeping"
+	case "T", "t":
+		return "stopped"
+	case "Z":
+		return "zombie"
+	case "X", "x":
+		return "dead"
+	default:
+		return fields[0]
+	}
+}
+
+type childCPUState struct {
+	At         time.Time
+	Identity   string
+	CPUSeconds float64
+}
+
+func (s *server) childCPUPercent(now time.Time, identity string, cpuSeconds float64) *float64 {
+	// Reuse the process-metrics mutex for this small bounded map. It is sampled
+	// only from the status path and avoids a second mutable sampler owner.
+	s.processMetricsMu.Lock()
+	defer s.processMetricsMu.Unlock()
+	if s.childCPU == nil {
+		s.childCPU = make(map[string]childCPUState)
+	}
+	previous, ok := s.childCPU[identity]
+	s.childCPU[identity] = childCPUState{At: now, Identity: identity, CPUSeconds: cpuSeconds}
+	if !ok || !now.After(previous.At) || previous.Identity != identity || cpuSeconds < previous.CPUSeconds {
+		return nil
+	}
+	percent := (cpuSeconds - previous.CPUSeconds) / now.Sub(previous.At).Seconds() * 100
+	if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 {
+		return nil
+	}
+	return &percent
+}
+
+func (s *server) threadCPUPercent(now time.Time, identity string, cpuSeconds float64) *float64 {
+	s.processMetricsMu.Lock()
+	defer s.processMetricsMu.Unlock()
+	if s.threadCPU == nil {
+		s.threadCPU = make(map[string]childCPUState)
+	}
+	previous, ok := s.threadCPU[identity]
+	s.threadCPU[identity] = childCPUState{At: now, Identity: identity, CPUSeconds: cpuSeconds}
+	if !ok || !now.After(previous.At) || previous.Identity != identity || cpuSeconds < previous.CPUSeconds {
+		return nil
+	}
+	percent := (cpuSeconds - previous.CPUSeconds) / now.Sub(previous.At).Seconds() * 100
+	if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 {
+		return nil
+	}
+	return &percent
+}
+
+func childProcessLabel(entry procEntry) string {
+	if executable := strings.TrimSpace(entry.Executable); executable != "" {
+		if base := filepath.Base(executable); base != "." && base != string(filepath.Separator) {
+			return base
+		}
+	}
+	command := strings.TrimSpace(entry.Command)
+	if command == "" {
+		return ""
+	}
+	return strings.Fields(command)[0]
+}
+
+func (s *server) goLocalServicesPayload(now time.Time) map[string]any {
+	metricsFn := s.processMetricsFn
+	if metricsFn == nil {
+		metricsFn = s.readGoProcessMetrics
+	}
+	return s.goLocalServicesPayloadFromMetrics(now, metricsFn(now))
+}
+
+func (s *server) goLocalServicesPayloadFromMetrics(now time.Time, process goProcessMetrics) map[string]any {
+	startedAt := process.StartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	uptime := now.Sub(startedAt).Seconds()
+	if uptime < 0 {
+		uptime = 0
+	}
+	threadReasonCode, threadReason := process.ThreadReasonCode, process.ThreadReason
+	if process.ThreadCount == nil && threadReasonCode == "" {
+		threadReasonCode = "process_threads_unavailable"
+		threadReason = "The operating system did not return Go process thread details"
+	}
+	goroutineReasonCode, goroutineReason := process.GoroutineReasonCode, process.GoroutineReason
+	if process.GoroutineCount == nil && goroutineReasonCode == "" {
+		goroutineReasonCode = "process_goroutines_unavailable"
+		goroutineReason = "The Go runtime did not return a goroutine count"
+	}
+	threadDetails := make([]any, 0, len(process.Threads))
+	for _, thread := range process.Threads {
+		threadDetails = append(threadDetails, map[string]any{
+			"tid": thread.TID, "name": thread.Name, "state": thread.State,
+			"cpu_now_percent": goMetric(valueOrNil(thread.CPUPercent), thread.CPUReasonCode, thread.CPUReason),
+		})
+	}
+	childProcesses := make([]any, 0, len(process.ChildProcesses))
+	for _, child := range process.ChildProcesses {
+		childProcesses = append(childProcesses, map[string]any{
+			"pid": child.PID, "parent_pid": child.PPID, "label": child.Label, "state": child.State,
+			"cpu_now_percent": goMetric(valueOrNil(child.CPUPercent), child.CPUReasonCode, child.CPUReason),
+			"rss_bytes":       goMetric(valueOrNil(child.RSSBytes), child.RSSReasonCode, child.RSSReason),
+		})
+	}
+	// Keep the measured owner timings beside the Go service that owns them. The
+	// top-level system-status copy remains for machine readers; this nested copy
+	// lets the expanded Daemons row answer what is consuming CPU without making
+	// the browser infer work from the aggregate process percentage.
+	runtimeDiagnostics := s.statsRuntimeDiagnostics()
+	processCount := uint64(1 + len(process.ChildProcesses))
+	ledger := s.ensureGoHealthLedger(now)
+	ledger.observe()
+	health := s.goHealthSnapshot(now)
+	lifecycle := s.goHealthLifecycleSnapshot()
+	unavailableRestart := func(code, reason string) map[string]any {
+		return goMetric(nil, code, reason)
+	}
+	measuredCount := func(value uint64) map[string]any {
+		return goMetric(float64(value), "", "")
+	}
+	lifecycleMetric := func(value uint64, available bool, reasonCode, reason string) map[string]any {
+		if !available {
+			if reasonCode == "" {
+				reasonCode = "go_health_history_unavailable"
+			}
+			if reason == "" {
+				reason = "Go backend-health history is not available for this counter"
+			}
+			return unavailableRestart(reasonCode, reason)
+		}
+		return measuredCount(value)
+	}
+	latencyMetric := func() map[string]any {
+		if health.completedCount == 0 {
+			return goMetric(nil, "no_completed_request", "No completed request has been timed in this web process")
+		}
+		return goMetric(float64(health.latencyMax)/float64(time.Millisecond), "", "")
+	}
+	latencyAverageMetric := func() map[string]any {
+		if health.completedCount == 0 {
+			return goMetric(nil, "no_completed_request", "No completed request has been timed in this web process")
+		}
+		average := float64(health.latencyTotal) / float64(time.Millisecond) / float64(health.completedCount)
+		return goMetric(average, "", "")
+	}
+	healthMetrics := map[string]any{
+		"restart_count":            lifecycleMetric(lifecycle.RestartCount, lifecycle.RestartAvailable, "go_health_history_unavailable", "Go restart history is not available"),
+		"process_start_count":      measuredCount(health.processStartCount),
+		"demand_start_count":       lifecycleMetric(lifecycle.DemandStartCount, lifecycle.DemandAvailable, "demand_classification_unavailable", "Go launch reason was not persisted for this history"),
+		"unexpected_restart_count": lifecycleMetric(lifecycle.UnexpectedRestartCount, lifecycle.UnexpectedAvailable, "restart_classification_unavailable", "Go restart history is not complete enough to classify this start"),
+		"observations":             measuredCount(health.observations),
+		"request_count":            measuredCount(health.requestCount),
+		"error_count":              measuredCount(health.errorCount),
+		"completed_count":          measuredCount(health.completedCount),
+		"latency_average_ms":       latencyAverageMetric(),
+		"latency_max_ms":           latencyMetric(),
+	}
+	service := map[string]any{
+		"id": "yolomux-go", "service": "yolomux-go", "label": "YO!stats Go backend",
+		"parent_id": "web", "state": "running", "reason_code": "", "reason": "",
+		"pid": process.PID, "started_at": unixSeconds(startedAt), "essential": true, "alerting": false,
+		"metrics": map[string]any{
+			"cpu_now_percent": goMetric(valueOrNil(process.CPUPercent), process.CPUReasonCode, process.CPUReason),
+			"rss_bytes":       goMetric(valueOrNil(process.RSSBytes), process.RSSReasonCode, process.RSSReason),
+			"uptime_seconds":  goMetric(uptime, "", ""),
+		},
+		"health": map[string]any{
+			"observed": true, "unavailable_reason_code": "",
+			"state": "ready", "reason_code": "none", "recovery_outcome": "none", "process_epoch": health.epoch,
+			"pid": process.PID, "observed_at": unixSeconds(now), "since_revision": 1, "since_wall_time": unixSeconds(health.epochStartedAt),
+			"state_age_seconds": maxGoHealthFloat(0, now.Sub(health.epochStartedAt).Seconds()), "transitions_truncated": false,
+			"coverage": map[string]any{
+				"retained_counters": lifecycleCoverage(lifecycle), "retained_counter_reasons": lifecycleCoverageReasons(lifecycle),
+				"lifecycle": lifecycleCoverage(lifecycle), "lifecycle_reasons": lifecycleCoverageReasons(lifecycle),
+				"counters": "full", "counter_reasons": []string{}, "counter_scope": "web_process",
+			},
+			"metrics": healthMetrics, "transitions": []any{}, "transitions_total": 0, "transitions_total_exact": true,
+			"errors_by_reason": goHealthErrorPayload(health.errorsByReason),
+		},
+		"details": map[string]any{
+			"backend":                "go",
+			"observer":               "in-process-ledger",
+			"stats_runtime":          runtimeDiagnostics,
+			"cpu_scope":              "Go process plus verified descendant processes",
+			"cpu_normalization":      "100% means one busy wall-clock core; values above 100% mean concurrent cores",
+			"process_count":          goMetric(processCount, "", ""),
+			"goroutine_count":        goMetric(valueOrNil(process.GoroutineCount), goroutineReasonCode, goroutineReason),
+			"goroutine_scope":        "aggregate_only",
+			"goroutine_scope_reason": "Go exposes an aggregate runtime goroutine count; per-goroutine CPU requires a profiler and is not a stable live metric",
+			"thread_count":           goMetric(valueOrNil(process.ThreadCount), threadReasonCode, threadReason),
+			"threads":                threadDetails,
+			"child_processes":        childProcesses,
+		},
+	}
+	cpuTotal := float64(0)
+	if process.CPUPercent != nil {
+		cpuTotal = *process.CPUPercent
+	}
+	for _, child := range process.ChildProcesses {
+		if child.CPUPercent != nil {
+			cpuTotal += *child.CPUPercent
+		}
+	}
+	rssTotal := uint64(0)
+	if process.RSSBytes != nil {
+		rssTotal = *process.RSSBytes
+	}
+	for _, child := range process.ChildProcesses {
+		if child.RSSBytes != nil {
+			rssTotal += *child.RSSBytes
+		}
+	}
+	return map[string]any{
+		"schema_version": 5, "inventory": []string{"yolomux-go"}, "services": []any{service},
+		"totals": map[string]any{"processes": processCount, "cpu_percent": cpuTotal, "rss_bytes": rssTotal},
+		"ledger": map[string]any{}, "recovery_events": []any{},
+		"health": map[string]any{
+			"available": true, "reason_code": "", "schema_version": 1,
+			"port": s.port, "observer_epoch": health.epoch, "observer_epoch_started_at": unixSeconds(health.epochStartedAt), "revision": health.observations,
+			"written_at": unixSeconds(now), "age_seconds": 0.0, "history_coverage": lifecycle.HistoryCoverage, "history_reset_reason": lifecycle.HistoryResetReason,
+			"persistence_state": lifecycle.PersistenceState, "persistence_reason_code": lifecycle.PersistenceReasonCode, "observer_alive": true,
+			"observer_cycle_age_seconds": 0.0, "observer_cycles": health.observations,
+			"observer_liveness_reason_code": "in_process_ledger", "resources": 1,
+		},
+	}
+}
+
+func goServerMetricsPayload(now time.Time, process goProcessMetrics) map[string]any {
+	startedAt := process.StartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	uptime := now.Sub(startedAt).Seconds()
+	if uptime < 0 {
+		uptime = 0
+	}
+	return map[string]any{
+		"uptime_seconds":     goMetric(uptime, "", ""),
+		"cpu_percent":        goMetric(valueOrNil(process.CPUPercent), process.CPUReasonCode, process.CPUReason),
+		"system_cpu_percent": goMetric(nil, "host_cpu_not_sampled", "The Go backend does not publish a separate host CPU sample in this status response"),
+		"rss_bytes":          goMetric(valueOrNil(process.RSSBytes), process.RSSReasonCode, process.RSSReason),
+	}
+}
+
+func valueOrNil[T any](value *T) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func unixSeconds(value time.Time) float64 {
+	return float64(value.UnixNano()) / 1e9
+}
+
 func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	eventSnapshot := map[string]any{}
 	if s.events != nil {
@@ -5268,18 +6263,65 @@ func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 		epoch = s.events.epoch
 		s.events.mu.Unlock()
 	}
+	now := time.Now()
+	metricsFn := s.processMetricsFn
+	if metricsFn == nil {
+		metricsFn = s.readGoProcessMetrics
+	}
+	process := metricsFn(now)
+	serverMetrics := goServerMetricsPayload(now, process)
+	serverBlock := map[string]any{"backend": "go", "version": version, "root": s.root, "pid": process.PID, "started_at": unixSeconds(process.StartedAt)}
+	if process.StartedAt.IsZero() {
+		serverBlock["started_at"] = unixSeconds(now)
+	}
+	for key, value := range serverMetrics {
+		serverBlock[key] = value
+	}
 	payload := map[string]any{
 		"schema": "system-status-snapshot", "state": "ready", "epoch": epoch,
-		"server":    map[string]any{"backend": "go", "version": version, "pid": os.Getpid(), "root": s.root},
+		"server":    serverBlock,
 		"refresh":   map[string]any{"events": eventSnapshot, "operations": map[string]any{"total": operationCount, "terminal": terminalCount}},
 		"services":  map[string]any{"events": "ready", "operations": "ready", "background": s.backgroundState().statusPayload()},
 		"resources": map[string]any{"event_broker": eventSnapshot, "operation_records": operationCount},
+		// Go polls the machine-wide tmux roster in-process. Report that subsystem
+		// explicitly so the shared health panel does not mistake the absence of a
+		// standalone control-client PID for an unsupported or exited watcher.
+		"tmux_signal_watcher": s.tmuxSignalWatcherStatus(),
+		"local_services":      s.goLocalServicesPayloadFromMetrics(now, process),
+		"stats_runtime":       s.statsRuntimeDiagnostics(),
 	}
 	if strings.HasSuffix(r.URL.Path, "/advanced") {
 		payload["advanced"] = true
 		payload["diagnostics"] = map[string]any{"events": s.events.snapshot(), "logs": s.logState().payload(), "operations": map[string]any{"records": operationCount, "terminal": terminalCount}}
 	}
 	jsonResponse(w, http.StatusOK, payload)
+}
+
+func (s *server) tmuxSignalWatcherStatus() map[string]any {
+	sessions, err := s.tmuxSessionRoster()
+	return tmuxSignalWatcherStatusFor(sessions, err)
+}
+
+func tmuxSignalWatcherStatusFor(sessions []string, err error) map[string]any {
+	if err != nil {
+		return map[string]any{
+			"state": "exited", "healthy": false, "reason_code": "tmux_unavailable",
+			"reason": "The in-process tmux roster poll failed", "sessions": []string{},
+			"thread_alive": false, "process_pid": 0, "demanded": true,
+		}
+	}
+	if len(sessions) == 0 {
+		return map[string]any{
+			"state": "no-sessions", "healthy": true, "reason_code": "no_sessions",
+			"reason": "No tmux sessions are available to the in-process poller", "sessions": sessions,
+			"thread_alive": true, "process_pid": 0, "demanded": true,
+		}
+	}
+	return map[string]any{
+		"state": "attached", "healthy": true, "reason_code": "attached",
+		"reason": "Global tmux roster is available to the in-process poller", "sessions": sessions,
+		"thread_alive": true, "process_pid": 0, "demanded": true,
+	}
 }
 func (s *server) eventPost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -5419,17 +6461,252 @@ func (s *server) appendEventLog(record map[string]any) error {
 	})
 }
 
-func (s *server) tmux(w http.ResponseWriter, _ *http.Request) {
-	out, err := s.tmuxCommand("list-sessions", "-F", "#{session_name}").Output()
-	sessions := []string{}
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if line != "" {
-				sessions = append(sessions, line)
-			}
+func (s *server) tmux(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessions, rosterErr := s.tmuxSessionRoster()
+	if rosterErr != nil {
+		cached, known := s.cachedTmuxSessionRoster()
+		if !known {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+				"sessions": []string{}, "session_order": []string{}, "session_scope": "all",
+				"errors": []string{rosterErr.Error()}, "backend": "go",
+			})
+			return
+		}
+		sessions = cached
+	}
+	// With no session query this is the small, machine-wide roster used by old
+	// clients.  Include the explicit order/scope keys so it is also a valid
+	// topology response for Tabber: one live tmux session owns one top-level tab.
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" {
+		payload := map[string]any{
+			"sessions": sessions, "session_order": sessions, "session_scope": "all", "backend": "go",
+			"errors": []string{},
+		}
+		if rosterErr != nil {
+			payload["errors"] = []string{rosterErr.Error()}
+		}
+		jsonResponse(w, http.StatusOK, payload)
+		return
+	}
+	knownSession := false
+	for _, name := range sessions {
+		if name == session {
+			knownSession = true
+			break
 		}
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"sessions": sessions, "backend": "go"})
+	if !knownSession {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
+	}
+
+	lines := 90
+	if raw := strings.TrimSpace(r.URL.Query().Get("lines")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid lines", "field": "lines"})
+			return
+		}
+		lines = parsed
+	}
+	if lines > maxContextTranscriptLines {
+		lines = maxContextTranscriptLines
+	}
+
+	target := session
+	metadata := s.liveSessionMetadata(session)
+	if selected, ok := metadata["selected_pane"].(map[string]any); ok {
+		if candidate, ok := selected["target"].(string); ok && strings.TrimSpace(candidate) != "" {
+			target = candidate
+		}
+	}
+	commandContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := s.tmuxCommandContext(commandContext, "capture-pane", "-t", target, "-p", "-J", "-S", fmt.Sprintf("-%d", lines)).CombinedOutput()
+	if err != nil {
+		diagnostic := strings.TrimSpace(string(output))
+		if diagnostic == "" {
+			diagnostic = err.Error()
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{
+			"session": session, "target": target, "errors": []string{"tmux capture-pane failed: " + diagnostic}, "backend": "go",
+		})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"session": session, "target": target, "lines": lines, "text": strings.TrimRight(string(output), "\n"),
+		"unchanged": false, "errors": []string{}, "backend": "go",
+	})
+}
+
+// tmuxSignals is the Go equivalent of Python's read-only tmux signal snapshot.
+// It intentionally uses the global tmux server and the same pane inventory as
+// session-metadata, so the browser can reconcile every machine-wide session and
+// window without depending on a standalone control-client process.
+func (s *server) tmuxSignals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	payload, status := s.tmuxSignalSnapshot(r.URL.Query().Get("session"))
+	jsonResponse(w, status, payload)
+}
+
+func goIntValue(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int64:
+		return int(number), true
+	case float64:
+		return int(number), number == float64(int(number))
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(number))
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func (s *server) activity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	hours, err := activityHours(r.URL.Query().Get("hours"))
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid hours", "field": "hours"})
+		return
+	}
+	// Tabber is a view of the machine-wide tmux roster. Keep this route on the
+	// same global inventory as session-metadata so one tmux session always has
+	// one stable top-level Tabber row, regardless of which YOLOmux process owns
+	// the browser request.
+	// Python accepts scope=all (and its tmux/visible aliases) for this product;
+	// Go has no separate configured-session inventory, so every accepted scope
+	// resolves to the machine-wide roster.
+	// Unlike Python, the Go backend has no separate configured-session list;
+	// even a missing or legacy scope parameter therefore means the global
+	// machine-wide roster. Report the scope actually served, not the raw query.
+	scope := "all"
+	sessions, rosterErr, topologyGeneration := s.tmuxTopologySnapshot()
+	if rosterErr != nil && len(sessions) == 0 {
+		if topologyGeneration == 0 {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+				"activity": map[string]any{}, "agents": []any{}, "agent_windows": map[string]any{},
+				"errors": []string{rosterErr.Error()}, "session_order": []string{}, "session_scope": scope,
+				"session_file_hours": hours, "cache": map[string]any{"hit": false, "stale": false, "refreshing": false},
+				"backend": "go",
+			})
+			return
+		}
+	}
+	liveMetadata, metadataErr := s.liveSessionMetadataForSessionsWithError(sessions)
+	activity := make(map[string]any)
+	activityErrors := make([]string, 0)
+	if rosterErr != nil {
+		activityErrors = append(activityErrors, rosterErr.Error())
+	}
+	if metadataErr != nil {
+		activityErrors = append(activityErrors, metadataErr.Error())
+	}
+	activityRoster := s.tmuxSessionActivityFn
+	if activityRoster == nil {
+		activityRoster = s.tmuxSessionActivityRoster
+	}
+	if sessionActivity, err := activityRoster(); err == nil {
+		for session, timestamp := range sessionActivity {
+			activity[session] = map[string]any{"active_recency_ts": timestamp}
+		}
+	} else {
+		// The roster is the topology source of truth. Keep the sessions visible when
+		// the optional activity timestamps fail, but preserve the diagnostic instead
+		// of publishing a falsely healthy empty activity snapshot.
+		activityErrors = append(activityErrors, err.Error())
+	}
+	windowActivityRoster := s.tmuxWindowActivityFn
+	if windowActivityRoster == nil {
+		windowActivityRoster = s.tmuxWindowActivityRoster
+	}
+	if windowActivity, err := windowActivityRoster(); err == nil {
+		for key, timestamp := range windowActivity {
+			activity[key] = map[string]any{
+				"active_recency_ts": timestamp,
+				// A tmux window activity timestamp is the only native Go
+				// signal available for non-agent panes. Keep the field names
+				// used by Python's activity ledger so Tabber's shared recency
+				// helper can sort every window consistently.
+				"last_output_ts": timestamp,
+			}
+		}
+	} else {
+		activityErrors = append(activityErrors, err.Error())
+	}
+	agents := make([]any, 0)
+	agentWindows := make(map[string]any)
+	metadataSessions := make(map[string]any, len(sessions))
+	for _, session := range sessions {
+		info := liveMetadata[session]
+		// Keep the activity response self-describing, just like Python's
+		// session-metadata records.  Tabber can receive activity before the
+		// bootstrap metadata poll, so each roster entry must carry its own
+		// stable session identity even when pane enrichment is empty.
+		info["session"] = session
+		info["label"] = session
+		metadataSessions[session] = info
+		rows, _ := info["agents"].([]map[string]any)
+		windowRows := make([]any, 0, len(rows))
+		for _, agent := range rows {
+			window, _ := agent["window_index"].(int)
+			windowRow := map[string]any{
+				"session": session, "window": strconv.Itoa(window), "window_index": window,
+				"pane_target": agent["pane_target"], "kind": agent["kind"], "agent_kind": agent["kind"], "state": agent["status"],
+				"current": agent["current"], "window_active": agent["window_active"],
+			}
+			windowRows = append(windowRows, windowRow)
+			agents = append(agents, windowRow)
+		}
+		if len(windowRows) > 0 {
+			agentWindows[session] = windowRows
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"activity": activity, "agents": agents, "agent_windows": agentWindows,
+		// The activity response is also a topology repair path. Python's cached
+		// activity product normally follows session-metadata, but a Go-only boot
+		// can receive activity first; carrying the same pane shape lets the client
+		// render one Tabber session row even when metadata is still unavailable.
+		"sessions": metadataSessions,
+		"errors":   activityErrors, "session_order": sessions, "session_scope": scope,
+		"topology_generation": topologyGeneration,
+		"session_file_hours":  hours, "cache": map[string]any{"hit": false, "stale": false, "refreshing": false},
+		"backend": "go",
+	})
+}
+
+const maxActivityHours = 24.0 * 365.0
+
+// activityHours mirrors Python's parse_query_float contract: a missing value uses
+// 24 hours, non-finite/negative values are rejected, and values above the product
+// cap are bounded rather than turning an otherwise valid Tabber request into an
+// error.
+func activityHours(raw string) (float64, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 24.0, nil
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, fmt.Errorf("hours must be a finite non-negative number")
+	}
+	if value > maxActivityHours {
+		return maxActivityHours, nil
+	}
+	return value, nil
 }
 
 func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
@@ -5437,43 +6714,209 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sessions := s.sessionNames()
-	s.metadataMu.Lock()
-	s.metadataGeneration++
-	generation := s.metadataGeneration
-	s.metadataMu.Unlock()
-	epoch := ""
-	if s.events != nil {
-		s.events.mu.Lock()
-		epoch = s.events.epoch
-		s.events.mu.Unlock()
+	sessions, rosterErr, generation := s.tmuxTopologySnapshot()
+	if rosterErr != nil && len(sessions) == 0 && generation == 0 {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "unavailable", "sessions": map[string]any{}, "session_order": []string{},
+			"session_scope": "all", "errors": []string{rosterErr.Error()}, "backend": "go",
+		})
+		return
 	}
-	metadataIdentity := map[string]any{"epoch": epoch, "generation": generation}
+	liveMetadata, metadataErr := s.liveSessionMetadataForSessionsWithError(sessions)
 	metadataSessions := make(map[string]any, len(sessions))
 	for _, session := range sessions {
-		info := s.liveSessionMetadata(session)
+		info := liveMetadata[session]
 		info["session"] = session
 		info["label"] = session
 		info["work_graph"] = s.sessionWorkGraph(session, info, generation)
 		metadataSessions[session] = info
 	}
-	cache := map[string]any{
-		"hit":        true,
-		"stale":      false,
-		"generation": generation,
-	}
+	cache := map[string]any{"hit": true, "stale": false, "generation": generation}
 	if r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true" {
+		s.metadataMu.Lock()
+		if s.metadataNextGeneration < generation {
+			s.metadataNextGeneration = generation
+		}
+		s.metadataMu.Unlock()
+		pending := s.queueMetadataRefresh(true)
 		cache["stale"] = true
-		cache["pending_identity"] = metadataIdentity
+		cache["refreshing"] = pending != 0 || s.metadataRefreshInFlight()
+		cache["pending_generation"] = pending
+		cache["pending_identity"] = map[string]any{"epoch": s.metadataEpoch(), "generation": pending}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
+		"sessions": metadataSessions, "session_order": sessions, "session_scope": "all",
+		"metadata_generation": generation, "metadata_identity": map[string]any{"epoch": s.metadataEpoch(), "generation": generation},
+		"topology_generation": generation, "errors": metadataErrors(rosterErr, metadataErr), "cache": cache,
+	})
+}
+
+func (s *server) metadataRefreshInFlight() bool {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	return s.metadataBuilding
+}
+
+func (s *server) metadataEpoch() string {
+	if s.events == nil {
+		return ""
+	}
+	s.events.mu.Lock()
+	defer s.events.mu.Unlock()
+	return s.events.epoch
+}
+
+func (s *server) buildMetadataPayload(generation uint64) map[string]any {
+	sessions, rosterErr := s.tmuxSessionRoster()
+	if rosterErr != nil {
+		if cached, known := s.cachedTmuxSessionRoster(); known {
+			sessions = cached
+		} else {
+			sessions = []string{}
+		}
+	}
+	metadataSessions := make(map[string]any, len(sessions))
+	liveMetadata, metadataErr := s.liveSessionMetadataForSessionsWithError(sessions)
+	for _, session := range sessions {
+		info := liveMetadata[session]
+		info["session"] = session
+		info["label"] = session
+		info["work_graph"] = s.sessionWorkGraph(session, info, generation)
+		metadataSessions[session] = info
+	}
+	identity := map[string]any{"epoch": s.metadataEpoch(), "generation": generation}
+	return map[string]any{
 		"sessions":            metadataSessions,
 		"session_order":       sessions,
+		"session_scope":       "all",
 		"metadata_generation": generation,
-		"metadata_identity":   metadataIdentity,
+		"metadata_identity":   identity,
 		"topology_generation": uint64(1),
-		"cache":               cache,
-	})
+		"errors":              metadataErrors(rosterErr, metadataErr),
+	}
+}
+
+func metadataErrors(rosterErr, metadataErr error) []string {
+	result := make([]string, 0, 2)
+	if rosterErr != nil {
+		result = append(result, rosterErr.Error())
+	}
+	if metadataErr != nil {
+		result = append(result, metadataErr.Error())
+	}
+	return result
+}
+
+func (s *server) metadataSnapshot() (map[string]any, uint64, bool) {
+	for {
+		s.metadataMu.Lock()
+		if s.metadataPayload != nil {
+			payload := cloneMap(s.metadataPayload)
+			generation := s.metadataGeneration
+			stale := s.metadataBuiltAt.IsZero() || time.Since(s.metadataBuiltAt) >= goMetadataCacheTTL
+			s.metadataMu.Unlock()
+			return payload, generation, stale
+		}
+		if s.metadataBuilding {
+			done := s.metadataBuildDone
+			s.metadataMu.Unlock()
+			<-done
+			continue
+		}
+		s.metadataNextGeneration++
+		generation := s.metadataNextGeneration
+		done := make(chan struct{})
+		s.metadataBuilding = true
+		s.metadataBuildDone = done
+		s.metadataMu.Unlock()
+
+		payload := s.buildMetadataPayload(generation)
+		s.metadataMu.Lock()
+		s.metadataPayload = payload
+		s.metadataGeneration = generation
+		s.metadataBuiltAt = time.Now()
+		queued := s.metadataQueuedGeneration
+		s.metadataQueuedGeneration = 0
+		if queued == 0 {
+			s.metadataBuilding = false
+		}
+		s.metadataBuildDone = nil
+		close(done)
+		s.metadataMu.Unlock()
+		if queued != 0 {
+			go s.buildMetadataRefresh(queued)
+		}
+		return cloneMap(payload), generation, false
+	}
+}
+
+func (s *server) queueMetadataRefresh(force bool) uint64 {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	if s.metadataQueuedGeneration != 0 {
+		if force {
+			return s.metadataQueuedGeneration
+		}
+		return 0
+	}
+	if s.metadataBuilding {
+		if !force {
+			return 0
+		}
+		s.metadataNextGeneration++
+		generation := s.metadataNextGeneration
+		s.metadataQueuedGeneration = generation
+		return generation
+	}
+	s.metadataNextGeneration++
+	generation := s.metadataNextGeneration
+	s.metadataBuilding = true
+	go s.buildMetadataRefresh(generation)
+	return generation
+}
+
+func (s *server) buildMetadataRefresh(generation uint64) {
+	payload := s.buildMetadataPayload(generation)
+	s.metadataMu.Lock()
+	s.metadataPayload = payload
+	s.metadataGeneration = generation
+	s.metadataBuiltAt = time.Now()
+	queued := s.metadataQueuedGeneration
+	s.metadataQueuedGeneration = 0
+	if queued == 0 {
+		s.metadataBuilding = false
+	}
+	s.metadataMu.Unlock()
+	if s.events != nil {
+		_, _ = s.events.publish("transcripts_changed", map[string]any{"data": cloneMap(payload)})
+	}
+	if queued != 0 {
+		s.buildMetadataRefresh(queued)
+	}
+}
+
+// tmuxTopologySnapshot serializes the machine-wide roster read with the
+// generation assigned to that read. Without this boundary, two concurrent
+// routes can observe old/new rosters in the order old-start/new-start but
+// finish in the order new/old; assigning generations after the read would then
+// stamp the stale response as newer and let it roll the browser back.
+//
+// A cached roster returned after a failed read keeps the last successful
+// generation. It is useful topology, but it is not a new observation and must
+// not advance the freshness clock.
+func (s *server) tmuxTopologySnapshot() ([]string, error, uint64) {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	sessions, err := s.tmuxSessionRoster()
+	if err != nil {
+		cached, known := s.cachedTmuxSessionRoster()
+		if known {
+			return cached, err, s.metadataGeneration
+		}
+		return nil, err, s.metadataGeneration
+	}
+	s.metadataGeneration++
+	return sessions, nil, s.metadataGeneration
 }
 
 func (s *server) sessionExists(w http.ResponseWriter, r *http.Request) {
@@ -5508,6 +6951,26 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+	if agent == "" {
+		agent = "claude"
+	}
+	terminal := strings.TrimSpace(r.URL.Query().Get("terminal"))
+	launchDangerously := s.dangerouslyYolo
+	if rawDangerously := r.URL.Query().Get("dangerously_yolo"); rawDangerously != "" {
+		launchDangerously = queryTrue(rawDangerously)
+	}
+	if launchDangerously && !s.dangerouslyYolo {
+		jsonResponse(w, http.StatusForbidden, map[string]any{
+			"ok": false, "agent": agent, "error": "full-access agent launches require YOLOmux --dangerously-yolo",
+		})
+		return
+	}
+	command, err := goSessionLaunchCommand(agent, terminal, launchDangerously)
+	if err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "agent": agent, "terminal": terminal, "error": err.Error()})
+		return
+	}
 	name := r.URL.Query().Get("session")
 	if name == "" {
 		name = r.FormValue("session")
@@ -5515,11 +6978,74 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "yo-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
-	if err := s.tmuxCommand("new-session", "-d", "-s", name).Run(); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+	generation := int64(0)
+	if rawGeneration := strings.TrimSpace(r.URL.Query().Get("generation")); rawGeneration != "" {
+		generation, err = strconv.ParseInt(rawGeneration, 10, 64)
+		if err != nil || generation < 0 {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "generation must be a non-negative integer"})
+			return
+		}
+	}
+	cwd := s.root
+	if cwd == "" {
+		cwd = "."
+	}
+	output, err := s.tmuxCommand("new-session", "-d", "-s", name, "-e", "TERM=xterm-256color", "-c", cwd, command).CombinedOutput()
+	if err != nil {
+		diagnostic := strings.TrimSpace(string(output))
+		if diagnostic == "" {
+			diagnostic = err.Error()
+		}
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": diagnostic})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "created": true, "session": name, "sessions": s.sessionNames()})
+	s.configureTmuxSession(name)
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok": true, "created": true, "session": name, "sessions": s.sessionNames(), "agent": agent,
+		"terminal": terminal, "cwd": cwd, "command": command, "dangerously_yolo": launchDangerously,
+		"generation": generation,
+	})
+}
+
+func validSessionLaunchName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if !(unicode.IsLetter(character) || unicode.IsDigit(character) || strings.ContainsRune("._+-", character)) {
+			return false
+		}
+	}
+	return true
+}
+
+func goSessionLaunchCommand(agent, terminal string, dangerouslyYolo bool) (string, error) {
+	command := agent
+	switch agent {
+	case "claude", "codex", "opencode":
+		if _, err := exec.LookPath(agent); err != nil {
+			return "", fmt.Errorf("%s is not available on this server PATH", agent)
+		}
+	case "term":
+		if !validSessionLaunchName(terminal) {
+			return "", errors.New("choose an explicit terminal command")
+		}
+		if _, err := exec.LookPath(terminal); err != nil {
+			return "", fmt.Errorf("terminal command is not available on this server PATH: %s", terminal)
+		}
+		command = terminal
+	default:
+		return "", fmt.Errorf("unsupported agent: %s", agent)
+	}
+	if dangerouslyYolo {
+		switch agent {
+		case "claude":
+			command += " --dangerously-skip-permissions"
+		case "codex":
+			command += " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+		}
+	}
+	return command, nil
 }
 
 func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
@@ -5528,9 +7054,144 @@ func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := "yo-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	generation := s.nextSessionPlanGeneration()
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok": true, "session": name, "generation": time.Now().UnixNano(), "backend": "go",
+		"ok": true, "session": name, "generation": generation, "backend": "go",
 	})
+}
+
+// settings delegates Startup Tips persistence to the repository's Python settings owner. Keeping
+// one owner for defaults, validation, migrations, comments, and atomic YAML writes prevents the Go
+// backend from silently accepting a different value. Other settings remain unavailable here until
+// their Python app side effects have an equivalent Go owner. The bridge is intentionally JSON-only
+// and uses the server's explicit config directory, so tests can provide a synthetic isolated file.
+func (s *server) settings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body string
+	if r.Method == http.MethodPost {
+		user, _ := r.Context().Value(authContextKey{}).(authUser)
+		if user.role != "admin" {
+			s.rejectForbidden(w, user, "admin")
+			return
+		}
+		var payload map[string]any
+		if err := decodeJSONBody(r.Body, 64*1024, &payload); err != nil {
+			jsonResponse(w, http.StatusBadRequest, typedError("invalid settings request", "request.error.invalid", false))
+			return
+		}
+		if !startupTipsSettingsPatch(payload) {
+			jsonResponse(w, http.StatusNotImplemented, map[string]any{
+				"error": "feature_unavailable",
+				"reason": map[string]any{
+					"code":          "settings_side_effects_unavailable",
+					"messageKey":    "capabilityUnavailable",
+					"messageParams": map[string]any{"setting": "general.startup_tips"},
+				},
+				"capability": "core.settings.v1",
+			})
+			return
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, typedError("invalid settings request", "request.error.invalid", false))
+			return
+		}
+		body = string(encoded)
+	}
+
+	script := `import json,sys
+from yolomux_lib.workspace.settings import save_settings, settings_payload
+if sys.argv[1] == "POST":
+    request = json.loads(sys.argv[2])
+    patch = request.get("settings", request) if isinstance(request, dict) else request
+    result = save_settings(patch)
+else:
+    result = settings_payload()
+print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
+	args := []string{"python3", "-c", script, r.Method}
+	if r.Method == http.MethodPost {
+		args = append(args, body)
+	}
+	command := exec.CommandContext(r.Context(), args[0], args[1:]...)
+	command.Dir = s.root
+	command.Env = pythonBridgeEnvironment(s.root, s.config)
+	output, err := command.Output()
+	if err != nil {
+		slog.Error("settings bridge failed", "method", r.Method, "error", err)
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("settings unavailable", "common.requestFailed", true))
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(output, &payload); err != nil {
+		slog.Error("settings bridge returned invalid JSON", "method", r.Method, "error", err)
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("settings unavailable", "common.requestFailed", true))
+		return
+	}
+	if errorMessage, ok := payload["error"].(string); ok && strings.TrimSpace(errorMessage) != "" {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+			"error":    errorMessage,
+			"code":     "settings_file_malformed",
+			"settings": nil,
+			"terminal": true,
+			"user_message": map[string]any{
+				"key": "common.requestFailed", "params": map[string]any{}, "fallback": errorMessage,
+			},
+		})
+		return
+	}
+	if r.Method == http.MethodPost && s.events != nil {
+		if _, err := s.events.publish("settings_changed", map[string]any{"mtime_ns": payload["mtime_ns"], "data": payload}); err != nil {
+			slog.Warn("settings change event publish failed", "error", err)
+		}
+	}
+	jsonResponse(w, http.StatusOK, payload)
+}
+
+func startupTipsSettingsPatch(payload map[string]any) bool {
+	settings, ok := payload["settings"].(map[string]any)
+	if !ok {
+		settings = payload
+	}
+	if len(settings) != 1 {
+		return false
+	}
+	general, ok := settings["general"].(map[string]any)
+	if !ok || len(general) != 1 {
+		return false
+	}
+	_, ok = general["startup_tips"].(bool)
+	return ok
+}
+
+func pythonBridgeEnvironment(root, config string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, value := range os.Environ() {
+		if strings.HasPrefix(value, "YOLOMUX_ROOT=") || strings.HasPrefix(value, "YOLOMUX_CONFIG_DIR=") || strings.HasPrefix(value, "PYTHONPATH=") {
+			continue
+		}
+		env = append(env, value)
+	}
+	env = append(env, "PYTHONPATH="+root, "YOLOMUX_CONFIG_DIR="+config, "YOLOMUX_AUTH_CONFIG_READ_ONLY=1")
+	return env
+}
+
+// The browser carries this lifecycle token as a JavaScript Number, so it must stay below
+// Number.MAX_SAFE_INTEGER. Milliseconds are sufficient for the short-lived reservation and the
+// atomic monotonic step keeps two plans created in the same millisecond distinct.
+func (s *server) nextSessionPlanGeneration() int64 {
+	candidate := time.Now().UnixMilli()
+	for {
+		previous := s.sessionPlanGeneration.Load()
+		if candidate <= previous {
+			candidate = previous + 1
+		}
+		if s.sessionPlanGeneration.CompareAndSwap(previous, candidate) {
+			return candidate
+		}
+	}
 }
 
 func (s *server) unsupported(w http.ResponseWriter, r *http.Request) {
@@ -5573,7 +7234,7 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user authUser) {
 	script := `import json,sys
 from yolomux_lib.web import html_page
-print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5]), stats_only=sys.argv[6] == "1", backend_label=sys.argv[7]), end="")`
+print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=sys.argv[3], accept_language=sys.argv[4], terminal_only=False, capability_snapshot=json.loads(sys.argv[5]), stats_only=sys.argv[6] == "1", backend_label=sys.argv[7], dangerously_yolo=sys.argv[8] == "1"), end="")`
 	sessions, _ := json.Marshal(s.sessionNames())
 	capabilityData, _ := json.Marshal(s.capabilities.Snapshot())
 	command := exec.Command("python3", "-c", script, string(sessions), user.role, user.username, r.Header.Get("Accept-Language"))
@@ -5583,8 +7244,13 @@ print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=
 	}
 	command.Args = append(command.Args, string(capabilityData), statsOnly)
 	command.Args = append(command.Args, "Go "+version)
+	if s.dangerouslyYolo {
+		command.Args = append(command.Args, "1")
+	} else {
+		command.Args = append(command.Args, "0")
+	}
 	command.Dir = s.root
-	command.Env = append(os.Environ(), "PYTHONPATH="+s.root)
+	command.Env = pythonBridgeEnvironment(s.root, s.config)
 	body, err := command.Output()
 	if err != nil {
 		http.Error(w, "application unavailable", http.StatusInternalServerError)
@@ -5606,32 +7272,234 @@ func (s *server) static(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) sessionNames() []string {
-	out, err := s.tmuxCommand("list-sessions", "-F", "#{session_name}").Output()
+	sessions, err := s.tmuxSessionRoster()
 	if err != nil {
+		cached, known := s.cachedTmuxSessionRoster()
+		if known {
+			return cached
+		}
 		return []string{}
+	}
+	return sessions
+}
+
+func (s *server) cachedTmuxSessionRoster() ([]string, bool) {
+	s.tmuxRosterMu.RLock()
+	defer s.tmuxRosterMu.RUnlock()
+	return append([]string(nil), s.tmuxRoster...), s.tmuxRosterKnown
+}
+
+func (s *server) rememberTmuxSessionRoster(sessions []string) {
+	s.tmuxRosterMu.Lock()
+	s.tmuxRoster = append([]string(nil), sessions...)
+	s.tmuxRosterKnown = true
+	s.tmuxRosterSampledAt = time.Now()
+	s.tmuxRosterMu.Unlock()
+}
+
+func (s *server) tmuxSessionRoster() ([]string, error) {
+	if s.tmuxSessionRosterFn != nil {
+		sessions, err := s.tmuxSessionRosterFn()
+		if err == nil {
+			sessions = normalizeTmuxSessionRoster(sessions)
+			s.rememberTmuxSessionRoster(sessions)
+		}
+		return sessions, err
+	}
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
+	s.tmuxRosterMu.RLock()
+	if s.tmuxRosterKnown && !s.tmuxRosterSampledAt.IsZero() && time.Since(s.tmuxRosterSampledAt) < goProcessMetricsCacheTTL {
+		sessions := append([]string(nil), s.tmuxRoster...)
+		s.tmuxRosterMu.RUnlock()
+		return sessions, nil
+	}
+	s.tmuxRosterMu.RUnlock()
+	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}").CombinedOutput()
+	if err != nil {
+		if stats.TmuxNoServerError(out) {
+			s.rememberTmuxSessionRoster([]string{})
+			return []string{}, nil
+		}
+		return nil, err
 	}
 	var result []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line != "" {
-			result = append(result, line)
-		}
+		result = append(result, line)
 	}
+	result = normalizeTmuxSessionRoster(result)
+	s.rememberTmuxSessionRoster(result)
+	return result, nil
+}
+
+func normalizeTmuxSessionRoster(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw))
+	result := make([]string, 0, len(raw))
+	for _, value := range raw {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left := tmuxSessionSortKey(result[i])
+		right := tmuxSessionSortKey(result[j])
+		if left.rank != right.rank {
+			return left.rank < right.rank
+		}
+		if left.group != right.group {
+			return left.group < right.group
+		}
+		return left.number < right.number
+	})
 	return result
 }
 
+type tmuxSessionSortValue struct {
+	rank   int
+	group  string
+	number int
+}
+
+// tmuxSessionSortKey mirrors Python's list_tmux_session_names ordering. Numeric
+// YOLOmux/project names stay naturally ordered (2 before 10), while arbitrary
+// session names use a case-insensitive lexical order.
+func tmuxSessionSortKey(name string) tmuxSessionSortValue {
+	for rank, prefix := range []string{"yolomux", "project"} {
+		suffix := strings.TrimPrefix(name, prefix)
+		if suffix == "" {
+			continue
+		}
+		allDigits := true
+		for _, char := range suffix {
+			if char < '0' || char > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			number, err := strconv.Atoi(suffix)
+			if err == nil {
+				return tmuxSessionSortValue{rank: rank, group: prefix, number: number}
+			}
+		}
+	}
+	return tmuxSessionSortValue{rank: 2, group: strings.ToLower(name)}
+}
+
+func (s *server) tmuxSessionActivityRoster() (map[string]float64, error) {
+	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}\t#{session_activity}").CombinedOutput()
+	if err != nil {
+		if stats.TmuxNoServerError(out) {
+			return map[string]float64{}, nil
+		}
+		return nil, err
+	}
+	result := make(map[string]float64)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := splitTmuxFields(line)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			continue
+		}
+		value, parseErr := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if parseErr != nil || value < 0 {
+			continue
+		}
+		result[parts[0]] = value
+	}
+	return result, nil
+}
+
+func (s *server) tmuxWindowActivityRoster() (map[string]float64, error) {
+	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := s.tmuxCommandContext(commandContext, "list-windows", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_activity}").CombinedOutput()
+	if err != nil {
+		if stats.TmuxNoServerError(out) {
+			return map[string]float64{}, nil
+		}
+		return nil, err
+	}
+	result := make(map[string]float64)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := splitTmuxFields(line)
+		if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			continue
+		}
+		value, parseErr := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+		if parseErr != nil || value < 0 {
+			continue
+		}
+		result[parts[0]+":"+parts[1]] = value
+	}
+	return result, nil
+}
+
 func (s *server) tmuxCommand(args ...string) *exec.Cmd {
+	return s.tmuxCommandContext(context.Background(), args...)
+}
+
+func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	values := []string{}
-	if socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET")); socket != "" {
+	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	if socket != "" {
 		values = append(values, "-S", socket)
 	}
-	return exec.Command("tmux", append(values, args...)...)
+	command := exec.CommandContext(ctx, "tmux", append(values, args...)...)
+	// A direct Go entrypoint can be started from inside a nested/private tmux client,
+	// where tmux would otherwise ignore the machine-wide default server and follow the
+	// inherited TMUX socket. Operator launches use the global server unless an explicit
+	// fixture socket was supplied; enforce that boundary at every command call so the
+	// Tabber roster cannot silently come from the launcher's supervisor server.
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		if socket == "" && (strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=")) {
+			continue
+		}
+		// tmux renders whitespace format separators as underscores under the empty
+		// locale used by Bazel's hermetic tests. Keep the wire format stable without
+		// changing an operator's configured locale when one is already present.
+		if os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" && os.Getenv("LANG") == "" && (strings.HasPrefix(value, "LC_ALL=") || strings.HasPrefix(value, "LC_CTYPE=") || strings.HasPrefix(value, "LANG=")) {
+			continue
+		}
+		environment = append(environment, value)
+	}
+	if os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" && os.Getenv("LANG") == "" {
+		environment = append(environment, "LC_ALL=C.UTF-8")
+	}
+	command.Env = environment
+	return command
 }
 
 func (s *server) exactTarget(session string) string { return "=" + session + ":" }
 
 func (s *server) supportsIgnoreSize() bool {
-	out, err := s.tmuxCommand("attach-session", "-?").CombinedOutput()
-	return err == nil && strings.Contains(string(out), "ignore-size")
+	s.ignoreSizeMu.Lock()
+	defer s.ignoreSizeMu.Unlock()
+	if s.ignoreSizeChecked {
+		return s.ignoreSizeSupported
+	}
+	// `attach-session -?` only prints generic usage on current tmux versions and
+	// therefore cannot establish whether client flags are supported. Probe the
+	// actual flag against a deliberately nonexistent target, matching the Python
+	// backend: supported versions reject the target, while older versions reject
+	// the option or flag itself.
+	out, _ := s.tmuxCommand(
+		"attach-session", "-f", "ignore-size", "-t", "__yolomux_ignore_size_capability_probe__",
+	).CombinedOutput()
+	text := strings.ToLower(string(out))
+	s.ignoreSizeSupported = !strings.Contains(text, "unknown option") && !strings.Contains(text, "unknown flag")
+	s.ignoreSizeChecked = true
+	return s.ignoreSizeSupported
 }
 
 func (s *server) configureTmuxSession(session string) {
@@ -5659,10 +7527,10 @@ func (s *server) claimResizeAuthority(session, activeClient string, cols, rows i
 		client := fields[0]
 		width, _ := strconv.Atoi(fields[2])
 		height, _ := strconv.Atoi(fields[3])
-		if client == activeClient || (width <= cols && height <= rows) {
-			_ = s.tmuxCommand("set-option", "-t", client, "-f", "ignore-size", "off").Run()
-		} else {
-			_ = s.tmuxCommand("set-option", "-t", client, "-f", "ignore-size", "on").Run()
+		if client == activeClient {
+			_ = s.tmuxCommand("refresh-client", "-t", client, "-f", "!ignore-size").Run()
+		} else if width > cols || height > rows {
+			_ = s.tmuxCommand("refresh-client", "-t", client, "-f", "ignore-size").Run()
 		}
 	}
 	_ = s.tmuxCommand("refresh-client", "-t", target).Run()
@@ -5796,7 +7664,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		slog.Error("tmux attach failed", "session", session, "error", err)
 		return
 	}
-	activeTTY := pty.slave.Name()
+	activeTTY := pty.tty
 	s.claimResizeAuthority(session, activeTTY, cols, rows)
 	s.refreshAfterAttach(session)
 	s.mu.Lock()
@@ -5881,7 +7749,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 			rows := clampDimension(msg.Rows, 2, 300, 36)
 			cols := clampDimension(msg.Cols, 20, 500, 120)
 			if msg.Activate || (msg.Foreground != nil && *msg.Foreground) {
-				s.claimResizeAuthority(session, pty.slave.Name(), cols, rows)
+				s.claimResizeAuthority(session, pty.tty, cols, rows)
 			}
 			if pty.resize(rows, cols) == nil && process.Process != nil {
 				_ = process.Process.Signal(syscall.SIGWINCH)

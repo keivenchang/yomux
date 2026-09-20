@@ -2691,6 +2691,7 @@
   "debug.system.roster.detail.sampler": "أخذ عينات YO!stats",
   "gitDiff.binary": "ثنائي",
   "gitDiff.changedFiles": "الملفات التي تم تغييرها",
+  "gitDiff.dirty": "متسخ",
   "gitDiff.empty": "لا توجد التزامات في هذا النطاق.",
   "gitDiff.filesTruncated": "قائمة الملفات مبتورة.",
   "gitDiff.firstParent": "المقارنة مع الأصل الأول",

@@ -1397,6 +1397,22 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"hours": 0.5, "visible": False})]
 
+    activity_calls = []
+    app = SimpleNamespace(
+        activity_payload=lambda **kwargs: activity_calls.append(kwargs) or ({"scope": kwargs["session_scope"]}, HTTPStatus.OK),
+    )
+    handler, calls, writes = route_handler("/api/activity?scope=all&hours=48&visible=1", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert activity_calls == [{"hours": 48.0, "visible": True, "session_scope": "all"}]
+    assert writes == [("json", HTTPStatus.OK, {"scope": "all"})]
+
+    app = SimpleNamespace(background_owner_status_payload=lambda: ({"status": "owner"}, HTTPStatus.OK))
+    handler, calls, writes = route_handler("/api/background/status", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
+
     # The route reads a published snapshot and writes its bytes; it never calls a payload builder.
     system_status_body = b'{"ok":true,"server":{"pid":123}}'
     app = SimpleNamespace(system_status_snapshot_response=lambda advanced=False: (system_status_body, {"length": len(system_status_body)}))

@@ -662,7 +662,9 @@ SESSION_FILES_DISK_CACHE_PRUNE_RETRY_SECONDS = 30
 SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE = 256
 SESSION_FILES_DISK_CACHE_INDEX_FILENAME = "cache-index.json"
 SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
-TABBER_ACTIVITY_CACHE_VERSION = 2
+# v3 adds the authoritative session_order topology to activity responses. Reject
+# v2 disk records so a warm restart cannot serve activity without Tabber rows.
+TABBER_ACTIVITY_CACHE_VERSION = 3
 TABBER_ACTIVITY_CACHE_DIR = default_tabber_activity_cache_dir()
 TABBER_ACTIVITY_CONSUMER_TTL_SECONDS = 30.0
 TABBER_ACTIVITY_REFRESH_DEBOUNCE_SECONDS = 0.2
@@ -6923,6 +6925,10 @@ class ActivityCache:
             "agents": agents,
             "agent_windows": agent_windows,
             "errors": errors,
+            # The activity snapshot is also Tabber's topology repair path. Keep the
+            # backend's authoritative order even when no agent rows were discovered;
+            # one live tmux session still owns one top-level Tabber row.
+            "session_order": ordered_sessions,
             "session_scope": scope,
             "session_file_hours": bounded_hours,
             "agent_window_snapshot_revision": snapshot_revision,
@@ -7107,10 +7113,11 @@ class ActivityCache:
             cache_hit=False,
         )
         return None
-    def refresh_tabber_activity_cache(self, app, hours: Any = 24.0) -> dict[str, Any]:
+    def refresh_tabber_activity_cache(self, app, hours: Any = 24.0, session_scope: Any = "configured") -> dict[str, Any]:
         bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        source_signature = app.tabber_activity_source_signature()
-        inflight_key = (bounded_hours, source_signature)
+        normalized_scope = app.normalized_activity_session_scope(session_scope)
+        source_signature = app.tabber_activity_source_signature() if normalized_scope == "configured" else app.tabber_activity_source_signature(normalized_scope)
+        inflight_key = (bounded_hours, normalized_scope, source_signature)
         with self.state.tabber_cache_lock:
             future = self.state.tabber_cache_record.inflight_by_key.get(inflight_key)
             if future is None:
@@ -7134,7 +7141,10 @@ class ActivityCache:
             )
             return copy.deepcopy(payload)
         try:
-            payload = app.refresh_tabber_activity_cache_owner(bounded_hours, source_signature)
+            if normalized_scope == "configured":
+                payload = app.refresh_tabber_activity_cache_owner(bounded_hours, source_signature)
+            else:
+                payload = app.refresh_tabber_activity_cache_owner(bounded_hours, source_signature, normalized_scope)
             future.set_result(copy.deepcopy(payload))
             return payload
         except Exception as exc:
@@ -7144,8 +7154,36 @@ class ActivityCache:
             with self.state.tabber_cache_lock:
                 if self.state.tabber_cache_record.inflight_by_key.get(inflight_key) is future:
                     self.state.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
-    def refresh_tabber_activity_cache_owner(self, app, bounded_hours: float, source_signature: str) -> dict[str, Any]:
+    def refresh_tabber_activity_cache_owner(self, app, bounded_hours: float, source_signature: str, session_scope: Any = "configured") -> dict[str, Any]:
         started = time.perf_counter()
+        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
+            cached = app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
+            if cached:
+                payload, _fresh, _age = cached
+                app.record_performance_sample(
+                    BACKGROUND_ROLE_TABBER_ACTIVITY,
+                    "refresh",
+                    trigger="follower-cache",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                    payload=payload,
+                    cache_key={"kind": "tabber-activity"},
+                    cache_status="hit:follower",
+                    cache_hit=True,
+                )
+                return payload
+            payload = {"activity": {}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": app.normalized_activity_session_scope(session_scope), "session_file_hours": bounded_hours}
+            app.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "refresh",
+                trigger="follower-empty",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key={"kind": "tabber-activity"},
+                cache_status="refreshing-elsewhere",
+                cache_hit=False,
+            )
+            return payload
         with self.state.tabber_cache_lock:
             record = self.state.tabber_cache_record
             current_payload = copy.deepcopy(record.payload) if record.payload is not None else None
@@ -7163,7 +7201,10 @@ class ActivityCache:
                 cache_fresh=True,
             )
             return current_payload
-        payload = app.build_activity_payload(hours=bounded_hours)
+        if app.normalized_activity_session_scope(session_scope) == "configured":
+            payload = app.build_activity_payload(hours=bounded_hours)
+        else:
+            payload = app.build_activity_payload(session_scope=session_scope, hours=bounded_hours)
         app.set_tabber_activity_cache(payload, source_signature=source_signature)
         app.record_performance_sample(
             BACKGROUND_ROLE_TABBER_ACTIVITY,
@@ -7195,7 +7236,7 @@ class ActivityCache:
             {"compute_ms": compute_ms, "cache_changed": True},
         )
         return True
-    def run_tabber_activity_cache_refresh(self, app, worker: threading.Thread) -> None:
+    def run_tabber_activity_cache_refresh(self, app, worker: threading.Thread, session_scope: Any = "configured") -> None:
         try:
             started = time.perf_counter()
             refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_TABBER_ACTIVITY, {"cache_key_kind": "tabber-activity"}, cache_key={"kind": "tabber-activity"})
@@ -7207,7 +7248,10 @@ class ActivityCache:
                 message_key="events.message.backgroundRefresh.started",
                 message_params={"target": message_descriptor("tabber.title", "Tabber")},
             )
-            app.refresh_tabber_activity_cache()
+            if app.normalized_activity_session_scope(session_scope) == "configured":
+                app.refresh_tabber_activity_cache()
+            else:
+                app.refresh_tabber_activity_cache(session_scope=session_scope)
             compute_ms = (time.perf_counter() - started) * 1000
             done_details = dict(refresh_details)
             done_details["compute_ms"] = round(compute_ms, 3)
@@ -7237,6 +7281,32 @@ class ActivityCache:
 
                     def run_refresh() -> None:
                         app.run_tabber_activity_cache_refresh(worker)
+
+                    worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
+                    self.state.tabber_cache_record.refresh_worker = worker
+
+                def rollback() -> None:
+                    with self.state.tabber_cache_lock:
+                        if self.state.tabber_cache_record.refresh_worker is worker:
+                            self.state.tabber_cache_record.refresh_worker = None
+
+                common.start_thread_with_rollback(worker, rollback)
+        if should_request:
+            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
+            return False
+    def start_tabber_activity_cache_refresh(self, app, session_scope: Any = "configured") -> bool:
+        with background_scheduler_admission(app, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
+            if not admitted:
+                should_request = True
+            else:
+                should_request = False
+                with self.state.tabber_cache_lock:
+                    if self.state.tabber_cache_record.refresh_worker is not None:
+                        return False
+                    worker: threading.Thread
+
+                    def run_refresh() -> None:
+                        app.run_tabber_activity_cache_refresh(worker, session_scope)
 
                     worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
                     self.state.tabber_cache_record.refresh_worker = worker
@@ -7330,13 +7400,13 @@ class ActivityCache:
             with self.state.tabber_cache_lock:
                 if self.state.tabber_warmer_record is record:
                     record.running = False
-    def empty_tabber_activity_payload(self, app, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
+    def empty_tabber_activity_payload(self, app, bounded_hours: float, refresh_seconds: float, session_scope: Any = "configured", **cache: Any) -> dict[str, Any]:
         return {
             "activity": {},
             "agents": [],
             "agent_windows": {},
             "errors": [],
-            "session_scope": "configured",
+            "session_scope": app.normalized_activity_session_scope(session_scope),
             "session_file_hours": bounded_hours,
             "cache": {
                 "hit": False,
@@ -7346,11 +7416,18 @@ class ActivityCache:
                 **cache,
             },
         }
-    def activity_payload(self, app, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
+    def activity_payload(self, app, hours: Any = 24.0, visible: bool = True, session_scope: Any = "configured") -> tuple[dict[str, Any], HTTPStatus]:
         visible_consumer = app.mark_tabber_activity_consumer(visible)
         refresh_seconds = app.tabber_activity_refresh_seconds()
         bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        source_signature = app.tabber_activity_source_signature()
+        normalized_scope = app.normalized_activity_session_scope(session_scope)
+        source_signature = app.tabber_activity_source_signature() if normalized_scope == "configured" else app.tabber_activity_source_signature(normalized_scope)
+
+        def build_current_payload() -> dict[str, Any]:
+            if normalized_scope == "configured":
+                return app.build_activity_payload(hours=bounded_hours)
+            return app.build_activity_payload(session_scope=normalized_scope, hours=bounded_hours)
+
         cached = app.get_tabber_activity_cache(refresh_seconds, allow_stale=True, hours=bounded_hours, source_signature=source_signature)
         if cached is None:
             # A new source generation must never blank a visible Tabber. Reuse the
@@ -7362,11 +7439,18 @@ class ActivityCache:
                 source_signature=source_signature,
                 allow_source_mismatch=True,
             )
+        if cached is not None:
+            cached_scope = app.normalized_activity_session_scope(cached[0].get("session_scope", "configured"))
+            if cached_scope != normalized_scope:
+                # A configured-session snapshot is not a valid stale fallback for the
+                # machine-wide Tabber view (and vice versa); doing so would silently
+                # remove live session rows until the next refresh completes.
+                cached = None
         if cached:
             payload, fresh, age_seconds = cached
             cached_hours = session_files.bounded_session_files_hours(app.float_value(payload.get("session_file_hours"), 24.0))
             if cached_hours != bounded_hours:
-                payload = app.build_activity_payload(hours=bounded_hours)
+                payload = build_current_payload()
                 app.set_tabber_activity_cache(payload, source_signature=source_signature)
                 payload = copy.deepcopy(payload)
                 payload["cache"] = {
@@ -7387,13 +7471,52 @@ class ActivityCache:
                 if not visible_consumer:
                     payload["cache"]["refreshing"] = False
                     payload["cache"]["idle_no_consumer"] = True
+                elif app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                    if normalized_scope == "configured":
+                        payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
+                    else:
+                        payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh(session_scope=normalized_scope)
                 else:
-                    payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
+                    app.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
+                    app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    if app.background_refresh_should_fallback(refresh_result):
+                        payload = build_current_payload()
+                        app.set_tabber_activity_cache(payload, source_signature=source_signature)
+                        payload = copy.deepcopy(payload)
+                        payload["cache"] = {
+                            "hit": False,
+                            "stale": False,
+                            "age_seconds": 0,
+                            "refresh_seconds": refresh_seconds,
+                            "fallback": True,
+                        }
+                    else:
+                        payload["cache"]["refreshing_elsewhere"] = True
             return payload, HTTPStatus.OK
         if not visible_consumer:
-            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, idle_no_consumer=True), HTTPStatus.OK
-        refreshing = app.start_tabber_activity_cache_refresh()
-        return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing=refreshing), HTTPStatus.OK
+            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, session_scope=normalized_scope, idle_no_consumer=True), HTTPStatus.OK
+        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
+            app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+            if app.background_refresh_should_fallback(refresh_result):
+                payload = build_current_payload()
+                app.set_tabber_activity_cache(payload, source_signature=source_signature)
+                payload = copy.deepcopy(payload)
+                payload["cache"] = {
+                    "hit": False,
+                    "stale": False,
+                    "age_seconds": 0,
+                    "refresh_seconds": refresh_seconds,
+                    "fallback": True,
+                }
+                return payload, HTTPStatus.OK
+            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, session_scope=normalized_scope, refreshing_elsewhere=True), HTTPStatus.OK
+        if normalized_scope == "configured":
+            refreshing = app.start_tabber_activity_cache_refresh()
+        else:
+            refreshing = app.start_tabber_activity_cache_refresh(session_scope=normalized_scope)
+        return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, session_scope=normalized_scope, refreshing=refreshing), HTTPStatus.OK
 
 
 class SystemStatusProjector:
@@ -10190,6 +10313,83 @@ class TmuxWebtermApp:
         if compute_ms is not None:
             event_payload.setdefault("compute_ms", round(max(0.0, compute_ms), 1))
         return self.client_events.publish(event_type, event_payload)
+
+    def shared_background_client_event_record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "id": uuid.uuid4().hex,
+            "time": time.time(),
+            "type": event_type,
+            "payload": dict(payload),
+            "source": self.background_owner.owner_payload(),
+        }
+
+    def write_shared_background_client_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        record = self.shared_background_client_event_record(event_type, payload)
+        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
+            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError))
+            raw_events = manifest.get("events") if isinstance(manifest, dict) else []
+            events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
+            resource = client_event_resource(event_type, payload)
+            # The manifest is a bounded recovery snapshot, not an audit log. Retain only the
+            # newest event for each independently ordered resource so a returning follower repairs
+            # current state once instead of replaying stale transitions.
+            events = [item for item in events if client_event_resource(str(item.get("type") or ""), item.get("payload") if isinstance(item.get("payload"), dict) else {}) != resource]
+            events.append(record)
+            events = events[-BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT:]
+            payload_text = json.dumps({"version": 1, "events": events}, sort_keys=True, separators=(",", ":")) + "\n"
+            atomic_write_text(BACKGROUND_CLIENT_EVENTS_PATH, payload_text, mode=0o600)
+        return record
+
+    def replay_shared_background_client_events(self, subscriber_id: int | None = None) -> int:
+        """Replay the durable latest-per-resource manifest after a follower was offline.
+
+        A live SSE stream supplies ``subscriber_id`` so recovery belongs only to the stream that
+        just crossed its ready fence. The no-argument form remains the process-wide adapter used by
+        direct lifecycle callers and older tests.
+        """
+        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
+            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, None, exceptions=(OSError, json.JSONDecodeError, TypeError))
+            if manifest is None:
+                return 0
+        raw_events = manifest.get("events") if isinstance(manifest, dict) else []
+        if not isinstance(raw_events, list):
+            return 0
+        replayed = 0
+        for record in raw_events:
+            if not isinstance(record, dict):
+                continue
+            event_id = str(record.get("id") or "")
+            event_type = str(record.get("type") or "")
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            if not event_id or (subscriber_id is None and event_id in self.replayed_background_client_event_ids):
+                continue
+            if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
+                continue
+            if subscriber_id is None:
+                self.replayed_background_client_event_ids.add(event_id)
+                self.handle_background_client_event({"event_type": event_type, "payload": payload})
+                replayed += 1
+            elif self.client_events.publish_to_subscriber(subscriber_id, event_type, payload) is not None:
+                replayed += 1
+        return replayed
+
+    def notify_background_client_event_followers(self, event_type: str, payload: dict[str, Any], shared_event: dict[str, Any]) -> None:
+        source = self.background_owner.owner_payload()
+        source_generation = str(source.get("generation_id") or "")
+        request = {
+            "action": "background_client_event",
+            "event_type": event_type,
+            "payload": payload,
+            "shared_event": shared_event,
+            "requester": source,
+        }
+        for record in self.background_owner.live_generation_records():
+            if str(record.get("generation_id") or "") == source_generation:
+                continue
+            if not str(record.get("control_socket") or ""):
+                continue
+            send_yolomux_control_request(record, request, timeout=BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS)
 
     def publish_background_client_event(
         self,
@@ -13525,20 +13725,20 @@ class TmuxWebtermApp:
     def get_tabber_activity_cache( self, max_age_seconds: float, allow_stale: bool = True, hours: float | None = None, source_signature: str = "", allow_source_mismatch: bool = False, ) -> tuple[dict[str, Any], bool, float] | None:
         return self._activity_cache.get_tabber_activity_cache(self, max_age_seconds, allow_stale, hours, source_signature, allow_source_mismatch)
 
-    def refresh_tabber_activity_cache(self, hours: Any = 24.0) -> dict[str, Any]:
-        return self._activity_cache.refresh_tabber_activity_cache(self, hours)
+    def refresh_tabber_activity_cache(self, hours: Any = 24.0, session_scope: Any = "configured") -> dict[str, Any]:
+        return self._activity_cache.refresh_tabber_activity_cache(self, hours, session_scope)
 
-    def refresh_tabber_activity_cache_owner(self, bounded_hours: float, source_signature: str) -> dict[str, Any]:
-        return self._activity_cache.refresh_tabber_activity_cache_owner(self, bounded_hours, source_signature)
+    def refresh_tabber_activity_cache_owner(self, bounded_hours: float, source_signature: str, session_scope: Any = "configured") -> dict[str, Any]:
+        return self._activity_cache.refresh_tabber_activity_cache_owner(self, bounded_hours, source_signature, session_scope)
 
     def publish_tabber_activity_refresh_if_changed(self, *, compute_ms: float) -> bool:
         return self._activity_cache.publish_tabber_activity_refresh_if_changed(self, compute_ms=compute_ms)
 
-    def run_tabber_activity_cache_refresh(self, worker: threading.Thread) -> None:
-        return self._activity_cache.run_tabber_activity_cache_refresh(self, worker)
+    def run_tabber_activity_cache_refresh(self, worker: threading.Thread, session_scope: Any = "configured") -> None:
+        return self._activity_cache.run_tabber_activity_cache_refresh(self, worker, session_scope)
 
-    def start_tabber_activity_cache_refresh(self) -> bool:
-        return self._activity_cache.start_tabber_activity_cache_refresh(self)
+    def start_tabber_activity_cache_refresh(self, session_scope: Any = "configured") -> bool:
+        return self._activity_cache.start_tabber_activity_cache_refresh(self, session_scope)
 
     def start_tabber_activity_cache_warmer(self) -> bool:
         return composed_owner_for(self, "_activity_cache", ActivityCache).start_tabber_activity_cache_warmer(self)
@@ -13546,11 +13746,11 @@ class TmuxWebtermApp:
     def tabber_activity_cache_warmer_loop(self, record: TabberActivityWarmerRecord) -> None:
         return composed_owner_for(self, "_activity_cache", ActivityCache).tabber_activity_cache_warmer_loop(self, record)
 
-    def empty_tabber_activity_payload(self, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
-        return self._activity_cache.empty_tabber_activity_payload(self, bounded_hours, refresh_seconds, **cache)
+    def empty_tabber_activity_payload(self, bounded_hours: float, refresh_seconds: float, session_scope: Any = "configured", **cache: Any) -> dict[str, Any]:
+        return self._activity_cache.empty_tabber_activity_payload(self, bounded_hours, refresh_seconds, session_scope, **cache)
 
-    def activity_payload(self, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._activity_cache.activity_payload(self, hours, visible)
+    def activity_payload(self, hours: Any = 24.0, visible: bool = True, session_scope: Any = "configured") -> tuple[dict[str, Any], HTTPStatus]:
+        return self._activity_cache.activity_payload(self, hours, visible, session_scope)
 
     def run_history_store_for_app(self) -> RunHistoryStore:
         store = getattr(self, "run_history_store", None)

@@ -106,7 +106,6 @@ func changed(path string) *Error {
 
 type Service struct {
 	root                       string
-	roots                      []string
 	uploadLimits               UploadLimits
 	publish                    EventPublisher
 	mu                         sync.Mutex
@@ -125,6 +124,11 @@ type Service struct {
 	stopOnce                   sync.Once
 	lastChangeAt               time.Time
 	lastChangePaths            []string
+	gitProductMu               sync.Mutex
+	gitHistoryCache            map[string]map[string]any
+	gitCommitCache             map[string]map[string]any
+	gitHistoryStatsCache       map[string]gitHistoryStatsInfo
+	gitHistoryStatsCacheOrder  []string
 }
 
 type watchRecord struct {
@@ -187,8 +191,7 @@ func (s *Service) walkDescriptors(ctx context.Context, root *os.File, requestedR
 			if !linkInfo.Mode().IsRegular() && !linkInfo.IsDir() {
 				continue
 			}
-			resolved := filepath.Join(resolvedRoot, childRelative)
-			if !s.allowed(resolved) || isSecretPath(requested) || isSecretPath(resolved) || name == ".git" {
+			if name == ".git" {
 				continue
 			}
 			child, openErr := openAt(directory, name, syscall.O_RDONLY, 0)
@@ -204,6 +207,7 @@ func (s *Service) walkDescriptors(ctx context.Context, root *os.File, requestedR
 				_ = child.Close()
 				continue
 			}
+			resolved := filepath.Join(resolvedRoot, childRelative)
 			walked := walkedEntry{Name: name, Relative: filepath.ToSlash(childRelative), Path: requested, Resolved: resolved, File: child, Info: info, IsDir: info.IsDir()}
 			callbackErr := callback(walked)
 			if closeErr := child.Close(); callbackErr == nil && closeErr != nil {
@@ -260,40 +264,6 @@ func NewWithLimits(root string, publish EventPublisher, uploadLimits UploadLimit
 	if err != nil {
 		return nil, err
 	}
-	roots := []string{filepath.Clean(canonical)}
-	if raw := strings.TrimSpace(os.Getenv("YOLOMUX_FS_ROOTS")); raw != "" {
-		roots = roots[:0]
-		for _, value := range strings.Split(raw, string(os.PathListSeparator)) {
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			resolved, resolveErr := filepath.EvalSymlinks(value)
-			if resolveErr != nil {
-				return nil, fmt.Errorf("filesystem root %q: %w", value, resolveErr)
-			}
-			resolved, resolveErr = filepath.Abs(resolved)
-			if resolveErr != nil {
-				return nil, resolveErr
-			}
-			if !containsString(roots, filepath.Clean(resolved)) {
-				roots = append(roots, filepath.Clean(resolved))
-			}
-		}
-		if len(roots) == 0 {
-			return nil, errors.New("YOLOMUX_FS_ROOTS contains no usable roots")
-		}
-	} else if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		resolvedHome, resolveErr := filepath.EvalSymlinks(home)
-		if resolveErr == nil {
-			if resolvedHome, resolveErr = filepath.Abs(resolvedHome); resolveErr == nil {
-				resolvedHome = filepath.Clean(resolvedHome)
-				if !containsString(roots, resolvedHome) {
-					roots = append(roots, resolvedHome)
-				}
-			}
-		}
-	}
 	native, nativeStatus := newNativeWatcher()
 	if uploadLimits.MaxBytes <= 0 {
 		uploadLimits.MaxBytes = MaxUploadBytes
@@ -301,12 +271,12 @@ func NewWithLimits(root string, publish EventPublisher, uploadLimits UploadLimit
 	if uploadLimits.MaxFiles <= 0 {
 		uploadLimits.MaxFiles = MaxUploadFiles
 	}
-	s := newService(canonical, roots, publish, native, nativeStatus, uploadLimits)
+	s := newService(canonical, publish, native, nativeStatus, uploadLimits)
 	return s, nil
 }
 
-func newService(root string, roots []string, publish EventPublisher, native nativeWatchController, nativeStatus nativeWatchStatus, uploadLimits UploadLimits) *Service {
-	s := &Service{root: root, roots: roots, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord), native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()), stop: make(chan struct{}), done: make(chan struct{})}
+func newService(root string, publish EventPublisher, native nativeWatchController, nativeStatus nativeWatchStatus, uploadLimits UploadLimits) *Service {
+	s := &Service{root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord), native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()), stop: make(chan struct{}), done: make(chan struct{})}
 	go s.watchLoop()
 	return s
 }
@@ -336,9 +306,6 @@ func (s *Service) authorize(raw string, allowMissing bool) (string, string, *Err
 		return "", "", invalid(raw, "path must be an absolute path")
 	}
 	requested := filepath.Clean(raw)
-	if isSecretPath(requested) {
-		return "", "", forbidden(requested, "fs.error.credentialBlocked", "path is blocked because it may contain credentials")
-	}
 	resolved, err := filepath.EvalSymlinks(requested)
 	if err != nil {
 		if !allowMissing || !errors.Is(err, os.ErrNotExist) {
@@ -357,19 +324,7 @@ func (s *Service) authorize(raw string, allowMissing bool) (string, string, *Err
 	if err != nil {
 		return "", "", &Error{Status: http.StatusInternalServerError, Code: "filesystem_error", MessageKey: "fs.error.operationFailed", Path: requested, Retryable: true, Message: err.Error()}
 	}
-	if !s.allowed(resolved) || isSecretPath(resolved) {
-		return "", "", forbidden(requested, "fs.error.outsideRoots", "path is outside configured filesystem roots")
-	}
 	return requested, filepath.Clean(resolved), nil
-}
-
-func (s *Service) allowed(path string) bool {
-	for _, root := range s.roots {
-		if path == root || root == string(os.PathSeparator) || strings.HasPrefix(path, root+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) open(raw string, directory bool) (*os.File, string, string, *Error) {
@@ -436,7 +391,9 @@ func (s *Service) openAny(raw string) (*os.File, string, string, *Error) {
 }
 
 func (s *Service) FastList(ctx context.Context, raw string) (map[string]any, *Error) {
-	return s.list(ctx, raw, false)
+	return s.listWithEntryInfo(ctx, raw, func(directory *os.File, requestedDir, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
+		return fastEntryInfoAt(directory, resolvedDir, entry)
+	})
 }
 
 func (s *Service) List(ctx context.Context, raw string) (map[string]any, *Error) {
@@ -448,6 +405,12 @@ func (s *Service) ListWithOptions(ctx context.Context, raw string, includeRepo b
 }
 
 func (s *Service) list(ctx context.Context, raw string, includeRepo bool) (map[string]any, *Error) {
+	return s.listWithEntryInfo(ctx, raw, func(directory *os.File, requestedDir, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
+		return s.entryInfoAt(directory, requestedDir, resolvedDir, entry.Name(), includeRepo)
+	})
+}
+
+func (s *Service) listWithEntryInfo(ctx context.Context, raw string, entryInfo func(*os.File, string, string, os.DirEntry) (map[string]any, bool)) (map[string]any, *Error) {
 	directory, requested, resolved, authErr := s.open(raw, true)
 	if authErr != nil {
 		return nil, authErr
@@ -468,7 +431,7 @@ func (s *Service) list(ctx context.Context, raw string, includeRepo bool) (map[s
 			return nil, &Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Path: requested, Retryable: true, Message: "directory listing cancelled"}
 		default:
 		}
-		row, include := s.entryInfoAt(directory, requested, resolved, entry.Name(), includeRepo)
+		row, include := entryInfo(directory, requested, resolved, entry)
 		if include {
 			result = append(result, row)
 		}
@@ -486,6 +449,77 @@ func (s *Service) list(ctx context.Context, raw string, includeRepo bool) (map[s
 		parent = nil
 	}
 	return map[string]any{"path": requested, "parent": parent, "entries": result, "truncated": truncated, "entry_limit": MaxDirectoryEntries}, nil
+}
+
+// fastEntryInfoAt is intentionally a metadata snapshot.  FastList is the first-paint route: it
+// must not reopen every child through the full descriptor authorization chain or inspect Git for
+// every directory.  Actions that consume a selected path still re-authorize it through Info or a
+// mutation, and the deferred INFO wave supplies repository metadata after the rows are visible.
+func fastEntryInfoAt(directory *os.File, resolvedDir string, entry os.DirEntry) (map[string]any, bool) {
+	linkInfo, err := entry.Info()
+	if err != nil {
+		if linkInfo != nil && entry.Type()&os.ModeSymlink != 0 {
+			return brokenSymlinkEntry(directory, entry.Name(), linkInfo)
+		}
+		return nil, false
+	}
+	isSymlink := linkInfo.Mode()&os.ModeSymlink != 0
+	targetInfo := linkInfo
+	resolved := filepath.Join(resolvedDir, entry.Name())
+	if isSymlink {
+		targetInfo, err = os.Stat(descriptorChildPath(directory, entry.Name()))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return brokenSymlinkEntry(directory, entry.Name(), linkInfo)
+			}
+			return nil, false
+		}
+		resolved, err = filepath.EvalSymlinks(descriptorChildPath(directory, entry.Name()))
+		if err != nil {
+			return nil, false
+		}
+		resolved, err = filepath.Abs(resolved)
+		if err != nil {
+			return nil, false
+		}
+	}
+	kind := "other"
+	if targetInfo.IsDir() {
+		kind = "dir"
+	} else if targetInfo.Mode().IsRegular() {
+		kind = "file"
+	}
+	size := targetInfo.Size()
+	if kind == "dir" {
+		size = 0
+	}
+	row := map[string]any{
+		"name": entry.Name(), "kind": kind, "size": size, "mtime": linkInfo.ModTime().Unix(),
+		"mtime_ns": linkInfo.ModTime().UnixNano(), "is_symlink": isSymlink, "realpath": resolved,
+		"file_id": fileID(targetInfo), "file_identity": "id:" + fileID(targetInfo),
+	}
+	if isSymlink {
+		if target, targetErr := os.Readlink(descriptorChildPath(directory, entry.Name())); targetErr == nil {
+			row["symlink_target"] = target
+		}
+	}
+	if kind == "dir" {
+		// Match Python's fast listing contract: the descriptor-relative repository marker probe is
+		// cheap enough for first paint, while branch/status/history metadata stays in the later INFO
+		// wave. Do not mark ordinary directories for enrichment; a large tree otherwise turns one
+		// fast listing into an INFO request for every child directory.
+		if isSymlink {
+			// A symlinked directory needs the full target-aware probe so FastList preserves the
+			// existing repository marker contract; ordinary directories take the cheap parent-FD path.
+			row["is_repo"] = isRepositoryDescriptor(directory, entry.Name())
+		} else {
+			row["is_repo"] = isRepositoryMarkerAt(directory, entry.Name())
+		}
+		if row["is_repo"] == true {
+			row["repo_info_deferred"] = true
+		}
+	}
+	return row, true
 }
 
 // entryInfoAt consumes a directory entry relative to the directory descriptor that was already
@@ -515,7 +549,7 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 		return nil, false
 	}
 	actualResolved, resolveErr = filepath.Abs(actualResolved)
-	if resolveErr != nil || !s.allowed(actualResolved) || isSecretPath(actualResolved) {
+	if resolveErr != nil {
 		return nil, false
 	}
 	resolved = actualResolved
@@ -1578,8 +1612,8 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 		return
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
-	if !s.allowed(root) {
-		result["git_enrichment"] = map[string]any{"available": false, "reason": "repo_outside_roots"}
+	root, err = filepath.Abs(root)
+	if err != nil {
 		return
 	}
 	workingDirectory := filepath.Dir(resolved)
@@ -1591,13 +1625,23 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 		return
 	}
 	defer namespace.close()
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return
+	}
+	rootDirectory, rootErr := openGitRootDescriptor(root, requested)
+	if rootErr != nil {
+		return
+	}
+	defer rootDirectory.Close()
+	gitDirectory = rootDirectory
 	run := func(args ...string) ([]byte, error) {
 		output, _, commandErr := runGitBounded(gitCtx, gitDirectory, nil, args, 64*1024, namespace)
 		return output, commandErr
 	}
-	relative, err := filepath.Rel(root, resolved)
-	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return
+	rootPath := relative == "."
+	if rootPath {
+		relative = ""
 	}
 	repo := map[string]any{"root": root, "name": filepath.Base(root), "branch": "", "detached": false, "head_sha": "", "upstream": "", "dirty_count": 0, "ahead": 0, "behind": 0}
 	if branch, branchErr := run("symbolic-ref", "--short", "HEAD"); branchErr == nil {
@@ -1611,21 +1655,24 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 	if status, statusErr := run("status", "--porcelain", "--untracked-files=no"); statusErr == nil {
 		repo["dirty_count"] = len(nonEmptyLines(string(status)))
 	}
-	trackedArgs := []string{"ls-files", "--error-unmatch"}
-	trackedArgs = append(trackedArgs, historyPathArgs(filepath.ToSlash(relative))...)
-	trackedOutput, trackedErr := run(trackedArgs...)
-	tracked := trackedErr == nil && strings.TrimSpace(string(trackedOutput)) != ""
 	history := []any{}
-	if tracked {
-		logArgs := []string{"log", "-n", "60", "--format=%H%x1f%h%x1f%s%x1e"}
-		logArgs = append(logArgs, historyPathArgs(filepath.ToSlash(relative))...)
-		if logOutput, logErr := run(logArgs...); logErr == nil {
-			for _, record := range strings.Split(string(logOutput), "\x1e") {
-				fields := strings.Split(strings.TrimSpace(record), "\x1f")
-				if len(fields) < 3 || fields[0] == "" {
-					continue
+	tracked := false
+	if !rootPath {
+		trackedArgs := []string{"ls-files", "--error-unmatch"}
+		trackedArgs = append(trackedArgs, historyPathArgs(filepath.ToSlash(relative))...)
+		trackedOutput, trackedErr := run(trackedArgs...)
+		tracked = trackedErr == nil && strings.TrimSpace(string(trackedOutput)) != ""
+		if tracked {
+			logArgs := []string{"log", "-n", "60", "--format=%H%x1f%h%x1f%s%x1e"}
+			logArgs = append(logArgs, historyPathArgs(filepath.ToSlash(relative))...)
+			if logOutput, logErr := run(logArgs...); logErr == nil {
+				for _, record := range strings.Split(string(logOutput), "\x1e") {
+					fields := strings.Split(strings.TrimSpace(record), "\x1f")
+					if len(fields) < 3 || fields[0] == "" {
+						continue
+					}
+					history = append(history, map[string]any{"ref": fields[0], "sha": fields[0], "short": fields[1], "subject": fields[2]})
 				}
-				history = append(history, map[string]any{"ref": fields[0], "sha": fields[0], "short": fields[1], "subject": fields[2]})
 			}
 		}
 	}
@@ -1709,36 +1756,6 @@ func fileID(info os.FileInfo) string {
 		return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
 	}
 	return fmt.Sprintf("0:%d", info.ModTime().UnixNano())
-}
-
-func isSecretPath(path string) bool {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	secretComponents := map[string]bool{".ssh": true, ".gnupg": true, ".aws": true, ".azure": true, ".kube": true}
-	secretNames := map[string]bool{".netrc": true, ".npmrc": true, ".pypirc": true}
-	for _, part := range parts {
-		if secretComponents[part] {
-			return true
-		}
-	}
-	if secretNames[filepath.Base(path)] {
-		return true
-	}
-	slash := filepath.ToSlash(path)
-	for _, subtree := range []string{"/.config/gh", "/.config/git", "/.docker", "/.ngc"} {
-		if strings.HasSuffix(slash, subtree) || strings.Contains(slash, subtree+"/") {
-			return true
-		}
-	}
-	return strings.HasSuffix(slash, "/.config/gitlab-token") || strings.HasSuffix(slash, "/.cache/huggingface/token")
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func bytesLookBinary(data []byte) bool {

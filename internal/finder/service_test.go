@@ -36,7 +36,7 @@ func newTestServiceWithNative(t *testing.T, publish EventPublisher, native nativ
 	if native == nil {
 		native, nativeStatus = newNativeWatcher()
 	}
-	service := newService(root, []string{root}, publish, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, publish, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	return service, root
 }
@@ -196,6 +196,58 @@ func TestListAndReadExposeFinderContracts(t *testing.T) {
 	}
 }
 
+func TestFastListDefersRepositoryMetadata(t *testing.T) {
+	service, root := newTestService(t, nil)
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fast, finderErr := service.FastList(context.Background(), root)
+	if finderErr != nil {
+		t.Fatalf("FastList() error = %v", finderErr)
+	}
+	fastEntries := fast["entries"].([]map[string]any)
+	var fastRepo map[string]any
+	for _, entry := range fastEntries {
+		if entry["name"] == "repo" {
+			fastRepo = entry
+			break
+		}
+	}
+	if fastRepo == nil || fastRepo["repo_info_deferred"] != true {
+		t.Fatalf("FastList() did not defer repository metadata: %#v", fastEntries)
+	}
+	if fastRepo["is_repo"] != true {
+		t.Fatalf("FastList() did not cheaply classify repository: %#v", fastRepo)
+	}
+	for _, entry := range fastEntries {
+		if entry["name"] == "src" {
+			if entry["is_repo"] != false {
+				t.Fatalf("FastList() classified ordinary directory as repository: %#v", entry)
+			}
+			if _, deferred := entry["repo_info_deferred"]; deferred {
+				t.Fatalf("FastList() unnecessarily deferred ordinary directory: %#v", entry)
+			}
+		}
+	}
+
+	full, finderErr := service.List(context.Background(), root)
+	if finderErr != nil {
+		t.Fatalf("List() error = %v", finderErr)
+	}
+	fullEntries := full["entries"].([]map[string]any)
+	for _, entry := range fullEntries {
+		if entry["name"] == "repo" {
+			if entry["is_repo"] != true || entry["repo_info_deferred"] == true {
+				t.Fatalf("List() repository metadata = %#v", entry)
+			}
+			return
+		}
+	}
+	t.Fatal("List() did not return repo entry")
+}
+
 func TestSearchMatchesPythonDirectRowsAndRanking(t *testing.T) {
 	service, root := newTestService(t, nil)
 	for _, name := range []string{"needle.txt", "needle-long.txt", "xneedle.txt"} {
@@ -349,18 +401,11 @@ func TestWatchRootsCountsBackgroundFilesAgainstGlobalCapacity(t *testing.T) {
 	}
 }
 
-func TestAuthorizationTreatsFilesystemRootSlashAsContainingDescendants(t *testing.T) {
-	service := &Service{roots: []string{string(os.PathSeparator)}}
-	if !service.allowed(filepath.Join(string(os.PathSeparator), "tmp", "file")) {
-		t.Fatal("filesystem root slash rejected a descendant")
-	}
-}
-
 func TestWatchRootsSerializesNativeReconfiguration(t *testing.T) {
 	root := t.TempDir()
 	secondRoot := t.TempDir()
 	native := &serializedNativeWatcher{events: make(chan nativeWatchEvent), firstStarted: make(chan struct{}), secondStarted: make(chan struct{}), releaseFirst: make(chan struct{})}
-	service := newService(root, []string{root, secondRoot}, nil, native, nativeWatchStatus{available: true}, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, nil, native, nativeWatchStatus{available: true}, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	first := make(chan *Error, 1)
 	go func() {
@@ -401,25 +446,55 @@ func TestWatchRootsSerializesNativeReconfiguration(t *testing.T) {
 	}
 }
 
-func TestAuthorizationRejectsOutsideAndSecretPaths(t *testing.T) {
+func TestAuthorizationAllowsAnyReadablePathAndSecretNames(t *testing.T) {
 	service, root := newTestService(t, nil)
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	externalRoot := filepath.Join(t.TempDir(), "external")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(externalRoot, "outside.txt")
 	if err := os.WriteFile(outside, []byte("no"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, finderErr := service.Read(context.Background(), outside); finderErr == nil || finderErr.Status != 403 {
-		t.Fatalf("outside read error = %#v, want 403", finderErr)
+	if err := os.WriteFile(filepath.Join(externalRoot, "nested", "needle.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read, finderErr := service.Read(context.Background(), outside)
+	if finderErr != nil || read["content"] != "no" {
+		t.Fatalf("outside read = %#v, error = %#v", read, finderErr)
+	}
+	listing, finderErr := service.List(context.Background(), externalRoot)
+	if finderErr != nil || listing["path"] != externalRoot {
+		t.Fatalf("outside listing = %#v, error = %#v", listing, finderErr)
+	}
+	search, finderErr := service.Search(context.Background(), externalRoot, "needle", 20, true, false, false)
+	if finderErr != nil || search["count"] != 1 {
+		t.Fatalf("outside search = %#v, error = %#v", search, finderErr)
+	}
+	created := filepath.Join(externalRoot, "created.txt")
+	if _, finderErr := service.Write(context.Background(), created, "created", nil); finderErr != nil {
+		t.Fatalf("outside write error = %#v", finderErr)
+	}
+	if _, finderErr := service.Delete(context.Background(), created); finderErr != nil {
+		t.Fatalf("outside delete error = %#v", finderErr)
 	}
 	secret := filepath.Join(root, ".ssh", "id_rsa")
-	if _, finderErr := service.Info(context.Background(), secret); finderErr == nil || finderErr.Status != 403 {
-		t.Fatalf("secret info error = %#v, want 403", finderErr)
+	if err := os.MkdirAll(filepath.Dir(secret), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretRead, finderErr := service.Read(context.Background(), secret)
+	if finderErr != nil || secretRead["content"] != "key" {
+		t.Fatalf("secret read = %#v, error = %#v", secretRead, finderErr)
 	}
 	if _, finderErr := service.Read(context.Background(), filepath.Join(root, "missing.txt")); finderErr == nil || finderErr.Status != 404 {
 		t.Fatalf("missing read error = %#v, want 404", finderErr)
 	}
 }
 
-func TestAuthorizationRejectsCredentialSubtreeDescendants(t *testing.T) {
+func TestAuthorizationAllowsCredentialSubtreeDescendants(t *testing.T) {
 	service, root := newTestService(t, nil)
 	for _, relative := range []string{
 		".config/gh/hosts.yml",
@@ -428,8 +503,15 @@ func TestAuthorizationRejectsCredentialSubtreeDescendants(t *testing.T) {
 		".ngc/cache/token",
 	} {
 		path := filepath.Join(root, relative)
-		if _, finderErr := service.Info(context.Background(), path); finderErr == nil || finderErr.Status != http.StatusForbidden {
-			t.Fatalf("secret descendant %q error = %#v, want 403", relative, finderErr)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(relative), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, finderErr := service.Info(context.Background(), path)
+		if finderErr != nil || info["kind"] != "file" {
+			t.Fatalf("credential descendant %q info = %#v, error = %#v", relative, info, finderErr)
 		}
 	}
 }
@@ -495,7 +577,7 @@ func TestWatchSignatureUsesPinnedDescriptorAndPythonShape(t *testing.T) {
 	}
 }
 
-func TestSymlinkEscapeIsRejectedAfterOpen(t *testing.T) {
+func TestSymlinkToAnyReadablePathIsAllowedAfterOpen(t *testing.T) {
 	service, root := newTestService(t, nil)
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
@@ -505,12 +587,13 @@ func TestSymlinkEscapeIsRejectedAfterOpen(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, finderErr := service.Read(context.Background(), link); finderErr == nil || finderErr.Status != 403 {
-		t.Fatalf("symlink escape error = %#v, want 403", finderErr)
+	read, finderErr := service.Read(context.Background(), link)
+	if finderErr != nil || read["content"] != "secret" {
+		t.Fatalf("symlink read = %#v, error = %#v", read, finderErr)
 	}
 }
 
-func TestListUsesPinnedDirectoryAndSkipsEscapingSymlink(t *testing.T) {
+func TestListUsesPinnedDirectoryAndIncludesSymlinksToAnyReadablePath(t *testing.T) {
 	service, root := newTestService(t, nil)
 	inside := filepath.Join(root, "inside.txt")
 	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
@@ -539,8 +622,8 @@ func TestListUsesPinnedDirectoryAndSkipsEscapingSymlink(t *testing.T) {
 	for _, entry := range entries {
 		seen[entry["name"].(string)] = entry
 	}
-	if _, ok := seen["outside-link"]; ok {
-		t.Fatalf("escaping symlink leaked into listing: %#v", seen["outside-link"])
+	if seen["outside-link"]["kind"] != "file" || seen["outside-link"]["realpath"] != outside {
+		t.Fatalf("external symlink metadata = %#v", seen["outside-link"])
 	}
 	if seen["inside-link"]["kind"] != "file" || seen["inside-link"]["symlink_target"] != inside {
 		t.Fatalf("valid symlink metadata = %#v", seen["inside-link"])
@@ -800,6 +883,13 @@ func TestReadInfoAndGitEnrichmentUsePythonFields(t *testing.T) {
 	if finderErr != nil || info["relative_path"] != "tracked.md" || info["git_tracked"] != true {
 		t.Fatalf("info git payload = %#v, error = %v", info, finderErr)
 	}
+	rootInfo, finderErr := service.Info(context.Background(), root, true)
+	if finderErr != nil || rootInfo["git_root"] != root || rootInfo["relative_path"] != "" || rootInfo["git_enrichment"].(map[string]any)["available"] != true {
+		t.Fatalf("repository-root info git payload = %#v, error = %v", rootInfo, finderErr)
+	}
+	if repo, ok := rootInfo["repo"].(map[string]any); !ok || repo["root"] != root {
+		t.Fatalf("repository-root info repo payload = %#v", rootInfo["repo"])
+	}
 	if err := os.WriteFile(file, []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -810,6 +900,44 @@ func TestReadInfoAndGitEnrichmentUsePythonFields(t *testing.T) {
 	blame, finderErr := service.Blame(context.Background(), file, "")
 	if finderErr != nil || blame["in_repo"] != true || len(blame["lines"].(map[string]map[string]any)) != 1 {
 		t.Fatalf("blame payload = %#v, error = %v", blame, finderErr)
+	}
+}
+
+func TestGitHistoryAndCommitRequireCurrentHeadObject(t *testing.T) {
+	for _, operation := range []string{"history", "commit"} {
+		t.Run(operation, func(t *testing.T) {
+			root, head := newCommittedTestRepo(t)
+			original := execCommandContext
+			t.Cleanup(func() { execCommandContext = original })
+			execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+				for _, arg := range args {
+					if arg == "cat-file" {
+						command := exec.CommandContext(ctx, "false")
+						command.ExtraFiles = extraFiles
+						command.Env = gitCommandEnvironment()
+						return command
+					}
+				}
+				command := exec.CommandContext(ctx, "git", args...)
+				command.ExtraFiles = extraFiles
+				command.Env = gitCommandEnvironment()
+				return command
+			}
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			if operation == "history" {
+				if _, finderErr := service.GitHistory(context.Background(), root, "1", ""); finderErr == nil || finderErr.MessageKey != "fs.error.gitHistoryFailed" {
+					t.Fatalf("missing current HEAD object history error = %v", finderErr)
+				}
+				return
+			}
+			if _, finderErr := service.GitCommit(context.Background(), root, head, head); finderErr == nil || finderErr.MessageKey != "fs.error.gitCommitFailed" {
+				t.Fatalf("missing current HEAD object commit error = %v", finderErr)
+			}
+		})
 	}
 }
 
@@ -840,6 +968,83 @@ func TestGitMetadataAndBlameTreatSpecialFilenamesLiterally(t *testing.T) {
 	}
 }
 
+func TestGitViewsUseLiteralPathspecsAndWorkingBlameRef(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", root},
+		{"-C", root, "config", "user.email", "test@example.invalid"},
+		{"-C", root, "config", "user.name", "Finder Test"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	targetDir := filepath.Join(root, "literal*")
+	decoyDir := filepath.Join(root, "literal-decoy")
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(decoyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "note.txt")
+	decoy := filepath.Join(decoyDir, "note.txt")
+	if err := os.WriteFile(target, []byte("target\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "--", target).CombinedOutput(); err != nil {
+		t.Fatalf("git add target: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "-qm", "target commit").CombinedOutput(); err != nil {
+		t.Fatalf("git commit target: %v (%s)", err, output)
+	}
+	if err := os.WriteFile(decoy, []byte("decoy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "--", decoy).CombinedOutput(); err != nil {
+		t.Fatalf("git add decoy: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "-qm", "decoy commit").CombinedOutput(); err != nil {
+		t.Fatalf("git commit decoy: %v (%s)", err, output)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	history, finderErr := service.GitHistory(context.Background(), targetDir, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	commits := history["commits"].([]map[string]any)
+	if len(commits) != 1 || commits[0]["subject"] != "target commit" {
+		t.Fatalf("literal target history = %#v", commits)
+	}
+	metadata, finderErr := service.Read(context.Background(), target, true)
+	if finderErr != nil || metadata["git_tracked"] != true || metadata["git_has_history"] != true {
+		t.Fatalf("nested literal metadata = %#v, error = %v", metadata, finderErr)
+	}
+	commitDetail, finderErr := service.GitCommit(context.Background(), targetDir, commits[0]["sha"].(string), history["head"].(string))
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	commitFiles, ok := commitDetail["files"].([]map[string]any)
+	if !ok || len(commitFiles) != 1 || commitFiles[0]["path"] != "literal*/note.txt" {
+		t.Fatalf("nested literal commit detail = %#v", commitDetail)
+	}
+	if err := os.WriteFile(target, []byte("target changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diff, finderErr := service.Diff(context.Background(), target, "HEAD", "current")
+	if finderErr != nil || diff["untracked"] != false || diff["original"] != "target\n" || diff["working"] != "target changed\n" || !strings.Contains(diff["diff"].(string), "+target changed") {
+		t.Fatalf("nested literal diff = %#v, error = %v", diff, finderErr)
+	}
+	blame, finderErr := service.Blame(context.Background(), target, "working")
+	if finderErr != nil || blame["in_repo"] != true || len(blame["lines"].(map[string]map[string]any)) != 1 {
+		t.Fatalf("working blame = %#v, error = %v", blame, finderErr)
+	}
+}
+
 func TestGitHistoryAndCommitBindRepositoryIdentity(t *testing.T) {
 	root, _ := newCommittedTestRepo(t)
 	service, err := New(root, nil)
@@ -866,6 +1071,89 @@ func TestGitHistoryAndCommitBindRepositoryIdentity(t *testing.T) {
 	commit := page["commits"].([]map[string]any)[0]["sha"].(string)
 	if _, finderErr = service.GitCommit(context.Background(), root, commit, page["head"].(string), "replaced-repository"); finderErr == nil || finderErr.Status != http.StatusConflict {
 		t.Fatalf("forged repository detail identity = %v", finderErr)
+	}
+}
+
+func TestGitHistoryExposesDecorationsAndWorktreeStatus(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	for _, args := range [][]string{{"-c", "tag.gpgSign=false", "-C", root, "tag", "v-test"}, {"-C", root, "branch", "test-branch"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	history, finderErr := service.GitHistory(context.Background(), root, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	commits := history["commits"].([]map[string]any)
+	if len(commits) != 1 {
+		t.Fatalf("history commits = %#v", commits)
+	}
+	branchOutput, err := exec.Command("git", "-C", root, "branch", "--show-current").Output()
+	if err != nil || history["branch"] != strings.TrimSpace(string(branchOutput)) {
+		t.Fatalf("history branch = %#v, git branch = %q, error = %v", history["branch"], strings.TrimSpace(string(branchOutput)), err)
+	}
+	if _, ok := commits[0]["signature_status"].(string); !ok {
+		t.Fatalf("signature status missing = %#v", commits[0])
+	}
+	if !strings.Contains(commits[0]["decorations"].(string), "tag: v-test") {
+		t.Fatalf("commit decorations = %#v", commits[0]["decorations"])
+	}
+	status, ok := history["worktree_status"].(map[string]any)
+	if !ok || status["available"] != true || status["dirty"] != true {
+		t.Fatalf("worktree status = %#v", history["worktree_status"])
+	}
+	entries := status["entries"].([]map[string]any)
+	seen := map[string]string{}
+	for _, entry := range entries {
+		seen[entry["path"].(string)] = entry["status"].(string)
+		if entry["path"] == "note.txt" {
+			if entry["counts_available"] != true || entry["added"] != 1 || entry["removed"] != 1 || entry["binary"] != false {
+				t.Fatalf("tracked worktree entry counts = %#v", entry)
+			}
+		}
+		if entry["path"] == "untracked.txt" {
+			if entry["counts_available"] != true || entry["added"] != 1 || entry["removed"] != 0 || entry["binary"] != false {
+				t.Fatalf("untracked worktree entry counts = %#v", entry)
+			}
+		}
+	}
+	if seen["note.txt"] != "M" || seen["untracked.txt"] != "??" {
+		t.Fatalf("worktree entries = %#v", entries)
+	}
+	if status["files"] != 2 || status["added"] != 1 || status["removed"] != 1 || status["binary_files"] != 0 || status["stats_available"] != true {
+		t.Fatalf("worktree aggregate stats = %#v", status)
+	}
+	if status["modified_at"].(int64) == 0 {
+		t.Fatalf("worktree latest modification time = %#v", status["modified_at"])
+	}
+	statusCounts, ok := status["status_counts"].(map[string]int)
+	if !ok || statusCounts["M"] != 1 || statusCounts["??"] != 1 {
+		t.Fatalf("worktree status counts = %#v", status["status_counts"])
+	}
+
+	snapshotCursor, ok := history["snapshot_cursor"].(string)
+	if !ok || snapshotCursor == "" {
+		t.Fatalf("snapshot cursor = %#v", history["snapshot_cursor"])
+	}
+	restored, finderErr := service.GitHistory(context.Background(), root, "10", snapshotCursor)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	restoredStatus, ok := restored["worktree_status"].(map[string]any)
+	if !ok || restoredStatus["available"] != true || restoredStatus["dirty"] != true {
+		t.Fatalf("restored worktree status = %#v", restored["worktree_status"])
 	}
 }
 
@@ -946,6 +1234,36 @@ func TestBlameOutputLimitIsTyped(t *testing.T) {
 	}
 }
 
+func TestBlameUsesPythonFallbackWhenGitReturnsNoDiagnostic(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	path := filepath.Join(root, "note.txt")
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "blame" {
+				command := exec.CommandContext(ctx, "false")
+				command.ExtraFiles = extraFiles
+				command.Env = gitCommandEnvironment()
+				return command
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	payload, finderErr := service.Blame(context.Background(), path, "")
+	if finderErr != nil || payload["error"] != "not committed yet" {
+		t.Fatalf("undignosed blame failure = %#v, error = %v", payload, finderErr)
+	}
+}
+
 func TestGitViewsIgnoreAmbientGitEnvironment(t *testing.T) {
 	root := t.TempDir()
 	workingRepo := filepath.Join(root, "working")
@@ -984,6 +1302,27 @@ func TestGitViewsIgnoreAmbientGitEnvironment(t *testing.T) {
 	diff, finderErr := service.Diff(context.Background(), path, "HEAD", "current")
 	if finderErr != nil || diff["repo"] != workingRepo || diff["untracked"] != false || !strings.Contains(diff["original"].(string), "working") {
 		t.Fatalf("ambient Git environment changed Diff: payload=%#v error=%v", diff, finderErr)
+	}
+}
+
+func TestDiffFallsBackFromUnknownExplicitRefForTrackedFile(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	diff, finderErr := service.Diff(context.Background(), path, "not-in-this-repo", "current")
+	if finderErr != nil {
+		t.Fatalf("tracked diff = %#v", finderErr)
+	}
+	if diff["from_ref"] != "HEAD" || diff["to_ref"] != "current" || diff["untracked"] != false || !strings.Contains(diff["diff"].(string), "+new") {
+		t.Fatalf("tracked diff fallback = %#v", diff)
 	}
 }
 
@@ -1042,6 +1381,38 @@ func TestGitViewsHandleHistoricalDeletedAndBinaryFiles(t *testing.T) {
 	binaryDiff, finderErr := service.Diff(context.Background(), binary, base, changed)
 	if finderErr != nil || binaryDiff["original_error"] == "" || binaryDiff["working_error"] == "" || !strings.Contains(binaryDiff["diff"].(string), "Binary files") {
 		t.Fatalf("historical binary diff = %#v, error = %v", binaryDiff, finderErr)
+	}
+}
+
+func TestDiffUsesPythonUnifiedContextShape(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	path := filepath.Join(root, "note.txt")
+	original := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "note.txt").CombinedOutput(); err != nil {
+		t.Fatalf("git add baseline: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "-qm", "ten lines").CombinedOutput(); err != nil {
+		t.Fatalf("git commit baseline: %v (%s)", err, output)
+	}
+	updated := strings.Replace(original, "eight\n", "EIGHT\n", 1)
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	payload, finderErr := service.Diff(context.Background(), path, "HEAD", "current")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	want := "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -5,6 +5,6 @@\n five\n six\n seven\n-eight\n+EIGHT\n nine\n ten\n"
+	if payload["diff"] != want {
+		t.Fatalf("Python unified diff shape = %q, want %q", payload["diff"], want)
 	}
 }
 
@@ -1127,6 +1498,90 @@ func TestGitHistoryAndCommitContracts(t *testing.T) {
 	if !ok || len(commits) != 1 || commits[0]["subject"] != "second" || firstPage["head"] != head || firstPage["next_cursor"] == "" {
 		t.Fatalf("first history page = %#v", firstPage)
 	}
+	for _, key := range []string{"files", "added", "removed", "binary_files"} {
+		if _, present := commits[0][key]; present {
+			t.Fatalf("fast history metadata unexpectedly contains %q: %#v", key, commits[0])
+		}
+	}
+	if commits[0]["metadata_truncated"] != false {
+		t.Fatalf("history metadata truncation marker = %#v", commits[0]["metadata_truncated"])
+	}
+	statsPage, finderErr := service.GitHistory(context.Background(), root, "1", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	statsCommits, ok := statsPage["commits"].([]map[string]any)
+	if !ok || len(statsCommits) != 1 || statsCommits[0]["files"] != 2 || statsCommits[0]["added"] != 2 || statsCommits[0]["removed"] != 0 || statsCommits[0]["binary_files"] != 0 {
+		t.Fatalf("Git history stats page = %#v", statsPage)
+	}
+	windowPage, finderErr := service.GitHistoryAtOffset(context.Background(), root, "1", firstPage["snapshot_cursor"].(string), 1)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	windowCommits, ok := windowPage["commits"].([]map[string]any)
+	if !ok || len(windowCommits) != 1 || windowCommits[0]["subject"] != "first" || windowCommits[0]["files"] != 1 || windowCommits[0]["added"] != 1 || windowCommits[0]["removed"] != 0 {
+		t.Fatalf("Git history independent stats offset = %#v", windowPage)
+	}
+	var oneAtATimeChunks []map[string]any
+	if finderErr := service.GitHistoryStatsStream(context.Background(), root, firstPage["snapshot_cursor"].(string), 2, 1, func(payload map[string]any) error {
+		oneAtATimeChunks = append(oneAtATimeChunks, payload)
+		return nil
+	}); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if len(oneAtATimeChunks) != 2 {
+		t.Fatalf("one-at-a-time stats chunks = %#v", oneAtATimeChunks)
+	}
+	for index, chunk := range oneAtATimeChunks {
+		chunkCommits, ok := chunk["commits"].([]map[string]any)
+		if !ok || len(chunkCommits) != 1 || chunkCommits[0]["files"] == nil {
+			t.Fatalf("one-at-a-time stats chunk %d = %#v", index, chunk)
+		}
+	}
+	var batchedChunks []map[string]any
+	if finderErr := service.GitHistoryStatsStream(context.Background(), root, firstPage["snapshot_cursor"].(string), 2, 10, func(payload map[string]any) error {
+		batchedChunks = append(batchedChunks, payload)
+		return nil
+	}); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if len(batchedChunks) != 1 {
+		t.Fatalf("batched stats chunks = %#v", batchedChunks)
+	}
+	batchedCommits, ok := batchedChunks[0]["commits"].([]map[string]any)
+	if !ok || len(batchedCommits) != 2 || batchedCommits[0]["subject"] != "second" || batchedCommits[1]["subject"] != "first" {
+		t.Fatalf("batched stats commits = %#v", batchedChunks[0])
+	}
+	var scheduledChunks []map[string]any
+	nextScheduledCursor, finderErr := service.GitHistoryStatsScheduled(context.Background(), root, firstPage["snapshot_cursor"].(string), []int{1, 2, 4}, func(payload map[string]any) error {
+		scheduledChunks = append(scheduledChunks, payload)
+		return nil
+	})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if nextScheduledCursor != "" || len(scheduledChunks) != 2 {
+		t.Fatalf("scheduled stats chunks/cursor = %d/%q", len(scheduledChunks), nextScheduledCursor)
+	}
+	scheduledSHAs := make(map[string]bool)
+	for index, chunk := range scheduledChunks {
+		chunkCommits, ok := chunk["commits"].([]map[string]any)
+		if !ok || len(chunkCommits) == 0 {
+			t.Fatalf("scheduled stats chunk %d = %#v", index, chunk)
+		}
+		for _, commit := range chunkCommits {
+			sha, _ := commit["sha"].(string)
+			scheduledSHAs[sha] = true
+			for _, key := range []string{"files", "added", "removed", "binary_files"} {
+				if _, present := commit[key]; !present {
+					t.Fatalf("scheduled stats commit %q missing %q: %#v", sha, key, commit)
+				}
+			}
+		}
+	}
+	if len(scheduledSHAs) != 2 {
+		t.Fatalf("scheduled stats SHAs = %#v", scheduledSHAs)
+	}
 	cursor := firstPage["next_cursor"].(string)
 	secondPage, finderErr := service.GitHistory(context.Background(), root, "1", cursor)
 	if finderErr != nil {
@@ -1150,6 +1605,9 @@ func TestGitHistoryAndCommitContracts(t *testing.T) {
 	rootDetail, finderErr := service.GitCommit(context.Background(), root, secondCommits[0]["sha"].(string), head)
 	if finderErr != nil || rootDetail["from_ref"] != "4b825dc642cb6eb9a060e54bf8d69288fbee4904" {
 		t.Fatalf("root commit detail = %#v, error = %v", rootDetail, finderErr)
+	}
+	if _, finderErr = service.GitHistory(context.Background(), filepath.Join(root, "note.txt"), "1", ""); finderErr == nil || finderErr.MessageKey != "fs.error.gitHistoryDirectoryRequired" {
+		t.Fatalf("file-valued history path = %v", finderErr)
 	}
 	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("later\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1178,15 +1636,459 @@ func TestGitHistoryAndCommitContracts(t *testing.T) {
 	}
 }
 
+func TestGitHistoryAtOffsetUsesTargetedStatsForRootRenameAndBinaryCommits(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{{"init", "-q", root}, {"-C", root, "config", "user.email", "test@example.invalid"}, {"-C", root, "config", "user.name", "Finder Test"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	runGit := func(args ...string) {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	oldPath := filepath.Join(root, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("-C", root, "add", "old.txt")
+	runGit("-C", root, "commit", "-qm", "root")
+	newPath := filepath.Join(root, "new.txt")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("-C", root, "add", "-A")
+	runGit("-C", root, "commit", "-qm", "rename")
+	if err := os.WriteFile(filepath.Join(root, "binary.bin"), []byte{0x00, 0x01, 0x02, 0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("-C", root, "add", "binary.bin")
+	runGit("-C", root, "commit", "-qm", "binary")
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	metadata, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	cursor, ok := metadata["snapshot_cursor"].(string)
+	if !ok || cursor == "" {
+		t.Fatalf("metadata snapshot cursor = %#v", metadata["snapshot_cursor"])
+	}
+	originalExec := execCommandContext
+	var calls [][]string
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		calls = append(calls, append([]string(nil), args...))
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	t.Cleanup(func() { execCommandContext = originalExec })
+	rows := make([]map[string]any, 0, 3)
+	for offset := 0; offset < 3; offset++ {
+		page, pageErr := service.GitHistoryAtOffset(context.Background(), root, "1", cursor, offset)
+		if pageErr != nil {
+			t.Fatalf("offset %d: %v", offset, pageErr)
+		}
+		commits, ok := page["commits"].([]map[string]any)
+		if !ok || len(commits) != 1 {
+			t.Fatalf("offset %d commits = %#v", offset, page["commits"])
+		}
+		rows = append(rows, commits[0])
+	}
+	if rows[0]["subject"] != "binary" || rows[0]["files"] != 1 || rows[0]["added"] != 0 || rows[0]["removed"] != 0 || rows[0]["binary_files"] != 1 {
+		t.Fatalf("binary stats = %#v", rows[0])
+	}
+	if rows[1]["subject"] != "rename" || rows[1]["files"] != 2 || rows[1]["added"] != 1 || rows[1]["removed"] != 1 || rows[1]["binary_files"] != 0 {
+		t.Fatalf("rename stats = %#v", rows[1])
+	}
+	if rows[2]["subject"] != "root" || rows[2]["files"] != 1 || rows[2]["added"] != 1 || rows[2]["removed"] != 0 || rows[2]["binary_files"] != 0 {
+		t.Fatalf("root stats = %#v", rows[2])
+	}
+	seenTargetedDiff := false
+	for _, args := range calls {
+		isLog := false
+		isDiffTree := false
+		hasNumstat := false
+		for _, arg := range args {
+			isLog = isLog || arg == "log"
+			isDiffTree = isDiffTree || arg == "diff-tree"
+			hasNumstat = hasNumstat || arg == "--numstat"
+		}
+		if isLog && hasNumstat {
+			t.Fatalf("offset stats used history-wide numstat: %v", args)
+		}
+		if isDiffTree && hasNumstat {
+			seenTargetedDiff = true
+		}
+	}
+	if !seenTargetedDiff {
+		t.Fatalf("offset stats did not run a targeted diff-tree: %v", calls)
+	}
+}
+
 func TestGitHistoryDefaultAndMaximumLimitsMatchPythonContract(t *testing.T) {
 	if got, err := gitHistoryLimit(""); err != nil || got != 200 {
 		t.Fatalf("default Git history limit = %d, error = %v; want 200", got, err)
+	}
+	for _, raw := range []string{"0", "-1", "-999"} {
+		if got, err := gitHistoryLimit(raw); err != nil || got != 1 {
+			t.Fatalf("clamped Git history limit %q = %d, error = %v; want 1", raw, got, err)
+		}
 	}
 	if got, err := gitHistoryLimit("999"); err != nil || got != 200 {
 		t.Fatalf("clamped Git history limit = %d, error = %v; want 200", got, err)
 	}
 	if got, err := gitHistoryLimit("200"); err != nil || got != 200 {
 		t.Fatalf("maximum Git history limit = %d, error = %v; want 200", got, err)
+	}
+}
+
+func TestGitHistoryAndCommitCacheImmutableProducts(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	calls := map[string]int{}
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "log" || arg == "show" {
+				calls[arg]++
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+
+	firstHistory, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	firstHistory["commits"].([]map[string]any)[0]["subject"] = "caller mutation"
+	secondHistory, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if calls["log"] != 1 || secondHistory["commits"].([]map[string]any)[0]["subject"] != "initial" {
+		t.Fatalf("history cache calls=%#v payload=%#v", calls, secondHistory)
+	}
+
+	firstCommit, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	firstCommit["subject"] = "caller mutation"
+	secondCommit, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if calls["show"] != 1 || secondCommit["subject"] != "initial" {
+		t.Fatalf("commit cache calls=%#v payload=%#v", calls, secondCommit)
+	}
+}
+
+func TestGitHistoryStatsCacheReusesSHAStatsAcrossHistoryProducts(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	firstPage, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	cursor, ok := firstPage["snapshot_cursor"].(string)
+	if !ok || cursor == "" {
+		t.Fatalf("history snapshot cursor = %#v", firstPage["snapshot_cursor"])
+	}
+	diffTreeCalls := 0
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "diff-tree" {
+				diffTreeCalls++
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	if _, finderErr = service.GitHistoryAtOffset(context.Background(), root, "1", cursor, 0); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if _, finderErr = service.GitHistoryAtOffset(context.Background(), root, "2", cursor, 0); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if diffTreeCalls != 1 {
+		t.Fatalf("diff-tree calls after changing only the history product shape = %d, want 1", diffTreeCalls)
+	}
+}
+
+func TestGitHistoryStatsCacheEvictsOldestSHAAndKeepsRecentEntries(t *testing.T) {
+	service, _ := newTestService(t, nil)
+	for index := 0; index < maxGitHistoryStatsCacheEntries; index++ {
+		service.cacheGitHistoryStats(fmt.Sprintf("sha-%d", index), gitHistoryStatsInfo{files: index})
+	}
+	if len(service.gitHistoryStatsCache) != maxGitHistoryStatsCacheEntries {
+		t.Fatalf("stats cache size = %d, want %d", len(service.gitHistoryStatsCache), maxGitHistoryStatsCacheEntries)
+	}
+	if _, ok := service.cachedGitHistoryStats("sha-0"); !ok {
+		t.Fatal("oldest entry was unexpectedly missing before the cache became full")
+	}
+	service.cacheGitHistoryStats("sha-1000", gitHistoryStatsInfo{files: 1000})
+	if _, ok := service.cachedGitHistoryStats("sha-0"); !ok {
+		t.Fatal("recently accessed entry was evicted instead of the oldest unused entry")
+	}
+	if _, ok := service.cachedGitHistoryStats("sha-1"); ok {
+		t.Fatal("oldest unused entry remained after the cache exceeded 1000 entries")
+	}
+}
+
+func TestGitHistoryAndCommitAllowExternalLinkedWorktree(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	linked := filepath.Join(t.TempDir(), "linked-worktree")
+	if output, err := exec.Command("git", "-C", root, "worktree", "add", "--detach", linked, head).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v (%s)", err, output)
+	}
+	serviceRoot := t.TempDir()
+	service, err := New(serviceRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	history, finderErr := service.GitHistory(context.Background(), linked, "1", "")
+	if finderErr != nil || history["repo"] != linked || history["head"] != head {
+		t.Fatalf("external linked-worktree history = %#v, error = %v", history, finderErr)
+	}
+	commits, ok := history["commits"].([]map[string]any)
+	if !ok || len(commits) != 1 || commits[0]["sha"] != head {
+		t.Fatalf("external linked-worktree commits = %#v", history["commits"])
+	}
+	detail, finderErr := service.GitCommit(context.Background(), linked, head, head, history["repository_identity"].(string))
+	if finderErr != nil || detail["sha"] != head || len(detail["files"].([]map[string]any)) != 1 {
+		t.Fatalf("external linked-worktree detail = %#v, error = %v", detail, finderErr)
+	}
+}
+
+func TestGitViewsHandleSparseCheckoutWorkingMissingFile(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", root},
+		{"-C", root, "config", "user.email", "test@example.invalid"},
+		{"-C", root, "config", "user.name", "Finder Test"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	visible := filepath.Join(root, "visible.txt")
+	omitted := filepath.Join(root, "omitted.txt")
+	if err := os.WriteFile(visible, []byte("visible\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(omitted, []byte("omitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "--", "visible.txt", "omitted.txt"},
+		{"-C", root, "commit", "-qm", "sparse baseline"},
+		{"-C", root, "sparse-checkout", "init", "--no-cone"},
+		{"-C", root, "sparse-checkout", "set", "/visible.txt"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if _, err := os.Stat(omitted); !os.IsNotExist(err) {
+		t.Fatalf("sparse checkout retained omitted file: err=%v", err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	diff, finderErr := service.Diff(context.Background(), omitted, "HEAD", "current")
+	if finderErr != nil || diff["repo"] != root || diff["relative_path"] != "omitted.txt" || diff["untracked"] != false || diff["working_missing"] != true || diff["original"] != "omitted\n" || diff["working"] != "" || !strings.Contains(diff["diff"].(string), "-omitted") {
+		t.Fatalf("sparse checkout diff = %#v, error = %v", diff, finderErr)
+	}
+}
+
+func TestGitViewsHandleConflictedWorkingFile(t *testing.T) {
+	root := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", root},
+		{"-C", root, "config", "user.email", "test@example.invalid"},
+		{"-C", root, "config", "user.name", "Finder Test"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	path := filepath.Join(root, "conflict.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "conflict.txt"},
+		{"-C", root, "commit", "-qm", "base"},
+		{"-C", root, "checkout", "-q", "-b", "other"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(path, []byte("other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "conflict.txt"},
+		{"-C", root, "commit", "-qm", "other"},
+		{"-C", root, "checkout", "-q", "-"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(path, []byte("main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "conflict.txt"},
+		{"-C", root, "commit", "-qm", "main"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	merge := exec.Command("git", "-C", root, "merge", "other")
+	if output, err := merge.CombinedOutput(); err == nil {
+		t.Fatalf("conflicting merge unexpectedly succeeded: %s", output)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	diff, finderErr := service.Diff(context.Background(), path, "HEAD", "current")
+	if finderErr != nil || diff["repo"] != root || diff["relative_path"] != "conflict.txt" || diff["untracked"] != false || diff["working_missing"] != false || !strings.Contains(diff["working"].(string), "<<<<<<<") || !strings.Contains(diff["diff"].(string), "<<<<<<<") {
+		t.Fatalf("conflicted diff = %#v, error = %v", diff, finderErr)
+	}
+}
+
+func TestGitViewsDiscoverNestedSubmoduleRepository(t *testing.T) {
+	child := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", child},
+		{"-C", child, "config", "user.email", "test@example.invalid"},
+		{"-C", child, "config", "user.name", "Finder Test"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	childFile := filepath.Join(child, "nested.txt")
+	if err := os.WriteFile(childFile, []byte("child\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", child, "add", "nested.txt"}, {"-C", child, "commit", "-qm", "child"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	outer := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", outer},
+		{"-C", outer, "config", "user.email", "test@example.invalid"},
+		{"-C", outer, "config", "user.name", "Finder Test"},
+		{"-C", outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", child, "modules/child"},
+		{"-C", outer, "add", "."},
+		{"-C", outer, "commit", "-qm", "submodule"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	service, err := New(outer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	childRoot := filepath.Join(outer, "modules/child")
+	info, finderErr := service.Info(context.Background(), childRoot, true)
+	// Python path_info decorates directories with repository identity but does not classify the
+	// directory itself as a tracked file. The submodule's directory-level Git history remains
+	// available through the dedicated history API below.
+	if finderErr != nil || info["git_root"] != childRoot || info["git_tracked"] != false || info["git_has_history"] != false {
+		t.Fatalf("nested submodule info = %#v, error = %v", info, finderErr)
+	}
+	history, finderErr := service.GitHistory(context.Background(), childRoot, "10", "")
+	if finderErr != nil || history["repo"] != childRoot || len(history["commits"].([]map[string]any)) != 1 {
+		t.Fatalf("nested submodule history = %#v, error = %v", history, finderErr)
+	}
+}
+
+func TestGitHistoryExposesOnlySafeSupportedHostedRemote(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want map[string]string
+	}{
+		{name: "github scp", url: "git@github.com:owner/project.git", want: map[string]string{"provider": "github", "base_url": "https://github.com/owner/project"}},
+		{name: "gitlab ssh", url: "ssh://git@gitlab.example.com/group/subgroup/project.git", want: map[string]string{"provider": "gitlab", "base_url": "https://gitlab.example.com/group/subgroup/project"}},
+		{name: "gitlab ssh port", url: "ssh://git@gitlab.example.com:2222/group/project.git", want: map[string]string{"provider": "gitlab", "base_url": "https://gitlab.example.com/group/project"}},
+		{name: "unsupported host", url: "https://example.com/owner/project.git"},
+		{name: "https credentials", url: "https://token@github.com/owner/project.git"},
+		{name: "query credentials", url: "https://github.com/owner/project.git?token=secret"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, _ := newCommittedTestRepo(t)
+			if output, err := exec.Command("git", "-C", root, "remote", "add", "origin", test.url).CombinedOutput(); err != nil {
+				t.Fatalf("git remote add: %v (%s)", err, output)
+			}
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			history, finderErr := service.GitHistory(context.Background(), root, "1", "")
+			if finderErr != nil {
+				t.Fatal(finderErr)
+			}
+			if test.want == nil {
+				got, typed := history["hosted_remote"].(map[string]string)
+				if (typed && got != nil) || (!typed && history["hosted_remote"] != nil) {
+					t.Fatalf("unsafe hosted remote was exposed: %#v", history["hosted_remote"])
+				}
+				return
+			}
+			got, ok := history["hosted_remote"].(map[string]string)
+			if !ok || len(got) != len(test.want) {
+				t.Fatalf("hosted remote = %#v, want %#v", history["hosted_remote"], test.want)
+			}
+			for key, want := range test.want {
+				if got[key] != want {
+					t.Fatalf("hosted remote = %#v, want %#v", got, test.want)
+				}
+			}
+		})
 	}
 }
 
@@ -1198,6 +2100,186 @@ func TestGitCommitRowsAreCappedWithoutOffByOne(t *testing.T) {
 	capped, truncated := capGitCommitRows(statusRows)
 	if len(capped) != gitCommitMaxFiles || !truncated || capped[len(capped)-1]["path"] != fmt.Sprintf("file-%d.txt", gitCommitMaxFiles-1) {
 		t.Fatalf("capped Git commit rows = len %d truncated %t last %#v", len(capped), truncated, capped[len(capped)-1])
+	}
+}
+
+func TestGitCommitPreservesMessageTruncationContract(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	messagePath := filepath.Join(root, "commit-message.txt")
+	message := strings.Repeat("message ", gitCommitMaxMessage/len("message ")+1024)
+	if err := os.WriteFile(messagePath, []byte(message), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "note.txt").CombinedOutput(); err != nil {
+		t.Fatalf("stage large message change: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "-F", messagePath).CombinedOutput(); err != nil {
+		t.Fatalf("large message commit: %v (%s)", err, output)
+	}
+	headBytes, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(string(headBytes))
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	detail, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if detail["message_truncated"] != true || detail["truncated"] != true {
+		t.Fatalf("large message truncation = %#v", detail)
+	}
+	if len(detail["message"].(string)) > gitCommitMaxMessage {
+		t.Fatalf("large message length = %d, limit %d", len(detail["message"].(string)), gitCommitMaxMessage)
+	}
+}
+
+func TestGitCommitParsersRejectMalformedPythonContractInputs(t *testing.T) {
+	nameStatusCases := [][]byte{
+		[]byte("R100\x00old\x00"),
+		[]byte("M\x00path"),
+		[]byte("M1000\x00path\x00"),
+		[]byte("M\x00path\x00M\x00path\x00"),
+	}
+	for _, raw := range nameStatusCases {
+		if _, _, err := parseGitNameStatus(raw, false); err == nil {
+			t.Fatalf("name-status parser accepted malformed input %q", raw)
+		}
+	}
+
+	numstatCases := [][]byte{
+		[]byte("1\t-\tpath\x00"),
+		[]byte("1\t2\tpath"),
+		[]byte("1\t2\tpath\x001\t2\tpath\x00"),
+	}
+	for _, raw := range numstatCases {
+		if _, _, err := parseGitNumstat(raw, false); err == nil {
+			t.Fatalf("numstat parser accepted malformed input %q", raw)
+		}
+	}
+}
+
+func TestGitCommitParsersRetainCompleteRowsBeforeBoundedTail(t *testing.T) {
+	statusRows, statusTruncated, err := parseGitNameStatus([]byte("M\x00complete.txt\x00M\x00partial"), true)
+	if err != nil || !statusTruncated || len(statusRows) != 1 || statusRows[0]["path"] != "complete.txt" {
+		t.Fatalf("truncated name-status = %#v, truncated=%t, error=%v", statusRows, statusTruncated, err)
+	}
+	counts, countsTruncated, err := parseGitNumstat([]byte("1\t2\tcomplete.txt\x001\t2\tpartial"), true)
+	if err != nil || !countsTruncated || len(counts) != 1 || counts["complete.txt\x00complete.txt"].added != 1 || counts["complete.txt\x00complete.txt"].removed != 2 {
+		t.Fatalf("truncated numstat = %#v, truncated=%t, error=%v", counts, countsTruncated, err)
+	}
+}
+
+func TestGitRawNumstatParserCombinesStatusAndCounts(t *testing.T) {
+	raw := []byte(":100644 100644 " + strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " R100\x00old.txt\x00new.txt\x00-\t-\t\x00old.txt\x00new.txt\x00")
+	rows, counts, truncated, err := parseGitRawNumstat(raw, false)
+	if err != nil || truncated || len(rows) != 1 || len(counts) != 1 {
+		t.Fatalf("combined Git diff parse = rows %#v counts %#v truncated %t error %v", rows, counts, truncated, err)
+	}
+	if rows[0]["status"] != "R" || rows[0]["old_path"] != "old.txt" || rows[0]["path"] != "new.txt" {
+		t.Fatalf("combined Git status row = %#v", rows[0])
+	}
+	count, ok := counts["old.txt\x00new.txt"]
+	if !ok || !count.binary {
+		t.Fatalf("combined Git count = %#v", counts)
+	}
+}
+
+func TestGitCommitReturnsTooLargeWhenTruncatedStatusHasNoCompleteRows(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	diffPath := filepath.Join(root, "diff-output")
+	if err := os.WriteFile(diffPath, []byte(":"+strings.Repeat("x", gitCommitMaxOutput)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		commandPath := ""
+		for _, arg := range args {
+			if strings.Contains(arg, "--raw") {
+				commandPath = diffPath
+				break
+			}
+		}
+		if commandPath != "" {
+			command := exec.CommandContext(ctx, "cat", commandPath)
+			command.ExtraFiles = extraFiles
+			command.Env = gitCommandEnvironment()
+			return command
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	_, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr == nil || finderErr.Status != http.StatusRequestEntityTooLarge || finderErr.MessageKey != "fs.error.gitCommitTooLarge" {
+		t.Fatalf("truncated status without a complete row = %#v", finderErr)
+	}
+}
+
+func TestGitCommitTrimsRowsToPayloadLimit(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	diffPath := filepath.Join(root, "diff-output")
+	status := make([]byte, 0, gitCommitMaxFiles*420)
+	numstat := make([]byte, 0, gitCommitMaxFiles*420)
+	for index := 0; index < gitCommitMaxFiles; index++ {
+		path := fmt.Sprintf("scope/%s-%04d.txt", strings.Repeat("x", 360), index)
+		status = append(status, []byte(fmt.Sprintf(":100644 100644 %040x %040x M\x00%s\x00", index+1, index+2, path))...)
+		numstat = append(numstat, []byte("1\t2\t"+path+"\x00")...)
+	}
+	combined := append(status, numstat...)
+	if err := os.WriteFile(diffPath, combined, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		commandPath := ""
+		for _, arg := range args {
+			if strings.Contains(arg, "--raw") {
+				commandPath = diffPath
+				break
+			}
+		}
+		if commandPath != "" {
+			command := exec.CommandContext(ctx, "cat", commandPath)
+			command.ExtraFiles = extraFiles
+			command.Env = gitCommandEnvironment()
+			return command
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	detail, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	files, ok := detail["files"].([]map[string]any)
+	if !ok || len(files) == 0 || len(files) >= gitCommitMaxFiles || detail["files_truncated"] != true || detail["truncated"] != true {
+		t.Fatalf("payload-trimmed commit = %#v", detail)
+	}
+	if len(files[0]["path"].(string)) != len(files[len(files)-1]["path"].(string)) {
+		t.Fatalf("payload-trimmed rows changed shape = first=%#v last=%#v", files[0], files[len(files)-1])
 	}
 }
 
@@ -1697,7 +2779,7 @@ func TestMutationsRejectAConfiguredRootReachedThroughASymlinkAlias(t *testing.T)
 		t.Fatal(err)
 	}
 	native := &fakeNativeWatcher{events: make(chan nativeWatchEvent), status: nativeWatchStatus{available: true}}
-	service := newService(root, []string{root, parent}, nil, native, native.status, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, nil, native, native.status, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	if _, finderErr := service.Write(context.Background(), alias, "must not replace root", nil); finderErr == nil || finderErr.Code != "forbidden" || finderErr.MessageKey != "fs.error.rootMutationBlocked" {
 		t.Fatalf("root alias mutation error = %#v", finderErr)
@@ -1793,7 +2875,7 @@ func TestSearchOptionsDoNotFallThroughToOnDemandTraversal(t *testing.T) {
 func TestDirectSearchBoundsDirectoryRowsAndCoverage(t *testing.T) {
 	root := t.TempDir()
 	native, nativeStatus := newNativeWatcher()
-	service := newService(root, []string{root}, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	for index := 0; index < MaxDirectoryEntries+5; index++ {
 		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("match-dir-%04d", index)), 0o700); err != nil {
@@ -1817,7 +2899,7 @@ func TestDirectSearchBoundsDirectoryRowsAndCoverage(t *testing.T) {
 func TestRecursiveSearchBoundsEachDirectoryBeforeMaterializingAllEntries(t *testing.T) {
 	root := t.TempDir()
 	native, nativeStatus := newNativeWatcher()
-	service := newService(root, []string{root}, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	for index := 0; index < MaxDirectoryEntries+5; index++ {
 		path := filepath.Join(root, fmt.Sprintf("match-file-%04d.txt", index))
@@ -1837,7 +2919,7 @@ func TestRecursiveSearchBoundsEachDirectoryBeforeMaterializingAllEntries(t *test
 func TestRecursiveSearchSkipsSpecialFilesWithoutBlocking(t *testing.T) {
 	root := t.TempDir()
 	native, nativeStatus := newNativeWatcher()
-	service := newService(root, []string{root}, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(root, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	fifo := filepath.Join(root, "blocked.fifo")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -1864,7 +2946,7 @@ func TestWatchDiffPollsBackgroundFilesOutsideWatchedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	native, nativeStatus := newNativeWatcher()
-	service := newService(serviceRoot, []string{serviceRoot}, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(serviceRoot, nil, native, nativeStatus, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	registration, finderErr := service.WatchRoots(context.Background(), map[string]any{
 		"client_id":        "background-watch",

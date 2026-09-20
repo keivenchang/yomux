@@ -2507,6 +2507,7 @@
   "debug.system.roster.detail.sampler": "YO!stats 샘플러",
   "gitDiff.binary": "바이너리",
   "gitDiff.changedFiles": "변경된 파일",
+  "gitDiff.dirty": "변경됨",
   "gitDiff.empty": "이 범위에 커밋이 없습니다.",
   "gitDiff.filesTruncated": "파일 목록이 잘렸습니다.",
   "gitDiff.firstParent": "첫 번째 부모와 비교",

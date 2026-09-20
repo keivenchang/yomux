@@ -19,11 +19,13 @@ const (
 // UsageMetadata identifies the provider context without coupling normalization
 // to a transcript or collector implementation.
 type UsageMetadata struct {
-	Provider string
-	Model    string
-	ThreadID string
-	ForkID   string
-	Extra    map[string]string
+	Provider        string
+	Model           string
+	ThreadID        string
+	ForkID          string
+	ExecutionSource string
+	Endpoint        string
+	Extra           map[string]string
 }
 
 type ClaudeUsageRecord struct {
@@ -196,7 +198,10 @@ func usageMetadataPayload(metadata UsageMetadata, provider string) (map[string]a
 		return nil, err
 	}
 	payload := map[string]any{"provider": metadata.Provider}
-	for name, value := range map[string]string{"model": metadata.Model, "thread_id": metadata.ThreadID, "fork_id": metadata.ForkID} {
+	for name, value := range map[string]string{
+		"model": metadata.Model, "thread_id": metadata.ThreadID, "fork_id": metadata.ForkID,
+		"execution_source": metadata.ExecutionSource, "endpoint": metadata.Endpoint,
+	} {
 		if value == "" {
 			continue
 		}

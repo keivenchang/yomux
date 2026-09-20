@@ -1115,7 +1115,11 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   if (fileExplorerTree) {
     setFileExplorerPathDisplay(root);
-    renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {entriesByDir});
+    renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {
+      entriesByDir,
+      view: 'finder',
+      deferSessionFilesDiff: options.deferSessionFilesDiff === true,
+    });
   }
   await refreshFileExplorerPanelTrees({
     ...options,

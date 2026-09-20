@@ -2507,6 +2507,7 @@
   "debug.system.roster.detail.sampler": "YO!stats-Sampler",
   "gitDiff.binary": "binär",
   "gitDiff.changedFiles": "Geänderte Dateien",
+  "gitDiff.dirty": "Geändert",
   "gitDiff.empty": "Keine Commits in diesem Bereich.",
   "gitDiff.filesTruncated": "Die Dateiliste wurde gekürzt.",
   "gitDiff.firstParent": "Vergleich mit dem ersten Eltern-Commit",

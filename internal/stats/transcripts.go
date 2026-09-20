@@ -540,6 +540,15 @@ func seedTranscriptContext(file *os.File, source TranscriptSource, state *Transc
 func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScannerState, record map[string]any, tailSeed bool) ([]UsageAtom, error) {
 	observed := transcriptTimestamp(record["timestamp"])
 	metadata := UsageMetadata{Provider: source.Provider, ThreadID: source.ThreadID, Model: source.ThreadID}
+	if source.Provider == "codex" {
+		// Python's Codex usage atoms use the OpenAI catalog identity even though
+		// the source file is a Codex transcript. Keep the execution source and
+		// endpoint explicit so materialization resolves the same pricing row and
+		// preserves the provider attribution shown by Python.
+		metadata.Provider = "openai"
+		metadata.ExecutionSource = "codex"
+		metadata.Endpoint = "responses"
+	}
 	if source.Provider == "claude" {
 		message, _ := record["message"].(map[string]any)
 		usage, _ := message["usage"].(map[string]any)
@@ -607,6 +616,54 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 		}
 		return nil, nil
 	}
+	if record["type"] == "token_usage_record" {
+		// Current Codex rollouts publish per-response usage together with a
+		// cumulative thread_token_usage snapshot. Prefer the cumulative thread
+		// counter for incremental scans, while using the per-response usage when
+		// a fresh large file was tail-seeded (the old event_msg path follows the
+		// same rule with last_token_usage).
+		threadID, _ := payload["thread_id"].(string)
+		if threadID != "" {
+			if state.CodexThreadID != "" && state.CodexThreadID != threadID {
+				state.CodexUsage = nil
+				state.CodexForkID = ""
+			}
+			state.CodexThreadID = threadID
+		}
+		if model, ok := payload["model"].(string); ok && model != "" {
+			state.CodexModel = model
+		}
+		if state.CodexThreadID != "" {
+			metadata.ThreadID = state.CodexThreadID
+		}
+		metadata.ForkID = state.CodexForkID
+		if model := state.CodexModel; model != "" {
+			metadata.Model = model
+		}
+		threadUsage, hasThreadUsage := payload["thread_token_usage"].(map[string]any)
+		usage, hasUsage := payload["usage"].(map[string]any)
+		turnUsage, hasTurnUsage := payload["turn_token_usage"].(map[string]any)
+		current := UsageCounters{}
+		baseline := UsageCounters{}
+		cumulative := false
+		switch {
+		case hasThreadUsage:
+			current = codexUsageCounters(threadUsage)
+			baseline = current
+			cumulative = true
+			if tailSeed && hasUsage {
+				current = codexUsageCounters(usage)
+				cumulative = false
+			}
+		case hasUsage:
+			current = codexUsageCounters(usage)
+		case hasTurnUsage:
+			current = codexUsageCounters(turnUsage)
+		default:
+			return nil, nil
+		}
+		return normalizeCodexUsageSnapshot(source, state, observed, metadata, current, baseline, cumulative)
+	}
 	info, _ := payload["info"].(map[string]any)
 	total, _ := info["total_token_usage"].(map[string]any)
 	last, _ := info["last_token_usage"].(map[string]any)
@@ -625,9 +682,6 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 		metadata.ThreadID = state.CodexThreadID
 	}
 	metadata.ForkID = state.CodexForkID
-	if state.CodexUsage == nil {
-		state.CodexUsage = UsageCounters{}
-	}
 	counters := UsageCounters{}
 	usageSource := total
 	if tailSeed {
@@ -649,11 +703,34 @@ func normalizeTranscriptRecord(source TranscriptSource, state *TranscriptScanner
 			}
 		}
 	}
-	delta, _, err := DeltaUsageCounters(state.CodexUsage, counters)
-	if err != nil {
-		return nil, err
+	return normalizeCodexUsageSnapshot(source, state, observed, metadata, counters, baseline, len(total) > 0 && !(tailSeed && len(last) > 0))
+}
+
+func codexUsageCounters(values map[string]any) UsageCounters {
+	result := UsageCounters{}
+	for _, key := range []string{"input_tokens", "cached_input_tokens", "output_tokens"} {
+		if value := mapNumber(values, key); value != nil {
+			result[key] = *value
+		}
 	}
-	state.CodexUsage = baseline
+	return result
+}
+
+func normalizeCodexUsageSnapshot(source TranscriptSource, state *TranscriptScannerState, observed float64, metadata UsageMetadata, current, baseline UsageCounters, cumulative bool) ([]UsageAtom, error) {
+	if state.CodexUsage == nil {
+		state.CodexUsage = UsageCounters{}
+	}
+	delta := current
+	if cumulative {
+		var err error
+		delta, _, err = DeltaUsageCounters(state.CodexUsage, current)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cumulative || len(baseline) > 0 {
+		state.CodexUsage = cloneCounters(baseline)
+	}
 	atoms, err := NormalizeCodexUsageMap(anyCounters(delta), observed, metadata)
 	addAgentIDs(atoms, source.AgentIDOrThread())
 	return atoms, err

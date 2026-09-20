@@ -1651,6 +1651,7 @@ globalThis.__layoutTestApi = {
     return state ? {...state} : null;
   },
   gitDiffCommitRowForTest: gitDiffCommitRow,
+  gitDiffWorktreeStatusNodeForTest: gitDiffWorktreeStatusNode,
   gitDiffCommitMessageForTest: gitDiffCommitMessage,
   gitDiffCommitFileTreeForTest: gitDiffCommitFilesTree,
   gitDiffHistoricalFileItemForTest: gitDiffHistoricalFileItem,
@@ -3060,6 +3061,8 @@ globalThis.__layoutTestApi = {
   setFinderSessionFilesPayloadForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
+  markFinderFastListingPaintedForTest: markFinderFastListingPainted,
+  releaseFinderSessionFilesDiffBackfillForTest: releaseFinderSessionFilesDiffBackfillIfReady,
   sessionFilesPayloadForTest() {
     return fileExplorerSessionFilesState.payload;
   },

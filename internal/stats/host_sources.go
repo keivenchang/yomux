@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
@@ -22,14 +24,21 @@ const maxHostCommandOutput = 8 << 20
 // collector boundary. The parser functions remain pure and are tested with
 // synthetic inputs in host_collectors_test.go.
 type LinuxHostSources struct {
-	procRoot  string
-	readFile  func(string) ([]byte, error)
-	readDir   func(string) ([]string, error)
-	readLink  func(string) (string, error)
-	run       func(context.Context, []string) (CommandOutput, error)
-	pageSize  uint64
-	clockTick uint64
+	procRoot          string
+	readFile          func(string) ([]byte, error)
+	readDir           func(string) ([]string, error)
+	readLink          func(string) (string, error)
+	run               func(context.Context, []string) (CommandOutput, error)
+	pageSize          uint64
+	clockTick         uint64
+	processMu         sync.Mutex
+	binaryCache       map[string]string
+	processCacheAt    time.Time
+	processCacheRows  []ProcessCensusRow
+	processCacheValid bool
 }
+
+const linuxProcessCensusCacheTTL = 500 * time.Millisecond
 
 // DarwinHostSources adapts bounded macOS command output to the common host
 // collector boundary. Commands are injected so captured plist/proc fixtures
@@ -47,14 +56,37 @@ func NewHostSources() HostSources {
 		return unavailableHostSources{}
 	}
 	return &LinuxHostSources{
-		procRoot:  "/proc",
-		readFile:  boundedOSReadFile,
-		readDir:   readDirNames,
-		readLink:  os.Readlink,
-		run:       runBoundedCommand,
-		pageSize:  uint64(os.Getpagesize()),
-		clockTick: 100,
+		procRoot:    "/proc",
+		readFile:    boundedOSReadFile,
+		readDir:     readDirNames,
+		readLink:    os.Readlink,
+		run:         runBoundedCommand,
+		pageSize:    uint64(os.Getpagesize()),
+		clockTick:   100,
+		binaryCache: make(map[string]string),
 	}
+}
+
+func (s *LinuxHostSources) processCensus() ([]ProcessCensusRow, bool) {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+	now := time.Now()
+	if s.processCacheValid && !now.Before(s.processCacheAt) && now.Sub(s.processCacheAt) < linuxProcessCensusCacheTTL {
+		return append([]ProcessCensusRow(nil), s.processCacheRows...), true
+	}
+	if s.binaryCache == nil {
+		s.binaryCache = make(map[string]string)
+	}
+	rows, ok := LinuxProcessCensus(HostCollectorInputs{
+		ReadFile: s.readFile, ReadDir: s.readDir, ReadLink: s.readLink,
+		PageSize: s.pageSize, ClockTick: s.clockTick, BinaryCache: s.binaryCache,
+	}, s.procRoot)
+	if ok {
+		s.processCacheRows = append(s.processCacheRows[:0], rows...)
+		s.processCacheAt = now
+		s.processCacheValid = true
+	}
+	return rows, ok
 }
 
 func (s *DarwinHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
@@ -205,10 +237,7 @@ func (s *LinuxHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
 	if !ok {
 		return CPUSnapshot{}, errors.New("invalid Linux CPU counters")
 	}
-	rows, ok := LinuxProcessCensus(HostCollectorInputs{
-		ReadFile: s.readFile, ReadDir: s.readDir, ReadLink: s.readLink,
-		PageSize: s.pageSize, ClockTick: s.clockTick,
-	}, s.procRoot)
+	rows, ok := s.processCensus()
 	if !ok {
 		return CPUSnapshot{}, errors.New("Linux process census unavailable")
 	}
@@ -249,10 +278,7 @@ func (s *LinuxHostSources) Memory(ctx context.Context) (MemoryCounters, []Proces
 	if !ok {
 		return MemoryCounters{}, nil, errors.New("invalid Linux memory counters")
 	}
-	rows, _ := LinuxProcessCensus(HostCollectorInputs{
-		ReadFile: s.readFile, ReadDir: s.readDir, ReadLink: s.readLink,
-		PageSize: s.pageSize, ClockTick: s.clockTick,
-	}, s.procRoot)
+	rows, _ := s.processCensus()
 	return memory, rows, nil
 }
 

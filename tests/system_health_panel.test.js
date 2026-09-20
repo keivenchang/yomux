@@ -415,6 +415,115 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
   assert.doesNotMatch(supported, /schema_unsupported/);
 });
 
+test('the Go-native local-services row is rendered as a nested process without double-counting resources', () => {
+  const native = {
+    schema_version: 5,
+    inventory: ['yolomux-go'],
+    services: [serviceRow('yolomux-go', {
+      label: 'YO!stats Go backend',
+      parent_id: 'web',
+      details: {backend: 'go', observer: 'not-attached', thread_count: measured(17)},
+    })],
+    health: healthSnapshot({available: false, reason_code: 'observer_unattached', resources: 0}),
+  };
+  const html = renderRoster(native, {expanded: ['yolomux-go']});
+  const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'yolomux-go']);
+  const row = rosterRow(html, 'yolomux-go');
+  assert.match(row, /data-subsystem-parent="web"/);
+  assert.match(row, /<span class="js-debug-system-service-name">YO!stats Go backend<\/span>/);
+  assert.doesNotMatch(row, /data-subsystem-state="schema_unsupported"/);
+  const detail = slice(html, 'id="js-debug-roster-detail-yolomux-go"', '</tr>');
+  assert.match(detail, /<dt>Threads<\/dt><dd>17<\/dd>/, 'expanded Go service details expose the measured thread count');
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  context.fixture = payloadFor(native);
+  vm.runInContext('result = debugSystemRosterSummary(debugSystemRosterRows(fixture));', context);
+  assert.equal(context.result.population, 3);
+  assert.equal(context.result.resourcePopulation, 1, 'the nested Go row shares the web process resources');
+  assert.equal(context.result.cpuPercent, 3, 'nested Go CPU is not added a second time beside the web process');
+  assert.equal(context.result.rssBytes, 88 * 1024 * 1024, 'nested Go RSS is not added a second time beside the web process');
+  assert.equal(context.result.cpuMeasured, 1, 'only the top-level process contributes to the CPU sum');
+  assert.equal(context.result.rssMeasured, 1, 'only the top-level process contributes to the RSS sum');
+});
+
+test('the Go-native disclosure reports runtime units and verified child processes', () => {
+  const native = {
+    schema_version: 5,
+    inventory: ['yolomux-go'],
+    services: [serviceRow('yolomux-go', {
+      label: 'YO!stats Go backend',
+      parent_id: 'web',
+      details: {
+        backend: 'go', observer: 'not-attached',
+        cpu_scope: 'Go process plus verified descendant processes',
+        cpu_normalization: '100% means one busy wall-clock core; values above 100% mean concurrent cores',
+        process_count: measured(2), goroutine_count: measured(23), thread_count: measured(7),
+        stats_runtime: {
+          process_diagnostics: {
+            last_roster_rows: 996, roster_cache_hits: 8, roster_cache_misses: 2,
+            last_roster_duration_ms: 4.5, metrics_cache_hits: 12, metrics_cache_misses: 3,
+            last_metrics_duration_ms: 2.25, last_thread_rows: 7, last_child_rows: 1,
+            agent_inventory_cache_hits: 4, agent_inventory_cache_misses: 2, last_agent_inventory_rows: 3,
+          },
+          collectors: {
+            host: {
+              families: {
+                cpu: {runs: 20, last_duration_ms: 3.5, duration_total_ms: 71,},
+              },
+              last_cpu_process_rows: 996,
+            },
+            agent_tokens: {
+              cycles: 2, last_duration_ms: 8, duration_total_ms: 16,
+              opencode_database_opens: 1, opencode_database_reuses: 5,
+              opencode_database_last_open_duration_ms: 120,
+              opencode_collection_duration_total_ms: 640,
+              opencode_phases: {
+                step_finish: {runs: 2, last_duration_ms: 4.2, duration_total_ms: 8.4},
+              },
+            },
+          },
+          service_refresh: {
+            runs: 20, ring_reads: 8, ring_rows: 120, bucket_decodes: 12,
+            products_built: 16, last_duration_ms: 3.75, duration_total_ms: 42,
+          },
+          lifecycle: {
+            by_resolution: [{resolution_seconds: 1, selected_cells: 4, fact_rows_read: 120, selection_duration_ms: 1.5, materialization_duration_ms: 5.25}],
+          },
+        },
+        child_processes: [{
+          pid: 7300, parent_pid: 7222, label: 'git', state: 'running',
+          cpu_now_percent: measured(4.5), rss_bytes: measured(4096),
+        }],
+      },
+    })],
+    health: healthSnapshot({available: false, reason_code: 'observer_unattached', resources: 0}),
+  };
+  const html = renderRoster(native, {expanded: ['yolomux-go']});
+  const detail = slice(html, 'id="js-debug-roster-detail-yolomux-go"', '</tr>');
+  assert.match(detail, /<dt>Processes<\/dt><dd>2<\/dd>/);
+  assert.match(detail, /<dt>Goroutines<\/dt><dd>23<\/dd>/);
+  assert.match(detail, /<dt>Threads<\/dt><dd>7<\/dd>/);
+  assert.match(detail, /<dt>CPU scope<\/dt><dd>Go process plus verified descendant processes<\/dd>/);
+  assert.match(detail, /data-go-child-processes/);
+  assert.match(detail, /data-go-child-pid="7300"/);
+  assert.match(detail, /<dt>Process<\/dt><dd>git<\/dd>/);
+  assert.match(detail, /<dt>CPU<\/dt><dd>4.5%<\/dd>/);
+  assert.match(html, /data-go-runtime-collectors/);
+  assert.match(html, /data-go-runtime-family="cpu"/);
+  assert.match(html, /996/);
+  assert.match(html, /Agent inventory cache/);
+  assert.match(html, /data-go-runtime-owner="agent_tokens:opencode"/);
+  assert.match(html, /1 opens \/ 5 reuses/);
+  assert.match(html, /data-go-runtime-service-refresh/);
+  assert.match(html, /Ring reads/);
+  assert.match(html, /data-go-runtime-opencode-phases/);
+  assert.match(html, /data-go-runtime-opencode-phase="step_finish"/);
+  assert.match(html, /data-go-runtime-lifecycle/);
+  assert.match(html, /data-go-runtime-resolution="1"/);
+  assert.match(html, /5.3ms/);
+});
+
 test('an unsupported schema row interprets NO field from the schema it cannot render', () => {
   // The second half of the same finding. The adapter kept the payload's `health` and process
   // objects, so opening the disclosure read observations, transitions, a pid and process metrics
@@ -739,6 +848,37 @@ test('the tmux signal watcher is a child of the web row with no invented process
   const demanded = rosterRow(renderRoster(localServices(), {extra: {tmux_signal_watcher: {state: 'never-started', demanded: true, sessions: [], process_pid: 0}}}), 'tmux-signal-watcher');
   assert.match(demanded, /data-subsystem-state="never-started"/);
   assert.match(demanded, /data-subsystem-tone="bad"/);
+});
+
+test('an absent tmux watcher is unsupported, not an exited control client', () => {
+  const html = renderRoster(localServices(), {extra: {tmux_signal_watcher: null}});
+  const childRow = rosterRow(html, 'tmux-signal-watcher');
+  assert.match(childRow, /data-subsystem-state="unsupported"/);
+  assert.match(childRow, /data-subsystem-tone="muted"/);
+  assert.match(childRow, /<span data-subsystem-state-label>Unsupported<\/span>/);
+  assert.match(childRow, /Tmux signal watcher is not reported by this backend/);
+  assert.doesNotMatch(childRow, /data-subsystem-state="exited"/);
+  assert.doesNotMatch(childRow, /Tmux control client exited/);
+
+  const malformed = renderRoster(localServices(), {extra: {tmux_signal_watcher: {}}});
+  const malformedRow = rosterRow(malformed, 'tmux-signal-watcher');
+  assert.match(malformedRow, /data-subsystem-state="unsupported"/);
+  assert.doesNotMatch(malformedRow, /data-subsystem-tone="bad"/);
+
+  const exited = renderRoster(localServices(), {
+    expanded: ['tmux-signal-watcher'],
+    extra: {tmux_signal_watcher: {state: 'exited', demanded: true, reason: 'Tmux control client exited'}},
+  });
+  const exitedRow = rosterRow(exited, 'tmux-signal-watcher');
+  assert.match(exitedRow, /data-subsystem-state="exited"/);
+  assert.match(exitedRow, /data-subsystem-tone="bad"/);
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  context.fixture = payloadFor(localServices(), {
+    tmux_signal_watcher: {state: 'exited', demanded: true, reason: 'Tmux control client exited'},
+  });
+  vm.runInContext('result = debugSystemAlertsHtml(fixture);', context);
+  assert.match(String(context.result), /data-system-alert="tmux-signal-watcher"/);
 });
 
 // -- NEGATIVE CONTROL: details are BUILT lazily, not hidden with CSS -----------------------------
@@ -1802,6 +1942,30 @@ test('the summary counts EVERY row the roster renders, nested child included', (
   vm.runInContext('result = debugSystemRosterSummary(debugSystemRosterRows(fixture));', context);
   assert.equal(context.result.issues, 0, context.result);
   assert.equal(context.result.idle, 1, context.result);
+});
+
+test('a Go monolith has one displayed CPU/RSS owner when the child shares the web PID', () => {
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  const go = localServices();
+  go.inventory = ['yolomux-go'];
+  go.services = [serviceRow('yolomux-go', {parent_id: 'web', pid: WEB_SERVER.pid, label: 'YO!stats Go backend'})];
+  const payload = payloadFor(go, {server: {...WEB_SERVER, pid: WEB_SERVER.pid}});
+  context.fixture = payload;
+  vm.runInContext('result = {rows: debugSystemRosterRows(fixture), html: debugSystemRosterHtml(fixture, {nowSeconds: 1902, expanded: new Set()})};', context);
+  const {rows, html} = context.result;
+  const web = rows.find(row => row.id === 'web');
+  const child = rows.find(row => row.id === 'yolomux-go');
+  assert.equal(web.metrics.cpu_now_percent.reason_code, 'resource_metrics_owned_by_nested_service');
+  assert.equal(web.metrics.rss_bytes.reason_code, 'resource_metrics_owned_by_nested_service');
+  assert.equal(child.metrics.cpu_now_percent.state, 'measured');
+  assert.equal(child.metrics.rss_bytes.state, 'measured');
+  vm.runInContext('result = debugSystemRosterSummary(debugSystemRosterRows(fixture));', context);
+  assert.equal(context.result.resourcePopulation, 1, context.result);
+  assert.equal(context.result.cpuPercent, 2, context.result);
+  assert.equal(context.result.rssBytes, 48 * 1024 * 1024, context.result);
+  assert.match(html, /data-subsystem-id="web"[\s\S]*data-metric-reason="resource_metrics_owned_by_nested_service">—/);
+  assert.match(html, /data-subsystem-id="yolomux-go"[\s\S]*data-subsystem-metric="cpu_now_percent"[^>]*>2%/);
 });
 
 test('the summary CPU number is labelled a population sum and carries no single-process budget', () => {

@@ -44,15 +44,19 @@ type AgentTokenInventory func(context.Context) ([]AgentRecord, []error)
 type AgentTokenSources func(context.Context, []AgentRecord) ([]TranscriptSource, error)
 
 type AgentTokenCollectorConfig struct {
-	Inventory                   AgentTokenInventory
-	OpenCodeInventory           AgentTokenInventory
-	TranscriptSources           AgentTokenSources
-	ClaudeTranscriptRoot        string
-	CodexTranscriptRoot         string
-	OpenCodeDatabase            string
-	CursorPath                  string
-	TranscriptCursorPath        string
-	SkipTranscriptScan          bool
+	Inventory            AgentTokenInventory
+	OpenCodeInventory    AgentTokenInventory
+	TranscriptSources    AgentTokenSources
+	ClaudeTranscriptRoot string
+	CodexTranscriptRoot  string
+	OpenCodeDatabase     string
+	CursorPath           string
+	TranscriptCursorPath string
+	SkipTranscriptScan   bool
+	// RequireTmuxPane limits production attribution to agents visible in the
+	// machine-wide tmux roster. Fixture collectors leave this false so they can
+	// scan synthetic transcript records without creating a tmux server.
+	RequireTmuxPane             bool
 	EpochID                     string
 	EpochStartedAt              float64
 	OwnerGeneration             uint64
@@ -152,7 +156,24 @@ type AgentTokenCollectorCounters struct {
 	OpenCodeInventoryTimeouts  uint64
 	AuxiliaryInventoryErrors   uint64
 	AuxiliaryInventoryTimeouts uint64
+	OpenCodeDatabaseOpens      uint64
+	OpenCodeDatabaseReuses     uint64
+	OpenCodeDatabaseLastOpen   time.Duration
+	OpenCodeDatabaseOpenTotal  time.Duration
+	OpenCodeCollectionLast     time.Duration
+	OpenCodeCollectionTotal    time.Duration
+	OpenCodePhases             map[string]OpenCodePhaseTiming
 	LastDuration               time.Duration
+	DurationTotal              time.Duration
+}
+
+// OpenCodePhaseTiming attributes the bounded database-backed portion of one
+// token cycle. Durations are diagnostic evidence only; they do not change the
+// collection or coverage contract.
+type OpenCodePhaseTiming struct {
+	Runs  uint64
+	Last  time.Duration
+	Total time.Duration
 }
 
 type agentTokenCounters struct {
@@ -160,42 +181,88 @@ type agentTokenCounters struct {
 	appendErrors, metadataErrors                                  atomic.Uint64
 	opencodeInventoryErrors, opencodeInventoryTimeouts            atomic.Uint64
 	auxiliaryInventoryErrors, auxiliaryInventoryTimeouts          atomic.Uint64
-	duration                                                      atomic.Int64
+	opencodeDatabaseOpens, opencodeDatabaseReuses                 atomic.Uint64
+	opencodeDatabaseLastOpen, opencodeDatabaseOpenTotal           atomic.Int64
+	opencodeCollectionLast, opencodeCollectionTotal               atomic.Int64
+	duration, durationTotal                                       atomic.Int64
+	opencodePhaseMu                                               sync.Mutex
+	opencodePhases                                                map[string]OpenCodePhaseTiming
 }
 
 func (c *agentTokenCounters) snapshot() AgentTokenCollectorCounters {
+	c.opencodePhaseMu.Lock()
+	phases := make(map[string]OpenCodePhaseTiming, len(c.opencodePhases))
+	for name, timing := range c.opencodePhases {
+		phases[name] = timing
+	}
+	c.opencodePhaseMu.Unlock()
 	return AgentTokenCollectorCounters{
 		Cycles: c.cycles.Load(), UsageAccepted: c.usage.Load(), UsageDuplicates: c.usageDuplicates.Load(), CoverageAccepted: c.coverage.Load(),
 		UnavailableAccepted: c.unavailable.Load(), Errors: c.errors.Load(), AppendErrors: c.appendErrors.Load(), MetadataErrors: c.metadataErrors.Load(),
 		OpenCodeInventoryErrors: c.opencodeInventoryErrors.Load(), OpenCodeInventoryTimeouts: c.opencodeInventoryTimeouts.Load(),
 		AuxiliaryInventoryErrors: c.auxiliaryInventoryErrors.Load(), AuxiliaryInventoryTimeouts: c.auxiliaryInventoryTimeouts.Load(),
-		LastDuration: time.Duration(c.duration.Load()),
+		OpenCodeDatabaseOpens: c.opencodeDatabaseOpens.Load(), OpenCodeDatabaseReuses: c.opencodeDatabaseReuses.Load(),
+		OpenCodeDatabaseLastOpen: time.Duration(c.opencodeDatabaseLastOpen.Load()), OpenCodeDatabaseOpenTotal: time.Duration(c.opencodeDatabaseOpenTotal.Load()),
+		OpenCodeCollectionLast: time.Duration(c.opencodeCollectionLast.Load()), OpenCodeCollectionTotal: time.Duration(c.opencodeCollectionTotal.Load()),
+		OpenCodePhases: phases,
+		LastDuration:   time.Duration(c.duration.Load()), DurationTotal: time.Duration(c.durationTotal.Load()),
 	}
+}
+
+func (c *agentTokenCounters) recordOpenCodePhase(name string, duration time.Duration) {
+	if duration < 0 {
+		duration = 0
+	}
+	c.opencodePhaseMu.Lock()
+	if c.opencodePhases == nil {
+		c.opencodePhases = make(map[string]OpenCodePhaseTiming)
+	}
+	timing := c.opencodePhases[name]
+	timing.Runs++
+	timing.Last = duration
+	timing.Total += duration
+	c.opencodePhases[name] = timing
+	c.opencodePhaseMu.Unlock()
 }
 
 // AgentTokenCollectionSnapshot is a bounded, runtime-only diagnostic view of
 // the token collector. It is deliberately separate from the persisted stats
 // payload so existing browser consumers do not acquire new stream semantics.
 type AgentTokenCollectionSnapshot struct {
-	Cycles                     uint64 `json:"cycles"`
-	LastAttemptAt              string `json:"last_attempt_at,omitempty"`
-	LastSuccessAt              string `json:"last_success_at,omitempty"`
-	UsageAccepted              uint64 `json:"usage_accepted"`
-	UsageDuplicates            uint64 `json:"usage_duplicates"`
-	OpenCodeInventoryRecords   int    `json:"opencode_inventory_records"`
-	OpenCodeInventoryErrors    uint64 `json:"opencode_inventory_errors"`
-	OpenCodeInventoryTimeouts  uint64 `json:"opencode_inventory_timeouts"`
-	OpenCodeInventoryLastError string `json:"opencode_inventory_last_error,omitempty"`
-	BatchAtoms                 int    `json:"batch_atoms"`
-	BatchCoverageEpochs        int    `json:"batch_coverage_epochs"`
-	BatchUnavailableSpans      int    `json:"batch_unavailable_spans"`
-	AppendErrors               uint64 `json:"append_errors"`
-	MetadataErrors             uint64 `json:"metadata_errors"`
-	LastAppendError            string `json:"last_append_error,omitempty"`
-	LastMetadataError          string `json:"last_metadata_error,omitempty"`
-	SourceDBPath               string `json:"source_db_path,omitempty"`
-	SourceCursorPath           string `json:"source_cursor_path,omitempty"`
-	LastReason                 string `json:"last_reason,omitempty"`
+	Cycles                      uint64                           `json:"cycles"`
+	LastDurationMS              float64                          `json:"last_duration_ms"`
+	DurationTotalMS             float64                          `json:"duration_total_ms"`
+	LastAttemptAt               string                           `json:"last_attempt_at,omitempty"`
+	LastSuccessAt               string                           `json:"last_success_at,omitempty"`
+	UsageAccepted               uint64                           `json:"usage_accepted"`
+	UsageDuplicates             uint64                           `json:"usage_duplicates"`
+	OpenCodeInventoryRecords    int                              `json:"opencode_inventory_records"`
+	OpenCodeInventoryErrors     uint64                           `json:"opencode_inventory_errors"`
+	OpenCodeInventoryTimeouts   uint64                           `json:"opencode_inventory_timeouts"`
+	OpenCodeInventoryLastError  string                           `json:"opencode_inventory_last_error,omitempty"`
+	OpenCodeDatabaseOpens       uint64                           `json:"opencode_database_opens"`
+	OpenCodeDatabaseReuses      uint64                           `json:"opencode_database_reuses"`
+	OpenCodeDatabaseLastOpenMS  float64                          `json:"opencode_database_last_open_duration_ms"`
+	OpenCodeDatabaseOpenTotalMS float64                          `json:"opencode_database_open_duration_total_ms"`
+	OpenCodeCollectionLastMS    float64                          `json:"opencode_collection_last_duration_ms"`
+	OpenCodeCollectionTotalMS   float64                          `json:"opencode_collection_duration_total_ms"`
+	OpenCodePhases              map[string]OpenCodePhaseSnapshot `json:"opencode_phases,omitempty"`
+	BatchAtoms                  int                              `json:"batch_atoms"`
+	BatchCoverageEpochs         int                              `json:"batch_coverage_epochs"`
+	BatchUnavailableSpans       int                              `json:"batch_unavailable_spans"`
+	AppendErrors                uint64                           `json:"append_errors"`
+	MetadataErrors              uint64                           `json:"metadata_errors"`
+	LastAppendError             string                           `json:"last_append_error,omitempty"`
+	LastMetadataError           string                           `json:"last_metadata_error,omitempty"`
+	SourceDBPath                string                           `json:"source_db_path,omitempty"`
+	SourceCursorPath            string                           `json:"source_cursor_path,omitempty"`
+	LastReason                  string                           `json:"last_reason,omitempty"`
+}
+
+type OpenCodePhaseSnapshot struct {
+	Runs            uint64  `json:"runs"`
+	LastDurationMS  float64 `json:"last_duration_ms"`
+	TotalDurationMS float64 `json:"total_duration_ms"`
 }
 
 type agentTokenDiagnostics struct {
@@ -212,22 +279,27 @@ type agentTokenDiagnostics struct {
 // AgentTokenCollector owns one bounded collection goroutine. RunOnce is safe
 // for deterministic callers and is the transaction boundary used by tests.
 type AgentTokenCollector struct {
-	writer           BatchWriter
-	clock            HostCollectorClock
-	config           AgentTokenCollectorConfig
-	transcriptStates map[string]*TranscriptScannerState
-	transcriptCursor *TranscriptCursorStore
-	cursor           *OpenCodeTokenCursor
-	counters         agentTokenCounters
-	diagnosticMu     sync.RWMutex
-	diagnostics      agentTokenDiagnostics
-	mu               sync.Mutex
-	run              bool
-	stop             context.CancelFunc
-	done             chan struct{}
-	lastCadence      float64
-	epochBaseID      string
-	epochSequence    uint64
+	writer                 BatchWriter
+	clock                  HostCollectorClock
+	config                 AgentTokenCollectorConfig
+	transcriptStates       map[string]*TranscriptScannerState
+	transcriptCursor       *TranscriptCursorStore
+	cursor                 *OpenCodeTokenCursor
+	openCodeDatabaseMu     sync.Mutex
+	openCodeDatabase       *OpenCodeDatabase
+	openCodeDatabasePath   string
+	openCodeDatabaseDevice uint64
+	openCodeDatabaseInode  uint64
+	counters               agentTokenCounters
+	diagnosticMu           sync.RWMutex
+	diagnostics            agentTokenDiagnostics
+	mu                     sync.Mutex
+	run                    bool
+	stop                   context.CancelFunc
+	done                   chan struct{}
+	lastCadence            float64
+	epochBaseID            string
+	epochSequence          uint64
 }
 
 func NewAgentTokenCollector(writer BatchWriter, clock HostCollectorClock, config AgentTokenCollectorConfig) *AgentTokenCollector {
@@ -249,23 +321,37 @@ func (c *AgentTokenCollector) Snapshot() AgentTokenCollectionSnapshot {
 	diagnostics := c.diagnostics
 	c.diagnosticMu.RUnlock()
 	snapshot := AgentTokenCollectionSnapshot{
-		Cycles:                     counters.Cycles,
-		UsageAccepted:              counters.UsageAccepted,
-		UsageDuplicates:            counters.UsageDuplicates,
-		OpenCodeInventoryRecords:   diagnostics.opencodeInventoryRecords,
-		OpenCodeInventoryErrors:    counters.OpenCodeInventoryErrors,
-		OpenCodeInventoryTimeouts:  counters.OpenCodeInventoryTimeouts,
-		OpenCodeInventoryLastError: diagnostics.opencodeInventoryLastError,
-		BatchAtoms:                 diagnostics.batch.BatchAtoms,
-		BatchCoverageEpochs:        diagnostics.batch.BatchCoverageEpochs,
-		BatchUnavailableSpans:      diagnostics.batch.BatchUnavailableSpans,
-		AppendErrors:               counters.AppendErrors,
-		MetadataErrors:             counters.MetadataErrors,
-		LastAppendError:            diagnostics.lastAppendError,
-		LastMetadataError:          diagnostics.lastMetadataError,
-		SourceDBPath:               diagnosticPath(c.config.OpenCodeDatabase),
-		SourceCursorPath:           diagnosticPath(c.cursor.path),
-		LastReason:                 diagnostics.lastReason,
+		Cycles:                      counters.Cycles,
+		LastDurationMS:              counters.LastDuration.Seconds() * 1000,
+		DurationTotalMS:             counters.DurationTotal.Seconds() * 1000,
+		UsageAccepted:               counters.UsageAccepted,
+		UsageDuplicates:             counters.UsageDuplicates,
+		OpenCodeInventoryRecords:    diagnostics.opencodeInventoryRecords,
+		OpenCodeInventoryErrors:     counters.OpenCodeInventoryErrors,
+		OpenCodeInventoryTimeouts:   counters.OpenCodeInventoryTimeouts,
+		OpenCodeInventoryLastError:  diagnostics.opencodeInventoryLastError,
+		OpenCodeDatabaseOpens:       counters.OpenCodeDatabaseOpens,
+		OpenCodeDatabaseReuses:      counters.OpenCodeDatabaseReuses,
+		OpenCodeDatabaseLastOpenMS:  counters.OpenCodeDatabaseLastOpen.Seconds() * 1000,
+		OpenCodeDatabaseOpenTotalMS: counters.OpenCodeDatabaseOpenTotal.Seconds() * 1000,
+		OpenCodeCollectionLastMS:    counters.OpenCodeCollectionLast.Seconds() * 1000,
+		OpenCodeCollectionTotalMS:   counters.OpenCodeCollectionTotal.Seconds() * 1000,
+		BatchAtoms:                  diagnostics.batch.BatchAtoms,
+		BatchCoverageEpochs:         diagnostics.batch.BatchCoverageEpochs,
+		BatchUnavailableSpans:       diagnostics.batch.BatchUnavailableSpans,
+		AppendErrors:                counters.AppendErrors,
+		MetadataErrors:              counters.MetadataErrors,
+		LastAppendError:             diagnostics.lastAppendError,
+		LastMetadataError:           diagnostics.lastMetadataError,
+		SourceDBPath:                diagnosticPath(c.config.OpenCodeDatabase),
+		SourceCursorPath:            diagnosticPath(c.cursor.path),
+		LastReason:                  diagnostics.lastReason,
+	}
+	if len(counters.OpenCodePhases) > 0 {
+		snapshot.OpenCodePhases = make(map[string]OpenCodePhaseSnapshot, len(counters.OpenCodePhases))
+		for name, timing := range counters.OpenCodePhases {
+			snapshot.OpenCodePhases[name] = OpenCodePhaseSnapshot{Runs: timing.Runs, LastDurationMS: timing.Last.Seconds() * 1000, TotalDurationMS: timing.Total.Seconds() * 1000}
+		}
 	}
 	if !diagnostics.lastAttemptAt.IsZero() {
 		snapshot.LastAttemptAt = diagnostics.lastAttemptAt.UTC().Format(time.RFC3339Nano)
@@ -429,12 +515,55 @@ func (c *AgentTokenCollector) Stop() {
 	c.mu.Lock()
 	if !c.run {
 		c.mu.Unlock()
+		c.closeOpenCodeDatabase()
 		return
 	}
 	stop, done := c.stop, c.done
 	c.mu.Unlock()
 	stop()
 	<-done
+	c.closeOpenCodeDatabase()
+}
+
+// closeOpenCodeDatabase releases the long-lived read-only handle owned by the
+// collector. Keeping this handle across ten-second cycles avoids repeating
+// SQLite connection setup and schema validation against a potentially large
+// external database, while Stop still gives tests and shutdown a deterministic
+// close boundary.
+func (c *AgentTokenCollector) closeOpenCodeDatabase() {
+	c.openCodeDatabaseMu.Lock()
+	database := c.openCodeDatabase
+	c.openCodeDatabase = nil
+	c.openCodeDatabasePath = ""
+	c.openCodeDatabaseDevice = 0
+	c.openCodeDatabaseInode = 0
+	c.openCodeDatabaseMu.Unlock()
+	if database != nil {
+		_ = database.Close()
+	}
+}
+
+func (c *AgentTokenCollector) openCachedOpenCodeDatabase(ctx context.Context, path string, device, inode uint64) (*OpenCodeDatabase, bool, time.Duration, error) {
+	c.openCodeDatabaseMu.Lock()
+	defer c.openCodeDatabaseMu.Unlock()
+	if c.openCodeDatabase != nil && c.openCodeDatabasePath == path && c.openCodeDatabaseDevice == device && c.openCodeDatabaseInode == inode {
+		return c.openCodeDatabase, true, 0, nil
+	}
+	if c.openCodeDatabase != nil {
+		_ = c.openCodeDatabase.Close()
+		c.openCodeDatabase = nil
+	}
+	started := time.Now()
+	database, err := OpenOpenCodeReadOnly(ctx, path)
+	duration := time.Since(started)
+	if err != nil {
+		return nil, false, duration, err
+	}
+	c.openCodeDatabase = database
+	c.openCodeDatabasePath = path
+	c.openCodeDatabaseDevice = device
+	c.openCodeDatabaseInode = inode
+	return database, false, duration, nil
 }
 func (c *AgentTokenCollector) loop(ctx context.Context) {
 	defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
@@ -456,7 +585,14 @@ func (c *AgentTokenCollector) loop(ctx context.Context) {
 func (c *AgentTokenCollector) RunOnce(parent context.Context) {
 	started := c.clock.Now()
 	c.setAttempt(started)
-	defer func() { c.counters.duration.Store(c.clock.Now().Sub(started).Nanoseconds()) }()
+	defer func() {
+		elapsed := c.clock.Now().Sub(started)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		c.counters.duration.Store(elapsed.Nanoseconds())
+		c.counters.durationTotal.Add(elapsed.Nanoseconds())
+	}()
 	c.counters.cycles.Add(1)
 	cadence := AgentTokenActiveCadence
 	if c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
@@ -505,6 +641,9 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 	openCtx, openCancel := context.WithTimeout(parent, c.config.OpenCodeInventoryTimeout)
 	records, inventoryErrors, timedOut := runBoundedAgentInventory(openCtx, opencodeInventory)
 	openCancel()
+	if c.config.RequireTmuxPane {
+		records = tmuxScopedAgentRecords(records)
+	}
 	c.recordInventory(records, inventoryErrors, timedOut)
 	if timedOut {
 		c.counters.opencodeInventoryTimeouts.Add(1)
@@ -532,7 +671,9 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 	}
 	openAppendCtx, openAppendCancel := context.WithTimeout(parent, c.config.OpenCodeAppendTimeout)
 	c.recordBatch(openBatch)
+	openAppendStarted := time.Now()
 	appendOK, metadataError, appendErr := c.appendOpenCodeCollected(openAppendCtx, openBatch, receipt)
+	c.counters.recordOpenCodePhase("append", time.Since(openAppendStarted))
 	openAppendCancel()
 	openCollectCancel()
 	if !appendOK {
@@ -556,6 +697,9 @@ func (c *AgentTokenCollector) runOnceSplit(parent context.Context, observed, cad
 		if len(auxiliaryErrors) > 0 {
 			c.counters.auxiliaryInventoryErrors.Add(uint64(len(auxiliaryErrors)))
 		}
+	}
+	if c.config.RequireTmuxPane {
+		auxiliaryRecords = tmuxScopedAgentRecords(auxiliaryRecords)
 	}
 	transcriptCtx, cancel := context.WithTimeout(parent, c.config.TranscriptDiscoveryTimeout)
 	defer cancel()
@@ -729,6 +873,9 @@ func (c *AgentTokenCollector) collect(parent context.Context, observed, cadence 
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{{Family: "agent_tokens", SourceID: c.config.SourceID, EpochID: c.config.EpochID, StartedAt: observed, EndedAt: observed + cadence, NativeCadenceSeconds: cadence, Reason: "inventory-unavailable", OwnerGeneration: c.config.OwnerGeneration}}}, nil, nil
 	}
 	records, inventoryErrors := c.config.Inventory(parent)
+	if c.config.RequireTmuxPane {
+		records = tmuxScopedAgentRecords(records)
+	}
 	if len(records) > maxAgentTokenSources {
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{{Family: "agent_tokens", SourceID: c.config.SourceID, EpochID: c.config.EpochID, StartedAt: observed, EndedAt: observed + cadence, NativeCadenceSeconds: cadence, Reason: "inventory-bound-exceeded", OwnerGeneration: c.config.OwnerGeneration}}}, nil, nil
 	}
@@ -959,14 +1106,24 @@ func unavailableSpanLess(left, right UnavailableSpan) bool {
 }
 
 func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cadence float64, records []AgentRecord) (batch AppendBatch, receipt *agentTokenReceipt, err error) {
+	collectionStarted := time.Now()
+	defer func() {
+		duration := time.Since(collectionStarted)
+		c.counters.opencodeCollectionLast.Store(duration.Nanoseconds())
+		c.counters.opencodeCollectionTotal.Add(duration.Nanoseconds())
+	}()
 	defer func() { deduplicateUnavailableSpans(&batch) }()
+	identityCursorStarted := time.Now()
 	identity, err := os.Stat(c.config.OpenCodeDatabase)
 	if err != nil {
+		c.counters.recordOpenCodePhase("identity_cursor", time.Since(identityCursorStarted))
+		c.closeOpenCodeDatabase()
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode", observed, cadence, "database-unavailable")}}, nil, nil
 	}
 	device, inode := fileIdentity(identity)
 	cursorState, err := c.cursor.state()
 	if err != nil {
+		c.counters.recordOpenCodePhase("identity_cursor", time.Since(identityCursorStarted))
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
 	}
 	cursorBefore := cursorState.clone()
@@ -974,17 +1131,27 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 		cursorState = openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}, Device: device, Inode: inode}
 	}
 	cursorState.Device, cursorState.Inode = device, inode
-	db, err := OpenOpenCodeReadOnly(ctx, c.config.OpenCodeDatabase)
+	c.counters.recordOpenCodePhase("identity_cursor", time.Since(identityCursorStarted))
+	databaseStarted := time.Now()
+	db, reused, openDuration, err := c.openCachedOpenCodeDatabase(ctx, c.config.OpenCodeDatabase, device, inode)
+	c.counters.recordOpenCodePhase("database_open", time.Since(databaseStarted))
+	if reused {
+		c.counters.opencodeDatabaseReuses.Add(1)
+	} else {
+		c.counters.opencodeDatabaseOpens.Add(1)
+		c.counters.opencodeDatabaseLastOpen.Store(openDuration.Nanoseconds())
+		c.counters.opencodeDatabaseOpenTotal.Add(openDuration.Nanoseconds())
+	}
 	if err != nil {
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode", observed, cadence, err.Error())}}, nil, nil
 	}
-	defer db.Close()
 	proposed := cursorState.clone()
 	batch = AppendBatch{}
 	type rootClaim struct {
 		key    string
 		record AgentRecord
 	}
+	claimsStarted := time.Now()
 	claims := map[string]rootClaim{}
 	for _, record := range records {
 		if record.Kind != "opencode" {
@@ -1031,6 +1198,7 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 		}
 		claims[sessionID] = candidate
 	}
+	c.counters.recordOpenCodePhase("claims", time.Since(claimsStarted))
 	rootIDs := make([]string, 0, len(claims))
 	for sessionID := range claims {
 		rootIDs = append(rootIDs, sessionID)
@@ -1045,6 +1213,7 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 	rootWindows := make([]rootWindow, 0, len(rootIDs))
 	selections := make([]OpenCodeStepFinishSelection, 0)
 	initialCursor := len(proposed.Parts) == 0
+	treesStarted := time.Now()
 	for _, sessionID := range rootIDs {
 		claim := claims[sessionID]
 		tree, treeErr := db.ReadCurrentSessionDescendantFrontier(ctx, sessionID, MaxOpenCodeSessionTree)
@@ -1081,10 +1250,13 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 		}
 		rootWindows = append(rootWindows, rootWindow{sessionID, claim, tree, initiallyUnseen})
 	}
+	c.counters.recordOpenCodePhase("session_tree", time.Since(treesStarted))
 	var window OpenCodeStepFinishWindow
+	stepFinishStarted := time.Now()
 	if len(selections) > 0 {
 		window, err = db.ReadStepFinishPartsForSelections(ctx, selections, int64(observed*1000)+1, proposed.Parts, MaxOpenCodePartReadLimit)
 	}
+	c.counters.recordOpenCodePhase("step_finish", time.Since(stepFinishStarted))
 	if err != nil {
 		for _, root := range rootWindows {
 			c.appendOpenCodeUnavailable(&batch, "opencode:"+root.id, observed, cadence, err.Error())
@@ -1123,12 +1295,16 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 			batch.CoverageEpochs = append(batch.CoverageEpochs, agentTokenCoverage(c.config, "opencode:"+root.id, observed, cadence))
 		}
 	}
+	cursorPrepareStarted := time.Now()
 	if !proposed.changed(cursorState) {
+		c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
 		return batch, nil, nil
 	}
 	if err := c.cursor.prepare(cursorBefore, proposed); err != nil {
+		c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
 	}
+	c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
 	committed := proposed.clone()
 	return batch, &agentTokenReceipt{
 		commit:   func() error { return c.cursor.commit(committed) },
@@ -1392,6 +1568,12 @@ func defaultAgentTokenSources(ctx context.Context, records []AgentRecord, config
 func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord, bounds transcriptDiscoveryBounds, configuredRoots ...string) ([]TranscriptSource, error) {
 	seen := map[string]bool{}
 	out := []TranscriptSource{}
+	fallbackRecords := make([]AgentRecord, 0, len(records))
+	exactCodexScopes := make(map[string]bool)
+	// Resolve exact Codex rollouts from the live process file descriptors before
+	// walking either transcript root. A large historical root can consume the
+	// bounded discovery interval; letting an unrelated Claude walk run first
+	// would otherwise prevent the active Codex pane from ever contributing.
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
 			return out, err
@@ -1401,6 +1583,29 @@ func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord,
 		}
 		if record.TranscriptPath != "" {
 			addTranscriptSource(&out, seen, record.TranscriptPath, record)
+			if record.Kind == "codex" {
+				exactCodexScopes[agentTokenScope(record)] = true
+			}
+			continue
+		}
+		if record.Kind == "codex" {
+			root := defaultTranscriptRoot(record.Kind, configuredRoots...)
+			if exact := codexTranscriptFromProcessFD(record.PID, root); exact != "" {
+				addTranscriptSource(&out, seen, exact, record)
+				exactCodexScopes[agentTokenScope(record)] = true
+				continue
+			}
+		}
+		fallbackRecords = append(fallbackRecords, record)
+	}
+	for _, record := range fallbackRecords {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		// The native Codex process and its launcher wrapper can both appear in
+		// one pane. Once the native process supplied an exact open rollout, do
+		// not make the wrapper trigger a second historical-root walk.
+		if record.Kind == "codex" && exactCodexScopes[agentTokenScope(record)] {
 			continue
 		}
 		root := defaultTranscriptRoot(record.Kind, configuredRoots...)
@@ -1420,6 +1625,69 @@ func defaultAgentTokenSourcesBounded(ctx context.Context, records []AgentRecord,
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+func agentTokenScope(record AgentRecord) string {
+	if record.TmuxPaneID != "" {
+		return "pane:" + record.TmuxPaneID
+	}
+	if record.TmuxSession != "" {
+		return "session:" + record.TmuxSession
+	}
+	return fmt.Sprintf("pid:%d", record.PID)
+}
+
+// codexTranscriptFromProcessFD mirrors the Python session resolver's
+// process-owned lookup: the active Codex process has the rollout JSONL open,
+// so resolving that descriptor is both exact and independent of a potentially
+// multi-gigabyte historical CODEX_HOME tree.
+func codexTranscriptFromProcessFD(pid int, root string) string {
+	if pid <= 0 || root == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
+	if err != nil {
+		return ""
+	}
+	targets := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		target, readErr := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name()))
+		if readErr == nil {
+			targets = append(targets, target)
+		}
+	}
+	return newestCodexTranscriptTarget(root, targets)
+}
+
+func newestCodexTranscriptTarget(root string, targets []string) string {
+	root = filepath.Clean(root)
+	candidates := make([]string, 0, len(targets))
+	for _, target := range targets {
+		target = strings.TrimSuffix(target, " (deleted)")
+		if filepath.Base(target) == "" || !strings.HasPrefix(filepath.Base(target), "rollout-") || filepath.Ext(target) != ".jsonl" {
+			continue
+		}
+		relative, err := filepath.Rel(root, target)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			continue
+		}
+		if _, err := os.Stat(target); err != nil {
+			continue
+		}
+		candidates = append(candidates, filepath.Clean(target))
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left, leftErr := os.Stat(candidates[i])
+		right, rightErr := os.Stat(candidates[j])
+		if leftErr == nil && rightErr == nil && !left.ModTime().Equal(right.ModTime()) {
+			return left.ModTime().After(right.ModTime())
+		}
+		return candidates[i] < candidates[j]
+	})
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 func addTranscriptSource(out *[]TranscriptSource, seen map[string]bool, path string, record AgentRecord) {

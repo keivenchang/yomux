@@ -224,6 +224,51 @@ func isRepositoryDescriptor(parent *os.File, name string) bool {
 	return err == nil && (info.IsDir() || info.Mode().IsRegular())
 }
 
+// isRepositoryMarkerAt is the bounded fast-list probe. The parent directory has already been
+// authorized and pinned by Service.open, so reopening the child through openDescriptorChild would
+// only repeat the full path-resolution and identity walk for a marker that needs two openat calls.
+// The full isRepositoryDescriptor path remains the owner for rich listings and symlink targets;
+// FastList deliberately treats a symlinked repo as deferred metadata instead of paying that cost.
+func isRepositoryMarkerAt(parent *os.File, name string) bool {
+	child, err := openAt(parent, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	defer child.Close()
+	for _, marker := range []string{".git", ".hg", ".svn", ".jj"} {
+		markerFile, markerErr := openAt(child, marker, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if markerErr != nil {
+			continue
+		}
+		markerInfo, statErr := markerFile.Stat()
+		_ = markerFile.Close()
+		if statErr != nil {
+			continue
+		}
+		if marker == ".git" {
+			// Keep the established Go contract: a .git file (linked worktree) or directory
+			// is enough to classify the child during the cheap first-paint pass.
+			return markerInfo.Mode().IsRegular() || markerInfo.IsDir()
+		}
+		if !markerInfo.IsDir() {
+			continue
+		}
+		required := map[string][]string{
+			".hg":  {"requires", "store"},
+			".svn": {"wc.db", "entries"},
+			".jj":  {"repo", "working_copy"},
+		}[marker]
+		for _, childName := range required {
+			requiredFile, requiredErr := openAt(child, filepath.Join(marker, childName), syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+			if requiredErr == nil {
+				_ = requiredFile.Close()
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func copyDescriptor(file *os.File) (*os.File, error) {
 	fd, err := syscall.Dup(int(file.Fd()))
 	if err != nil {

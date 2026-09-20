@@ -67,6 +67,8 @@ type Writer struct {
 	validateCurrentFamilies bool
 	mutationMu              sync.Mutex
 	sourceGeneration        atomic.Int64
+	dataVersion             int64
+	dataVersionReady        bool
 	pendingMu               sync.RWMutex
 	pending                 map[[2]int64]int64
 	pendingReady            bool
@@ -203,6 +205,9 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		return closeOnError(fmt.Errorf("publish YO!stats writer fence: %w", err))
 	}
 	writer := &Writer{db: db, lease: lease, pending: make(map[[2]int64]int64)}
+	if err := writer.initializeDataVersion(ctx); err != nil {
+		return closeOnError(fmt.Errorf("read YO!stats data version: %w", err))
+	}
 	var sourceGeneration, publishedGeneration int64
 	if err := db.QueryRowContext(ctx, "SELECT source_generation FROM schema_meta WHERE singleton=1").Scan(&sourceGeneration); err != nil {
 		return closeOnError(fmt.Errorf("read YO!stats source generation: %w", err))
@@ -263,6 +268,84 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		return closeOnError(fmt.Errorf("read YO!stats pending invalidations: %w", err))
 	}
 	return writer, nil
+}
+
+// initializeDataVersion records SQLite's connection-local external-commit
+// counter. SQLite does not advance this value for writes made through the
+// same connection, but it does advance it after a legacy/direct writer commits
+// through another connection. That distinction preserves reconciliation when
+// an external mutation reuses the current generation and a normal Go append
+// later advances the generation before the lifecycle tick runs.
+func (w *Writer) initializeDataVersion(ctx context.Context) error {
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
+	return w.readDataVersionLocked(ctx, false)
+}
+
+func (w *Writer) readDataVersionLocked(ctx context.Context, detect bool) error {
+	return w.readDataVersionLockedAt(ctx, detect, float64(time.Now().UnixNano())/1e9)
+}
+
+func (w *Writer) readDataVersionLockedAt(ctx context.Context, detect bool, now float64) error {
+	if w == nil || w.db == nil {
+		return errors.New("nil YO!stats writer")
+	}
+	if math.IsNaN(now) || math.IsInf(now, 0) || now < 0 {
+		return errors.New("invalid YO!stats reconciliation time")
+	}
+	var version int64
+	if err := w.db.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version); err != nil {
+		return err
+	}
+	changed := w.dataVersionReady && version != w.dataVersion
+	w.dataVersion = version
+	w.dataVersionReady = true
+	if detect && changed {
+		var generation, publishedGeneration int64
+		if err := w.db.QueryRowContext(ctx, "SELECT source_generation FROM schema_meta WHERE singleton=1").Scan(&generation); err != nil {
+			return err
+		}
+		if err := w.db.QueryRowContext(ctx, "SELECT source_generation FROM aggregate_publication WHERE singleton=1").Scan(&publishedGeneration); err != nil {
+			return err
+		}
+		if publishedGeneration > generation {
+			generation = publishedGeneration
+		}
+		tx, err := w.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if err := recordExternalGenerationInvalidations(ctx, tx, generation, now); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if err := w.refreshPendingCache(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReconcileExternalMutation notices a commit made outside this Writer and
+// records bounded invalidations before the lifecycle selects work. The caller
+// need not rely on source_generation changing: direct writers sometimes reuse
+// the current watermark.
+func (w *Writer) ReconcileExternalMutation(ctx context.Context) error {
+	return w.ReconcileExternalMutationAt(ctx, float64(time.Now().UnixNano())/1e9)
+}
+
+// ReconcileExternalMutationAt is the deterministic-clock variant used by the
+// lifecycle owner and synthetic fixtures. The reconciliation timestamp must
+// use the same clock as bucket selection; otherwise a fixture timeline (or a
+// restored logical clock) can be discarded as older than wall-clock retention
+// before its external fact mutation is converted to ring invalidations.
+func (w *Writer) ReconcileExternalMutationAt(ctx context.Context, now float64) error {
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
+	return w.readDataVersionLockedAt(ctx, true, now)
 }
 
 // validateWriterDatabaseReadOnly is intentionally separate from OpenReadOnly:

@@ -630,6 +630,9 @@ const fileExplorerFinderSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
   signature: '',
   loading: false,
+  diffBackfillPending: false,
+  partialBackfillPainted: false,
+  fastListingPainted: false,
   guard: makeGenerationGuard(),
   abortController: null,
   completionWaiter: null,
@@ -20255,10 +20258,26 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
     ? tabberActivityPayload.agent_windows[String(session || '')]
     : null;
-  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
+  let stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const stateRevision = agentWindowSnapshotRevision(statePayload);
   const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
+  // Go has no Python auto-approve snapshot. During a pane-capture miss, its shared activity
+  // snapshot can already have recovered to a concrete state while the compatibility state map
+  // still contains `unavailable`. Let that newer Go activity row repair only the unavailable
+  // canonical row; Python keeps its normal canonical-status precedence unchanged.
+  const activityCanRepairUnavailable = !(stateRevision > 0 && activityRevision > 0 && activityRevision < stateRevision);
+  if (activityCanRepairUnavailable
+      && typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback()) {
+    stateRows = stateRows.map(stateRow => {
+      if (agentWindowStateKey(stateRow?.state) !== 'unavailable') return stateRow;
+      const replacement = activityRows.find(activityRow => (
+        agentWindowPayloadKey(activityRow) === agentWindowPayloadKey(stateRow)
+        && agentWindowStateKey(activityRow?.state) !== 'unavailable'
+      ));
+      return replacement ? {...stateRow, ...replacement} : stateRow;
+    });
+  }
   // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
   // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
   // not. Old clients have no revision and retain the established compatibility behavior.
@@ -20802,7 +20821,10 @@ function refreshAgentWindowActivityDisplays() {
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (typeof refreshTabberPanels === 'function'
+      && typeof itemInLayout === 'function'
+      && typeof tabberItemId !== 'undefined'
+      && itemInLayout(tabberItemId)) refreshTabberPanels();
   if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
 }
 
@@ -21136,6 +21158,13 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const animate = options.animate !== false;
   const pulse = !acknowledging && animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
+  // Working markers must keep their green liveness signal for the whole run. The optional
+  // broad attention pulse is disabled by default, and the short transition pulse expires;
+  // without this independent class a long Codex turn looks idle.
+  const alwaysWorkingPulse = !acknowledging
+    && animate
+    && tone === STATE_KEY.working
+    && options.alwaysPulseWorking !== false;
   const transitionPulse = !acknowledging && animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && agentWindowVisibleTone(tone);
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
@@ -21169,6 +21198,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     acknowledgementShapeClass,
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
+    alwaysWorkingPulse ? 'heartbeat-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
     tone === 'unavailable' ? 'status-indicator--blocked' : '',
@@ -21185,7 +21215,8 @@ function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
   const subwindowPulse = item?.pulseActive !== false;
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
-  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
+  const alwaysWorkingPulse = options.alwaysPulseWorking === true && tone === STATE_KEY.working;
+  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse || alwaysWorkingPulse;
   if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
     const durationMs = Math.max(1, Number(agentStatusPulsePeriodMs) || 1);
@@ -21220,6 +21251,12 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   // sub-window. Parent Tab circles are status-only, so they still disappear entirely.
   if (acknowledged && statusOnly) return '';
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
+  const animate = options.animate !== false;
+  // A working marker is a live liveness signal on every surface, not only on the
+  // status-only parent tab. Keep the green heartbeat after the short transition
+  // glow has expired; callers may explicitly suppress it for static snapshots.
+  const alwaysPulseWorking = animate && (options.alwaysPulseWorking === true
+    || (item?.state === STATE_KEY.working && options.alwaysPulseWorking !== false));
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -21230,6 +21267,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {
     animate: options.animate !== false,
     subwindowGlyphPulse,
+    alwaysPulseWorking,
     acknowledgementPreview: options.acknowledgementPreview === true,
   });
   if (statusOnly && !markerHtml) return '';
@@ -21239,6 +21277,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {
     subwindowGlyphPulse,
+    alwaysPulseWorking,
     acknowledgementPreview: options.acknowledgementPreview === true,
   });
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
@@ -21470,26 +21509,37 @@ function toggleFileExplorer() {
 async function resolveFileExplorerDirectoryRoot(path, options = {}) {
   const requested = normalizeDirectoryPath(expandUserPath(path));
   try {
+    // A directory listing is the fastest useful answer for an unverified root. The old order
+    // performed a full INFO batch first, which made opening a cold repository wait for Git-aware
+    // metadata before the user saw even its plain directory rows. A file path cannot be listed;
+    // only that case falls through to INFO so it can resolve to the containing directory.
+    const entries = await fetchDirectory(requested, {
+      fresh: true,
+      user: options.user === true || options.manualSelection === true,
+      enrich: false,
+      trigger: options.trigger,
+    });
+    if (entries) return {root: requested, entries};
     const info = await fetchFilePathInfo(requested, {fresh: true, force: true, user: options.user === true || options.manualSelection === true});
     if (info?.kind === 'dir') {
       const key = fileExplorerFsBatchKey('list', requested);
       const record = fileExplorerFsResourceRecords.get(key);
       if (record?.failureStatus) invalidateFileExplorerFsResourceRecord(key, record);
-      return requested;
+      return {root: requested, entries: null};
     }
     if (info?.kind === 'file') {
       markFileExplorerDirectoryDemandNegative(requested, 400);
       retireFileExplorerDirectoryDemand(requested);
-      return dirnameOf(requested);
+      return {root: dirnameOf(requested), entries: null};
     }
     const error = new Error(t('fs.error.notDirectory', {path: requested}));
     error.status = 400;
     error.payload = {user_message: {key: 'fs.error.notDirectory', params: {path: requested}, fallback: error.message}};
     setFileExplorerListError(requested, error, 400);
-    return '';
+    return {root: '', entries: null};
   } catch (error) {
     setFileExplorerListError(requested, error, Number(error?.status) || 0);
-    return '';
+    return {root: '', entries: null};
   }
 }
 
@@ -21501,24 +21551,33 @@ async function openFileExplorerAt(path, options = {}) {
   const openGeneration = fileWorkspaceState.beginOpen();
   const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const requestedRoot = normalizeDirectoryPath(expandUserPath(path));
-  const validateKind = options.validateKind === true
-    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
-  const root = validateKind ? await resolveFileExplorerDirectoryRoot(requestedRoot, options) : requestedRoot;
-  if (!root || !openStillCurrent()) return false;
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
+  // Claim an explicit path before the kind probe. The probe is the fastest validation available,
+  // but it is still asynchronous; leaving the previous tree mounted until it completes makes a
+  // slow path look like the typed request was ignored.
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
-    setFileExplorerPathDisplay(root, {deferRepoInfo: true});
+    setFileExplorerPathDisplay(requestedRoot, {deferRepoInfo: true});
     renderFileExplorerRootModeControls();
-    renderFileExplorerTreeSearching(root);
-  } else if (options.syncSelection === true) {
+    renderFileExplorerTreeSearching(requestedRoot);
+  }
+  const validateKind = options.validateKind === true
+    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
+  const resolvedRoot = validateKind
+    ? await resolveFileExplorerDirectoryRoot(requestedRoot, options)
+    : {root: requestedRoot, entries: null};
+  const root = resolvedRoot.root;
+  if (!root || !openStillCurrent()) return false;
+  if (!showPendingRoot && options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {
-    user: options.user === true || options.manualSelection === true,
-    trigger: options.trigger,
-    enrichRoot: true,
-  });
+  const entries = Array.isArray(resolvedRoot.entries)
+    ? resolvedRoot.entries
+    : await fetchDirectory(root, {
+      user: options.user === true || options.manualSelection === true,
+      trigger: options.trigger,
+      enrichRoot: true,
+    });
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -21526,6 +21585,7 @@ async function openFileExplorerAt(path, options = {}) {
     if (showPendingRoot) renderFileExplorerTreeStatus(error || t('preview.openFailed', {path: root}), {root, error: true});
     return false;
   }
+  beginFinderSessionFilesDiffBackfill();
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   const rootChanged = root !== currentFileExplorerRoot();
@@ -21538,12 +21598,24 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder', deferSessionFilesDiff: true});
     scheduleFinderUsableObservation(fileExplorerTree, entries, observabilityJourney);
   }
+  if (Array.isArray(resolvedRoot.entries)) {
+    scheduleFileExplorerRepoInfoEnrichment(fileExplorerRoot, entries, {includeRoot: true});
+  }
   if (options.refreshPanels !== false) {
-    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false, observabilityJourney});
+    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false, observabilityJourney, deferSessionFilesDiff: true});
     if (!openStillCurrent()) return false;
+    scheduleAfterFileExplorerFirstPaint(() => {
+      if (!openStillCurrent()) return;
+      markFinderFastListingPainted();
+      if (typeof ensureSessionFilesSurfaceLoaded === 'function') {
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+      }
+      if (typeof releaseFinderSessionFilesDiffBackfillIfReady === 'function') releaseFinderSessionFilesDiffBackfillIfReady();
+      updateFileTreeGitStatusRows();
+    });
   }
   if (previousExpanded.length) {
     await restoreFileExplorerExpandedPaths(previousExpanded, fileExplorerRoot);
@@ -21626,6 +21698,23 @@ const FILE_TREE_ROW_HANDLERS = Object.freeze([
   'ondragstart',
   'ondragend',
 ]);
+const FILE_TREE_TOUCH_CLICK_DEDUP_MS = 1000;
+
+function armFileTreeTouchClickSuppression(row) {
+  row.__fileTreeTouchClickSuppressions = (Number(row.__fileTreeTouchClickSuppressions) || 0) + 1;
+  setTimeout(() => {
+    row.__fileTreeTouchClickSuppressions = Math.max(0, (Number(row.__fileTreeTouchClickSuppressions) || 0) - 1);
+  }, FILE_TREE_TOUCH_CLICK_DEDUP_MS);
+}
+
+function consumeFileTreeTouchClickSuppression(row, event) {
+  const generatedByTouch = event?.sourceCapabilities?.firesTouchEvents === true
+    || (row.__fileTreeLastPointerType === 'touch' && event?.detail === 1);
+  const pending = Number(row.__fileTreeTouchClickSuppressions) || 0;
+  if (!generatedByTouch || pending <= 0) return false;
+  row.__fileTreeTouchClickSuppressions = pending - 1;
+  return true;
+}
 
 function fileTreeRowPadding(depth, compact = false) {
   const safeDepth = Math.max(0, Number(depth) || 0);
@@ -22266,6 +22355,7 @@ function invalidateFileExplorerRoots(roots = []) {
 
 function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
   const entriesByDir = new Map();
+  const changedDirectories = [];
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
   for (const item of directories) {
     const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
@@ -22274,6 +22364,9 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
     reconcileFileExplorerDeletedPathTombstones(path, entries, true);
     const visibleEntries = entries ? filterFileExplorerDeletedPathTombstones(path, entries) : null;
     if (!path || !visibleEntries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    const previousSignature = fileExplorerDirectoryRecord(path)?.signature;
+    const nextSignature = directoryEntriesSignature(visibleEntries);
+    if (previousSignature !== undefined && previousSignature !== nextSignature) changedDirectories.push(path);
     entriesByDir.set(path, visibleEntries);
     cacheFileExplorerRepoInfoEntries(path, visibleEntries);
     markNewDirectoryEntries(path, visibleEntries);
@@ -22284,7 +22377,7 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
       watchDiffOwned: options.fromWatchDiff === true,
     });
   }
-  return entriesByDir;
+  return {entriesByDir, changedDirectories};
 }
 
 async function fetchFilesystemWatchDiff(options = {}) {
@@ -22426,7 +22519,9 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       fileExplorerFilesystemWatchToken = nextToken;
       fileExplorerFilesystemPushToken = nextToken;
     }
-    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : new Map();
+    const pushed = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : {entriesByDir: new Map(), changedDirectories: []};
+    const entriesByDir = pushed.entriesByDir;
+    const changedDirectories = pushed.changedDirectories;
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
     if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
@@ -22443,6 +22538,15 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     }
     if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
     if (!entriesByDir.size) return;
+    const finderBackfillSession = fileExplorerFinderTargetSession();
+    const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+    const watchDiffChangedVisibleTree = changedDirectories.some(path => (
+      pathIsInsideDirectory(path, currentRoot) || pathIsInsideDirectory(currentRoot, path)
+    ));
+    const finderHasLoadedMetadata = finderBackfillSession
+      && sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, finderBackfillSession)
+      && (options.fromWatchDiff !== true || watchDiffChangedVisibleTree);
+    if (finderHasLoadedMetadata) beginFinderSessionFilesDiffBackfill();
     fileExplorerPushRefreshDepth += 1;
     try {
       const root = normalizeDirectoryPath(currentFileExplorerRoot());
@@ -22453,6 +22557,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
           preserveExpanded: true,
           preserveScroll: true,
           entriesByDir,
+          deferSessionFilesDiff: finderHasLoadedMetadata,
         });
       }
       const openFileDirs = Array.from(fileState.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
@@ -22460,6 +22565,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
     }
+    if (finderHasLoadedMetadata) scheduleFinderSessionFilesBackfillAfterFastPaint(finderBackfillSession);
   } finally {
     clientPerfEnd(perf, {nodes: changedRoots, rows: renderedRows, skipped});
   }
@@ -22673,7 +22779,10 @@ function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {
   const candidates = [];
   if (options.includeRoot === true && root) candidates.push(root);
   for (const entry of Array.isArray(entries) ? entries : []) {
-    if (entry?.kind !== 'dir' || entry.repo_info_deferred !== true || entry.repo) continue;
+    // A filesystem push can carry the full listing's cheap is_repo marker without the detailed
+    // repo payload. Treat that shape like FastList's explicit deferred marker; otherwise a push
+    // that overwrites the fast resource can suppress the INFO backfill permanently.
+    if (entry?.kind !== 'dir' || entry.repo || (entry.repo_info_deferred !== true && entry.is_repo !== true)) continue;
     candidates.push(childPath(root, entry.name));
   }
   for (const path of candidates) {
@@ -22739,11 +22848,12 @@ async function enrichFileExplorerRepoInfoEntries() {
       ? cacheFileExplorerRepoInfo(path, result.value.info.repo, {persist: false}) || changed
       : clearFileExplorerRepoInfo(path, {persist: false}) || changed;
   }
-  if (changed) {
-    persistFileExplorerRepoInfoCache();
+  if (changed || enrichedPaths.size) {
+    if (changed) persistFileExplorerRepoInfoCache();
     const mountedRows = fileExplorerTreeContainers().flatMap(container => Array.from(
       container.querySelectorAll?.('.file-tree-row[data-path]') || [],
     )).filter(row => !row.dataset.tabberType && enrichedPaths.has(normalizeDirectoryPath(row.dataset.path || '')));
+    for (const row of mountedRows) row.dataset.repoInfoResolved = 'true';
     updateFileTreeGitStatusRows(mountedRows);
     const root = currentFileExplorerRoot();
     if (enrichedPaths.has(root) && !currentFileExplorerListError(root)) {
@@ -23967,6 +24077,12 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
     }
   }
   const rootChanged = root !== currentFileExplorerRoot();
+  const finderTrees = [fileExplorerTree, ...Array.from(document.querySelectorAll('.file-explorer-panel .file-explorer-tree-panel'))]
+    .filter(Boolean);
+  const firstPaint = rootChanged || !finderTrees.some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
+  if (firstPaint && typeof beginFinderSessionFilesDiffBackfill === 'function') {
+    beginFinderSessionFilesDiffBackfill();
+  }
   const preserveState = options.preserveState === true && !rootChanged;
   const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = preserveState ? captureFileExplorerScrollPositions() : null;
@@ -23982,10 +24098,11 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
     if (!fileExplorerSyncPathSuppressed(path)) fileExplorerExpanded.add(path);
   }
   for (const path of qualifiedExpansionPaths) fileExplorerExpanded.add(path);
-  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  const renderOptions = {view: 'finder', entriesByDir, deferSessionFilesDiff: firstPaint};
+  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, renderOptions);
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
     const tree = panel.querySelector?.('.file-explorer-tree-panel');
-    if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+    if (tree) renderTreeChildren(tree, root, rootEntries, 0, renderOptions);
   }
   updateFileExplorerCurrentFileHighlight();
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
@@ -24042,6 +24159,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
   const generation = fileExplorerSyncState.generation;
   requestAnimationFrame(() => {
     if (fileExplorerSyncState.generation !== generation) return;
+    if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
     void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
@@ -24105,7 +24223,16 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return false;
     if (!Array.isArray(rootEntries)) return false;
     const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
+    const firstPaint = normalizedRoot !== currentFileExplorerRoot()
+      || ![fileExplorerTree, ...Array.from(document.querySelectorAll('.file-explorer-panel .file-explorer-tree-panel'))]
+        .filter(Boolean)
+        .some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
     changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
+    if (firstPaint) {
+      scheduleAfterFileExplorerFirstPaint(() => {
+        if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
+      });
+    }
     if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
     restoreFileExplorerSyncCursorState(plan.session, plan.root);
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
@@ -24155,6 +24282,36 @@ function fileExplorerTreeContainers() {
     if (!containers.includes(tree)) containers.push(tree);
   });
   return containers;
+}
+
+// The first Finder listing is intentionally only one level deep. Once those rows are mounted,
+// expose the visible repository paths to the later session-files stream so the Go backend can
+// enrich each repository independently, including child repositories under a non-Git parent.
+function fileExplorerVisibleRepositoryPaths() {
+  // The scoped repository candidates are consumed by the Go per-repository stream. Python keeps
+  // its established aggregate session-files request and must not acquire a Finder-only request
+  // identity that would prevent valid Finder/Differ peer sharing.
+  if (typeof sessionFilesStreamSupported === 'function' && !sessionFilesStreamSupported('finder')) return [];
+  const paths = [];
+  const seen = new Set();
+  const add = rawPath => {
+    const path = normalizeDirectoryPath(rawPath || '');
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    paths.push(path);
+  };
+  // The opened Finder root is itself a repository candidate. It is not rendered as a child row,
+  // so looking only at mounted repository rows would omit a root repo when the active tmux CWD is
+  // elsewhere. This runs only while constructing the later session-files request; the first
+  // /api/fs/fast/list request remains a direct one-level filesystem listing.
+  add(currentFileExplorerRoot());
+  for (const container of fileExplorerTreeContainers()) {
+    for (const row of container.querySelectorAll?.('.file-tree-row[data-path]') || []) {
+      if (row.dataset.tabberType || row.dataset.kind !== 'dir' || row.dataset.isRepo !== 'true') continue;
+      add(row.dataset.path);
+    }
+  }
+  return paths.slice(0, 128);
 }
 
 function renderFileExplorerTreeStatus(message, options = {}) {
@@ -24304,6 +24461,11 @@ async function ensureDirectoryRowExpanded(row, fullPath, options = {}) {
 
 function nextAnimationFrame() {
   return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+function scheduleAfterFileExplorerFirstPaint(callback) {
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : handler => setTimeout(handler, 0);
+  schedule(() => schedule(callback));
 }
 
 function scrollFileTreeRowIntoView(container, row) {
@@ -24944,32 +25106,35 @@ function fileTreeDirCountText(count) {
 
 function fileTreeRowDerivedState(fullPath, entry, options = {}) {
   const differMode = options.differMode === true;
+  const deferSessionFilesDiff = options.deferSessionFilesDiff === true;
   const indexExcludedEntry = !differMode && fileExplorerPathIsExcluded(fullPath);
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
-  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
+  const changedAncestor = !deferSessionFilesDiff && !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
     ? (options.changedAncestorStats.get(fullPath) || null)
     : null;
-  const changedFile = entry.kind === 'file'
+  const changedFile = !deferSessionFilesDiff && entry.kind === 'file'
     ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
     : null;
   const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
   const gitStatus = indexExcludedEntry
     ? t('finder.index.excluded')
     : entry.kind === 'file'
-    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
+    ? (deferSessionFilesDiff ? '' : (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath)))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const displayName = differMode ? {text: entry.display_name || entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const directoryDiffParts = entry.kind === 'dir'
     ? (differMode
       ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
-      : (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {})))
+      : (deferSessionFilesDiff
+        ? []
+        : (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))))
     : [];
   const dirCountText = entry.kind === 'dir'
     ? (differMode && directoryDiffParts.length
       ? ''
       : (differMode
         ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
-        : fileTreeDirCountText(changedAncestor?.count)))
+        : (deferSessionFilesDiff ? '' : fileTreeDirCountText(changedAncestor?.count))))
     : '';
   const icon = options.iconText != null
     ? String(options.iconText)
@@ -24991,8 +25156,8 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
       disclosureExpanded: entry.kind === 'dir' ? options.expanded === true : undefined,
       nameHtml: differMode ? null : displayName.html,
       dateText: options.dateText || '',
-      diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
-      agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
+      diffParts: changedFile && !deferSessionFilesDiff ? sessionFileDiffText(changedFile) : directoryDiffParts,
+      agentHtml: deferSessionFilesDiff ? '' : (changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '')),
       dirCountText,
       preserveDirCount: options.preserveDirCount === true,
       preserveDate: options.preserveDate === true,
@@ -25115,6 +25280,7 @@ function bindFinderRowHandlers(row, state) {
   }
   row.onpointerdown = event => {
     if (event.button != null && event.button !== 0) return;
+    row.__fileTreeLastPointerType = event.pointerType || '';
     cancelPendingFileExplorerActiveSync();
     row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
   };
@@ -25141,7 +25307,11 @@ function bindFinderRowHandlers(row, state) {
     if (start && Math.max(dx, dy) > 4) return;
     event.preventDefault();
     event.stopPropagation();
-    if (event.detail > 1) return;
+    // Desktop double-click keeps its dedicated ondblclick route, but touch browsers report the
+    // second intentional tap with detail=2. Dropping that pointerup makes a touch collapse look
+    // dead because the first tap expanded the directory and the second tap is the collapse.
+    if (event.pointerType !== 'touch' && event.detail > 1) return;
+    if (event.pointerType === 'touch') armFileTreeTouchClickSuppression(row);
     row.__fileTreePointerActivated = true;
     setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
     scheduleFileTreeRowActivation(row, fullPath, entry, event);
@@ -25154,6 +25324,12 @@ function bindFinderRowHandlers(row, state) {
       return;
     }
     if (typeof dockviewTabContentInteractionSuppressed === 'function' && dockviewTabContentInteractionSuppressed()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (consumeFileTreeTouchClickSuppression(row, event)) {
+      row.__fileTreePointerActivated = false;
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -25171,6 +25347,10 @@ function bindFinderRowHandlers(row, state) {
   row.ondblclick = event => {
     event.preventDefault();
     event.stopPropagation();
+    // Chromium can synthesize a dblclick after two touch taps. Touch already uses each tap for
+    // expand/collapse in the pointerup path; letting this desktop-only route run would navigate
+    // into the directory and make the original row disappear instead of collapsing it.
+    if (row.__fileTreeLastPointerType === 'touch' || event.sourceCapabilities?.firesTouchEvents === true) return;
     if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
     else openFileInEditor(fullPath, entry);
   };
@@ -25273,6 +25453,9 @@ function fileTreeRowViewModel(state) {
       kind: entry.kind,
       name: entry.name,
       isRepo: entry.is_repo === true ? 'true' : 'false',
+      repoInfoResolved: entry.kind === 'dir'
+        ? (entry.repo_info_deferred === true || (state.options.deferSessionFilesDiff === true && entry.is_repo === true && !entry.repo) ? 'false' : 'true')
+        : '',
       isSymlink: entry.is_symlink === true ? 'true' : 'false',
       symlinkTarget: entry.symlink_target || '',
       indexed: state.indexedDirectory ? 'true' : 'false',
@@ -25333,6 +25516,16 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     sessionHighlightSets: options.sessionHighlightSets || fileExplorerSessionHighlightSets(),
     changedAncestorStats: options.changedAncestorStats instanceof Map ? options.changedAncestorStats : fileTreeChangedAncestorStats(),
   };
+  // Every Finder tree renderer, including a direct user expansion, must honor the same first-paint
+  // boundary. The root open path passes this flag explicitly, but expansion and sync renderers do not
+  // share that call site; derive it here so a pending session-files payload cannot leak stale +/- rows.
+  if (
+    renderOptions.view === 'finder'
+    && typeof finderSessionFilesDiffIsDeferred === 'function'
+    && finderSessionFilesDiffIsDeferred()
+  ) {
+    renderOptions.deferSessionFilesDiff = true;
+  }
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
   const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
@@ -25532,7 +25725,8 @@ function updateFileTreeGitStatusRows(targetRows = null) {
   for (const row of rows) {
     if (!row?.dataset?.path || row.dataset.tabberType) continue;
     const fullPath = row.dataset.path || '';
-    const isRepo = Boolean(exactFileExplorerRepoInfo(fullPath));
+    const isRepo = Boolean(exactFileExplorerRepoInfo(fullPath))
+      || (row.dataset.repoInfoResolved !== 'true' && row.dataset.isRepo === 'true');
     row.dataset.isRepo = isRepo ? 'true' : 'false';
     const entry = {
       kind: row.dataset.kind,
@@ -25541,7 +25735,10 @@ function updateFileTreeGitStatusRows(targetRows = null) {
       is_symlink: row.dataset.isSymlink === 'true',
       symlink_target: row.dataset.symlinkTarget || '',
     };
-    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel') || row.dataset.changesFolderToggle || row.dataset.openChangeFile || row.dataset.openChangeDirectory);
+    // `openChangeFile` is an action on a changed Finder row, not proof that the row belongs to the
+    // Differ surface. Only the rendered surface or directory action markers select Differ mode;
+    // otherwise Finder's late session-files payload must be allowed to replace its deferred diff cell.
+    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel, .git-diff-file-tree') || row.dataset.changesFolderToggle || row.dataset.openChangeDirectory);
     applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
       changedAncestorStats,
       differMode: inDiffer,
@@ -25550,7 +25747,11 @@ function updateFileTreeGitStatusRows(targetRows = null) {
       expanded: entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {differMode: inDiffer}),
       iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
       preserveDate: true,
-      preserveDiff: true,
+      deferSessionFilesDiff: !inDiffer && typeof finderSessionFilesDiffIsDeferred === 'function' && finderSessionFilesDiffIsDeferred(),
+      // Differ owns its already-rendered status-count columns through entriesByDir. Finder rows
+      // instead derive repository +/- totals from the session-files payload, so allow the late
+      // session-files backfill to repaint those columns after the fast directory listing.
+      preserveDiff: inDiffer,
       preserveDirCount: inDiffer,
     }));
     if (!inDiffer && isRepo) {
@@ -26593,14 +26794,83 @@ function tabberActivityPayloadIsRefreshPlaceholder(payload) {
   return payload?.cache?.refreshing === true && !tabberActivityPayloadHasUsefulData(payload);
 }
 
+function mergeTabberActivitySessionMetadata(payload) {
+  const sessionPayloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : null;
+  const order = Array.isArray(payload?.session_order) ? payload.session_order : null;
+  if (!sessionPayloads && !order) return false;
+  const prior = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+    ? transcriptMetadataState.payload
+    : {};
+  const priorSessions = prior.sessions && typeof prior.sessions === 'object' ? prior.sessions : {};
+  // A session order supplied by the global tmux inventory is authoritative.  Do not retain a
+  // disappeared session in the metadata map, because tabberOrderedSessions() also considers map
+  // keys that are not present in the current order.
+  const sessions = order
+    ? Object.fromEntries(order.filter(session => priorSessions[session] && typeof priorSessions[session] === 'object').map(session => [session, priorSessions[session]]))
+    : {...priorSessions};
+  for (const [session, info] of Object.entries(sessionPayloads || {})) {
+    if (!info || typeof info !== 'object') continue;
+    // When the backend supplies an authoritative global roster, metadata keys outside that
+    // roster are stale cross-route enrichments and must not create a synthetic Tabber row.
+    if (order && !order.includes(session)) continue;
+    sessions[session] = {...(sessions[session] || {}), ...info};
+  }
+  const nextOrder = order || Object.keys(sessions);
+  setTranscriptMetadataPayload({...prior, sessions, session_order: nextOrder}, {invalidateRequest: false});
+  const changed = updateSessionList(nextOrder);
+  if (changed) {
+    renderSessionButtons();
+    if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
+  }
+  return changed;
+}
+
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
-  if (!payload || typeof payload !== 'object' || !payload.activity || typeof payload.activity !== 'object') return false;
+  if (!payload || typeof payload !== 'object') return false;
+  const payloadTopologyGeneration = Number(payload.topology_generation || 0);
+  const currentTopologyGeneration = Math.max(Number(tmuxTopologyGeneration || 0), Number(transcriptMetadataState.rosterGeneration || 0));
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration < currentTopologyGeneration) return false;
+  const hasActivity = payload.activity && typeof payload.activity === 'object';
+  const hasTopology = Array.isArray(payload.session_order)
+    || (payload.sessions && typeof payload.sessions === 'object');
+  if (!hasActivity && !hasTopology) return false;
+  // Do not advance the shared roster clock from a response that has no usable activity or
+  // topology. Such a placeholder must not poison the generation guard for the next valid read.
+  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration >= currentTopologyGeneration
+      && typeof adoptTopologyGeneration === 'function') adoptTopologyGeneration(payload);
+  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration > transcriptMetadataState.rosterGeneration) {
+    transcriptMetadataState.rosterGeneration = payloadTopologyGeneration;
+  }
+  const hasVersionedTopology = Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+    && Number.isSafeInteger(payloadTopologyGeneration)
+    && payloadTopologyGeneration > 0;
+  // Python's legacy activity/roster responses predate topology generations, so they remain
+  // valid on a cold boot. Once a versioned Go metadata/activity response has established a
+  // roster, an unversioned response is only safe if it contains every known session. Otherwise
+  // it is an older cross-route read and must not make a live Tabber row disappear.
+  if (!hasVersionedTopology && currentTopologyGeneration > 0) {
+    const currentOrder = Array.isArray(transcriptMetadataState.payload.session_order)
+      ? transcriptMetadataState.payload.session_order.map(session => String(session))
+      : [];
+    const incomingOrder = Array.isArray(payload.session_order)
+      ? payload.session_order.map(session => String(session))
+      : Object.keys(payload.sessions && typeof payload.sessions === 'object' ? payload.sessions : {});
+    const incomingSessions = new Set(incomingOrder);
+    if (currentOrder.some(session => !incomingSessions.has(session))) return false;
+  }
+  // Session metadata is a valid topology-only repair when the activity product is unavailable.
+  // Keep the shared payload shape explicit so renderers never interpret missing activity as a
+  // useful empty snapshot.
+  if (!hasActivity) payload = {...payload, activity: {}};
   // Generation zero denotes a direct/pushed snapshot rather than an HTTP completion. Give it a new
   // generation so any request started before that snapshot cannot roll the cache back afterward.
   const generation = Number(requestGeneration) || ++tabberActivityState.requestGeneration;
   if (generation > 0 && generation < tabberActivityState.appliedGeneration) return false;
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
+  mergeTabberActivitySessionMetadata(payload);
   tabberActivityPayload = payload;
   tabberActivityState.loaded = true;
   // A refresh placeholder is not an authoritative snapshot. Let an older in-flight full response
@@ -26621,10 +26891,49 @@ async function fetchTabberActivity(options = {}) {
       const params = new URLSearchParams();
       params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
       params.set('visible', visible ? '1' : '0');
+      // Tabber is the machine-wide tmux view. Python's activity API only includes
+      // that roster when the caller opts into the global scope; keep the Go and
+      // Python backends on the same one-session-per-row contract.
+      params.set('scope', 'all');
       const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-      applyTabberActivityPayload(payload, requestGeneration);
+      const applied = applyTabberActivityPayload(payload, requestGeneration);
+      // Go owns live agent status in the activity product.  Keep the shared
+      // auto-status model in step with every accepted activity refresh, not
+      // only the initial stats-only boot and explicit status repair path; the
+      // Tabber and pane-tab renderers read that shared model for the green
+      // working marker.
+      if (applied
+          && typeof goAgentStatusUsesActivityFallback === 'function'
+          && goAgentStatusUsesActivityFallback()
+          && typeof adoptTabberActivityAsAutoStatusFallback === 'function') {
+        const adopted = adoptTabberActivityAsAutoStatusFallback();
+        if (adopted > 0) {
+          // The activity request's finally block owns the Tabber tree refresh.
+          // Repaint only the status-bearing pane chrome here so this repair
+          // does not trigger Tabber's lazy session-files reads a second time.
+          if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+          if (typeof renderAutoApproveButtons === 'function') renderAutoApproveButtons();
+          if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
+        }
+      }
     } catch (_) {
-      // Keep the last snapshot; the interval retries without a render-triggered request loop.
+      // The activity product is optional for topology. Python's session-metadata path still owns
+      // the live roster, so use it as a topology-only repair instead of hiding every tmux session
+      // when activity collection is temporarily unavailable.
+      try {
+        const metadata = await apiFetchJson('/api/session-metadata', {cache: 'no-store'});
+        applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
+      } catch (_) {
+        // Older Go/compatibility servers may expose the lighter roster through /api/tmux even
+        // when their full metadata build is unavailable.  It carries the same authoritative
+        // session_order, so preserve one Tabber row per live session instead of clearing the tree.
+        try {
+          const roster = await apiFetchJson('/api/tmux', {cache: 'no-store'});
+          applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
+        } catch (_) {
+          // Keep the last snapshot; the interval retries without a render-triggered request loop.
+        }
+      }
     } finally {
       if (tabberActivityState.request === request) {
         tabberActivityState.loaded = true;
@@ -26752,18 +27061,22 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
   if (itemInLayout(tabberItemId)) refreshTabberPanels();
 }
 
-// Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
+// Tabber level 0: one row for every live tmux session in session_order. Pane metadata enriches
+// the row with windows, but a session must remain visible while that metadata is unavailable.
 function tabberOrderedSessions() {
   const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
   const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const ordered = [];
+  // `session_order` is the backend's authoritative global tmux roster.  It can arrive before the
+  // older top-level `sessions` list has converged (notably on a Go stats-only boot), so do not
+  // discard a valid roster entry merely because `isTmuxSession()` still reflects that old list.
+  // When no roster order exists, retain the legacy guard for metadata-only callers.
+  const hasAuthoritativeRoster = order.length > 0;
   for (const session of [...order, ...all]) {
     if (seen.has(session)) continue;
     seen.add(session);
-    if (!isTmuxSession(session)) continue;
-    const info = transcriptMetadataState.payload.sessions?.[session];
-    if (!Array.isArray(info?.panes) || !info.panes.length) continue;
+    if (!hasAuthoritativeRoster && !isTmuxSession(session)) continue;
     ordered.push(session);
   }
   return ordered;
@@ -26852,7 +27165,10 @@ function buildTabberTree() {
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex', 'opencode'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
+      // Keep the Tabber window marker on the shared live-status pulse path.  A working Codex/Claude
+      // pane must remain visibly green while the tree is open; disabling animation here made the
+      // status look idle even though the backend had classified the pane as working.
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
       const dateDisplay = tabberWindowDateDisplay(windowMtime, agentStatusForDisplay, nowSeconds);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {
@@ -28618,7 +28934,11 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   if (fileExplorerTree) {
     setFileExplorerPathDisplay(root);
-    renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {entriesByDir});
+    renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {
+      entriesByDir,
+      view: 'finder',
+      deferSessionFilesDiff: options.deferSessionFilesDiff === true,
+    });
   }
   await refreshFileExplorerPanelTrees({
     ...options,
@@ -34054,7 +34374,11 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('auto-approve', () => {
     if (!clientCanUseUnscopedHostRequests()) return null;
     if (document.visibilityState === 'hidden') return null;
-    if (clientEventTransportState.connected === true) return null;
+    // Python publishes auto_approve_changed over the shared SSE stream. Go has
+    // no auto-approve route/event, so its activity fallback must keep repairing
+    // a transient unavailable sample while the general event stream is healthy.
+    if (clientEventTransportState.connected === true
+        && !(typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback())) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   if (itemInLayout(tabberItemId)) {
@@ -54088,6 +54412,10 @@ const jsDebugStatsAgentStatusState = {
   revision: 0,
   inFlight: null,
   updatedAtMs: 0,
+  // Graph activation can be replayed by panel/layout lifecycle events. Keep a forced
+  // activation fresh, but do not let those replays turn one visible chart into a request
+  // stream; the endpoint is supplementary to the stats snapshot/SSE transport.
+  lastForcedAtMs: 0,
 };
 const jsDebugCurrentStatsClientState = {
   client: null,
@@ -58219,7 +58547,11 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
   // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
   // promoted in its place, and there is no aggregate `cpu` fallback series.
-  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
+  // Python's legacy web process uses a `port:N` owner and keeps an empty current
+  // port line visible across a no-sample window. Go owns a named daemon process
+  // instead; do not add an unrelated empty Python/web line beside it.
+  const hasLegacyPortProcess = [...processes.keys()].some(key => String(key).startsWith('port:'));
+  if (!processes.has(currentProcessId) && (!processes.size || hasLegacyPortProcess)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
@@ -59840,8 +60172,15 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
   const startMs = Math.floor(nowMs / durationMs) * durationMs;
   const xStart = debugGraphXForTime(startMs, domain);
   const xLimit = debugGraphXForTime(startMs + durationMs, domain);
-  const width = Math.max(0.5, xLimit - xStart);
-  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
+  // At one-second resolution a live cell is sub-pixel on the 1200-unit viewBox. A
+  // sub-pixel strip at the right edge is effectively invisible (and gets clipped),
+  // even though the animation is running. Keep a small, bounded strip inside the
+  // plot so the live green pulse is visible at every supported chart width.
+  const graphWidth = Math.max(1, Number(jsDebugGraphGeometry.width) || 1);
+  const minimumWidth = Math.max(8, graphWidth / 120);
+  const width = Math.min(graphWidth, Math.max(minimumWidth, xLimit - xStart));
+  const visibleXStart = Math.max(0, Math.min(graphWidth - width, xStart));
+  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(visibleXStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
 function debugGraphStatsAgentState(state) {
@@ -59888,12 +60227,41 @@ function debugGraphStatsAgentWindowRows() {
   return {rows, revision};
 }
 
-async function refreshDebugStatsAgentStatus() {
+const jsDebugStatsAgentStatusFreshnessMs = 10_000;
+
+function debugStatsAgentStatusConsumerVisible() {
+  // The Go-only roster is supplementary data for the live Agents detail under the
+  // activity chart. Stats snapshots and SSE already carry aggregate counts and
+  // revisions, so polling this endpoint while another Debug subtab is active (or
+  // while the activity chart is hidden) only creates traffic with no visible consumer.
+  // The full Go page uses the same supplementary roster: its activity fallback is
+  // intentionally unversioned, so without this read the detail permanently labels
+  // otherwise-current Go rows as stale and can hide the working marker behind the
+  // compatibility row.
+  const statsOnly = typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled();
+  const goBackend = typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback();
+  if (!statsOnly && !goBackend) return false;
+  if (typeof jsDebugStatsPanelVisible === 'function' && !jsDebugStatsPanelVisible()) return false;
+  if (typeof debugRuntimeState !== 'undefined' && debugRuntimeState.subTab !== 'graph') return false;
+  if (typeof debugGraphChartVisible === 'function' && !debugGraphChartVisible('activity')) return false;
+  return true;
+}
+
+async function refreshDebugStatsAgentStatus({force = false} = {}) {
   // Python's full application boot has no stats-agent-status route because it
   // already owns /api/auto-approve. This supplementary stats projection is
   // only needed for the negotiated Go stats-only surface.
-  if (typeof statsOnlyBootEnabled !== 'function' || !statsOnlyBootEnabled()) return null;
+  if (typeof debugStatsAgentStatusConsumerVisible === 'function' && !debugStatsAgentStatusConsumerVisible()) return null;
   if (jsDebugStatsAgentStatusState.inFlight) return jsDebugStatsAgentStatusState.inFlight;
+  const nowMs = Date.now();
+  const updatedAtMs = Number(jsDebugStatsAgentStatusState.updatedAtMs || 0);
+  const lastForcedAtMs = Number(jsDebugStatsAgentStatusState.lastForcedAtMs || 0);
+  const fresh = updatedAtMs > 0 && nowMs - updatedAtMs < jsDebugStatsAgentStatusFreshnessMs;
+  const forcedFresh = lastForcedAtMs > 0 && nowMs - lastForcedAtMs < jsDebugStatsAgentStatusFreshnessMs;
+  if ((!force && fresh) || (force && forcedFresh && jsDebugStatsAgentStatusState.payload)) {
+    return jsDebugStatsAgentStatusState.payload;
+  }
+  if (force) jsDebugStatsAgentStatusState.lastForcedAtMs = nowMs;
   const request = (async () => {
     try {
       const payload = await apiFetchJson('/api/stats-agent-status', {cache: 'no-store'});
@@ -59920,9 +60288,36 @@ async function refreshDebugStatsAgentStatus() {
 
 function debugGraphLiveAgentWindowRows() {
   const rows = [];
-  const seen = new Set();
+  const rowIndexes = new Map();
   const revisions = new Set();
   const sessionRevisions = new Map();
+  const appendRow = row => {
+    const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
+    const existingIndex = rowIndexes.get(key);
+    if (existingIndex === undefined) {
+      rowIndexes.set(key, rows.length);
+      rows.push(row);
+      return;
+    }
+    const existing = rows[existingIndex];
+    // Activity fallback rows identify the live pane but have no immutable snapshot
+    // revision. A revisioned stats row normally replaces them, except that an
+    // unavailable stats row is a capture failure, not a newer assertion that the
+    // pane stopped working. Preserve a concrete Go activity state in that case so
+    // the JS Agents detail does not turn a live Codex pane gray while Tabber is green.
+    const existingUnavailable = typeof agentWindowStateKey === 'function'
+      && agentWindowStateKey(existing.agent?.state) === 'unavailable';
+    const incomingUnavailable = typeof agentWindowStateKey === 'function'
+      && agentWindowStateKey(row.agent?.state) === 'unavailable';
+    const activityFallback = typeof goAgentStatusUsesActivityFallback === 'function'
+      && goAgentStatusUsesActivityFallback();
+    if (activityFallback && incomingUnavailable && !existingUnavailable) return;
+    if (activityFallback && existingUnavailable && !incomingUnavailable) {
+      rows[existingIndex] = row;
+      return;
+    }
+    if (Number(row.revision || 0) >= Number(existing.revision || 0)) rows[existingIndex] = row;
+  };
   for (const [session, payload] of autoApproveStates.entries()) {
     const revision = agentWindowSnapshotRevision(payload);
     if (revision > 0) revisions.add(revision);
@@ -59931,23 +60326,34 @@ function debugGraphLiveAgentWindowRows() {
       const kind = agentWindowKind(agent?.kind);
       const physical = agentWindowPhysicalKey(agent);
       if (!kind || !physical) continue;
-      const key = `${session}\u0000${physical}\u0000${kind}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push({session, agent, kind, revision});
+      appendRow({session, agent, kind, revision});
     }
   }
-  rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
-    || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
-    || left.kind.localeCompare(right.kind));
   const statsRows = typeof debugGraphStatsAgentWindowRows === 'function'
     ? debugGraphStatsAgentWindowRows()
     : {rows: [], revision: 0};
+  const statsStatus = typeof jsDebugStatsAgentStatusState !== 'undefined'
+    ? jsDebugStatsAgentStatusState.payload
+    : null;
+  const statsRosterAuthoritative = statsStatus?.available === true && Number(statsRows.revision || 0) > 0;
+  if (statsRosterAuthoritative) {
+    // A revisioned empty roster is a real transition, not a missing response.
+    // Retire fallback rows that disappeared from the stats owner's global roster
+    // before merging the new rows, otherwise a closed working pane remains visible.
+    const authoritativeKeys = new Set(statsRows.rows.map(row => (
+      `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`
+    )));
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
+      if (authoritativeKeys.has(key)) continue;
+      rows.splice(index, 1);
+    }
+    rowIndexes.clear();
+    rows.forEach((row, index) => rowIndexes.set(`${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`, index));
+  }
   for (const row of statsRows.rows) {
-    const key = `${row.session}\u0000${agentWindowPhysicalKey(row.agent)}\u0000${row.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push(row);
+    appendRow(row);
     sessionRevisions.set(String(row.session), row.revision);
     if (row.revision > 0) revisions.add(row.revision);
   }
@@ -61324,13 +61730,19 @@ function jsDebugCurrentBucketRecord(bucket) {
       record.system_cpu_total_percent = jsDebugCurrentCpuProjectionValue(series, name, 'system_cpu_max_percent', duration);
       record.system_cpu_count = 1;
     } else if (name.startsWith('cpu_percent:')) {
+      // `cpu_percent:*` is the host/process-family sample. It is not a daemon
+      // ownership record: putting it in `record.servers` makes host CPU appear
+      // in the Daemons chart and can double-count the same process. The Go
+      // backend publishes its daemon-owned line as
+      // `owned_process_cpu_percent:*`; the ordinary process series stays
+      // host-wide so same-named co-tenants remain visible as host users.
       const source = name.slice('cpu_percent:'.length);
       const projected = jsDebugCurrentCpuProjectionValue(series, name, `cpu_max_percent:${source}`, duration);
-      record.servers[source] = {label: source, cpu_total_percent: projected, cpu_count: 1};
-      // No serving-port preference: the exact serving port owns the solid CPU series in
-      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      // Every cpu_percent source contributes the aggregate CPU line. The source
+      // label is diagnostic metadata, not a daemon identity; fixtures and older
+      // backends may use a source name other than "host".
       if (!record.cpu_count) {
-        record.cpu_total_percent = value;
+        record.cpu_total_percent = projected;
         record.cpu_count = 1;
       }
     } else if (name === 'ask_agents') record.ask_agent_total = value;
@@ -61348,6 +61760,12 @@ function jsDebugCurrentBucketRecord(bucket) {
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('owned_process_cpu_percent:')) {
+      const binary = name.slice('owned_process_cpu_percent:'.length);
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `owned_process_cpu_max_percent:${binary}`, duration);
+      const normalizedBinary = String(binary || '').trim().toLowerCase();
+      const label = normalizedBinary === 'yolomux_go' || normalizedBinary === 'yolomux-go' ? 'yolomux-go' : binary;
+      record.servers[binary] = {label, cpu_total_percent: projected, cpu_count: 1};
     } else if (name.startsWith('process_cpu_percent:')) {
       const binary = name.slice('process_cpu_percent:'.length);
       const projected = jsDebugCurrentCpuProjectionValue(series, name, `process_cpu_max_percent:${binary}`, duration);
@@ -61507,8 +61925,19 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
   debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
-  jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
-  if (typeof refreshDebugStatsAgentStatus === 'function') void refreshDebugStatsAgentStatus();
+  const nextAgentWindowRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
+  jsDebugStatsPollState.agentWindowSnapshotRevision = nextAgentWindowRevision;
+  // The stats stream already carries the agent-window snapshot revision. The detailed
+  // `/api/stats-agent-status` roster is needed only for its names and states, so do not
+  // re-read it on every ordinary 10-second chart delta when the roster revision is unchanged.
+  // A zero revision still gets one bootstrap read; Graph activation retains its explicit
+  // force-refresh path below.
+  const agentStatusState = typeof jsDebugStatsAgentStatusState === 'undefined' ? null : jsDebugStatsAgentStatusState;
+  const agentStatusRevision = Number(agentStatusState?.revision || 0);
+  const agentStatusNeedsRefresh = typeof refreshDebugStatsAgentStatus === 'function'
+    && (!agentStatusState?.payload
+      || (nextAgentWindowRevision > 0 && nextAgentWindowRevision !== agentStatusRevision));
+  if (agentStatusNeedsRefresh) void refreshDebugStatsAgentStatus();
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
   jsDebugStatsPollState.firstSampleReceived = true;
@@ -61675,7 +62104,11 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSubviewActivation({pollNow: visible});
+    // Visibility changes re-run subview activation so the live ticker resumes, but they are not
+    // a new Graph navigation. Let the ten-second roster cache decide whether a status read is
+    // needed; forcing here made every focus/visibility round-trip issue another request even when
+    // the SSE stream had not published a newer agent-window revision.
+    syncDebugSubviewActivation({pollNow: visible, forceAgentStatus: false});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
   });
@@ -61770,12 +62203,19 @@ const DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS = Object.freeze({
   'no-sessions': 'No tmux sessions are configured to watch',
   attached: 'Control client is attached',
   exited: 'Tmux control client exited',
+  unsupported: 'Tmux signal watcher is not reported by this backend',
 });
+
+function debugSystemTmuxSignalWatcherState(watcher = null) {
+  if (!watcher || typeof watcher !== 'object') return 'unsupported';
+  const state = String(watcher.state || '');
+  return DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(state) ? state : 'unsupported';
+}
 
 // The ONE predicate for "this watcher is an actionable problem". An exited control client is one;
 // so is a watcher that was demanded and never started. An undemanded watcher never is.
 function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   return state === 'exited' || (state === 'never-started' && watcher?.demanded !== false);
 }
 
@@ -61793,7 +62233,7 @@ function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
 // three process metrics; only the number formatting differs.
 const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set([
   'restart_count', 'process_start_count', 'demand_start_count', 'unexpected_restart_count',
-  'observations', 'request_count', 'error_count', 'completed_count',
+  'observations', 'request_count', 'error_count', 'completed_count', 'process_count', 'goroutine_count', 'thread_count',
 ]);
 // The three measurements the local-service projection publishes per process, versus the retained
 // health measurements. They carry different DOM attributes because they have different producers
@@ -61837,6 +62277,7 @@ const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
   // request, error or latency series for the web process itself, and the tmux signal watcher
   // is an in-process subsystem with no separate process to measure.
   web_process_not_observed: 'the backend-health observer watches the local services from this web process, so it has never observed this web process itself',
+  resource_metrics_owned_by_nested_service: 'this process is represented by the nested service row, so its CPU and memory are shown there once',
   subsystem_not_observed: 'this is an in-process subsystem, not a separate process, so it has no independent process or traffic measurement',
   schema_unsupported: 'the backend published a local-services schema this panel does not render',
   // Diagnostics the sampler and the watcher publish only once they have run. Before that the field
@@ -61878,6 +62319,7 @@ const DEBUG_SYSTEM_STATE_TONES = Object.freeze({
   idle: 'muted',
   'no-sessions': 'muted',
   'never-started': 'muted',
+  unsupported: 'muted',
   not_running: 'muted',
   not_demanded: 'muted',
   starting: 'warn',
@@ -62259,10 +62701,11 @@ const DEBUG_SYSTEM_ROSTER_METRIC_KEYS = Object.freeze([
 ]);
 const debugSystemRosterAbsentMetrics = reasonCode =>
   Object.fromEntries(DEBUG_SYSTEM_ROSTER_METRIC_KEYS.map(key => [key, debugSystemAbsentMetric(reasonCode)]));
-// The tmux control-client states this panel knows, and how each one reads as a roster state.
-// `never-started` is only an issue when something actually demanded the watcher; undemanded is
-// idle-by-design and must stay gray and non-alerting.
-const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
+// The tmux control-client states this panel knows, plus the explicit unsupported state used when a
+// backend does not publish this in-process subsystem. `never-started` is only an issue when
+// something actually demanded the watcher; undemanded is idle-by-design and must stay gray and
+// non-alerting.
+const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited', 'unsupported']);
 const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
   running: 'debug.system.roster.state.ready',
   idle: 'state.idle',
@@ -62278,6 +62721,7 @@ const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
   'no-sessions': 'debug.system.roster.state.noSessions',
   'never-started': 'debug.system.roster.state.neverStarted',
   exited: 'debug.system.roster.state.exited',
+  unsupported: 'debug.system.roster.state.unsupported',
   schema_unsupported: 'debug.system.roster.state.unsupported',
 });
 
@@ -62305,7 +62749,17 @@ function debugSystemRosterStatusHtml(state, toneOverride = '') {
 // with its reason code rather than letting the cell fall back to a bare zero.
 function debugSystemRosterWebRow(payload = {}, port = '') {
   const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
-  const absent = debugSystemAbsentMetric('web_process_not_observed');
+  const serverPid = Number(server.pid || 0);
+  const localServices = debugSystemRenderableLocalServices(payload);
+  const nestedServiceOwnsProcess = serverPid > 0
+    && Array.isArray(localServices.services)
+    && localServices.services.some(service => (
+      String(service?.parent_id || service?.parentId || '') === DEBUG_SYSTEM_ROSTER_WEB_ID
+      && Number(service?.pid || 0) === serverPid
+    ));
+  const absent = debugSystemAbsentMetric(
+    nestedServiceOwnsProcess ? 'resource_metrics_owned_by_nested_service' : 'web_process_not_observed',
+  );
   return {
     id: DEBUG_SYSTEM_ROSTER_WEB_ID,
     kind: 'web',
@@ -62319,8 +62773,8 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
       // here from raw floats until the producer started publishing the envelope, which is what
       // let an unsampled `0` render as `measured 0.0B` / `measured 0%` and be summed into the
       // strip's Memory and CPU totals while ~160MB of real RSS went uncounted.
-      cpu_now_percent: server.cpu_percent,
-      rss_bytes: server.rss_bytes,
+      cpu_now_percent: nestedServiceOwnsProcess ? absent : server.cpu_percent,
+      rss_bytes: nestedServiceOwnsProcess ? absent : server.rss_bytes,
       uptime_seconds: server.uptime_seconds,
       // The backend-health observer runs IN this web process and observes the six local services;
       // it has never observed this process, so these four have no series at all. Rendering them as
@@ -62338,8 +62792,8 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
 }
 
 function debugSystemRosterTmuxWatcherRow(payload = {}) {
-  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : {};
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : null;
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   return {
     id: DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID,
     kind: 'child',
@@ -62349,9 +62803,10 @@ function debugSystemRosterTmuxWatcherRow(payload = {}) {
     state,
     // Undemanded and never started is idle by design, not an outage; demanded and never started is
     // the outage. The one issue predicate decides the paint here and the compact alert above, and
-    // `data-subsystem-state` keeps saying which of the five typed states was actually published.
+    // `data-subsystem-state` keeps saying which typed state was published, or that this backend
+    // does not publish the watcher at all.
     tone: debugSystemTmuxSignalWatcherIsIssue(watcher) ? 'bad' : (state === 'attaching' ? 'warn' : (state === 'attached' ? 'good' : 'muted')),
-    reason: String(watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
+    reason: String(watcher?.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
     metrics: debugSystemRosterAbsentMetrics('subsystem_not_observed'),
     health: {},
   };
@@ -62391,7 +62846,7 @@ function debugSystemRosterServiceRow(service = {}) {
   return {
     id,
     kind: 'service',
-    parentId: '',
+    parentId: String(service?.parent_id || service?.parentId || ''),
     label: String(service?.label || id),
     qualifier: id,
     state: String(service?.state || 'unavailable'),
@@ -62523,12 +62978,33 @@ function debugSystemRosterSummary(rows = []) {
     population: rows.length, resourcePopulation: 0,
     cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0,
   };
+  const measuredResource = row => (
+    row?.metrics?.cpu_now_percent?.state === 'measured'
+    || row?.metrics?.rss_bytes?.state === 'measured'
+  );
+  const resourceOwner = row => {
+    if (!row?.parentId) {
+      return row?.metrics?.cpu_now_percent?.reason_code !== 'resource_metrics_owned_by_nested_service';
+    }
+    const parent = rows.find(candidate => String(candidate?.id || '') === String(row.parentId));
+    // A nested row is an independent resource owner only when its parent has no
+    // measured process metrics. This handles the Go monolith (the child owns the
+    // one process) while preserving Python's parent-owned web process accounting.
+    // The tmux watcher is an in-process subsystem and has no process of its own;
+    // a nested service row is still an owner even when its sample is unavailable.
+    return !resourceOwner(parent) && (row?.kind === 'service' || measuredResource(row));
+  };
   for (const row of rows) {
-    if (!row.parentId) counts.resourcePopulation += 1;
+    const ownsResources = resourceOwner(row);
+    if (ownsResources) counts.resourcePopulation += 1;
     const tone = row.tone || debugSystemStateTone(row.state);
     if (tone === 'good') counts.ready += 1;
     else if (tone === 'muted') counts.idle += 1;
     else counts.issues += 1;
+    // A nested service runs inside its parent process. Its CPU/RSS are already represented by
+    // that parent row, so including the child here would double-count one process in the summary
+    // even though the Daemons chart correctly exposes one owned process series.
+    if (!ownsResources || !measuredResource(row)) continue;
     const cpu = row.metrics?.cpu_now_percent;
     if (cpu?.state === 'measured') {
       counts.cpuPercent += Number(cpu.value) || 0;
@@ -62943,7 +63419,7 @@ function debugSystemWebProcessDetailHtml(payload = {}) {
 }
 
 function debugSystemTmuxSignalWatcherDetailHtml(watcher = {}) {
-  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const state = debugSystemTmuxSignalWatcherState(watcher);
   const demandKnown = typeof watcher?.demanded === 'boolean';
   const demanded = watcher?.demanded === true;
   const sessions = Array.isArray(watcher?.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
@@ -62984,14 +63460,94 @@ const DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL = Object.freeze({
   indexd: payload => debugSystemSearchCachesDetailHtml(payload),
 });
 
+function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
+  if (!runtimeDiagnostics || typeof runtimeDiagnostics !== 'object') return '';
+  const runtimeDuration = value => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? debugGraphTerseTimeText(number) : '—';
+  };
+  const process = runtimeDiagnostics.process_diagnostics && typeof runtimeDiagnostics.process_diagnostics === 'object'
+    ? runtimeDiagnostics.process_diagnostics : {};
+  const collectors = runtimeDiagnostics.collectors && typeof runtimeDiagnostics.collectors === 'object'
+    ? runtimeDiagnostics.collectors : {};
+  const lifecycle = runtimeDiagnostics.lifecycle && typeof runtimeDiagnostics.lifecycle === 'object'
+    ? runtimeDiagnostics.lifecycle : {};
+  const processRows = debugSystemRowsHtml([
+    ['Roster rows', process.last_roster_rows],
+    ['Roster cache', `${debugSystemNumber(process.roster_cache_hits)} hits / ${debugSystemNumber(process.roster_cache_misses)} misses`],
+    ['Roster time', runtimeDuration(process.last_roster_duration_ms)],
+    ['Metrics cache', `${debugSystemNumber(process.metrics_cache_hits)} hits / ${debugSystemNumber(process.metrics_cache_misses)} misses`],
+    ['Metrics time', runtimeDuration(process.last_metrics_duration_ms)],
+    ['Agent inventory cache', `${debugSystemNumber(process.agent_inventory_cache_hits)} hits / ${debugSystemNumber(process.agent_inventory_cache_misses)} misses`],
+    ['Agent inventory rows', process.last_agent_inventory_rows],
+    ['Thread rows', process.last_thread_rows],
+    ['Child rows', process.last_child_rows],
+  ]);
+  const collectorEntries = Object.entries(collectors).filter(([, value]) => value && typeof value === 'object');
+  const collectorHtml = collectorEntries.length ? `<h4 class="js-debug-roster-detail-title">Collector work</h4><div data-go-runtime-collectors><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Owner</th><th>Runs</th><th>Last</th><th>Total</th><th>Rows</th></tr></thead><tbody>${collectorEntries.map(([name, value]) => {
+    const families = value.families && typeof value.families === 'object' ? Object.entries(value.families) : [];
+    const rows = families.length ? families.map(([family, familyValue]) => `<tr data-go-runtime-family="${esc(family)}"><th scope="row">${esc(`${name}:${family}`)}</th><td>${esc(debugSystemNumber(familyValue.runs))}</td><td>${esc(runtimeDuration(familyValue.last_duration_ms))}</td><td>${esc(runtimeDuration(familyValue.duration_total_ms))}</td><td>${esc(debugSystemNumber(name === 'host' && family === 'cpu' ? value.last_cpu_process_rows : name === 'host' && family === 'system_memory' ? value.last_memory_process_rows : 0))}</td></tr>`).join('') : `<tr data-go-runtime-owner="${esc(name)}"><th scope="row">${esc(name)}</th><td>${esc(debugSystemNumber(value.cycles))}</td><td>${esc(runtimeDuration(value.last_duration_ms))}</td><td>${esc(runtimeDuration(value.duration_total_ms))}</td><td>—</td></tr>`;
+    const opencode = name === 'agent_tokens' && ('opencode_database_opens' in value || 'opencode_database_reuses' in value || 'opencode_collection_last_duration_ms' in value)
+      ? `<tr data-go-runtime-owner="agent_tokens:opencode"><th scope="row">agent_tokens:opencode</th><td>${esc(`${debugSystemNumber(value.opencode_database_opens)} opens / ${debugSystemNumber(value.opencode_database_reuses)} reuses`)}</td><td>${esc(runtimeDuration(value.opencode_database_last_open_duration_ms))}</td><td>${esc(runtimeDuration(value.opencode_collection_duration_total_ms))}</td><td>—</td></tr>`
+      : '';
+    return rows + opencode;
+  }).join('')}</tbody></table></div>` : '';
+  const serviceRefresh = runtimeDiagnostics.service_refresh && typeof runtimeDiagnostics.service_refresh === 'object'
+    ? runtimeDiagnostics.service_refresh : null;
+  const serviceRefreshHtml = serviceRefresh ? `<h4 class="js-debug-roster-detail-title">Published-ring projection</h4><div data-go-runtime-service-refresh><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Runs</th><th>Ring reads</th><th>Ring rows</th><th>Decodes</th><th>Products</th><th>Last</th><th>Total</th></tr></thead><tbody><tr><td>${esc(debugSystemNumber(serviceRefresh.runs))}</td><td>${esc(debugSystemNumber(serviceRefresh.ring_reads))}</td><td>${esc(debugSystemNumber(serviceRefresh.ring_rows))}</td><td>${esc(debugSystemNumber(serviceRefresh.bucket_decodes))}</td><td>${esc(debugSystemNumber(serviceRefresh.products_built))}</td><td>${esc(runtimeDuration(serviceRefresh.last_duration_ms))}</td><td>${esc(runtimeDuration(serviceRefresh.duration_total_ms))}</td></tr></tbody></table></div>` : '';
+  const tokenCollector = collectors.agent_tokens && typeof collectors.agent_tokens === 'object' ? collectors.agent_tokens : null;
+  const phaseEntries = tokenCollector && tokenCollector.opencode_phases && typeof tokenCollector.opencode_phases === 'object'
+    ? Object.entries(tokenCollector.opencode_phases).sort(([left], [right]) => left.localeCompare(right)) : [];
+  const phaseHtml = phaseEntries.length ? `<h4 class="js-debug-roster-detail-title">OpenCode phases</h4><div data-go-runtime-opencode-phases><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Phase</th><th>Runs</th><th>Last</th><th>Total</th></tr></thead><tbody>${phaseEntries.map(([name, value]) => `<tr data-go-runtime-opencode-phase="${esc(name)}"><th scope="row">${esc(name)}</th><td>${esc(debugSystemNumber(value?.runs))}</td><td>${esc(runtimeDuration(value?.last_duration_ms))}</td><td>${esc(runtimeDuration(value?.duration_total_ms))}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const resolutions = lifecycle.by_resolution && typeof lifecycle.by_resolution === 'object'
+    ? (Array.isArray(lifecycle.by_resolution) ? lifecycle.by_resolution : Object.values(lifecycle.by_resolution)) : [];
+  const lifecycleHtml = resolutions.length ? `<h4 class="js-debug-roster-detail-title">SQLite/materialization work</h4><div data-go-runtime-lifecycle><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Resolution</th><th>Cells</th><th>Rows</th><th>Select</th><th>Materialize</th></tr></thead><tbody>${resolutions.map(value => `<tr data-go-runtime-resolution="${esc(value.resolution_seconds || '')}"><th scope="row">${esc(`${value.resolution_seconds || '?'}s`)}</th><td>${esc(debugSystemNumber(value.selected_cells))}</td><td>${esc(debugSystemNumber(value.fact_rows_read))}</td><td>${esc(debugGraphTerseTimeText(Number(value.selection_duration_ms || 0)))}</td><td>${esc(debugGraphTerseTimeText(Number(value.materialization_duration_ms || 0)))}</td></tr>`).join('')}</tbody></table></div>` : '';
+  return `<h4 class="js-debug-roster-detail-title">Measured runtime work</h4>${processRows}${collectorHtml}${serviceRefreshHtml}${phaseHtml}${lifecycleHtml}`;
+}
+
 function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const processDetails = row.service?.details && typeof row.service.details === 'object' ? row.service.details : {};
+  const processMetric = processDetails.process_count;
+  const goroutineMetric = processDetails.goroutine_count;
+  const threadMetric = processDetails.thread_count;
+  const goroutineScopeReason = String(processDetails.goroutine_scope_reason || '').trim();
+  const cpuScope = String(processDetails.cpu_scope || '').trim();
+  const cpuNormalization = String(processDetails.cpu_normalization || '').trim();
+  const goRuntimeHtml = row.id === 'yolomux-go' ? debugSystemGoRuntimeDetailHtml(processDetails.stats_runtime) : '';
+  const threads = Array.isArray(processDetails.threads) ? processDetails.threads : [];
+  const childProcesses = Array.isArray(processDetails.child_processes) ? processDetails.child_processes : [];
+  const childProcessHtml = childProcesses.length ? `<h4 class="js-debug-roster-detail-title">Child processes</h4><div data-go-child-processes>${childProcesses.map(child => {
+    const label = String(child?.label || `pid:${child?.pid || '?'}`);
+    const cpu = child?.cpu_now_percent;
+    const rss = child?.rss_bytes;
+    return `<div class="js-debug-go-child-process" data-go-child-pid="${esc(child?.pid || '')}">${debugSystemRowsHtml([
+      ['Process', label], ['PID', Number(child?.pid) > 0 ? child.pid : '—'],
+      ['State', child?.state || '—'], ['CPU', debugSystemMetricText(cpu, 'cpu_now_percent')],
+      ['Memory', debugSystemMetricText(rss, 'rss_bytes')],
+    ])}</div>`;
+  }).join('')}</div>` : '';
+  const threadHtml = threads.length ? `<h4 class="js-debug-roster-detail-title">OS threads</h4><div data-go-threads>${threads.map(thread => {
+    const cpu = thread?.cpu_now_percent;
+    return `<div class="js-debug-go-thread" data-go-thread-tid="${esc(thread?.tid || '')}">${debugSystemRowsHtml([
+      ['Thread', thread?.name || `tid:${thread?.tid || '?'}`], ['TID', Number(thread?.tid) > 0 ? thread.tid : '—'],
+      ['State', thread?.state || '—'], ['CPU', debugSystemMetricText(cpu, 'cpu_now_percent')],
+    ])}</div>`;
+  }).join('')}</div>` : '';
   const identity = debugSystemRowsHtml([
     ['Service id', row.id],
     ['PID', Number(row.pid) > 0 ? row.pid : '—', Number(row.pid) > 0 ? '' : debugSystemHealthReasonText('process_not_running')],
     ['Reason', row.reason || '—', row.reason ? '' : debugSystemHealthReasonText('state_reason_unpublished')],
+    ...(cpuScope ? [['CPU scope', cpuScope]] : []),
+    ...(cpuNormalization ? [['CPU scale', cpuNormalization]] : []),
   ]);
   const owned = DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL[row.id];
   return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    ${(processMetric || goroutineMetric || threadMetric || goroutineScopeReason) ? debugSystemRowsHtml([
+      ...(processMetric ? [['Processes', debugSystemMetricText(processMetric, 'process_count')]] : []),
+      ...(goroutineMetric ? [['Goroutines', debugSystemMetricText(goroutineMetric, 'goroutine_count')]] : []),
+      ...(goroutineScopeReason ? [['Goroutine detail', goroutineScopeReason]] : []),
+      ...(threadMetric ? [['Threads', debugSystemMetricText(threadMetric, 'thread_count')]] : []),
+    ]) : ''}${threadHtml}${childProcessHtml}${goRuntimeHtml}
     ${debugSystemServiceHealthDetailHtml(row.health, nowSeconds)}
     ${owned ? owned(payload, nowSeconds) : ''}`;
 }
@@ -63109,7 +63665,7 @@ function debugSystemAlertsHtml(payload = {}) {
   const alerts = [...debugSystemHealthExplanations(health).alerts];
   if (debugSystemTmuxSignalWatcherIsIssue(payload.tmux_signal_watcher)) {
     const watcher = payload.tmux_signal_watcher || {};
-    const watcherState = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+    const watcherState = debugSystemTmuxSignalWatcherState(watcher);
     alerts.push(['tmux-signal-watcher', `${t('debug.system.roster.tmuxSignalWatcher')}: ${watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[watcherState]}`]);
   }
   for (const event of Array.isArray(localServices.recovery_events) ? localServices.recovery_events : []) {
@@ -63551,7 +64107,10 @@ const DEBUG_SUBVIEWS = Object.freeze([
       bindDebugGraphTouchSelection(panel);
       bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
     },
-    activate: () => syncDebugGraphLiveTicker(),
+    activate: ({forceAgentStatus = true} = {}) => {
+      void refreshDebugStatsAgentStatus({force: forceAgentStatus});
+      return syncDebugGraphLiveTicker();
+    },
     deactivate: () => syncDebugGraphLiveTicker(),
   }),
   debugSubviewDescriptor({
@@ -63580,11 +64139,11 @@ function debugPanelSubviewDescriptors() {
   return DEBUG_SUBVIEWS;
 }
 
-function syncDebugSubviewActivation({pollNow = false} = {}) {
+function syncDebugSubviewActivation({pollNow = false, forceAgentStatus = true} = {}) {
   for (const view of debugPanelSubviewDescriptors()) {
     if (view.id !== debugRuntimeState.subTab) view.deactivate();
   }
-  return debugSubview(debugRuntimeState.subTab).activate({pollNow});
+  return debugSubview(debugRuntimeState.subTab).activate({pollNow, forceAgentStatus});
 }
 
 function debugPanelHtml() {
@@ -64991,14 +65550,16 @@ function newGitDiffTabState(item, defaults = {}) {
     item,
     path,
     repo: '',
+    branch: '',
     repositoryIdentity: '',
     relativePath: '',
     hostedRemote: null,
-    branch: '',
     detached: false,
     dirtyCount: null,
     dirtyEntries: [],
     dirtyEntriesTruncated: false,
+    worktreeStatus: null,
+    worktreeStatusExpanded: false,
     head: '',
     snapshotCursor: '',
     commits: [],
@@ -65021,6 +65582,15 @@ function newGitDiffTabState(item, defaults = {}) {
     focusedFilePaths: new Map(),
     historyGuard: makeGenerationGuard(),
     historyController: null,
+    statsGuard: makeGenerationGuard(),
+    statsController: null,
+    statsControllers: new Set(),
+    statsLoading: false,
+    statsNextCursor: '',
+    statsExhausted: false,
+    statsInitialWindowDone: false,
+    statsBackfillTimer: null,
+    statsBySha: new Map(),
     historyRefreshTimer: null,
     focusedSha: '',
     ...defaults,
@@ -65050,13 +65620,23 @@ function invalidateGitDiffDetailRequests(state) {
 function cleanupGitDiffTab(item) {
   const state = gitDiffTabState.get(item);
   if (state?.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
+  if (state?.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
   state?.historyController?.abort?.();
   state?.historyGuard?.invalidate?.();
+  state?.statsController?.abort?.();
+  for (const controller of state?.statsControllers || []) controller.abort?.();
+  state?.statsGuard?.invalidate?.();
   invalidateGitDiffDetailRequests(state);
   gitDiffTabState.delete(item);
 }
 
 const gitDiffHistoryRefreshIntervalMs = 10000;
+const gitDiffHistoryStatsInitialSchedule = [1, 2, 4];
+const gitDiffHistoryStatsLaterSchedule = [4, 4, 4, 4];
+
+function gitDiffStatsWindowSupported() {
+  return /^Go(?:\s|$)/.test(String(bootstrap.backendLabel || ''));
+}
 
 function scheduleGitDiffHistoryRefresh(item) {
   const state = ensureGitDiffTabState(item);
@@ -65085,9 +65665,11 @@ function gitDiffHistoryPageSize(body) {
   return Math.max(gitDiffHistoryMinimumPageSize, Math.ceil(availableHeight / rowHeight));
 }
 
-function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize) {
+function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize, includeStats = false, statsOffset = null) {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}`;
+  const statsSuffix = includeStats ? '&stats=1' : '';
+  const offsetSuffix = Number.isSafeInteger(statsOffset) && statsOffset >= 0 ? `&stats_offset=${statsOffset}` : '';
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}${statsSuffix}${offsetSuffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head, repositoryIdentity = '') {
@@ -65112,6 +65694,7 @@ function gitDiffHistoryPayloadIsValid(payload) {
     && typeof payload.path === 'string'
     && typeof payload.repo === 'string'
     && typeof payload.relative_path === 'string'
+    && (payload.branch === undefined || typeof payload.branch === 'string')
     && typeof payload.head === 'string'
     && (payload.hosted_remote === undefined || payload.hosted_remote === null || (
       typeof payload.hosted_remote === 'object'
@@ -65125,7 +65708,18 @@ function gitDiffHistoryPayloadIsValid(payload) {
     && (payload.dirty_entries === undefined || (Array.isArray(payload.dirty_entries) && payload.dirty_entries.every(entry => entry && typeof entry.status === 'string' && typeof entry.path === 'string' && (entry.old_path === undefined || typeof entry.old_path === 'string'))))
     && (payload.dirty_entries_truncated === undefined || typeof payload.dirty_entries_truncated === 'boolean')
     && Array.isArray(payload.commits)
-    && typeof payload.next_cursor === 'string');
+    && typeof payload.next_cursor === 'string'
+    && (payload.worktree_status === undefined || gitDiffWorktreeStatusIsValid(payload.worktree_status)));
+}
+
+function gitDiffWorktreeStatusIsValid(status) {
+  return Boolean(status && typeof status === 'object'
+    && typeof status.available === 'boolean'
+    && typeof status.dirty === 'boolean'
+    && Array.isArray(status.entries)
+    && status.entries.every(entry => entry && typeof entry === 'object'
+      && typeof entry.status === 'string' && typeof entry.path === 'string')
+    && (status.status_counts === undefined || (status.status_counts && typeof status.status_counts === 'object')));
 }
 
 function gitDiffCommitPayloadIsValid(payload, sha) {
@@ -65155,6 +65749,33 @@ function mergeGitDiffCommits(current, incoming) {
   });
 }
 
+function gitDiffCommitStatsComplete(commit) {
+  return ['files', 'added', 'removed', 'binary_files'].every(key => Number.isSafeInteger(commit?.[key]) && commit[key] >= 0);
+}
+
+function mergeGitDiffHistoryCommits(current, incoming) {
+  const prior = new Map((current || []).map(commit => [String(commit?.sha || ''), commit]));
+  return mergeGitDiffCommits([], incoming).map(commit => {
+    const old = prior.get(String(commit?.sha || ''));
+    if (!old || gitDiffCommitStatsComplete(commit)) return commit;
+    return {...commit, ...Object.fromEntries(['files', 'added', 'removed', 'binary_files']
+      .filter(key => Object.prototype.hasOwnProperty.call(old, key)).map(key => [key, old[key]]))};
+  });
+}
+
+function gitDiffHistoryNeedsStats(state) {
+  return Boolean(state?.commits?.some(commit => !gitDiffCommitStatsComplete(commit)));
+}
+
+function applyGitDiffStatsCache(state) {
+  if (!state?.statsBySha?.size) return;
+  state.commits = state.commits.map(commit => {
+    const stats = state.statsBySha.get(String(commit?.sha || ''));
+    if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+  });
+}
+
 function pruneGitDiffShaState(state, shas) {
   for (const sha of [...state.expanded]) if (!shas.has(sha)) state.expanded.delete(sha);
   for (const map of [state.details, state.detailErrors, state.detailLoading, state.detailGuards, state.detailControllers, state.detailCollapsedDirectories, state.focusedFilePaths]) {
@@ -65176,6 +65797,18 @@ async function refreshGitDiffHistory(item, options = {}) {
   const cursor = append ? state.nextCursor : (!options.refresh && !state.loaded ? state.snapshotCursor : '');
   if (!append) {
     invalidateGitDiffDetailRequests(state);
+    state.statsController?.abort?.();
+    for (const controller of state.statsControllers) controller.abort?.();
+    state.statsControllers.clear();
+    state.statsGuard.invalidate();
+    state.statsController = null;
+    state.statsLoading = false;
+    if (state.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
+    state.statsBackfillTimer = null;
+    state.statsNextCursor = '';
+    state.statsExhausted = false;
+    state.statsInitialWindowDone = false;
+    state.statsBySha.clear();
     state.loadAttempted = true;
     state.loading = true;
   } else {
@@ -65186,8 +65819,8 @@ async function refreshGitDiffHistory(item, options = {}) {
   try {
     const panel = panelNodes.get(item);
     const body = panel?.querySelector?.('.git-diff-panel-body');
-       const pageSize = gitDiffHistoryPageSize(body);
-      const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, 200), {
+    const pageSize = gitDiffHistoryPageSize(body);
+    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor, pageSize), {
       cache: 'no-store',
       ...(controller ? {signal: controller.signal} : {}),
     });
@@ -65200,6 +65833,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     }
     state.path = normalizeDirectoryPath(payload.path) || state.path;
     state.repo = normalizeDirectoryPath(payload.repo);
+    state.branch = String(payload.branch || '');
     state.repositoryIdentity = String(payload.repository_identity || '');
     state.relativePath = payload.relative_path;
     state.hostedRemote = payload.hosted_remote || null;
@@ -65208,11 +65842,17 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.dirtyCount = Number.isSafeInteger(payload.dirty_count) && payload.dirty_count >= 0 ? payload.dirty_count : null;
     state.dirtyEntries = Array.isArray(payload.dirty_entries) ? payload.dirty_entries : [];
     state.dirtyEntriesTruncated = payload.dirty_entries_truncated === true;
+    if (gitDiffWorktreeStatusIsValid(payload.worktree_status)) state.worktreeStatus = payload.worktree_status;
     state.head = payload.head;
-    state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
-       if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
-       else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
+    state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffHistoryCommits(state.commits, payload.commits);
+    applyGitDiffStatsCache(state);
+    if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
+    else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
+    if (!append) {
+      state.statsNextCursor = state.snapshotCursor;
+      state.statsInitialWindowDone = false;
+    }
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
     state.truncationReason = String(payload.truncation_reason || '');
@@ -65223,6 +65863,7 @@ async function refreshGitDiffHistory(item, options = {}) {
     refreshPaneTabLabel(item);
     if (itemInLayout(tabberItemId)) refreshTabberPanels();
     if (!append) pruneGitDiffShaState(state, new Set(state.commits.map(commit => String(commit?.sha || '')).filter(Boolean)));
+    if (gitDiffHistoryNeedsStats(state)) scheduleGitDiffHistoryStatsBackfill(item);
     for (const sha of state.expanded) if (!state.details.has(sha) && !state.detailLoading.has(sha)) void loadGitDiffCommitDetail(item, sha);
     refreshLayoutUrlStateSoon();
     return true;
@@ -65253,6 +65894,148 @@ async function refreshGitDiffHistory(item, options = {}) {
       renderGitDiffPanel(item);
     }
   }
+}
+
+function applyGitDiffStatsPayload(item, state, payload) {
+  for (const commit of payload.commits || []) {
+    const sha = String(commit?.sha || '');
+    if (sha && gitDiffCommitStatsComplete(commit)) state.statsBySha.set(sha, commit);
+  }
+  let changed = false;
+  state.commits = state.commits.map(commit => {
+    const stats = state.statsBySha.get(String(commit?.sha || ''));
+    if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
+    changed = changed || !gitDiffCommitStatsComplete(commit)
+      || ['files', 'added', 'removed', 'binary_files'].some(key => commit[key] !== stats[key]);
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+  });
+  if (changed) renderGitDiffPanel(item);
+  return changed;
+}
+
+function gitDiffStatsRequest(state, url) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  if (controller) {
+    state.statsControllers.add(controller);
+    if (!state.statsController) state.statsController = controller;
+  }
+  return apiFetchJson(url, {
+    cache: 'no-store',
+    ...(controller ? {signal: controller.signal} : {}),
+  }).finally(() => {
+    if (controller) {
+      state.statsControllers.delete(controller);
+      if (state.statsController === controller) state.statsController = [...state.statsControllers][0] || null;
+    }
+  });
+}
+
+function gitDiffStatsStreamRequest(state, url, onChunk) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  if (controller) {
+    state.statsControllers.add(controller);
+    state.statsController = controller;
+  }
+  const fetchOptions = {
+    cache: 'no-store',
+    headers: {Accept: 'text/event-stream'},
+    ...(controller ? {signal: controller.signal} : {}),
+  };
+  return (async () => {
+    const response = await apiFetch(url, fetchOptions, {recordDebug: true});
+    if (!response.ok) {
+      const error = new Error(response.statusText || `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const reader = response.body?.getReader?.();
+    if (!reader) return response.json();
+    const decoder = new TextDecoder();
+    let streamError = null;
+    let donePayload = {};
+    const parser = createFileQuickOpenSseParser((event, payload) => {
+      if (event === 'chunk') onChunk(payload);
+      else if (event === 'done') donePayload = payload || {};
+      else if (event === 'error') {
+        streamError = new Error(String(payload?.message || payload?.error || 'Git history stats stream failed'));
+        streamError.payload = payload;
+      }
+    });
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      parser.feed(decoder.decode(result.value, {stream: true}));
+    }
+    parser.feed(decoder.decode());
+    parser.finish();
+    if (streamError) throw streamError;
+    return donePayload;
+  })().finally(() => {
+    if (controller) {
+      state.statsControllers.delete(controller);
+      if (state.statsController === controller) state.statsController = null;
+    }
+  });
+}
+
+async function backfillGitDiffHistoryStats(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || !state.loaded || !state.head || state.statsExhausted || !gitDiffHistoryNeedsStats(state) || state.statsLoading) return false;
+  const isCurrent = state.statsGuard.begin();
+  const requestedHead = state.head;
+  const useInitialWindow = gitDiffStatsWindowSupported() && !state.statsInitialWindowDone;
+  const requestedCursor = state.statsNextCursor || state.snapshotCursor;
+  let continueBackfill = false;
+  let changed = false;
+  state.statsLoading = true;
+  try {
+    if (!gitDiffStatsWindowSupported()) {
+      const payload = await gitDiffStatsRequest(state, gitDiffHistoryUrl(state.path, '', 200, true));
+      if (!isCurrent() || state.head !== requestedHead) return false;
+      if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
+      changed = applyGitDiffStatsPayload(item, state, payload);
+      state.statsExhausted = true;
+      return changed;
+    }
+    const batchSizes = useInitialWindow ? gitDiffHistoryStatsInitialSchedule : gitDiffHistoryStatsLaterSchedule;
+    if (useInitialWindow) state.statsInitialWindowDone = true;
+    const donePayload = await gitDiffStatsStreamRequest(
+      state,
+      `/api/fs/git-history-stats-stream?path=${encodeURIComponent(state.path)}&cursor=${encodeURIComponent(requestedCursor)}&batch_sizes=${batchSizes.join(',')}`,
+      payload => {
+        if (!isCurrent() || state.head !== requestedHead) return;
+        if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
+        changed = applyGitDiffStatsPayload(item, state, payload) || changed;
+      },
+    );
+    if (!isCurrent() || state.head !== requestedHead) return changed;
+    state.statsNextCursor = String(donePayload?.next_cursor || '');
+    state.statsExhausted = !state.statsNextCursor;
+    continueBackfill = !state.statsExhausted && gitDiffHistoryNeedsStats(state);
+    return changed;
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return false;
+    return false;
+  } finally {
+    if (isCurrent()) {
+      state.statsLoading = false;
+      state.statsController = null;
+      renderGitDiffPanel(item);
+      if (continueBackfill && state.loaded && state.head === requestedHead) {
+        scheduleGitDiffHistoryStatsBackfill(item);
+      }
+    }
+  }
+}
+
+function scheduleGitDiffHistoryStatsBackfill(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || state.statsBackfillTimer || state.statsLoading || state.statsExhausted || !gitDiffHistoryNeedsStats(state)) return false;
+  state.statsBackfillTimer = setTimeout(() => {
+    state.statsBackfillTimer = null;
+    void backfillGitDiffHistoryStats(item);
+  }, 0);
+  return true;
 }
 
 function loadOlderGitDiffHistory(item) {
@@ -65383,8 +66166,7 @@ function gitDiffCommitChangesNode(commit) {
   const binary = Number.isSafeInteger(commit?.binary_files) && commit.binary_files >= 0 ? commit.binary_files : null;
   const node = gitDiffTextNode('git-diff-commit-changes');
   if (files === null || added === null || removed === null || binary === null) {
-    node.setAttribute('aria-label', t('common.notAvailable'));
-    node.title = t('common.notAvailable');
+    node.setAttribute('aria-hidden', 'true');
     return node;
   }
   node.append(
@@ -65431,7 +66213,7 @@ function gitDiffCommitSubjectNode(commit, remote) {
   const node = gitDiffTextNode('git-diff-commit-description');
   const decorations = Array.isArray(commit?.decorations)
     ? commit.decorations.map(value => String(value || '').trim()).filter(Boolean)
-    : [];
+    : String(commit?.decorations || '').trim() ? [String(commit.decorations).trim()] : [];
   if (decorations.length) {
     const refs = document.createElement('span');
     refs.className = 'git-diff-commit-decorations';
@@ -65457,6 +66239,49 @@ function gitDiffCommitDateText(commit) {
   return localizedDateTimeFormat(commit?.authored_at, {
     year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
   });
+}
+
+function gitDiffHistoryRow(item, rowData, row = null) {
+  const state = ensureGitDiffTabState(item);
+  const sha = String(rowData?.sha || '');
+  const elementName = String(rowData?.elementName || 'div');
+  const control = row?.localName === elementName ? row : document.createElement(elementName);
+  control.className = String(rowData?.className || 'git-diff-commit-row');
+  if (sha) {
+    control.dataset.gitDiffCommit = sha;
+    control.dataset.path = `/commit/${sha}`;
+    control.dataset.kind = 'dir';
+    control.dataset.name = String(rowData?.name || rowData?.description || sha);
+  } else {
+    delete control.dataset.gitDiffCommit;
+    delete control.dataset.path;
+    delete control.dataset.kind;
+    delete control.dataset.name;
+  }
+  control.setAttribute('role', String(rowData?.role || 'treeitem'));
+  control.setAttribute('aria-level', '1');
+  control.setAttribute('aria-expanded', rowData?.expanded === true ? 'true' : 'false');
+  const caret = gitDiffTextNode('git-diff-commit-caret ui-disclosure-triangle', disclosureTriangleGlyph(rowData?.expanded === true));
+  caret.dataset.disclosureExpanded = rowData?.expanded === true ? 'true' : 'false';
+  caret.setAttribute('aria-hidden', 'true');
+  const shortShaText = String(rowData?.shortSha ?? (sha ? sha.slice(0, 9) : ''));
+  const shortSha = sha
+    ? gitDiffHostedAnchor('git-diff-commit-sha', shortShaText, gitDiffHostedLink(state?.hostedRemote, 'commit', sha))
+    : gitDiffTextNode('git-diff-commit-sha', shortShaText);
+  shortSha.title = sha || shortShaText;
+  const signatureStatus = String(rowData?.signatureStatus || '').trim();
+  if (signatureStatus) {
+    const signature = gitDiffTextNode('git-diff-commit-signature', signatureStatus);
+    shortSha.append(document.createTextNode(' '), signature);
+  }
+  const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText({authored_at: rowData?.authoredAt}));
+  date.title = localizedExactDateTimeFormat(rowData?.authoredAt);
+  const changes = gitDiffCommitChangesNode(rowData);
+  const author = gitDiffTextNode('git-diff-commit-author', rowData?.author || '');
+  const description = rowData?.descriptionNode || gitDiffTextNode('git-diff-commit-description', rowData?.description || '');
+  control.setAttribute('aria-label', [shortShaText, signatureStatus, date.textContent, changes.getAttribute('aria-label'), author.textContent, rowData?.description || description.textContent].filter(Boolean).join(' '));
+  control.replaceChildren(caret, shortSha, date, changes, author, description);
+  return control;
 }
 
 function gitDiffCommitRow(item, commit, row = null) {
@@ -65619,6 +66444,51 @@ function gitDiffFileTreeContext(tree) {
   return {item, sha, state, detail: state?.details?.get(sha) || null};
 }
 
+function gitDiffWorktreeDetail(state) {
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  if (!repo || !String(state?.head || '')) return null;
+  return {repo, from_ref: 'HEAD', to_ref: 'current', parents: [String(state.head)]};
+}
+
+function gitDiffWorktreeEntryForPath(state, rowPath) {
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  const requested = String(rowPath || '');
+  if (!repo || !requested) return null;
+  return (state?.worktreeStatus?.entries || []).find(entry => {
+    const relative = String(entry?.path || '');
+    return relative && (requested === relative || normalizeDirectoryPath(`${repo}/${relative}`) === normalizeDirectoryPath(requested));
+  }) || null;
+}
+
+function gitDiffWorktreeEntryFile(state, entry) {
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  const path = String(entry?.path || '');
+  if (!repo || !path) return null;
+  const status = String(entry?.status || 'M');
+  return {
+    ...entry,
+    path,
+    old_path: String(entry?.old_path || ''),
+    abs_path: normalizeDirectoryPath(`${repo}/${path}`),
+    repo,
+    mtime: Number(state?.worktreeStatus?.modified_at || 0),
+    missing: status === 'D',
+    diff_tracked: status !== '??',
+  };
+}
+
+function gitDiffWorktreeFilesTree(state) {
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  const status = state?.worktreeStatus;
+  if (!repo || !status) return {entries: [], entriesByDir: new Map(), sessionFilesMap: new Map(), directoryStatusCounts: new Map()};
+  const files = (Array.isArray(status.entries) ? status.entries : []).map(entry => {
+    const file = gitDiffWorktreeEntryFile(state, entry);
+    if (!file) return null;
+    return {...file, status: file.status === '??' ? '?' : file.status};
+  }).filter(Boolean);
+  return buildSessionFileTree(repo, files);
+}
+
 const gitDiffFileTreeInteractionController = createSharedTreeInteractionController({
   name: 'git-diff-files',
   rowSelector: '.file-tree-row[data-path]',
@@ -65655,8 +66525,13 @@ const gitDiffFileTreeInteractionController = createSharedTreeInteractionControll
       gitDiffFileTreeInteractionController.setExpanded(tree, row, !gitDiffFileTreeInteractionController.isExpanded(row, tree));
       return;
     }
-    const file = context.detail ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '') : null;
-    if (file) void openGitDiffHistoricalFile(context.detail, file, {returnToItem: context.item});
+    const file = context.detail
+      ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '')
+      : context.sha === '__worktree__'
+        ? gitDiffWorktreeEntryFile(context.state, gitDiffWorktreeEntryForPath(context.state, row?.dataset?.path))
+        : null;
+    const detail = context.detail || (context.sha === '__worktree__' ? gitDiffWorktreeDetail(context.state) : null);
+    if (file && detail) void openGitDiffHistoricalFile(detail, file, {returnToItem: context.item});
   },
 });
 
@@ -65720,6 +66595,93 @@ function gitDiffLoadingStatusNode(className = 'git-diff-state git-diff-state-loa
   return node;
 }
 
+function gitDiffWorktreeStatusCountsNode(status) {
+  const counts = new Map();
+  const rawCounts = status?.status_counts && typeof status.status_counts === 'object' ? status.status_counts : null;
+  if (rawCounts) {
+    for (const [code, count] of Object.entries(rawCounts)) {
+      if (Number.isSafeInteger(count) && count > 0) counts.set(String(code), count);
+    }
+  }
+  if (!counts.size) {
+    for (const entry of status?.entries || []) {
+      const code = String(entry?.status || 'M');
+      counts.set(code, (counts.get(code) || 0) + 1);
+    }
+  }
+  const order = ['??', 'M', 'A', 'D', 'R', 'C', 'T', 'U'];
+  const entries = [...counts.entries()].sort(([left], [right]) => {
+    const leftIndex = order.indexOf(left);
+    const rightIndex = order.indexOf(right);
+    if (leftIndex >= 0 || rightIndex >= 0) return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex);
+    return left.localeCompare(right);
+  });
+  const node = gitDiffTextNode('git-diff-commit-description');
+  node.append(...entries.flatMap(([code, count], index) => [
+    ...(index ? [document.createTextNode(' · ')] : []),
+    gitDiffTextNode('git-diff-worktree-count', `${count} ${code}`),
+  ]));
+  node.setAttribute('aria-label', entries.map(([code, count]) => `${count} ${code}`).join(', '));
+  return node;
+}
+
+function gitDiffWorktreeStatusNode(item, state) {
+  const status = state?.worktreeStatus;
+  if (!gitDiffWorktreeStatusIsValid(status) || status.available !== true || status.dirty !== true) return null;
+  const details = document.createElement('details');
+  details.className = 'git-diff-commit git-diff-worktree-status';
+  details.dataset.gitDiffCommitGroup = '__worktree__';
+  details.open = state.worktreeStatusExpanded === true;
+  const summary = gitDiffHistoryRow(item, {
+    elementName: 'summary',
+    className: 'git-diff-commit-row git-diff-worktree-summary',
+    expanded: details.open,
+    shortSha: t('gitDiff.dirty'),
+    authoredAt: status.modified_at,
+    files: status.files,
+    added: status.added,
+    removed: status.removed,
+    binary_files: status.binary_files,
+    author: '',
+    descriptionNode: gitDiffWorktreeStatusCountsNode(status),
+  });
+  summary.title = t('common.details');
+  details.addEventListener('toggle', () => {
+    const current = ensureGitDiffTabState(item);
+    if (current) current.worktreeStatusExpanded = details.open;
+    summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
+    const caret = summary.querySelector('.git-diff-commit-caret');
+    if (caret) {
+      caret.textContent = disclosureTriangleGlyph(details.open);
+      caret.dataset.disclosureExpanded = details.open ? 'true' : 'false';
+    }
+  });
+  const model = gitDiffWorktreeFilesTree(state);
+  const list = document.createElement('div');
+  list.className = 'git-diff-worktree-entries git-diff-file-tree file-tree';
+  list.dataset.gitDiffCommitSha = '__worktree__';
+  list.setAttribute('role', 'tree');
+  list.setAttribute('aria-label', t('gitDiff.changedFiles'));
+  renderTreeChildren(list, normalizeDirectoryPath(state.repo), model.entries, 0, {
+    entriesByDir: model.entriesByDir,
+    sessionFilesMap: model.sessionFilesMap,
+    directoryStatusCounts: model.directoryStatusCounts,
+    differMode: true,
+    compact: true,
+    repoForDiffer: normalizeDirectoryPath(state.repo),
+    view: 'differ',
+    treeSortMode: 'az',
+    includeHidden: true,
+    collapsedSet: gitDiffDetailCollapsedDirectories(state, '__worktree__'),
+    rowBinding: (row, rowState) => bindGitDiffFileTreeRow(row, rowState, item, '__worktree__', gitDiffWorktreeDetail(state)),
+  });
+  bindGitDiffFileTree(list);
+  gitDiffFileTreeInteractionController.applyState(list);
+  if (status.truncated === true) list.append(gitDiffStatusNode('git-diff-worktree-truncated', t('gitDiff.historyTruncated'), 'status'));
+  details.append(summary, list);
+  return details;
+}
+
 function renderGitDiffCommitDetail(item, sha, detailNode) {
   const state = ensureGitDiffTabState(item);
   const detail = state.details.get(sha);
@@ -65773,6 +66735,8 @@ function renderGitDiffCommitList(item, list, state) {
   const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
   const existing = new Map(Array.from(list.children || []).map(group => [group.dataset?.gitDiffCommitGroup || '', group]));
   const groups = [];
+  const worktreeStatus = gitDiffWorktreeStatusNode(item, state);
+  if (worktreeStatus) groups.push(worktreeStatus);
   for (const commit of state.commits.slice(0, state.visibleCommitCount)) {
     const sha = String(commit?.sha || '');
     if (!sha) continue;
@@ -65805,6 +66769,7 @@ function createGitDiffPanel(item) {
   toolbar.className = 'git-diff-toolbar';
   const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.showDiff'));
   const path = gitDiffTextNode('git-diff-path');
+  path.replaceChildren(gitDiffTextNode('git-diff-pathname'));
   const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => void refreshGitDiffHistory(item, {refresh: true})});
   toolbar.append(heading, path, refresh);
   const meta = document.createElement('div');
@@ -65826,8 +66791,11 @@ function renderGitDiffPanel(item, options = {}) {
   panel.setAttribute('aria-label', gitDiffTabLabel(item));
   const path = panel.querySelector?.('.git-diff-path');
   if (path) {
-    path.textContent = compactHomePath(state.path);
-    path.title = state.path;
+    const branch = String(state.branch || '').trim();
+    const pathNodes = [gitDiffTextNode('git-diff-pathname', compactHomePath(state.path))];
+    if (branch) pathNodes.push(gitDiffTextNode('git-diff-branch', `[${branch}]`));
+    path.replaceChildren(...pathNodes);
+    path.title = `${state.path}${branch ? ` [${branch}]` : ''}`;
   }
   const refresh = panel.querySelector?.('.git-diff-refresh');
   if (refresh) {
@@ -65852,8 +66820,8 @@ function renderGitDiffPanel(item, options = {}) {
   const nodes = [];
   if (state.loading) nodes.push(gitDiffLoadingStatusNode());
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
-  if (state.loaded) nodes.push(gitDiffDirtySummaryNode(state));
-  if (state.commits.length) nodes.push(list);
+  if (state.loaded && !gitDiffWorktreeStatusIsValid(state.worktreeStatus)) nodes.push(gitDiffDirtySummaryNode(state));
+  if (state.commits.length || gitDiffWorktreeStatusIsValid(state.worktreeStatus) && state.worktreeStatus.dirty === true) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
   if (state.loadingOlder) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
   else if (state.truncated && state.visibleCommitCount >= state.commits.length && !state.nextCursor) {
@@ -66052,7 +67020,8 @@ function sessionFilesRefsQuery() {
 
 function sessionFilesRequestQueryString(destination = 'differ') {
   return destination === 'finder'
-    ? 'from=HEAD&to=current'
+    ? `from=HEAD&to=current${(typeof fileExplorerVisibleRepositoryPaths === 'function' ? fileExplorerVisibleRepositoryPaths() : [])
+      .map(path => `&repo_path=${encodeURIComponent(path)}`).join('')}`
     : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
@@ -66064,13 +67033,16 @@ function sessionFilesRequestForDestination(destination, sessionOverride = '') {
     const parsed = safeJsonParse(refs, null);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
   }
-  return {
+  const request = {
     session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
     hours: 24,
     from_ref: params.get('from') || 'HEAD',
     to_ref: params.get('to') || 'current',
     repo_refs: repoRefs,
   };
+  const repoPaths = destination === 'finder' ? params.getAll('repo_path') : [];
+  if (repoPaths.length) request.repo_paths = repoPaths;
+  return request;
 }
 
 function clientSessionFilesWatchRequests() {
@@ -66103,6 +67075,11 @@ function normalizedSessionFilesRepoRefs(repoRefs) {
   return normalized;
 }
 
+function normalizedSessionFilesRepoPaths(repoPaths) {
+  if (!Array.isArray(repoPaths)) return [];
+  return [...new Set(repoPaths.map(path => normalizeDirectoryPath(path || '')).filter(Boolean))].sort();
+}
+
 function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
   const from = cleanDiffRef(request.from_ref || request.from || '', 'HEAD');
   const to = cleanDiffRef(request.to_ref || request.to || '', 'current');
@@ -66113,6 +67090,7 @@ function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
     from_ref: from,
     to_ref: to,
     repo_refs: normalizedSessionFilesRepoRefs(request.repo_refs),
+    repo_paths: normalizedSessionFilesRepoPaths(request.repo_paths),
   };
 }
 
@@ -66974,6 +67952,19 @@ function switchFileExplorerFinderSession(session) {
   if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     setSessionFilesSignatureForDestination('finder', cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload));
+    // The directory rows are already mounted when a cached session is selected. Complete the
+    // same first-paint transition as a fresh listing so a prior filesystem refresh cannot leave
+    // the Finder diff gate held forever.
+    finishFinderFastPaint();
+  } else {
+    // A session switch without a cache must not keep decorating Finder with the previous
+    // session's +/- rows while the target's slower Git/transcript backfill runs.
+    beginFinderSessionFilesDiffBackfill();
+    const pendingPayload = emptySessionFilesPayload(session, false, 'finder');
+    setSessionFilesPayloadForDestination('finder', pendingPayload);
+    setSessionFilesSignatureForDestination('finder', sessionFilesPayloadSignatureForPayload(pendingPayload));
+    setSessionFilesLoadingForDestination('finder', true);
+    renderSessionFilesDestination('finder', {force: true});
   }
   fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   return true;
@@ -67129,6 +68120,53 @@ function setSessionFilesLoadingForDestination(destination, loading) {
   sessionFilesStateForDestination(destination).loading = loading;
 }
 
+function finderSessionFilesDiffIsDeferred() {
+  return fileExplorerFinderSessionFilesState.diffBackfillPending === true
+    && fileExplorerFinderSessionFilesState.partialBackfillPainted !== true;
+}
+
+function beginFinderSessionFilesDiffBackfill() {
+  fileExplorerFinderSessionFilesState.diffBackfillPending = true;
+  fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
+  fileExplorerFinderSessionFilesState.fastListingPainted = false;
+}
+
+function markFinderFastListingPainted() {
+  fileExplorerFinderSessionFilesState.fastListingPainted = true;
+}
+
+function releaseFinderSessionFilesDiffBackfillIfReady() {
+  if (
+    fileExplorerFinderSessionFilesState.diffBackfillPending !== true
+    || fileExplorerFinderSessionFilesState.fastListingPainted !== true
+    || sessionFilesRequestIsActiveForDestination('finder')
+    || !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())
+  ) return false;
+  fileExplorerFinderSessionFilesState.diffBackfillPending = false;
+  return true;
+}
+
+function finishFinderFastPaint() {
+  markFinderFastListingPainted();
+  ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+  releaseFinderSessionFilesDiffBackfillIfReady();
+  updateFileTreeGitStatusRows();
+}
+
+function scheduleFinderSessionFilesBackfillAfterFastPaint(session) {
+  const expectedSession = String(session || '');
+  if (!expectedSession) return;
+  scheduleAfterFileExplorerFirstPaint(() => {
+    if (fileExplorerFinderTargetSession() !== expectedSession) return;
+    markFinderFastListingPainted();
+    if (!sessionFilesRequestIsActiveForDestination('finder')) {
+      void fetchSessionFiles({destination: 'finder', session: expectedSession, silent: true, force: true});
+    }
+    releaseFinderSessionFilesDiffBackfillIfReady();
+    updateFileTreeGitStatusRows();
+  });
+}
+
 function sessionFilesRenderOptions(options = {}) {
   return options.force === true || options.silent !== true ? {force: true} : {};
 }
@@ -67136,6 +68174,103 @@ function sessionFilesRenderOptions(options = {}) {
 function sessionFilesPerfDetails(payload = {}, extra = {}) {
   const files = Array.isArray(payload?.files) ? payload.files.length : 0;
   return {nodes: sessionFilesRepoRoots(payload).length, rows: files, ...extra};
+}
+
+function sessionFilesStreamSupported(destination) {
+  return destination === 'finder' && /^Go(?:\s|$)/.test(String(bootstrap.backendLabel || ''));
+}
+
+function sessionFilesStreamRows(payload, key) {
+  return Array.isArray(payload?.[key]) ? payload[key].filter(row => row && typeof row === 'object') : [];
+}
+
+function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent) {
+  if (!requestIsCurrent() || !chunk || typeof chunk !== 'object') return false;
+  const state = sessionFilesStateForDestination(destination);
+  const current = state.payload?.session === session ? state.payload : emptySessionFilesPayload(session, false, destination);
+  const reposByPath = new Map(sessionFilesStreamRows(current, 'repos').map(row => [String(row.repo || ''), row]));
+  const replaceRepo = chunk.replace_repo === true;
+  const chunkRepoPaths = new Set(sessionFilesStreamRows(chunk, 'repos').map(row => String(row.repo || '')).filter(Boolean));
+  for (const repo of sessionFilesStreamRows(chunk, 'repos')) {
+    const path = String(repo.repo || '');
+    if (path) reposByPath.set(path, repo);
+  }
+  const filesByPath = new Map(sessionFilesStreamRows(current, 'files').map(file => [
+    `${String(file.repo || '')}\x1f${String(file.abs_path || file.path || '')}`,
+    file,
+  ]));
+  if (replaceRepo && chunkRepoPaths.size) {
+    for (const [key, file] of filesByPath) {
+      if (chunkRepoPaths.has(String(file.repo || ''))) filesByPath.delete(key);
+    }
+  }
+  for (const file of sessionFilesStreamRows(chunk, 'files')) {
+    filesByPath.set(`${String(file.repo || '')}\x1f${String(file.abs_path || file.path || '')}`, file);
+  }
+  const refsByRepo = {...(current.refs_by_repo || {}), ...(chunk.refs_by_repo || {})};
+  const warnings = [...(Array.isArray(current.warnings) ? current.warnings : []), ...(Array.isArray(chunk.warnings) ? chunk.warnings : [])];
+  const nextPayload = {
+    ...current,
+    session,
+    hours: chunk.hours ?? current.hours,
+    files: [...filesByPath.values()],
+    repos: [...reposByPath.values()],
+    refs_by_repo: refsByRepo,
+    from_ref: chunk.from_ref || current.from_ref,
+    to_ref: chunk.to_ref || current.to_ref,
+    warnings: [...new Set(warnings.map(value => String(value)))],
+    errors: [],
+    loaded: false,
+    streaming: true,
+  };
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
+  setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(nextPayload));
+  if (destination === 'finder') {
+    fileExplorerFinderSessionFilesState.partialBackfillPainted = true;
+    renderSessionFilesDestination(destination, {force: true});
+  }
+  return true;
+}
+
+async function fetchSessionFilesStream(url, state, requestIsCurrent, onRepo) {
+  const controller = state.abortController;
+  const response = await apiFetch(url, {
+    cache: 'no-store',
+    headers: {Accept: 'text/event-stream'},
+    ...(controller ? {signal: controller.signal} : {}),
+  }, {recordDebug: true});
+  if (!response.ok) {
+    const error = new Error(response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const error = new Error('session-files stream is unavailable');
+    error.status = 501;
+    throw error;
+  }
+  const decoder = new TextDecoder();
+  let streamError = null;
+  let donePayload = {};
+  const parser = createFileQuickOpenSseParser((event, payload) => {
+    if (event === 'repo') onRepo(payload);
+    else if (event === 'done') donePayload = payload || {};
+    else if (event === 'error') {
+      streamError = new Error(String(payload?.message || payload?.error || 'Finder session-files stream failed'));
+      streamError.payload = payload;
+    }
+  });
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    parser.feed(decoder.decode(result.value, {stream: true}));
+  }
+  parser.feed(decoder.decode());
+  parser.finish();
+  if (streamError) throw streamError;
+  if (!requestIsCurrent()) return {};
+  return donePayload;
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
@@ -67191,6 +68326,7 @@ async function fetchSessionFiles(options = {}) {
     renderSessionFilesDestination(destination, {force: true});
     renderPaneTabStrips();
   }
+  let streamMode = sessionFilesStreamSupported(destination);
   try {
     const request = sessionFilesRequestForDestination(destination, session);
     const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
@@ -67203,11 +68339,44 @@ async function fetchSessionFiles(options = {}) {
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
-      payload = await apiFetchJson(
-        requestUrl,
-        {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
-        {abortRetirementReason: 'session_files_request_superseded'},
-      );
+      if (streamMode) {
+        if (destination === 'finder') fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
+        const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true};
+        setSessionFilesPayloadForDestination(destination, partialPayload, {invalidateRequest: false});
+        setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(partialPayload));
+        try {
+          const donePayload = await fetchSessionFilesStream(
+            `/api/session-files-stream?${params.toString()}`,
+            state,
+            requestIsCurrent,
+            chunk => mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent),
+          );
+          payload = {
+            ...fileExplorerFinderSessionFilesState.payload,
+            ...donePayload,
+            session,
+            loaded: true,
+            streaming: false,
+          };
+        } catch (streamError) {
+          if (![404, 501].includes(Number(streamError?.status))) throw streamError;
+          streamMode = false;
+          const fallbackPayload = emptySessionFilesPayload(session, false, destination);
+          setSessionFilesPayloadForDestination(destination, fallbackPayload, {invalidateRequest: false});
+          setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(fallbackPayload));
+          payload = await apiFetchJson(
+            requestUrl,
+            {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+            {abortRetirementReason: 'session_files_request_superseded'},
+          );
+        }
+      } else {
+        payload = await apiFetchJson(
+          requestUrl,
+          {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+          {abortRetirementReason: 'session_files_request_superseded'},
+        );
+      }
     } catch (err) {
       // A producer can return the same accepted receipt again while its terminal result is still
       // retained locally. Reuse that exact result instead of painting a terminal Differ as queued.
@@ -67256,7 +68425,10 @@ async function fetchSessionFiles(options = {}) {
     }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
     const failedRefs = sessionFilesRequestForDestination(destination, session);
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
+    const partialPayload = streamMode && state.payload?.streaming === true && state.payload?.session === session;
+    const nextPayload = partialPayload
+      ? {...state.payload, streaming: false, loaded: true, errors: [issue]}
+      : {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -67271,11 +68443,17 @@ async function fetchSessionFiles(options = {}) {
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    // The request owner must be cleared before releasing the Finder's first-paint gate. Otherwise
+    // the completion path sees its own controller as active, leaves the gate set forever, and the
+    // late session-files +/- metadata can never repaint the already-mounted fast rows.
+    const finderBackfillReleased = current
+      && destination === 'finder'
+      && releaseFinderSessionFilesDiffBackfillIfReady();
     if (state.completionWaiter === completionWaiter) {
       state.completionWaiter = null;
       releaseCompletionWaiter?.();
     }
-    if (current && (shouldRender || wasLoading) && visible) {
+    if (current && (shouldRender || wasLoading || finderBackfillReleased) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       renderPaneTabStrips();
       renderSessionButtons();
@@ -67900,7 +69078,7 @@ function buildSessionFileTree(repoPath, sessionFiles) {
   const directoryStatusCounts = new Map(); // normalizedDirPath → {added, deleted} file counts
   const countedStatusPaths = new Set();
   for (const item of sessionFiles) {
-    const absPath = item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || '');
+    const absPath = normalizeDirectoryPath(item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || ''));
     if (!absPath) continue;
     sessionFilesMap.set(absPath, item);
     const status = sessionFileDisplayStatus(item);
@@ -69119,12 +70297,46 @@ function createFileExplorerPanel(item = finderItemId) {
     panel.classList.toggle('file-explorer-root-mode-fixed', fileExplorerRootMode !== 'sync');
     syncFileExplorerSessionControlVisibility(panel);
     renderFileExplorerRootModeControls();
-    refreshFileExplorerPanelTree(panel);
+    startFinderPanelListing(panel);
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
+  if (view !== 'finder') ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return panel;
+}
+
+// Finder's direct listing is the first-paint owner. Session-files can run Git history, status, and
+// numstat work for every repository in a session; starting it beside a cold listing can occupy both
+// Finder workers and leave the user staring at an empty tree. Start that backfill only after the
+// listing has mounted, while still starting it after a failed listing so the session surface reports
+// its own result independently.
+function startFinderPanelListing(panel, options = {}) {
+  const firstPaint = !panel?.querySelector?.('.file-tree-row[data-path]');
+  if (firstPaint) beginFinderSessionFilesDiffBackfill();
+  const listing = refreshFileExplorerPanelTree(panel, {...options, deferSessionFilesDiff: firstPaint});
+  void listing.then(
+    () => {
+      // Keep the fast directory rows on screen for one complete browser paint. This also applies
+      // to a warm session-files payload: cached +/- totals are slower metadata, so they must not
+      // change the first-paint result merely because another owner finished earlier.
+      scheduleAfterFileExplorerFirstPaint(() => {
+        markFinderFastListingPainted();
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+        releaseFinderSessionFilesDiffBackfillIfReady();
+        updateFileTreeGitStatusRows();
+      });
+    },
+    error => {
+      scheduleAfterFileExplorerFirstPaint(() => {
+        markFinderFastListingPainted();
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+        releaseFinderSessionFilesDiffBackfillIfReady();
+        updateFileTreeGitStatusRows();
+      });
+      console.warn('Finder initial listing failed', error);
+    },
+  );
+  return listing;
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
@@ -69160,7 +70372,11 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     ? options.entries
     : await fetchDirectory(root);
   if (!entries) return;
-  renderTreeChildren(treeEl, root, entries, 0, {entriesByDir: options.entriesByDir});
+  renderTreeChildren(treeEl, root, entries, 0, {
+    entriesByDir: options.entriesByDir,
+    view: 'finder',
+    deferSessionFilesDiff: options.deferSessionFilesDiff === true,
+  });
   scheduleFinderUsableObservation(
     treeEl,
     entries,
@@ -69222,8 +70438,7 @@ function activateFileExplorerSurface(item) {
   const panel = panelNodes.get(item);
   if (!view || !panel) return false;
   if (view === 'finder') {
-    refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
-    ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
+    startFinderPanelListing(panel, {preserveExpanded: true, preserveScroll: true});
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -85264,6 +86479,63 @@ function autoApproveSnapshotIsFresh() {
     && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
 }
 
+function goAgentStatusUsesActivityFallback() {
+  return statsOnlyBootEnabled() || /^go(?:\s|$)/i.test(String(bootstrap?.backendLabel || '').trim());
+}
+
+function adoptTabberActivityAsAutoStatusFallback() {
+  const payload = tabberActivityPayload;
+  const sessionsPayload = payload?.agent_windows;
+  if (!sessionsPayload || typeof sessionsPayload !== 'object' || Array.isArray(sessionsPayload)) return 0;
+  const snapshotRevision = agentWindowSnapshotRevision(payload);
+  const rosterSessions = new Set(
+    Array.isArray(payload?.session_order)
+      ? payload.session_order.map(session => String(session || '').trim()).filter(Boolean)
+      : [],
+  );
+  let adopted = 0;
+  // The stats-only layout can mount only the Debug/JS surface, so its layout
+  // session list may not contain the machine-wide tmux sessions yet. The
+  // activity payload itself is the authoritative roster; include both sources
+  // so a working pane receives its marker before Tabber is opened.
+  const candidateSessions = new Set([...activeSessions, ...Object.keys(sessionsPayload)]);
+  for (const session of [...candidateSessions].filter(session => (
+    isTmuxSession(session) || rosterSessions.has(String(session))
+  ))) {
+    // Metadata/roster fallbacks may carry agent-window identity without a state. Do not
+    // promote those rows and accidentally erase a previously known canonical status.
+    const rows = agentWindowPayloadRows(sessionsPayload[String(session)])
+      .filter(row => String(row?.state || '').trim() !== '');
+    if (!rows.length) continue;
+    const existing = autoApproveStates.get(session);
+    const existingRevision = agentWindowSnapshotRevision(existing);
+    // Activity responses can complete out of order. Never let an older (or an
+    // unversioned compatibility) sample erase a newer canonical state.
+    if (existingRevision > 0 && (snapshotRevision === 0 || snapshotRevision < existingRevision)) continue;
+    // A Go pane capture can briefly fail while the Codex process is still running. `unavailable`
+    // is a transport/evidence failure, not a stop signal; retaining the last concrete state keeps
+    // the green marker alive until a later sample says idle, ask, or working explicitly. Without
+    // this merge, a single transient capture miss clears the pane marker while the Agents graph
+    // (which has its own aggregate sample) still shows the run.
+    const existingRows = agentWindowPayloadRows(existing?.agent_windows);
+    const mergedRows = rows.map(row => {
+      if (agentWindowStateKey(row?.state) !== 'unavailable') return row;
+      const prior = existingRows.find(candidate => agentWindowPayloadKey(candidate) === agentWindowPayloadKey(row));
+      if (!prior || agentWindowStateKey(prior?.state) === 'unavailable') return row;
+      return {...prior, ...row, state: prior.state};
+    });
+    const nextState = autoApproveStateWithSnapshotRevision({
+      target: session,
+      enabled: false,
+      agent_windows: mergedRows,
+    }, snapshotRevision);
+    autoApproveStates.set(session, nextState);
+    reconcileTmuxWindowMetadataFromAgentWindows(session, nextState);
+    adopted += 1;
+  }
+  return adopted;
+}
+
 function loadAutoStatuses(options = {}) {
   if (!clientCanUseUnscopedHostRequests()) {
     return Promise.resolve({applied: false, sessionsChanged: false, previousActive: activeSessions.slice()});
@@ -85276,26 +86548,47 @@ function loadAutoStatuses(options = {}) {
   const request = (async () => {
   let result = null;
   try {
-    let payload;
-    try {
-      payload = await apiFetchJson('/api/auto-approve');
-    } catch (error) {
-      if (!isApiPendingResponse(error)) throw error;
-      payload = await waitForApiOperationResult(error, {
-        kind: String(error?.operation?.kind || ''),
-        url: '/api/auto-approve',
-        method: 'GET',
-      });
+    if (goAgentStatusUsesActivityFallback()) {
+      // Go owns live agent status in the activity product and does not expose
+      // Python's auto-approve route. Read that one shared snapshot directly so
+      // a transient unavailable sample can be repaired without a 501 probe.
+      await fetchTabberActivity({visible: true, allowHidden: true});
+      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+      const adopted = adoptTabberActivityAsAutoStatusFallback();
+      result = {applied: adopted > 0, sessionsChanged: false, previousActive: activeSessions.slice()};
+    } else {
+      let payload;
+      try {
+        payload = await apiFetchJson('/api/auto-approve');
+      } catch (error) {
+        if (!isApiPendingResponse(error)) throw error;
+        payload = await waitForApiOperationResult(error, {
+          kind: String(error?.operation?.kind || ''),
+          url: '/api/auto-approve',
+          method: 'GET',
+        });
+      }
+      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+      result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
     }
-    if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-    result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
     if (requestIsCurrent()) {
       loadAutoStatuses.lastResult = result;
       loadAutoStatuses.updatedAt = Date.now();
     }
   } catch (_) {
     if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-    if (options.sessionFallback !== false) {
+    // Go owns the machine-wide agent status product but does not expose Python's
+    // auto-approve worker route.  Keep the terminal/tab status authoritative by
+    // consuming that shared activity snapshot when the canonical route is absent;
+    // otherwise metadata-only fallback downgrades a working Codex pane to merely
+    // "Active" and drops the green working marker.
+    if (typeof fetchTabberActivity === 'function') {
+      try {
+        await fetchTabberActivity({visible: true, allowHidden: true});
+        if (requestIsCurrent()) adoptTabberActivityAsAutoStatusFallback();
+      } catch (_) {}
+    }
+    if (options.sessionFallback !== false && !goAgentStatusUsesActivityFallback()) {
       for (const session of activeSessions.filter(isTmuxSession)) {
         if (!requestIsCurrent() || !tmuxSessionLifecycleAllowsTopologySession(session)) continue;
         try {
@@ -85910,7 +87203,9 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // still cannot touch shared identity: a late reply from the server that was just replaced would
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return finalizeSessionMetadataOutcome(false, 'malformed_payload', payload);
-  const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
+  const requestIsCurrent = typeof options.requestIsCurrentPayload === 'function'
+    ? () => options.requestIsCurrentPayload(payload)
+    : (typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true);
   if (!requestIsCurrent()) {
     // A superseded response still carries a true fact about the SERVER's build queue: which build
     // will observe the request that produced it. That fact is not about whether THIS client request
@@ -86241,7 +87536,16 @@ async function refreshSessionMetadata(options = {}) {
           refreshContext: true,
           refreshActivity: options.refreshActivity !== false,
           source: 'request',
-          requestIsCurrent,
+          // Opening the client-event stream adopts this same server epoch while the metadata
+          // request is in flight. Its epochGeneration counter is newer by the time the response
+          // arrives, but the payload is still current; only a different epoch is stale.
+          requestIsCurrentPayload: payload => {
+            const payloadEpoch = sessionMetadataPayloadIdentity(payload)?.epoch || '';
+            return requestIsCurrent()
+              || (topologyEpoch === tmuxTopologyEpoch
+                && payloadEpoch !== ''
+                && payloadEpoch === clientEventTransportState.resourceEpoch);
+          },
           onServerEpochAdopted,
         }),
       );
@@ -87038,7 +88342,27 @@ async function boot() {
   // Stats-only Go boot owns the stats surface and app shell. Do not start
   // unrelated route work that the negotiated backend explicitly does not
   // implement; those requests used to create misleading boot failures.
-  if (statsOnlyBootEnabled()) return;
+  if (statsOnlyBootEnabled()) {
+    // Tabber is a read-only topology consumer, not one of the full application
+    // routes disabled by stats-only boot. Load session metadata when Tabber is
+    // present, but always load the global activity snapshot: pane tabs and the
+    // JS stats Agents view need the same live Codex/Claude marker even when the
+    // operator has not mounted Tabber. Keep auto-status, terminals, filesystem
+    // watchers, and other full-app producers disabled on this partial backend.
+    if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) {
+      await refreshTranscripts({refreshAuto: false, refreshContext: false, refreshActivity: false});
+    }
+    await fetchTabberActivity({visible: true, allowHidden: true});
+    // Go's stats-only surface deliberately has no `/api/auto-approve` route. The
+    // activity snapshot is therefore the canonical live-status source for this
+    // boot path as well as the full-app error fallback. Adopt it before painting
+    // pane tabs, otherwise every session keeps the neutral placeholder even when
+    // the activity payload says the Codex pane is working.
+    adoptTabberActivityAsAutoStatusFallback();
+    renderPaneTabStrips();
+    if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) refreshTabberPanels();
+    return;
+  }
   refreshBackgroundOwnerStatus({render: false}).catch(error => {
     console.warn('initial background-owner status refresh failed', error);
     return false;

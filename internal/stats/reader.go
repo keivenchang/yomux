@@ -288,11 +288,11 @@ func decodeObservation(row []any) (Observation, error) {
 	if err != nil {
 		return Observation{}, err
 	}
-	payload, err := decodePayload(row[6])
+	payload, payloadBytes, err := decodePayloadWithSize(row[6])
 	if err != nil {
 		return Observation{}, err
 	}
-	item := Observation{EventID: rowString(row[0]), Family: rowString(row[1]), SourceID: rowString(row[2]), ObservedAt: observed, EpochID: rowString(row[4]), OwnerGeneration: generation, Payload: payload}
+	item := Observation{EventID: rowString(row[0]), Family: rowString(row[1]), SourceID: rowString(row[2]), ObservedAt: observed, EpochID: rowString(row[4]), OwnerGeneration: generation, Payload: payload, payloadBytes: payloadBytes}
 	return item, item.Validate()
 }
 
@@ -335,15 +335,20 @@ func decodeUsageAtom(row []any) (UsageAtom, error) {
 	if err != nil {
 		return UsageAtom{}, err
 	}
-	payload, err := decodePayload(row[6])
+	payload, payloadBytes, err := decodePayloadWithSize(row[6])
 	if err != nil {
 		return UsageAtom{}, err
 	}
-	item := UsageAtom{EventID: rowString(row[0]), Direction: rowString(row[1]), Modality: rowString(row[2]), CacheRole: rowString(row[3]), Unit: rowString(row[4]), ObservedAt: observed, Payload: payload}
+	item := UsageAtom{EventID: rowString(row[0]), Direction: rowString(row[1]), Modality: rowString(row[2]), CacheRole: rowString(row[3]), Unit: rowString(row[4]), ObservedAt: observed, Payload: payload, payloadBytes: payloadBytes}
 	return item, item.Validate()
 }
 
 func decodePayload(value any) (map[string]any, error) {
+	payload, _, err := decodePayloadWithSize(value)
+	return payload, err
+}
+
+func decodePayloadWithSize(value any) (map[string]any, int, error) {
 	var raw []byte
 	switch value := value.(type) {
 	case string:
@@ -351,24 +356,24 @@ func decodePayload(value any) (map[string]any, error) {
 	case []byte:
 		raw = value
 	default:
-		return nil, fmt.Errorf("payload_json is not text")
+		return nil, 0, fmt.Errorf("payload_json is not text")
 	}
 	if len(raw) == 0 || len(raw) > MaxPayloadBytes {
-		return nil, fmt.Errorf("invalid payload_json size")
+		return nil, 0, fmt.Errorf("invalid payload_json size")
 	}
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("malformed payload_json: %w", err)
+		return nil, 0, fmt.Errorf("malformed payload_json: %w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("malformed payload_json: trailing data")
+		return nil, 0, fmt.Errorf("malformed payload_json: trailing data")
 	}
 	if payload == nil {
-		return nil, fmt.Errorf("payload_json must be a JSON object")
+		return nil, 0, fmt.Errorf("payload_json must be a JSON object")
 	}
-	return payload, nil
+	return payload, len(raw), nil
 }
 
 func rowString(value any) string {

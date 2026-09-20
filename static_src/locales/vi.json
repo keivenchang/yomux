@@ -2504,6 +2504,7 @@
   "debug.system.roster.detail.sampler": "Bộ lấy mẫu YO!stats",
   "gitDiff.binary": "nhị phân",
   "gitDiff.changedFiles": "Tệp đã thay đổi",
+  "gitDiff.dirty": "Bẩn",
   "gitDiff.empty": "Không có commit trong phạm vi này.",
   "gitDiff.filesTruncated": "Danh sách tệp đã bị cắt bớt.",
   "gitDiff.firstParent": "So sánh với cha đầu tiên",

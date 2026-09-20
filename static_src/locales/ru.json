@@ -2599,6 +2599,7 @@
   "debug.system.roster.detail.sampler": "Сэмплер YO!stats",
   "gitDiff.binary": "двоичный",
   "gitDiff.changedFiles": "Изменённые файлы",
+  "gitDiff.dirty": "Изменено",
   "gitDiff.empty": "В этой области нет коммитов.",
   "gitDiff.filesTruncated": "Список файлов усечён.",
   "gitDiff.firstParent": "Сравнение с первым родителем",

@@ -394,6 +394,157 @@ func (s *server) statsAgentStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, snapshot)
 }
 
+// statsRuntimeDiagnostics is a bounded owner-level view of the work that can
+// account for Go CPU. It intentionally reports counters and elapsed time, not
+// raw rows or payloads, so it is safe to expose through system-status.
+func (s *server) statsRuntimeDiagnostics() map[string]any {
+	payload := map[string]any{"schema_version": 1}
+	s.processEntriesCacheMu.Lock()
+	processEntriesRows := len(s.processEntriesCache)
+	processEntriesHits := s.processEntriesCacheHits
+	processEntriesMisses := s.processEntriesCacheMisses
+	processEntriesAt := s.processEntriesCacheAt
+	processEntriesLastDuration := s.processEntriesCacheLastDuration
+	processEntriesDurationTotal := s.processEntriesCacheDurationTotal
+	s.processEntriesCacheMu.Unlock()
+	s.processMetricsCacheMu.Lock()
+	processMetricsHits := s.processMetricsCacheHits
+	processMetricsMisses := s.processMetricsCacheMisses
+	processMetricsLastDuration := s.processMetricsLastDuration
+	processMetricsDurationTotal := s.processMetricsDurationTotal
+	processMetricsThreadRows := s.processMetricsLastThreadRows
+	processMetricsChildRows := s.processMetricsLastChildRows
+	s.processMetricsCacheMu.Unlock()
+	s.agentInventoryMu.Lock()
+	agentInventoryCacheHits := s.agentInventoryCacheHits
+	agentInventoryCacheMisses := s.agentInventoryCacheMisses
+	agentInventoryLastDuration := s.agentInventoryLastDuration
+	agentInventoryDurationTotal := s.agentInventoryDurationTotal
+	agentInventoryRows := len(s.agentInventoryRecords)
+	agentInventoryAt := s.agentInventoryAt
+	s.agentInventoryMu.Unlock()
+	var processEntriesAtValue any
+	if !processEntriesAt.IsZero() {
+		processEntriesAtValue = unixSeconds(processEntriesAt)
+	}
+	rosterScope, rosterReader := "go_descendants", "proc_children"
+	if s.childProcessEntriesFn == nil {
+		rosterScope, rosterReader = "fallback_process_roster", "process_entries"
+	}
+	payload["process_diagnostics"] = map[string]any{
+		"roster_scope":                      rosterScope,
+		"roster_reader":                     rosterReader,
+		"roster_cache_ttl_ms":               goProcessEntriesCacheTTL.Seconds() * 1000,
+		"roster_cache_hits":                 processEntriesHits,
+		"roster_cache_misses":               processEntriesMisses,
+		"last_roster_rows":                  processEntriesRows,
+		"last_roster_at":                    processEntriesAtValue,
+		"last_roster_duration_ms":           processEntriesLastDuration.Seconds() * 1000,
+		"roster_duration_total_ms":          processEntriesDurationTotal.Seconds() * 1000,
+		"metrics_cache_ttl_ms":              goProcessMetricsCacheTTL.Seconds() * 1000,
+		"metrics_cache_hits":                processMetricsHits,
+		"metrics_cache_misses":              processMetricsMisses,
+		"last_metrics_duration_ms":          processMetricsLastDuration.Seconds() * 1000,
+		"metrics_duration_total_ms":         processMetricsDurationTotal.Seconds() * 1000,
+		"last_thread_rows":                  processMetricsThreadRows,
+		"last_child_rows":                   processMetricsChildRows,
+		"agent_inventory_cache_ttl_ms":      goAgentInventoryCacheTTL.Seconds() * 1000,
+		"agent_inventory_cache_hits":        agentInventoryCacheHits,
+		"agent_inventory_cache_misses":      agentInventoryCacheMisses,
+		"agent_inventory_last_duration_ms":  agentInventoryLastDuration.Seconds() * 1000,
+		"agent_inventory_duration_total_ms": agentInventoryDurationTotal.Seconds() * 1000,
+		"last_agent_inventory_rows":         agentInventoryRows,
+		"last_agent_inventory_at": func() any {
+			if agentInventoryAt.IsZero() {
+				return nil
+			}
+			return unixSeconds(agentInventoryAt)
+		}(),
+	}
+	if s.statsLifecycle != nil {
+		counters := s.statsLifecycle.Counters()
+		byResolution := make([]map[string]any, 0, len(counters.ByResolution))
+		resolutions := make([]int, 0, len(counters.ByResolution))
+		for resolution := range counters.ByResolution {
+			resolutions = append(resolutions, resolution)
+		}
+		sort.Ints(resolutions)
+		for _, resolution := range resolutions {
+			value := counters.ByResolution[resolution]
+			byResolution = append(byResolution, map[string]any{
+				"resolution_seconds": resolution,
+				"selection_runs":     value.SelectionRuns, "materialization_runs": value.MaterializationRuns,
+				"selected_cells": value.SelectedCells, "materialized_buckets": value.MaterializedBuckets,
+				"fact_rows_read": value.FactRowsRead, "decoded_bytes": value.DecodedBytes,
+				"selection_duration_ms":       value.SelectionDuration.Seconds() * 1000,
+				"materialization_duration_ms": value.MaterializationDuration.Seconds() * 1000,
+			})
+		}
+		payload["lifecycle"] = map[string]any{
+			"runs": counters.Runs, "publications": counters.Publications, "repairs": counters.Repairs, "errors": counters.Errors,
+			"background_backfill_deferrals": counters.BackgroundBackfillDeferrals,
+			"selected_cells":                counters.SelectedCells, "materialized_buckets": counters.MaterializedBuckets,
+			"fact_rows_read": counters.FactRowsRead, "decoded_bytes": counters.DecodedBytes,
+			"selection_duration_ms":       counters.SelectionDuration.Seconds() * 1000,
+			"materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000,
+			"by_resolution":               byResolution,
+		}
+		refresh := s.statsService.RefreshCounters()
+		payload["service_refresh"] = map[string]any{
+			"runs": refresh.Runs, "errors": refresh.Errors, "ring_reads": refresh.RingReads,
+			"ring_rows": refresh.RingRows, "bucket_decodes": refresh.BucketDecodes,
+			"decoded_bytes": refresh.DecodedBytes, "products_built": refresh.ProductsBuilt,
+			"duration_total_ms": refresh.DurationTotal.Seconds() * 1000,
+			"last_duration_ms":  refresh.LastDuration.Seconds() * 1000,
+		}
+	}
+	collectors := map[string]any{}
+	if s.hostCollector != nil {
+		counters := s.hostCollector.Counters()
+		families := map[string]any{}
+		for name, timing := range counters.Family {
+			families[name] = map[string]any{
+				"runs": timing.Runs, "duration_total_ms": timing.DurationTotal.Seconds() * 1000, "last_duration_ms": timing.LastDuration.Seconds() * 1000,
+				"source_duration_total_ms": timing.SourceDurationTotal.Seconds() * 1000, "last_source_duration_ms": timing.LastSourceDuration.Seconds() * 1000,
+			}
+		}
+		collectors["host"] = map[string]any{
+			"cycles": counters.Cycles, "duration_total_ms": counters.DurationTotal.Seconds() * 1000, "last_duration_ms": counters.LastDuration.Seconds() * 1000,
+			// These row counts are deliberately reported beside family timing. A
+			// slow CPU sample is otherwise indistinguishable from a slow SQLite
+			// append, while a large process census explains the /proc work that can
+			// consume more than one logical CPU on a busy host.
+			"last_cpu_process_rows": counters.LastCPUProcessRows, "last_memory_process_rows": counters.LastMemoryProcessRows,
+			"families": families,
+		}
+	}
+	if s.agentStatusCollector != nil {
+		counters := s.agentStatusCollector.Counters()
+		collectors["agent_status"] = map[string]any{"cycles": counters.Cycles, "duration_total_ms": counters.DurationTotal.Seconds() * 1000, "last_duration_ms": counters.LastDuration.Seconds() * 1000, "accepted_observations": counters.AcceptedObservations, "unavailable_spans": counters.UnavailableSpans, "errors": counters.Errors}
+	}
+	if s.tokenCollector != nil {
+		counters := s.tokenCollector.Counters()
+		openCodePhases := make(map[string]any, len(counters.OpenCodePhases))
+		for name, timing := range counters.OpenCodePhases {
+			openCodePhases[name] = map[string]any{
+				"runs": timing.Runs, "last_duration_ms": timing.Last.Seconds() * 1000, "duration_total_ms": timing.Total.Seconds() * 1000,
+			}
+		}
+		collectors["agent_tokens"] = map[string]any{
+			"cycles": counters.Cycles, "duration_total_ms": counters.DurationTotal.Seconds() * 1000, "last_duration_ms": counters.LastDuration.Seconds() * 1000,
+			"usage_accepted": counters.UsageAccepted, "coverage_accepted": counters.CoverageAccepted, "unavailable_spans": counters.UnavailableAccepted, "errors": counters.Errors,
+			"opencode_database_opens": counters.OpenCodeDatabaseOpens, "opencode_database_reuses": counters.OpenCodeDatabaseReuses,
+			"opencode_database_last_open_duration_ms":  counters.OpenCodeDatabaseLastOpen.Seconds() * 1000,
+			"opencode_database_open_duration_total_ms": counters.OpenCodeDatabaseOpenTotal.Seconds() * 1000,
+			"opencode_collection_last_duration_ms":     counters.OpenCodeCollectionLast.Seconds() * 1000,
+			"opencode_collection_duration_total_ms":    counters.OpenCodeCollectionTotal.Seconds() * 1000,
+			"opencode_phases":                          openCodePhases,
+		}
+	}
+	payload["collectors"] = collectors
+	return payload
+}
+
 func (s *server) statsCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2393,6 +2544,9 @@ func (s *server) pricingCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 	s.pricingRefreshMu.Unlock()
 	go func() {
 		err := s.pricing.Refresh()
+		if err == nil && s.statsWriter != nil {
+			_, err = s.statsWriter.InvalidatePricingCatalog(context.Background(), float64(time.Now().UnixNano())/1e9)
+		}
 		s.pricingRefreshMu.Lock()
 		s.pricingRefreshing = false
 		if err != nil {
@@ -2475,7 +2629,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	if serviceState.LastError != "" {
 		failures = append(failures, "stats service refresh failed: "+serviceState.LastError)
 	}
-	jsonResponse(w, status, map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": maxInt(pending, 0), "pending_cell_details": pendingCells, "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
+	response := map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": maxInt(pending, 0), "pending_cell_details": pendingCells, "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_background_backfill_deferrals": counters.BackgroundBackfillDeferrals, "lifecycle_selected_cells": counters.SelectedCells, "lifecycle_materialized_buckets": counters.MaterializedBuckets, "lifecycle_fact_rows_read": counters.FactRowsRead, "lifecycle_decoded_bytes": counters.DecodedBytes, "lifecycle_selection_duration_ms": counters.SelectionDuration.Seconds() * 1000, "lifecycle_materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000, "lifecycle_by_resolution": counters.ByResolution, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
 		if counters.Runs > 0 && !counters.LastRunSucceeded {
 			return "error"
 		}
@@ -2483,5 +2637,6 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 			return "pending"
 		}
 		return "ready"
-	}(), "ring_failure": serviceState.LastError, "failures": failures})
+	}(), "ring_failure": serviceState.LastError, "failures": failures}
+	jsonResponse(w, status, response)
 }

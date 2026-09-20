@@ -675,10 +675,9 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }
-/* Every coarse-pointer top-level menu uses the same bounded sheet. Measured topbar packing may keep
-   the five desktop roots when they fit, so limiting this rule to the compact Menus root left a
-   perfectly valid File menu clipped off the phone viewport. */
-body.app-topbar-touch-compact .app-menu > .app-menu-popover {
+/* Phones use a viewport-bounded sheet. Tablets keep the normal content-sized dropdown even when
+   their topbar uses touch-sized controls; an iPad is not an iPhone. */
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu > .app-menu-popover {
   position: fixed;
   inset-block-start: calc(max(var(--topbar-height), env(safe-area-inset-top)) + var(--space-4));
   inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
@@ -690,7 +689,7 @@ body.app-topbar-touch-compact .app-menu > .app-menu-popover {
   overflow: auto;
   transform: none !important;
 }
-body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
   width: 100% !important;
   max-width: none;
   box-sizing: border-box;

@@ -457,6 +457,54 @@ test('the yolomux.py web CPU line renders on the daemon chart, not beside host p
   assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
 });
 
+test('Go stats keeps host CPU out of Daemons and exposes only the Go process there', () => {
+  const bucketSource = [
+    sourceFunction('jsDebugCurrentSeriesValue', 'jsDebugCurrentCpuProjectionValue'),
+    sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentServiceLoadItem'),
+    sourceFunction('jsDebugCurrentServiceLoadItem', 'jsDebugCurrentBucketRecord'),
+    sourceFunction('jsDebugCurrentBucketRecord', 'jsDebugCurrentSnapshotAgentWindowRevision'),
+  ].join('\n');
+  const daemonSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const context = {
+    result: null,
+    Number,
+    Math,
+    Map,
+    Object,
+    String,
+    location: {port: '7222', protocol: 'http:'},
+    jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
+  };
+  vm.runInNewContext(`
+    ${bucketSource}
+    ${daemonSource}
+    const record = jsDebugCurrentBucketRecord({duration: 1, series: {
+      'cpu_percent:host': {value: 31},
+      'process_cpu_percent:yolomux_go': {value: 99},
+      'process_cpu_percent:python': {value: 99},
+      'process_cpu_percent:tmux': {value: 88},
+      'owned_process_cpu_percent:yolomux_go': {value: 7},
+    }});
+    const daemonBuckets = [{servers: new Map(Object.entries(record.servers).map(([key, item]) => [key, {
+      label: item.label,
+      cpuTotalPercent: item.cpu_total_percent,
+      cpuCount: item.cpu_count,
+    }]))}];
+    result = {
+      hostCpu: record.cpu_total_percent,
+      daemonSources: Object.keys(record.servers),
+      hostProcessSources: Object.keys(record.host_metrics.cpu_processes).sort(),
+      daemonSeries: debugGraphProcessCpuSeriesDefs(daemonBuckets).map(series => series.processId),
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
+    hostCpu: 31,
+    daemonSources: ['yolomux_go'],
+    hostProcessSources: ['python', 'tmux', 'yolomux_go'],
+    daemonSeries: ['yolomux_go'],
+  }, 'host CPU remains a CPU-family aggregate, while only the Go-owned process becomes a Daemons series');
+});
+
 test('CPU serving-port series leads the legend and paints after every other line', () => {
   const orderingSource = sourceFunction('debugGraphCurrentProcessCpuOrdered', 'debugGraphLegendSeriesItems');
   const chartSource = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
@@ -1204,6 +1252,100 @@ test('Agents detail consumes the stats-owner roster when auto-approve is unavail
   assert.match(context.result, /debug → 0:codex → codex → working/);
   assert.match(context.result, /debug → 1:claude → claude → idle/);
   assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
+});
+
+test('Agents detail replaces unversioned Go activity fallback rows with the revisioned roster', () => {
+  const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    autoApproveStates: new Map([
+      ['yo7222', {agent_windows: [{window_index: 1, pane_target: '%73', kind: 'codex', state: 'working'}]}],
+    ]),
+    jsDebugStatsAgentStatusState: {
+      payload: {
+        available: true,
+        payload: {snapshot_revision: 12},
+        agents: [{session: 'yo7222', window: '1', pane: '%73', kind: 'codex', state: 'run'}],
+      },
+      revision: 12,
+    },
+    debugGraphStatsAgentWindowRows: () => ({
+      rows: [{session: 'yo7222', agent: {window_index: '1', pane: '%73', kind: 'codex', state: 'run'}, kind: 'codex', revision: 12}],
+      revision: 12,
+    }),
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || '').toLowerCase(),
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
+    agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
+  assert.equal(context.result.rows.length, 1);
+  assert.equal(context.result.rows[0].revision, 12);
+  assert.equal(context.result.rows[0].agent.state, 'run');
+});
+
+test('Agents detail keeps a concrete Go activity state over a newer unavailable stats row', () => {
+  const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    autoApproveStates: new Map([
+      ['yo7222', {agent_windows: [{window_index: 1, pane_target: '%73', kind: 'codex', state: 'working'}]}],
+    ]),
+    jsDebugStatsAgentStatusState: {payload: {available: true}, revision: 12},
+    debugGraphStatsAgentWindowRows: () => ({
+      rows: [{session: 'yo7222', agent: {window_index: '1', pane: '%73', kind: 'codex', state: 'unavailable'}, kind: 'codex', revision: 12}],
+      revision: 12,
+    }),
+    goAgentStatusUsesActivityFallback: () => true,
+    agentWindowStateKey: state => String(state || 'idle'),
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || '').toLowerCase(),
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
+    agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
+  assert.equal(context.result.rows.length, 1);
+  assert.equal(context.result.rows[0].agent.state, 'working');
+  assert.equal(context.result.rows[0].revision, 0);
+});
+
+test('Agents detail retires fallback rows when the revisioned Go roster becomes empty', () => {
+  const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    autoApproveStates: new Map([
+      ['yo7222', {agent_windows: [{window_index: 1, pane_target: '%73', kind: 'codex', state: 'working'}]}],
+    ]),
+    jsDebugStatsAgentStatusState: {payload: {available: true}},
+    debugGraphStatsAgentWindowRows: () => ({rows: [], revision: 13}),
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || '').toLowerCase(),
+    agentWindowPhysicalKey: agent => String(agent?.pane_target || agent?.pane || agent?.window_index || ''),
+    agentWindowIndex: agent => agent?.window_index === null || agent?.window_index === undefined ? null : Number(agent.window_index),
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowRows();`, context);
+  assert.equal(context.result.rows.length, 0);
 });
 
 test('Agents detail reports typed stats-owner unavailability instead of fabricated zero windows', () => {
@@ -2511,6 +2653,61 @@ test('stats-only boot does not schedule unrelated deferred settings metadata', (
     editorSettingsSource,
     /function scheduleDeferredSettingsMetadataRefresh\(\)[\s\S]*?statsOnlyBootEnabled\(\)[\s\S]*?if \(!clientSettingsMetadataDeferred\)/,
   );
+});
+
+test('stats-only boot loads Tabber topology before returning', () => {
+  const boot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const statsOnlyBranch = boot.slice(
+    boot.indexOf('if (statsOnlyBootEnabled()) {'),
+    boot.indexOf('\n  refreshBackgroundOwnerStatus', boot.indexOf('if (statsOnlyBootEnabled()) {')),
+  );
+  assert.match(statsOnlyBranch, /itemInLayout\(tabberItemId\)/, 'stats-only boot checks whether Tabber is present in the layout');
+  assert.match(statsOnlyBranch, /await refreshTranscripts\(\{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/, 'stats-only boot fetches session metadata without full-app producers');
+  assert.match(statsOnlyBranch, /await fetchTabberActivity\(\{visible: true, allowHidden: true\}\)/, 'stats-only boot fetches the global Tabber activity/topology API');
+  assert.match(statsOnlyBranch, /adoptTabberActivityAsAutoStatusFallback\(\)/, 'stats-only boot promotes the Go activity snapshot into the shared live-status model');
+  assert.match(statsOnlyBranch, /adoptTabberActivityAsAutoStatusFallback\(\);[\s\S]*renderPaneTabStrips\(\)/, 'stats-only boot paints the working marker after adopting activity');
+  assert.match(statsOnlyBranch, /refreshTabberPanels\(\)/, 'stats-only boot paints the loaded Tabber rows');
+  assert.match(boot, /function adoptTabberActivityAsAutoStatusFallback\(\)[\s\S]*new Set\(\[\.\.\.activeSessions, \.\.\.Object\.keys\(sessionsPayload\)\]\)/, 'activity fallback covers a Debug-only layout before Tabber has populated activeSessions');
+});
+
+testAsync('stats-agent-status refresh is coalesced and bounded by the collector cadence', async () => {
+  assert.match(source, /function debugStatsAgentStatusConsumerVisible\(\)[\s\S]*jsDebugStatsPanelVisible\(\)[\s\S]*debugRuntimeState\.subTab !== 'graph'[\s\S]*debugGraphChartVisible\('activity'\)/, 'agent status is requested only while the visible Graph activity detail can consume it');
+  assert.match(source, /id: 'graph',[\s\S]*activate: \(\{forceAgentStatus = true\} = \{\}\) => \{[\s\S]*refreshDebugStatsAgentStatus\(\{force: forceAgentStatus\}\)/, 'opening Graph forces one fresh agent-status roster read');
+  assert.match(source, /visibilitychange[\s\S]*syncDebugSubviewActivation\(\{pollNow: visible, forceAgentStatus: false\}\)/, 'visibility replay does not force a fresh agent-status read');
+  assert.match(source, /const nextAgentWindowRevision = jsDebugCurrentSnapshotAgentWindowRevision\(snapshot\)[\s\S]*const agentStatusRevision = Number\(agentStatusState\?\.revision \|\| 0\)[\s\S]*nextAgentWindowRevision > 0 && nextAgentWindowRevision !== agentStatusRevision/, 'ordinary stats snapshots refresh the detailed roster only when the SSE revision changes');
+  const functionText = source.slice(
+    source.indexOf('async function refreshDebugStatsAgentStatus('),
+    source.indexOf('\nfunction debugGraphLiveAgentWindowRows(', source.indexOf('async function refreshDebugStatsAgentStatus(')),
+  );
+  const context = {result: null};
+  vm.runInNewContext(`
+    let now = 1000;
+    const Date = {now: () => now};
+    const jsDebugStatsAgentStatusFreshnessMs = 10000;
+    const jsDebugStatsAgentStatusState = {payload: null, revision: 0, inFlight: null, updatedAtMs: 0};
+    let requests = 0;
+    function statsOnlyBootEnabled() { return true; }
+    function debugGraphStatsAgentWindowRows() { return {revision: 7}; }
+    function refreshDebugAgentWindowLiveDetails() {}
+    async function apiFetchJson() {
+      requests += 1;
+      return {available: true, agents: [], counts: {total: 0}};
+    }
+    ${functionText}
+    (async () => {
+      await refreshDebugStatsAgentStatus();
+      await refreshDebugStatsAgentStatus();
+      now += 9999;
+      await refreshDebugStatsAgentStatus();
+      now += 1;
+      await refreshDebugStatsAgentStatus();
+      await refreshDebugStatsAgentStatus({force: true});
+      await refreshDebugStatsAgentStatus({force: true});
+      result = requests;
+    })();
+  `, context);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(context.result, 3, 'repeated snapshot/SSE updates and lifecycle replays do not exceed one request per 10-second freshness window, while force refresh remains available');
 });
 
 test('a complete snapshot replaces graph data once and resolves readiness', () => {
@@ -4330,7 +4527,10 @@ test('debug subviews share one complete lifecycle descriptor registry', () => {
   assert.match(sourceFunction('debugPanelHtml', 'relocalizeDebugPanelChrome'), /debugSubview\(id\)\.html\(\)/);
   assert.match(sourceFunction('refreshDebugPanelFromEvents', 'syncDebugGraphControls'), /view\.render\(panel, options\)/);
   assert.match(source.slice(source.indexOf('function bindDebugPanel(')), /view\.bind\(panel\)/);
-  assert.match(sourceFunction('syncDebugLogsPolling', 'requestJsDebugHistoryForCurrentDomain'), /return pollDebugLogs\(\{force: true\}\)[\s\S]*return debugSubview\(debugRuntimeState\.subTab\)\.activate\(\{pollNow\}\)[\s\S]*return syncDebugSubviewActivation\(\{pollNow: true\}\)/);
+  const logsPolling = sourceFunction('syncDebugLogsPolling', 'debugSubviewNoop');
+  assert.match(logsPolling, /return pollDebugLogs\(\{force: true\}\)/, 'the logs owner performs its initial poll');
+  assert.doesNotMatch(logsPolling, /syncDebugSubviewActivation/, 'the logs owner does not recursively redispatch subview activation');
+  assert.match(source.slice(source.indexOf("id: 'logs'"), source.indexOf("id: 'system'")), /activate: \(\{pollNow = false\} = \{\}\) => syncDebugLogsPolling\(\{pollNow\}\)/, 'the logs descriptor owns logs activation');
   assert.match(sourceFunction('relocalizeDebugPanelChrome', 'yoCostPanelHtml'), /view\.relocalize\(panel\)/);
 });
 

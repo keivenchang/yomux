@@ -39,6 +39,22 @@ class TmuxSocketTargetError(RuntimeError):
         super().__init__(f"refusing tmux {self.verb}: {self.reason}; refused argv: {self.argv}")
 
 
+def use_machine_tmux_for_operator_launch() -> None:
+    """Route a direct operator process to this user's machine-wide tmux server.
+
+    A process launched from a nested tmux client inherits ``TMUX`` and
+    ``TMUX_PANE``.  Those variables can point at a private supervisor server,
+    so an operator launch must not inherit them.  An explicit YOLOmux socket is
+    reserved for isolated fixtures and is therefore left untouched.
+    """
+
+    if os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip():
+        return
+    os.environ.pop("TMUX", None)
+    os.environ.pop("TMUX_PANE", None)
+    os.environ[YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV] = "1"
+
+
 def tmux_explicit_socket_argument(args: Sequence[str]) -> str:
     """Return an inline ``-S`` or ``-L`` target, if the caller chose one."""
 

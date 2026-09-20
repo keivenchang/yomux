@@ -70,6 +70,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_server_query.py:test_http_route_registry_groups_dispatch_and_keeps_verbs_thin": "Route registration and verb dispatch are intentionally centralized architecture boundaries.",
     "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle": "The signal watcher lifecycle has one intentional client-event owner.",
     "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup": "The server's route, readonly, and PTY wiring form an architecture contract.",
+    "tests/test_tmux_utils.py:test_launchers_declare_the_default_server_intent_for_control_mode": "The launcher default-server opt-in and explicit socket clearing are an audited source contract for machine-wide tmux discovery.",
     "tests/test_session_files.py:test_transcript_scan_store_survives_cold_reload_and_resumes_append": "The persistent scan store's source contains the intentional recovery markers.",
     "tests/test_session_files.py:test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids": "The scan cache has one deliberately bounded state owner.",
     "tests/test_settings.py:test_preferences_source_paths_are_in_backend_catalog": "The backend preference catalog is a static source-of-truth mapping.",
@@ -123,7 +124,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "ec20db6a75f34771146c3a824cb7e5fd9e8f303509357380bc7fea6a3087eb8b"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "884dd4740d431275d9cb9629409ecdaff5f897dd1a9ae56a30eceaaea4cbd70d"
 
 
 @dataclass(frozen=True, slots=True)

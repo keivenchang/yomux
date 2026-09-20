@@ -31,6 +31,8 @@ except RuntimeError as _error:
 del _resolver
 del _resolver_spec
 
+from yolomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
+
 # Cap glibc malloc arenas before any allocation-heavy import or thread pool spawns,
 # so a direct `python yolomux.py` launch stays lean like a boot.sh launch does.
 from yolomux_lib.infra.malloc_tuning import cap_malloc_arenas
@@ -40,10 +42,23 @@ cap_malloc_arenas()
 from yolomux_lib.infra.root_paths import YolomuxRootError
 
 try:
-    from yolomux_lib.cli import main
+    from yolomux_lib.cli import main as _cli_main
 except YolomuxRootError as error:
     print(f"ERROR: {error}", file=sys.stderr)
     raise SystemExit(2) from error
+
+
+def main() -> int:
+    """Run YOLOmux after selecting the machine-wide tmux server.
+
+    The installed ``yolomux`` console script calls this exported function
+    directly, so normalization cannot live only in the ``__main__`` block.
+    An explicit ``YOLOMUX_TMUX_SOCKET`` remains reserved for isolated
+    fixtures and is preserved by the shared helper.
+    """
+
+    use_machine_tmux_for_operator_launch()
+    return _cli_main()
 
 
 if __name__ == "__main__":
