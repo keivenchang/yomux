@@ -4534,6 +4534,18 @@ def _current_head(scope: BoundedGitReadScope | PinnedGitHistoryScope, *, operati
     return _decode_git_text(result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode()).strip()
 
 
+def _current_branch(scope: BoundedGitReadScope) -> str:
+    """Return the current branch from the already-pinned worktree HEAD record."""
+    _ensure_git_read_namespace_unchanged(scope)
+    record = _read_small_git_control_file(scope.git_dir_handle.descriptor, "HEAD")
+    if record is None or not _valid_git_head_record(record):
+        raise _history_error("Git HEAD is unavailable or unsafe", key="fs.error.gitRepositoryChanged", status=409)
+    branch_prefix = "ref: refs/heads/"
+    branch = record.removeprefix(branch_prefix) if record.startswith(branch_prefix) else ""
+    _ensure_git_read_namespace_unchanged(scope)
+    return branch
+
+
 def _ensure_commit_exists(
     scope: BoundedGitReadScope | PinnedGitHistoryScope,
     commit_oid: str,
@@ -4647,6 +4659,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
     page_limit = _bounded_history_limit(limit)
     cursor_text = str(cursor or "")
     with _bounded_git_read_scope(raw_path, operation="git_history") as scope:
+        current_branch = _current_branch(scope)
         current_head = _current_head(scope, operation="gitHistory")
         repo_metadata = _git_history_repo_metadata(scope)
         repo_metadata_payload = _git_history_repo_metadata_payload(repo_metadata)
@@ -4657,6 +4670,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "path": str(scope.path),
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
+                "branch": current_branch,
                 "head": "",
                 "hosted_remote": scope.hosted_remote,
                 "snapshot_cursor": "",
@@ -4776,6 +4790,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "path": str(scope.path),
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
+                "branch": current_branch,
                 "head": frozen_head,
                 "hosted_remote": scope.hosted_remote,
                 "snapshot_cursor": snapshot_cursor,

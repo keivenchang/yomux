@@ -11,9 +11,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const pricingSchemaVersion = 1
+
+const pricingStaleSeconds = 30 * 24 * 60 * 60
 
 type PricingCatalog struct {
 	SchemaVersion   int            `json:"schema_version"`
@@ -23,6 +26,8 @@ type PricingCatalog struct {
 	path            string
 	root            string
 	configured      string
+	seedRevision    int64
+	refreshFailed   bool
 	mu              sync.RWMutex
 }
 
@@ -35,8 +40,9 @@ type PricingModel struct {
 }
 
 type PricingSource struct {
-	URL  string `json:"url,omitempty"`
-	Kind string `json:"kind,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	CheckedAt string `json:"checked_at,omitempty"`
 }
 
 type PricingRate struct {
@@ -71,7 +77,26 @@ func LoadPricingCatalog(path string) (*PricingCatalog, error) {
 		return nil, err
 	}
 	catalog.path = path
+	catalog.seedRevision = pricingCatalogSeedRevision(catalog.Models, catalog.CatalogRevision)
 	return &catalog, nil
+}
+
+func pricingSourceKind(source PricingSource) string {
+	kind := strings.TrimSpace(source.Kind)
+	if kind == "" {
+		return "seed"
+	}
+	return kind
+}
+
+func pricingCatalogSeedRevision(models []PricingModel, catalogRevision int64) int64 {
+	seedRevision := int64(0)
+	for _, model := range models {
+		if pricingSourceKind(model.Source) == "seed" && catalogRevision > seedRevision {
+			seedRevision = catalogRevision
+		}
+	}
+	return seedRevision
 }
 
 func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, error) {
@@ -101,6 +126,7 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 					}
 				}
 			}
+			catalog.seedRevision = pricingCatalogSeedRevision(catalog.Models, catalog.CatalogRevision)
 			loaded = append(loaded, catalog)
 			if configured != "" && path == configured {
 				for _, model := range catalog.Models {
@@ -175,6 +201,12 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 		}
 		result.root = root
 		result.configured = configured
+		result.seedRevision = 0
+		for _, catalog := range loaded {
+			if catalog.seedRevision > result.seedRevision {
+				result.seedRevision = catalog.seedRevision
+			}
+		}
 		return result, nil
 	}
 	return nil, fmt.Errorf("pricing catalog not found")
@@ -215,7 +247,12 @@ func (c *PricingCatalog) validate() error {
 	return nil
 }
 
-func (c *PricingCatalog) Refresh() error {
+func (c *PricingCatalog) Refresh() (err error) {
+	defer func() {
+		c.mu.Lock()
+		c.refreshFailed = err != nil
+		c.mu.Unlock()
+	}()
 	c.mu.RLock()
 	path := c.path
 	root, configured := c.root, c.configured
@@ -227,6 +264,7 @@ func (c *PricingCatalog) Refresh() error {
 		}
 		c.mu.Lock()
 		c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
+		c.seedRevision = next.seedRevision
 		c.mu.Unlock()
 		return nil
 	}
@@ -239,6 +277,7 @@ func (c *PricingCatalog) Refresh() error {
 	}
 	c.mu.Lock()
 	c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
+	c.seedRevision = next.seedRevision
 	c.mu.Unlock()
 	return nil
 }
@@ -360,9 +399,35 @@ func (c *PricingCatalog) PublicPayload() map[string]any {
 	for _, source := range sources {
 		publicSources = append(publicSources, map[string]any{"kind": source.kind, "url": source.url, "revision": source.revision})
 	}
+	state := "seed-only"
+	lastCheckedAt := float64(0)
+	official := false
+	for _, model := range c.Models {
+		if pricingSourceKind(model.Source) == "seed" {
+			continue
+		}
+		official = true
+		checkedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(model.Source.CheckedAt))
+		if err == nil && float64(checkedAt.Unix()) > lastCheckedAt {
+			lastCheckedAt = float64(checkedAt.Unix())
+		}
+	}
+	if official {
+		state = "fresh"
+		if lastCheckedAt > 0 && time.Now().Unix()-int64(lastCheckedAt) > pricingStaleSeconds {
+			state = "stale"
+		}
+	}
+	if c.refreshFailed {
+		state = "review-needed"
+	}
+	seedRevision := c.seedRevision
+	if seedRevision == 0 && state == "seed-only" {
+		seedRevision = c.CatalogRevision
+	}
 	status := map[string]any{
-		"state": "seed-only", "seed_revision": c.CatalogRevision,
-		"catalog_revision": c.CatalogRevision, "last_checked_at": float64(0),
+		"state": state, "seed_revision": seedRevision,
+		"catalog_revision": c.CatalogRevision, "last_checked_at": lastCheckedAt,
 		// Go loads the catalog from immutable JSON rather than the Python
 		// refresh SQLite; keep the field explicit without exposing a misleading
 		// source path as a database identity.

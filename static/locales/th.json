@@ -800,6 +800,7 @@
   "git.status.untracked": "ไม่ได้ติดตาม",
   "gitDiff.binary": "ไบนารี",
   "gitDiff.changedFiles": "ไฟล์ที่เปลี่ยนแปลง",
+  "gitDiff.dirty": "มีการเปลี่ยนแปลง",
   "gitDiff.empty": "ไม่มีคอมมิตในขอบเขตนี้",
   "gitDiff.filesTruncated": "รายการไฟล์ถูกตัดทอน",
   "gitDiff.firstParent": "เปรียบเทียบกับพาเรนต์แรก",

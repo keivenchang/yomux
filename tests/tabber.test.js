@@ -34,6 +34,80 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 
 async function runTabberSuite() {
+  test('global activity payload creates one Tabber session row per tmux session', () => {
+    const api = loadYolomux('', []);
+    api.setFileExplorerModeForTest('tabber');
+    api.setTabberActivityForTest({activity: {}, agents: []});
+    const accepted = api.applyTabberActivityPayloadForTest({
+      activity: {
+        'synthetic-tab-a': {active_recency_ts: 100},
+        'synthetic-tab-b': {active_recency_ts: 200},
+      },
+      sessions: {
+        'synthetic-tab-a': {panes: [{window: '0', window_name: 'bash', command: 'bash', active: true, window_active: true, pid: 101}]},
+        'synthetic-tab-b': {panes: [{window: '0', window_name: 'bash', command: 'bash', active: true, window_active: true, pid: 102}]},
+      },
+      session_order: ['synthetic-tab-a', 'synthetic-tab-b'],
+    });
+    assert.equal(accepted, true, 'the global activity payload is accepted as a Tabber topology update');
+    const rows = api.tabberRenderedRowsForTest();
+    assert.deepStrictEqual(canonical(rows.filter(row => row.type === 'session').map(row => row.name)), ['synthetic-tab-a', 'synthetic-tab-b'], 'every global tmux session gets exactly one top-level Tabber row, even without an agent process');
+  });
+
+  test('authoritative global roster is rendered before the legacy session list converges', () => {
+    const api = loadYolomux('', []);
+    api.setFileExplorerModeForTest('tabber');
+    api.setTranscriptSessionOrderForTest(['synthetic-global-a', 'synthetic-global-b']);
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(row => row.tabber.session), ['synthetic-global-a', 'synthetic-global-b'], 'Tabber renders every API roster session even when the bootstrap session list is stale');
+  });
+
+  await testAsync('Tabber falls back to session metadata topology when activity is unavailable', async () => {
+    const api = loadYolomux('', []);
+    api.setFileExplorerModeForTest('tabber');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (String(url).startsWith('/api/activity?')) return Promise.reject(new Error('synthetic activity unavailable'));
+      if (String(url) === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({
+          session_order: ['synthetic-fallback-a', 'synthetic-fallback-b'],
+          sessions: {
+            'synthetic-fallback-a': {panes: []},
+            'synthetic-fallback-b': {panes: []},
+          },
+        }));
+      }
+      return Promise.reject(new Error(`unexpected request: ${url}`));
+    });
+    await api.fetchTabberActivityForTest({visible: true});
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(row => row.tabber.session), ['synthetic-fallback-a', 'synthetic-fallback-b'], `metadata fallback keeps one Tabber row per global session: ${JSON.stringify({rows, requests, state: api.tabberActivityStateForTest(), payload: api.tabberActivityPayloadForTest()})}`);
+    assert.deepEqual(requests, ['/api/activity?hours=24&visible=1&scope=all', '/api/session-metadata'], 'activity failure performs one topology-only metadata repair');
+  });
+
+  await testAsync('Tabber falls back to the global tmux roster when metadata is unavailable', async () => {
+    const api = loadYolomux('', []);
+    api.setFileExplorerModeForTest('tabber');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (String(url).startsWith('/api/activity?')) return Promise.reject(new Error('synthetic activity unavailable'));
+      if (String(url) === '/api/session-metadata') return Promise.reject(new Error('synthetic metadata unavailable'));
+      if (String(url) === '/api/tmux') {
+        return Promise.resolve(jsonResponse({
+          session_order: ['synthetic-roster-a', 'synthetic-roster-b'],
+          sessions: ['synthetic-roster-a', 'synthetic-roster-b'],
+        }));
+      }
+      return Promise.reject(new Error(`unexpected request: ${url}`));
+    });
+    await api.fetchTabberActivityForTest({visible: true});
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(row => row.tabber.session), ['synthetic-roster-a', 'synthetic-roster-b'], 'the global roster fallback keeps one Tabber row per session');
+    assert.deepEqual(requests, ['/api/activity?hours=24&visible=1&scope=all', '/api/session-metadata', '/api/tmux'], 'roster fallback is attempted only after activity and metadata fail');
+  });
+
   test('terminal tabs use the live tmux pane path while transcript metadata is incomplete', () => {
     const api = loadYolomux('', ['8882']);
     api.setTmuxSignalStateForTest({windows: [{
@@ -528,6 +602,90 @@ async function runTabberSuite() {
     assert.equal(byRepo.get('~/already')?.name, '~/already', 'Tabber does not double-abbreviate an already-tilde path');
     assert.ok(/^\/s_7\/w_0\/r_/.test(byRepo.get('/home/test/project')?.path || ''), 'Tabber synthetic tree path stays id-based, not display-path based');
     assert.equal((byRepo.get('/home/test/project')?.path || '').includes('~'), false, 'Tabber synthetic tree path never receives home abbreviation');
+  });
+
+  test('Tabber activity topology exposes one session row per global tmux session', () => {
+    const api = loadYolomux('', []);
+    api.applyTabberActivityPayloadForTest({
+      activity: {
+        'synthetic-a': {active_recency_ts: 100},
+        'synthetic-b': {active_recency_ts: 90},
+      },
+      session_order: ['synthetic-a', 'synthetic-b'],
+      sessions: {
+        'synthetic-a': {panes: [{window: '0', window_name: 'bash', window_active: true, active: true, command: 'bash'}]},
+        'synthetic-b': {panes: [{window: '0', window_name: 'bash', window_active: true, active: true, command: 'bash'}]},
+      },
+    });
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-a', 'synthetic-b'], 'activity topology adds every global session as exactly one Tabber row');
+  });
+
+  test('Tabber keeps a live session row while pane metadata is unavailable', () => {
+    const api = loadYolomux('', []);
+    api.applyTabberActivityPayloadForTest({
+      activity: {'synthetic-bare': {active_recency_ts: 100}},
+      session_order: ['synthetic-bare'],
+      sessions: {'synthetic-bare': {panes: []}},
+    });
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-bare'], 'a global tmux session remains one Tabber row without pane metadata');
+  });
+
+  test('Tabber activity topology removes sessions absent from the global tmux roster', () => {
+    const api = loadYolomux('', []);
+    const panes = [{window: '0', window_name: 'bash', window_active: true, active: true, command: 'bash'}];
+    api.applyTabberActivityPayloadForTest({activity: {'synthetic-a': {active_recency_ts: 100}, 'synthetic-b': {active_recency_ts: 90}}, session_order: ['synthetic-a', 'synthetic-b'], sessions: {'synthetic-a': {panes}, 'synthetic-b': {panes}}});
+    api.applyTabberActivityPayloadForTest({activity: {'synthetic-a': {active_recency_ts: 110}}, session_order: ['synthetic-a'], sessions: {'synthetic-a': {panes}}});
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-a'], 'removed tmux sessions do not remain as stale Tabber rows');
+  });
+
+  test('Tabber ignores an activity response older than the metadata roster', () => {
+    const api = loadYolomux('', []);
+    api.applyTabberActivityPayloadForTest({
+      activity: {}, topology_generation: 2, session_order: ['synthetic-new'], sessions: {'synthetic-new': {panes: []}},
+    });
+    const accepted = api.applyTabberActivityPayloadForTest({
+      activity: {}, topology_generation: 1, session_order: ['synthetic-old'], sessions: {'synthetic-old': {panes: []}},
+    });
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.equal(accepted, false, 'a stale activity roster is rejected');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-new'], 'a stale activity response cannot remove a newer Tabber session');
+  });
+
+  test('Tabber rejects an unversioned activity roster that would remove a newer topology', () => {
+    const api = loadYolomux('', []);
+    api.applyTabberActivityPayloadForTest({
+      activity: {}, topology_generation: 2, session_order: ['synthetic-a', 'synthetic-b'],
+      sessions: {'synthetic-a': {panes: []}, 'synthetic-b': {panes: []}},
+    });
+    const accepted = api.applyTabberActivityPayloadForTest({
+      activity: {}, session_order: ['synthetic-a'], sessions: {'synthetic-a': {panes: []}},
+    });
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.equal(accepted, false, 'an unversioned stale activity roster is rejected');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-a', 'synthetic-b'], 'an unversioned response cannot remove a newer Tabber session');
+  });
+
+  test('Tabber does not adopt a generation from an unusable placeholder', () => {
+    const api = loadYolomux('', []);
+    assert.equal(api.applyTabberActivityPayloadForTest({topology_generation: 5}), false, 'a generation-only placeholder is not useful topology');
+    assert.equal(api.applyTabberActivityPayloadForTest({
+      activity: {}, topology_generation: 4, session_order: ['synthetic-valid'], sessions: {'synthetic-valid': {panes: []}},
+    }), true, 'a later valid payload is accepted after the placeholder');
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-valid'], 'the valid roster renders');
+  });
+
+  test('Tabber ignores metadata keys outside the authoritative session order', () => {
+    const api = loadYolomux('', []);
+    assert.equal(api.applyTabberActivityPayloadForTest({
+      activity: {}, topology_generation: 2, session_order: ['synthetic-live'],
+      sessions: {'synthetic-live': {panes: []}, 'synthetic-foreign': {panes: []}},
+    }), true, 'the authoritative roster is accepted');
+    const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
+    assert.deepEqual(rows.map(entry => entry.tabber.session), ['synthetic-live'], 'foreign metadata cannot create a Tabber row');
   });
 
   test('Differ shared tree controller handles keys without taking diff-ref input keys', () => {
@@ -1851,6 +2009,7 @@ async function runTabberSuite() {
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function tabberActivityVisibleConsumer\(\)[\s\S]*fileExplorerMode === 'tabber'[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'Tabber activity polling only marks visible Tabber panes as subscribers');
     assert.ok(/async function fetchTabberActivity\(options = \{\}\)[\s\S]*params\.set\('visible', visible \? '1' : '0'\)/.test(source), 'Tabber activity requests include the visible-consumer flag');
+    assert.ok(/function refreshAgentWindowActivityDisplays\(\)[\s\S]*typeof itemInLayout === 'function'[\s\S]*itemInLayout\(tabberItemId\)[\s\S]*refreshTabberPanels\(\)/.test(source), 'activity changes repaint a mounted Tabber pane even when Dockview does not set the legacy Tabber mode flag');
     assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*!tabberActivityVisibleConsumer\(\)[\s\S]*tabberLaunchWarmupStarted = true;[\s\S]*fetchTabberActivity\(\);[\s\S]*return true;/.test(source), 'Tabber launch warmup primes cached activity only for visible Tabber panes');
     assert.ok(/function tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*\.tabber-session-tab\[data-popover-hover-state="open"\][\s\S]*popoverLifecycleActive\(tab, popover\)/.test(source), 'Tabber refresh detects active session-popover hover lifecycle before rebuilding rows');
     assert.ok(/function refreshTabberPanels\(\)[\s\S]*tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*scheduleDeferredTabberRefresh\(\)[\s\S]*return/.test(source), 'Tabber activity refresh defers instead of replacing hovered session-tab DOM');
@@ -1881,6 +2040,7 @@ async function runTabberSuite() {
     assert.ok(/params\.set\('hours', String\(hours\)\)/.test(source), 'Tabber batch touched-path requests carry the selected lookback hours');
     assert.ok(/\/api\/session-files\?session=\$\{encodeURIComponent\(session\)\}&hours=\$\{encodeURIComponent\(String\(hours\)\)\}/.test(source), 'Tabber single-session fallback requests carry the selected lookback hours');
     assert.ok(/apiFetchJson\(`\/api\/activity\?\$\{params\.toString\(\)\}`/.test(source) && /params\.set\('hours', String\(normalizeSessionFileLookbackHours\(tabberSessionFileLookbackHours\)\)\)/.test(source), 'Tabber activity fetch carries the selected touched-path lookback hours');
+    assert.ok(/params\.set\('scope', 'all'\)/.test(source), 'Tabber activity fetch explicitly requests the machine-wide tmux roster');
     assert.ok(source.includes('function fileTreeRowPadding(depth, compact = false)') && source.includes('function fileTreeRowDepth(row, compact = false)'), 'DOIT.61 B3: tree indentation math is centralized');
     assert.ok(source.includes('const nextDepth = fileTreeRowDepth(row) + 1'), 'DOIT.61 B3: directory expansion uses the shared depth helper');
     assert.ok(source.includes('function clearFileTreeRowHandlers(row)') && (source.match(/clearFileTreeRowHandlers\(row\)/g) || []).length >= 2, 'DOIT.61 B4: stale row handler cleanup is shared');
@@ -2010,6 +2170,30 @@ async function runTabberSuite() {
     assert.equal((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-status-dot'), false, 'current idle Codex Tabber window does not add a competing status dot');
     assert.equal((scopedWindow1.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), false, 'inactive idle Codex Tabber window does not pulse');
 
+    const pulseApi = loadYolomux('', ['3']);
+    pulseApi.setFileExplorerModeForTest('tabber');
+    pulseApi.setTranscriptInfoForTest('3', {
+      panes: [
+        {window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u'},
+      ],
+    });
+    pulseApi.setAutoApproveStateForTest('3', {agent_windows: [
+      {kind: 'codex', state: 'working', window_index: 0, window_label: '0:codex', active: true, path_entries: [{path: '/home/u/codex-a', mtime: 7000}]},
+    ]});
+    const workingTree = pulseApi.buildTabberTree();
+    const workingSession = workingTree.entries.find(e => e.tabber?.session === '3');
+    const workingWindows = workingTree.entriesByDir.get('/' + workingSession.name);
+    const workingWindow = workingWindows.find(row => row.tabber.windowIndex === 0);
+    assert.ok((workingWindow.tabber.activityIconHtml || '').includes('status-indicator--working'), 'working Codex Tabber window renders the green working marker');
+    assert.ok((workingWindow.tabber.activityIconHtml || '').includes('agent-window-status-dot--subwindow-pulse'), 'working Codex Tabber window keeps the green marker blinking');
+    const directWorkingMarker = api.agentWindowStatusDotHtmlForTest({
+      state: 'working',
+      icon: '●',
+      pulseActive: true,
+      transitionPulseActive: true,
+    }, {label: 'working'});
+    assert.match(directWorkingMarker, /status-indicator--working[^\"]*heartbeat-pulse|heartbeat-pulse[^\"]*status-indicator--working/, 'direct working status markers keep the continuous green heartbeat');
+
     const sortedApi = loadYolomux('', ['1', '2', '3']);
     sortedApi.setTranscriptInfoForTest('1', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
     sortedApi.setTranscriptInfoForTest('2', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
@@ -2056,6 +2240,7 @@ async function runTabberSuite() {
       const marker = r.nameHtml.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
       return marker.includes('agent-window-activity--status-only')
         && marker.includes('agent-window-status-dot')
+        && marker.includes('heartbeat-pulse')
         && !marker.includes('agent-icon claude')
         && r.nameHtml.includes('session-button-prefix')
         && r.nameHtml.includes('tab-inline-detail');

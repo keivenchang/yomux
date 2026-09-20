@@ -70,8 +70,9 @@ type AgentInventorySources struct {
 }
 
 // OpenCodeInventorySources is the narrow inventory boundary used by token
-// collection. Processes are discovered from /proc first; tmux is only an
-// opportunistic annotation and is never required to identify OpenCode.
+// collection. Processes are discovered from /proc first; production YO!stats
+// requires a matching pane in the machine-wide tmux roster, while synthetic
+// tests may leave that scope disabled when they are testing native discovery.
 type OpenCodeInventorySources struct {
 	Processes func(context.Context) ([]AgentProcess, error)
 	Panes     func(context.Context) ([]AgentTmuxPane, error)
@@ -209,7 +210,7 @@ func BuildOpenCodeInventory(ctx context.Context, sources OpenCodeInventorySource
 		}
 		cancel()
 	}
-	if sources.RequireTmuxPane && len(paneByPID) > 0 {
+	if sources.RequireTmuxPane {
 		scoped := make([]AgentProcess, 0, len(processes))
 		for _, process := range processes {
 			if _, ok := paneByPID[process.PID]; ok {
@@ -303,6 +304,20 @@ func descendants(root int, children map[int][]AgentProcess) []AgentProcess {
 	return result
 }
 
+// tmuxScopedAgentRecords is the shared product boundary for activity and token
+// attribution. A process that is not attached to a pane in the machine-wide
+// tmux roster is not an agent YO!stats should poll; admitting it would also
+// make transcript discovery walk unrelated historical roots.
+func tmuxScopedAgentRecords(records []AgentRecord) []AgentRecord {
+	result := make([]AgentRecord, 0, len(records))
+	for _, record := range records {
+		if tmuxPaneTarget(record) != "" {
+			result = append(result, record)
+		}
+	}
+	return result
+}
+
 // ClassifyAgent only accepts an executable entry point, never an argument that
 // happens to contain an agent name. Native OpenCode is identified by its
 // executable path even when a shell/operator wrapper leaves a different argv[0].
@@ -333,6 +348,33 @@ func ClassifyAgent(command, executable string) string {
 		return "opencode"
 	}
 	return ""
+}
+
+// agentProcessMatchesKind validates a process against an already admitted
+// agent record. The inventory classifier intentionally rejects generic Node
+// wrappers, but a pane-scoped Codex record may transiently point at Codex's
+// Node launcher while its native child is between process-tree observations.
+func agentProcessMatchesKind(kind, command, executable string) bool {
+	if ClassifyAgent(command, executable) == kind {
+		return true
+	}
+	if kind != "codex" {
+		return false
+	}
+	parts := shellWords(command)
+	if len(parts) < 2 {
+		return false
+	}
+	executableBase := strings.ToLower(filepath.Base(strings.TrimSuffix(executable, " (deleted)")))
+	if executableBase != "node" && executableBase != "nodejs" {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if strings.EqualFold(filepath.Base(strings.Trim(part, "\"'")), "codex") {
+			return true
+		}
+	}
+	return false
 }
 
 func explicitSessionID(command, kind string) string {
@@ -368,9 +410,47 @@ func LinuxAgentInventorySources() AgentInventorySources {
 	return AgentInventorySources{Processes: linuxProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD, Started: linuxStartedIdentity, StartTime: linuxProcessStartedAt}
 }
 
+// SyntheticAgentInventorySources keeps development and integration runs on
+// the fixture-owned tmux server. It derives agent identities from pane names
+// and never scans the host process table or /proc; the pane PID is only an
+// opaque fixture identity used to join the two synthetic snapshots.
+func SyntheticAgentInventorySources() AgentInventorySources {
+	panes := func(ctx context.Context) ([]AgentTmuxPane, error) { return linuxTmuxPanes(ctx) }
+	return AgentInventorySources{
+		Processes: func(ctx context.Context) ([]AgentProcess, error) {
+			rows, err := panes(ctx)
+			if err != nil {
+				return nil, err
+			}
+			processes := make([]AgentProcess, 0, len(rows))
+			for _, pane := range rows {
+				kind := syntheticPaneAgentKind(pane.Session)
+				switch kind {
+				case "claude", "codex":
+					processes = append(processes, AgentProcess{PID: pane.PID, Command: kind, Executable: kind})
+				case "opencode":
+					processes = append(processes, AgentProcess{PID: pane.PID, Command: "opencode --mock --session ses-live", Executable: "python3"})
+				}
+			}
+			return processes, nil
+		},
+		Panes: panes,
+	}
+}
+
+func syntheticPaneAgentKind(session string) string {
+	parts := strings.Split(strings.TrimSpace(session), "-")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.ToLower(parts[len(parts)-1])
+}
+
 // LinuxOpenCodeInventorySources deliberately uses a bounded /proc scan that
 // reads command lines only for OpenCode candidates. Tmux enrichment is bounded
-// separately by the token collector and remains optional.
+// separately by the token collector; the serving process enables the global
+// roster requirement explicitly, while isolated tests can opt into their own
+// private socket through YOLOMUX_OPENCODE_TMUX_SCOPE.
 func LinuxOpenCodeInventorySources() OpenCodeInventorySources {
 	return OpenCodeInventorySources{
 		Processes: linuxOpenCodeProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD,
@@ -541,15 +621,54 @@ func boundedProcReadFile(name string) ([]byte, error) {
 	return boundedOSReadFile(name)
 }
 
+func linuxTmuxSessions(ctx context.Context) (map[string]struct{}, error) {
+	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	output, err := runBoundedCommand(commandContext, tmuxCommandArgs("list-sessions", "-F", "#{session_name}"))
+	if err != nil || output.ExitCode != 0 {
+		if TmuxNoServerError(output.Stderr) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, errors.New("tmux list-sessions failed")
+	}
+	sessions := parseTmuxSessions(string(output.Stdout))
+	return sessions, nil
+}
+
+func parseTmuxSessions(text string) map[string]struct{} {
+	sessions := make(map[string]struct{})
+	for _, line := range strings.Split(text, "\n") {
+		name := strings.TrimSuffix(line, "\r")
+		if name != "" {
+			sessions[name] = struct{}{}
+		}
+	}
+	return sessions
+}
+
 func linuxTmuxPanes(ctx context.Context) ([]AgentTmuxPane, error) {
 	commandContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	sessions, err := linuxTmuxSessions(commandContext)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return []AgentTmuxPane{}, nil
+	}
 	format := "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}"
 	output, err := runBoundedCommand(commandContext, tmuxCommandArgs("list-panes", "-a", "-F", format))
 	if err != nil || output.ExitCode != 0 {
 		return nil, errors.New("tmux list-panes failed")
 	}
-	return parseAgentTmuxPanes(string(output.Stdout)), nil
+	panes := parseAgentTmuxPanes(string(output.Stdout))
+	filtered := make([]AgentTmuxPane, 0, len(panes))
+	for _, pane := range panes {
+		if _, ok := sessions[pane.Session]; ok {
+			filtered = append(filtered, pane)
+		}
+	}
+	return filtered, nil
 }
 
 func parseAgentTmuxPanes(text string) []AgentTmuxPane {

@@ -12,7 +12,7 @@ func TestMaterializerDeclaredFamiliesAndPricing(t *testing.T) {
 	layer, err := (Materializer{Price: func(UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
 		return 12, 20, &PriceEvidence{CatalogModel: "fixture"}, true, nil
 	}}).Build(MaterializeRequest{Start: 0, End: 20, Resolution: 10}, []Observation{
-		{EventID: "cpu-1", Family: "cpu", SourceID: "host", ObservedAt: 1, EpochID: "cpu", Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0, "process_cpu_percent": map[string]any{"python": 4.0}}},
+		{EventID: "cpu-1", Family: "cpu", SourceID: "host", ObservedAt: 1, EpochID: "cpu", Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0, "process_cpu_percent": map[string]any{"python": 4.0}, "owned_process_cpu_percent": map[string]any{"yolomux-go": 137.5}}},
 		{EventID: "browser-1", Family: "browser", SourceID: "client", ObservedAt: 2, EpochID: "browser", Payload: map[string]any{"kind": "api", "latency_ms": 8.0, "bytes": 100.0}},
 	}, []CoverageEpoch{{Family: "cpu", SourceID: "host", EpochID: "cpu", StartedAt: 0, EndedAt: &ended, NativeCadenceSeconds: 1}}, nil, []UsageAtom{
 		{EventID: "usage-1", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 3, Payload: map[string]any{"quantity": 10.0, "agent_id": "agent", "model": "model", "provider": "provider"}},
@@ -31,6 +31,9 @@ func TestMaterializerDeclaredFamiliesAndPricing(t *testing.T) {
 	}
 	if got := seriesValue(layer.Buckets[0], "process_cpu_percent:python"); got != 4 {
 		t.Fatalf("per-binary cpu = %v bucket=%+v", got, layer.Buckets[0])
+	}
+	if got := seriesValue(layer.Buckets[0], "owned_process_cpu_percent:yolomux-go"); got != 137.5 {
+		t.Fatalf("owned per-binary cpu = %v bucket=%+v", got, layer.Buckets[0])
 	}
 	if got := seriesValue(layer.Buckets[0], "browser_api_per_second"); got != .1 {
 		t.Fatalf("browser rate = %v", got)

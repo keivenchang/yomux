@@ -2,8 +2,11 @@ package stats
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRingSlotIndexAndFixedShape(t *testing.T) {
@@ -59,6 +62,66 @@ func TestRingPublicationReadAndInvalidation(t *testing.T) {
 	}
 	if len(window.Rows) != 0 || len(window.PendingInvalidations) != 1 {
 		t.Fatalf("stale ring window = %+v", window)
+	}
+}
+
+func TestRingWindowMetadataDoesNotDecodeBucketPayloads(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 100, BucketJSON: `{"value":1}`, Complete: true}}, 1, 200, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "UPDATE aggregate_ring_slots SET bucket_json=? WHERE resolution_seconds=? AND bucket_start=?", []byte("bad-compressed-payload"), 10, 100); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := writer.ReadRingWindowMetadata(ctx, 10, 10, 110)
+	if err != nil {
+		t.Fatalf("metadata read = %v", err)
+	}
+	if len(metadata.Rows) != 1 || metadata.Rows[0].BucketJSON != "" || !metadata.Rows[0].Complete {
+		t.Fatalf("metadata window = %+v", metadata)
+	}
+	full, err := writer.ReadRingWindow(ctx, 10, 10, 110)
+	if err == nil {
+		t.Fatalf("full ring read accepted malformed bucket payload: %+v", full)
+	}
+}
+
+func TestRingWindowPayloadsDefersCompressionDecode(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	raw := `{"value":"` + strings.Repeat("x", 4096) + `"}`
+	encoded, err := encodeRingBucket(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := encoded.([]byte); !ok {
+		t.Fatalf("synthetic payload was not compressed: %T", encoded)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 100, BucketJSON: raw, Complete: true}}, 1, 200, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "UPDATE aggregate_ring_slots SET bucket_json=? WHERE resolution_seconds=? AND bucket_start=?", encoded, 10, 100); err != nil {
+		t.Fatal(err)
+	}
+	payloads, err := writer.ReadRingWindowPayloads(ctx, 10, 10, 110)
+	if err != nil {
+		t.Fatalf("raw payload read = %v", err)
+	}
+	if len(payloads.Rows) != 1 || payloads.Rows[0].BucketJSON == raw {
+		t.Fatalf("payload window unexpectedly decoded: %+v", payloads)
+	}
+	decoded, err := decodeRingBucket(payloads.Rows[0].BucketJSON)
+	if err != nil || decoded != raw {
+		t.Fatalf("deferred payload decode = %q, err=%v", decoded, err)
 	}
 }
 
@@ -146,5 +209,79 @@ func TestRingPublicationRemovesDisplacedSlotInvalidations(t *testing.T) {
 	}
 	if got := pendingStarts(t, writer, 10); len(got) != 0 {
 		t.Fatalf("displaced invalidation survived slot wrap: %v", got)
+	}
+}
+
+func TestOpenWriterReconcilesMoreThanSQLiteBindLimitWithSyntheticFacts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := float64(time.Now().Unix()-3600) + 0.5
+	seed := make([]RingBucketWrite, 0, len(ringCapacities))
+	for _, resolution := range []int{1, 10, 60, 300} {
+		seed = append(seed, RingBucketWrite{
+			ResolutionSeconds: resolution,
+			BucketStart:       invalidationBucket(resolution, base),
+			BucketJSON:        `{"value":1}`,
+			Complete:          true,
+		})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, seed, 1, base+1, true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	// Simulate a legacy/direct owner: it committed many facts and advanced the
+	// source watermark without leaving cell-level invalidations. 130 timestamps
+	// produce more than 400 unique ring keys, forcing reconciliation to cross
+	// the portable SQLite bind-variable boundary while remaining fixture-only.
+	keys := make(map[[2]int64]struct{})
+	for index := 0; index < 130; index++ {
+		observedAt := base + float64(index*60)
+		for resolution := range ringCapacities {
+			keys[[2]int64{int64(resolution), invalidationBucket(resolution, observedAt)}] = struct{}{}
+		}
+		if _, err := writer.db.ExecContext(ctx, `INSERT INTO observations(event_id,family,source_id,observed_at,epoch_id,owner_generation,payload_json) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("synthetic-%03d", index), "cpu", "synthetic", observedAt, "epoch", 1, `{"value":1}`); err != nil {
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+	}
+	if len(keys) <= maxRingInvalidationStatementKeys {
+		t.Fatalf("synthetic reconciliation only generated %d keys, want more than %d", len(keys), maxRingInvalidationStatementKeys)
+	}
+	if _, err := writer.db.ExecContext(ctx, "DELETE FROM ring_invalidations"); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "UPDATE schema_meta SET source_generation=2 WHERE singleton=1"); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatalf("synthetic startup reconciliation failed: %v", err)
+	}
+	defer reopened.Close()
+	pending, err := reopened.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byResolution := make(map[int]int)
+	for _, cell := range pending {
+		if cell.SourceGeneration != 2 {
+			t.Fatalf("pending cell has source generation %d, want 2: %+v", cell.SourceGeneration, cell)
+		}
+		byResolution[cell.ResolutionSeconds]++
+	}
+	for _, resolution := range []int{1, 10, 60, 300} {
+		if byResolution[resolution] == 0 {
+			t.Fatalf("startup reconciliation did not retain seeded %ds cell: pending=%+v", resolution, pending)
+		}
 	}
 }

@@ -75,6 +75,9 @@ func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T)
 	if first.UsageAccepted != 27 || first.Cycles != 1 {
 		t.Fatalf("first counters = %+v", first)
 	}
+	if first.OpenCodeDatabaseOpens != 1 || first.OpenCodeDatabaseReuses != 0 {
+		t.Fatalf("first OpenCode database lifecycle = %+v", first)
+	}
 
 	clock.now = time.Unix(1788307310, 0)
 	collector.RunOnce(context.Background())
@@ -88,7 +91,8 @@ func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T)
 	mutateSQLite(t, opencodePath, `INSERT INTO part VALUES ('part-2', 'msg-2', 'ses-1', 3000, 3000, '{"type":"step-finish","tokens":{"total":4,"input":2,"output":2,"cache":{"read":0}}}')`)
 	clock.now = time.Unix(1788307320, 0)
 	collector.RunOnce(context.Background())
-	if got := collector.Counters().UsageAccepted; got != 31 {
+	third := collector.Counters()
+	if got := third.UsageAccepted; got != 31 {
 		t.Fatalf("incremental accepted = %d", got)
 	}
 
@@ -111,6 +115,62 @@ func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T)
 	if got := projection.Buckets[0].Input + projection.Buckets[0].Output + projection.Buckets[0].Cache; got != 180 {
 		t.Fatalf("tokens/minute projection = %g", got)
 	}
+}
+
+func TestAgentTokenCollectorReusesOpenCodeDatabaseAcrossCycles(t *testing.T) {
+	root := t.TempDir()
+	opencodePath := copyOpenCodeFixture(t)
+	collector := NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+		OpenCodeDatabase: opencodePath,
+		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
+			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "opencode"}}, nil
+		},
+		CursorPath: filepath.Join(root, "cursor.json"), SkipTranscriptScan: true,
+	})
+	collector.RunOnce(context.Background())
+	collector.RunOnce(context.Background())
+	counters := collector.Counters()
+	if counters.OpenCodeDatabaseOpens != 1 || counters.OpenCodeDatabaseReuses != 1 {
+		t.Fatalf("OpenCode database lifecycle = %+v", counters)
+	}
+	for _, phase := range []string{"identity_cursor", "database_open", "claims", "session_tree", "step_finish", "cursor_prepare", "append"} {
+		timing, ok := counters.OpenCodePhases[phase]
+		if !ok || timing.Runs != 2 || timing.Last < 0 || timing.Total < timing.Last {
+			t.Fatalf("OpenCode phase timing %q = %+v (all phases should run for both cycles)", phase, counters.OpenCodePhases)
+		}
+	}
+	t.Logf("synthetic OpenCode phase timings: %+v", counters.OpenCodePhases)
+	snapshot := collector.Snapshot()
+	if len(snapshot.OpenCodePhases) != len(counters.OpenCodePhases) {
+		t.Fatalf("snapshot omitted OpenCode phase timings: %+v", snapshot)
+	}
+	collector.Stop()
+}
+
+func TestAgentTokenCollectorReopensReplacedOpenCodeDatabase(t *testing.T) {
+	root := t.TempDir()
+	opencodePath := copyOpenCodeFixture(t)
+	replacement := copyOpenCodeFixture(t)
+	collector := NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+		OpenCodeDatabase: opencodePath,
+		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
+			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "opencode"}}, nil
+		},
+		CursorPath: filepath.Join(root, "cursor.json"), SkipTranscriptScan: true,
+	})
+	collector.RunOnce(context.Background())
+	if err := os.Rename(opencodePath, opencodePath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, opencodePath); err != nil {
+		t.Fatal(err)
+	}
+	collector.RunOnce(context.Background())
+	counters := collector.Counters()
+	if counters.OpenCodeDatabaseOpens != 2 || counters.OpenCodeDatabaseReuses != 0 {
+		t.Fatalf("replaced OpenCode database lifecycle = %+v", counters)
+	}
+	collector.Stop()
 }
 
 func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
@@ -1430,6 +1490,36 @@ func TestDefaultTranscriptSourcesRequireExplicitSyntheticRoot(t *testing.T) {
 	}
 	if len(sources) != 0 {
 		t.Fatalf("unconfigured source resolution returned host-derived paths: %#v", sources)
+	}
+}
+
+func TestNewestCodexTranscriptTargetUsesOnlyLiveRolloutsUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "2026", "09", "17", "rollout-first.jsonl")
+	second := filepath.Join(root, "2026", "09", "17", "rollout-second.jsonl")
+	if err := os.MkdirAll(filepath.Dir(first), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(first, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(first, time.Unix(10, 0), time.Unix(10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, time.Unix(20, 0), time.Unix(20, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got := newestCodexTranscriptTarget(root, []string{
+		"/outside/rollout-other.jsonl",
+		first,
+		second,
+		second + " (deleted)",
+	})
+	if got != second {
+		t.Fatalf("newest Codex rollout = %q, want %q", got, second)
 	}
 }
 

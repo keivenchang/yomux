@@ -933,12 +933,20 @@ def get_activity(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
     visible = query_bool(qs, "visible", True)
+    session_scope = str(query_one(qs, "scope", "configured") or "configured")
+
+    def make_result(hours: float) -> tuple[Any, HTTPStatus]:
+        normalized_scope = session_scope.strip().lower()
+        if normalized_scope in {"all", "tmux", "visible"}:
+            return request.server.app.activity_payload(hours=hours, visible=visible, session_scope=session_scope)
+        return request.server.app.activity_payload(hours=hours, visible=visible)
+
     request.write_validated_float_result(
         qs,
         "hours",
         24.0,
         ACTIVITY_MAX_HOURS,
-        lambda hours: request.server.app.activity_payload(hours=hours, visible=visible),
+        make_result,
     )
 
 

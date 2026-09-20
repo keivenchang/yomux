@@ -82,6 +82,7 @@ from yolomux_lib.tmux.tmux_utils import tmux_list_sessions
 from yolomux_lib.tmux.tmux_utils import tmux_send_option
 from yolomux_lib.tmux.tmux_utils import tmux_exact_target_from_sessions  # noqa: F401 - CLI compatibility export
 from yolomux_lib.tmux.tmux_utils import tmux_session_names
+from yolomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
 
 _DETECTOR_REEXPORTS = (
     blank_prompt_state,
@@ -710,4 +711,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    use_machine_tmux_for_operator_launch()
     main()

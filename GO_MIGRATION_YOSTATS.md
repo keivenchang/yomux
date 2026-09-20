@@ -117,6 +117,10 @@ The Go host collector owns:
 
 CPU needs two counter samples before it can produce a rate; the first sample is not written as a fabricated zero. Memory is an absolute read and can be written immediately. The default memory cadence is one minute; CPU and other runtime cadences are set by the runtime collector configuration in `stats_runtime.go`.
 
+The host `process_cpu_percent` series intentionally aggregates by executable name to retain the Python top-user view, so several `yolomux_go` or `yolomux-go` instances can legitimately add to a value above 100%. The Go Daemons row uses the current process PID/start-time identity and verified descendants instead; it must not inherit that host-wide aggregate. Runtime diagnostics expose process-row counts and source durations so a high host aggregate can be separated from CPU consumed by one Go instance.
+
+The CPU value is expressed in busy-core units, not as a fraction of one machine. A value of 224% means about 2.24 wall-clock cores were busy in the measured scope. The synthetic Go service test intentionally demonstrates this as 180% for the owned process plus 44% for one verified child; a production chart can reach the same value either from a multi-core Go process/descendant group or from the host-wide `process_cpu_percent:yolomux-go` series summing same-name co-tenants. Use the expanded Go row's owned process and child rows when answering what this daemon is doing; do not infer ownership from the host-wide series.
+
 `host_sources.go` contains Linux and Darwin source types, but the current server wiring and Docker evidence are Linux-first. The existence of a Darwin adapter is not cross-platform certification.
 
 ## Agent Status
@@ -136,6 +140,10 @@ Current Claude/Codex scan state is held in the Go process. A restart can rescan 
 OpenCode is read from its own SQLite database in read-only/query-only mode. The adapter validates the expected schema, caps each part read at 2,048 rows, caps a session tree at 64 sessions, and extracts token/cost data only from supported `step-finish` parts. Parent/child sessions retain their own identity and are not collapsed into one pane total.
 
 The OpenCode cursor has a durable sidecar, unlike the in-memory Claude/Codex transcript scanner state. Discovery and process/session joins currently use Linux runtime adapters. Unsupported schema or missing data produces an unavailable result rather than mutating the OpenCode database.
+
+The Go runtime diagnostics expose bounded OpenCode phase timings under `collectors.agent_tokens.opencode_phases`: identity/cursor inspection, database open or reuse, root-claim resolution, session-tree reads, `step-finish` reads, cursor preparation, and stats append. Each phase reports run count, last duration, and cumulative duration. The Go Daemons disclosure also reports published-ring projection reads/rows/decodes and per-resolution lifecycle selection/materialization timings. These measurements are diagnostic only and are intended to distinguish `/proc`/inventory cost from SQLite/query cost before a production-scale optimization or migration decision.
+
+The OpenCode `step-finish` query now reads the bounded row floor as a scalar parameter and combines active-time and cursor-new-row candidates without overlapping `UNION` branches. This lets SQLite use the integer-primary-key range bound on databases without a session/time index; the cursor regression verifies that active rows and cursor-only rows are each returned exactly once. A synthetic cache comparison also verifies one database open followed by reuse across 50 cycles, versus one open per cycle when the lifecycle is deliberately reopened.
 
 ## Pricing And Cost
 

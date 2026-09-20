@@ -13,6 +13,19 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func TestLinuxAgentPaneCaptureUsesVisibleScreenOnly(t *testing.T) {
+	got := linuxAgentPaneCaptureArgs("%26")
+	want := []string{"capture-pane", "-p", "-J", "-t", "%26"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("capture args = %v, want %v", got, want)
+	}
+	for _, value := range got {
+		if value == "-S" || value == "-12" {
+			t.Fatalf("capture args still include scrollback selector: %v", got)
+		}
+	}
+}
+
 func TestClassifyAgentStatusUsesBoundedSyntheticPaneEvidence(t *testing.T) {
 	tests := []struct {
 		name string
@@ -68,6 +81,90 @@ func TestClassifyAgentStatusRealShapedClaudeCodexOpenCodePanes(t *testing.T) {
 				t.Fatalf("status = %q, want %q (%+v)", got.Status, tc.want, got)
 			}
 		})
+	}
+}
+
+func TestClassifyAgentStatusAcceptsAdmittedNodeCodexWrapper(t *testing.T) {
+	got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{
+		Kind: "codex", PID: 10, Executable: "/usr/bin/node", PaneTarget: "%1",
+	}, AgentStatusSources{
+		Process: func(context.Context, int) (AgentStatusProcess, error) {
+			return AgentStatusProcess{Alive: true, Command: "node /home/test/.local/bin/codex --resume thread", Executable: "/usr/bin/node"}, nil
+		},
+		CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+			return AgentStatusPane{VisibleText: "Working\nEsc to interrupt"}, nil
+		},
+	})
+	if got.Status != AgentStatusRun {
+		t.Fatalf("Node Codex wrapper status = %+v, want run", got)
+	}
+}
+
+func TestClassifyVisibleAgentTextUsesCurrentCodexComposerOverStaleCompletion(t *testing.T) {
+	text := `Finished waiting
+  └ No agents completed yet
+
+────────────────────────────────────────────────────────────────────────
+› Ask Codex to do anything
+
+gpt-5.6-luna high · /workspace · Main`
+
+	got := classifyVisibleAgentText(text)
+	if got.Status != AgentStatusIdle {
+		t.Fatalf("status = %+v, want idle for the current composer", got)
+	}
+}
+
+func TestClassifyVisibleAgentTextRecognizesCurrentCodexWorkingCounter(t *testing.T) {
+	text := `• Ran 2 commands · ctrl + t to view transcript
+
+◦ Working (27s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+› Ask Codex to do anything`
+
+	got := classifyVisibleAgentText(text)
+	if got.Status != AgentStatusRun {
+		t.Fatalf("status = %+v, want run for the current working counter", got)
+	}
+}
+
+func TestClassifyVisibleAgentTextIgnoresStaleAutoApproveDiscussionBeforeWorkingCounter(t *testing.T) {
+	text := `• Ran node tests/layout_async.test.js
+	assert.equal(model.agents[0].state, "working", "auto-approve fallback preserves the green marker")
+
+◦ Working (26m 16s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+› Ask Codex to do anything`
+
+	got := classifyVisibleAgentText(text)
+	if got.Status != AgentStatusRun {
+		t.Fatalf("status = %+v, want run when stale auto-approve prose precedes the current working counter", got)
+	}
+}
+
+func TestClassifyVisibleAgentTextIgnoresStaleToolErrorBeforeWorkingFooter(t *testing.T) {
+	text := `• Ran python3 - <<'PY'
+  File "<stdin>", line 17
+    print(json.dumps(...))
+          ^
+SyntaxError: unterminated triple-quoted string literal
+
+◦ Working (20m 46s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+› Ask Codex to do anything`
+
+	got := classifyVisibleAgentText(text)
+	if got.Status != AgentStatusRun {
+		t.Fatalf("status = %+v, want run for a current working footer after stale tool error", got)
+	}
+}
+
+func TestClassifyVisibleAgentTextIgnoresStaleCompletionBeforeWorkingFooter(t *testing.T) {
+	text := `Goal achieved (2m)
+
+◦ Working (28m 12s • esc to interrupt) · 2 background terminals running · /ps to view · /stop to close
+› Ask Codex to do anything`
+
+	got := classifyVisibleAgentText(text)
+	if got.Status != AgentStatusRun {
+		t.Fatalf("status = %+v, want run when stale completion precedes the current working footer", got)
 	}
 }
 
@@ -157,6 +254,34 @@ func TestOpenCodeSQLiteStateReaderUsesTemporaryCompatibleSchema(t *testing.T) {
 	got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "opencode", OpenCodeSession: "ses-1"}, AgentStatusSources{OpenCodeState: reader})
 	if got.Status != AgentStatusAsk {
 		t.Fatalf("OpenCode status = %+v", got)
+	}
+}
+
+func TestOpenCodeSQLiteStateReaderRejectsExplicitSessionMissingFromDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE session (id TEXT, directory TEXT, agent TEXT, model TEXT, time_created INTEGER, time_updated INTEGER, cost REAL)`,
+		`CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)`,
+		`CREATE TABLE session_input (id TEXT, session_id TEXT, delivery TEXT, admitted_seq INTEGER, promoted_seq INTEGER, time_created INTEGER)`,
+		`CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := OpenCodeSQLiteStateReader(path)
+	state, evidence, err := reader(context.Background(), AgentStatusRequest{OpenCodeSession: "ses-live"})
+	if err == nil || err.Error() != "opencode-session-unavailable" || state != "" || evidence != nil {
+		t.Fatalf("missing explicit session = state %q evidence=%v err=%v", state, evidence, err)
 	}
 }
 
@@ -371,17 +496,45 @@ func TestAgentStatusCollectorRetainsValidPaneWhenAnotherPaneConflicts(t *testing
 		t.Fatalf("mixed pane states = %#v", states)
 	}
 	counts := payload["counts"].(map[string]any)
-	if counts["total"] != 1 || payload["snapshot_revision"] != uint64(4) {
+	if counts["total"] != 2 || payload["snapshot_revision"] != uint64(4) {
 		t.Fatalf("mixed pane metadata = counts=%#v revision=%#v", counts, payload["snapshot_revision"])
+	}
+	roster := payload["agents"].([]map[string]any)
+	if len(roster) != 2 || roster[0]["state"] != "unavailable" || roster[1]["state"] != "run" {
+		t.Fatalf("mixed pane roster = %#v", roster)
 	}
 }
 
-func TestAgentStatusCollectorRevisionIsMonotonicAcrossRepeatedCycles(t *testing.T) {
+func TestAgentStatusCollectorRetainsRosterWhenEveryPaneIsUnavailable(t *testing.T) {
 	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		return []AgentRecord{{Kind: "opencode", TmuxSession: "yo7220", TmuxWindow: "1", TmuxPaneID: "%7"}}, nil
+	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
+		return AgentStatusResult{Status: AgentStatusUnavailable, Reason: "opencode-session-unavailable"}
+	}, nil, clock, AgentStatusCollectorConfig{EpochID: "epoch", EpochStartedAt: 100, SourceID: "test"})
+
+	facts := collector.collect(context.Background(), HostFactContext{EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 200, CadenceSeconds: 10, SourceID: "test"})
+	if len(facts.UnavailableSpans) != 0 || len(facts.Observations) != 1 {
+		t.Fatalf("unavailable roster facts = %+v", facts)
+	}
+	payload := facts.Observations[0].Payload
+	roster := payload["agents"].([]map[string]any)
+	if len(roster) != 1 || roster[0]["state"] != "unavailable" {
+		t.Fatalf("unavailable roster = %#v", roster)
+	}
+	counts := payload["counts"].(map[string]any)
+	if counts["total"] != 1 || counts["running"] != 0 {
+		t.Fatalf("unavailable counts = %#v", counts)
+	}
+}
+
+func TestAgentStatusCollectorRevisionStaysStableAcrossUnchangedCycles(t *testing.T) {
+	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	status := AgentStatusIdle
 	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
 		return []AgentRecord{{Kind: "codex", TmuxSession: "session", TmuxWindow: "0", TmuxPaneID: "%1"}}, nil
 	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
-		return AgentStatusResult{Status: AgentStatusIdle}
+		return AgentStatusResult{Status: status}
 	}, nil, clock, AgentStatusCollectorConfig{
 		EpochID: "epoch", EpochStartedAt: 100, SourceID: "test",
 		SnapshotRevision: func() uint64 { return 1 },
@@ -395,8 +548,16 @@ func TestAgentStatusCollectorRevisionIsMonotonicAcrossRepeatedCycles(t *testing.
 		EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 210, CadenceSeconds: 10, SourceID: "test",
 	})
 	second := facts.Observations[0].Payload["snapshot_revision"]
-	if first != uint64(1) || second != uint64(2) {
+	if first != uint64(1) || second != uint64(1) {
 		t.Fatalf("revisions = %#v, %#v", first, second)
+	}
+	status = AgentStatusRun
+	facts = collector.collect(context.Background(), HostFactContext{
+		EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 220, CadenceSeconds: 10, SourceID: "test",
+	})
+	third := facts.Observations[0].Payload["snapshot_revision"]
+	if third == uint64(1) {
+		t.Fatalf("changed status did not advance revision: %#v", third)
 	}
 }
 
@@ -446,6 +607,32 @@ func TestAgentStatusCollectorUsesExactFamilyCadenceAndBound(t *testing.T) {
 	facts := collector.collect(context.Background(), HostFactContext{EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 200, CadenceSeconds: 10, SourceID: "test"})
 	if len(facts.UnavailableSpans) != 1 || facts.UnavailableSpans[0].Reason != "agent-status-bound-exceeded" {
 		t.Fatalf("bound result = %+v", facts)
+	}
+}
+
+func TestAgentStatusCollectorUsesDemandCadence(t *testing.T) {
+	demanded := false
+	writer := &recordingBatchWriter{}
+	collector := NewAgentStatusCollector(
+		func(context.Context) ([]AgentRecord, []error) {
+			return []AgentRecord{{Kind: "codex", TmuxSession: "synthetic", TmuxWindow: "0", TmuxPaneID: "%1"}}, nil
+		},
+		func(context.Context, AgentStatusRequest) AgentStatusResult {
+			return AgentStatusResult{Status: AgentStatusIdle}
+		},
+		writer,
+		&agentStatusTestClock{now: time.Unix(200, 0)},
+		AgentStatusCollectorConfig{EpochID: "demand", EpochStartedAt: 100, SourceID: "test", ActiveFunc: func() bool { return demanded }},
+	)
+	collector.RunOnce(context.Background())
+	if batches := writer.snapshot(); len(batches) != 1 || len(batches[0].CoverageEpochs) != 1 || batches[0].CoverageEpochs[0].NativeCadenceSeconds != 60 {
+		t.Fatalf("idle cadence batch = %+v, want one 60-second coverage epoch", batches)
+	}
+	demanded = true
+	collector.RunOnce(context.Background())
+	batches := writer.snapshot()
+	if len(batches) != 2 || len(batches[1].CoverageEpochs) != 1 || batches[1].CoverageEpochs[0].NativeCadenceSeconds != 10 {
+		t.Fatalf("active cadence batch = %+v, want one 10-second coverage epoch", batches)
 	}
 }
 

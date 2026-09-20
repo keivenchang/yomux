@@ -144,6 +144,24 @@ func TestCPUDeltaSamplerUsesWallTimeAndLogicalCPUCount(t *testing.T) {
 	}
 }
 
+func TestCPUDeltaSamplerKeepsProcessRelativeCPUAboveOneCore(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 0, Total: 1000}, Processes: map[string]CPUProcessCounters{
+		"pid:1": {Identity: "pid-1", CPU: 0, Binary: "yolomux-go"},
+	}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 1100}, Processes: map[string]CPUProcessCounters{
+		"pid:1": {Identity: "pid-1", CPU: 450, Binary: "yolomux-go"},
+	}}
+	sampler := NewCPUDeltaSampler("pid:1", nil, 8)
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUValid || got.Process.Value != 450 {
+		t.Fatalf("process-relative sample = %+v, want 450%% for 4.5 busy cores", got)
+	}
+	if got.Group.Value != 56.25 {
+		t.Fatalf("logical-CPU-normalized group sample = %+v, want 56.25%%", got)
+	}
+}
+
 func TestCPUDeltaSamplerUsesSnapshotProcessCounterRate(t *testing.T) {
 	first := CPUSnapshot{Host: CPUHostCounters{Busy: 0, Total: 1000}, Processes: map[string]CPUProcessCounters{
 		"yolomux-go": {Identity: "pid-1", CPU: 0, Binary: "yolomux-go"},
@@ -248,6 +266,60 @@ func TestCPUDeltaSamplerRuntimeSnapshotsSkipChangedBinaryMembership(t *testing.T
 	}
 	if !reflect.DeepEqual(got.ProcessCPUPercent, map[string]float64{"yolomux-go": 20}) {
 		t.Fatalf("grouped series = %#v", got.ProcessCPUPercent)
+	}
+}
+
+func TestCPUDeltaSamplerOwnedIdentityExcludesSameNamedCotenants(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 10, Binary: "yolomux-go"},
+		"202:20": {Identity: "202:20", CPU: 30, Binary: "yolomux-go"},
+		"303:30": {Identity: "303:30", CPU: 40, Binary: "python"},
+	}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 20, Binary: "yolomux-go"},
+		"202:20": {Identity: "202:20", CPU: 80, Binary: "yolomux-go"},
+		"303:30": {Identity: "303:30", CPU: 60, Binary: "python"},
+	}}
+	sampler := NewCPUDeltaSampler("yolomux-go", []string{"yolomux-go"}, 1)
+	sampler.processIdentity = "101:"
+	sampler.groupIdentity = "101:"
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUValid || !got.Process.Valid || !got.Group.Valid {
+		t.Fatalf("owned sample = %+v", got)
+	}
+	if got.Process.Value != 10 || got.Group.Value != 10 {
+		t.Fatalf("owned CPU percentages = process=%v group=%v, want 10%%", got.Process.Value, got.Group.Value)
+	}
+	if !reflect.DeepEqual(got.ProcessCPUPercent, map[string]float64{"yolomux-go": 10}) {
+		t.Fatalf("owned daemon series = %#v", got.ProcessCPUPercent)
+	}
+}
+
+func TestCPUDeltaSamplerScopesProcessButKeepsHostTopUsers(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux-go"},
+		"202:20": {Identity: "202:20", CPU: 200, Binary: "yolomux-go"},
+		"303:30": {Identity: "303:30", CPU: 50, Binary: "python"},
+	}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 110, Binary: "yolomux-go"},
+		"202:20": {Identity: "202:20", CPU: 260, Binary: "yolomux-go"},
+		"303:30": {Identity: "303:30", CPU: 70, Binary: "python"},
+	}}
+	sampler := NewCPUDeltaSampler("yolomux-go", nil, 1)
+	sampler.processIdentity = "101:"
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUValid || !got.Process.Valid || got.Process.Value != 10 {
+		t.Fatalf("owned process sample = %+v, want 10%%", got)
+	}
+	wantUsers := map[string]float64{"yolomux-go": 70, "python": 20}
+	if !reflect.DeepEqual(got.ProcessCPUPercent, wantUsers) {
+		t.Fatalf("host top-user series = %#v, want %#v", got.ProcessCPUPercent, wantUsers)
+	}
+	if !reflect.DeepEqual(got.OwnedProcessCPUPercent, map[string]float64{"yolomux-go": 10}) {
+		t.Fatalf("owned process series = %#v, want yolomux-go=10", got.OwnedProcessCPUPercent)
 	}
 }
 

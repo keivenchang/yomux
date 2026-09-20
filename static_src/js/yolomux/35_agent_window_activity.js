@@ -324,10 +324,26 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
     ? tabberActivityPayload.agent_windows[String(session || '')]
     : null;
-  const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
+  let stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const stateRevision = agentWindowSnapshotRevision(statePayload);
   const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
+  // Go has no Python auto-approve snapshot. During a pane-capture miss, its shared activity
+  // snapshot can already have recovered to a concrete state while the compatibility state map
+  // still contains `unavailable`. Let that newer Go activity row repair only the unavailable
+  // canonical row; Python keeps its normal canonical-status precedence unchanged.
+  const activityCanRepairUnavailable = !(stateRevision > 0 && activityRevision > 0 && activityRevision < stateRevision);
+  if (activityCanRepairUnavailable
+      && typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback()) {
+    stateRows = stateRows.map(stateRow => {
+      if (agentWindowStateKey(stateRow?.state) !== 'unavailable') return stateRow;
+      const replacement = activityRows.find(activityRow => (
+        agentWindowPayloadKey(activityRow) === agentWindowPayloadKey(stateRow)
+        && agentWindowStateKey(activityRow?.state) !== 'unavailable'
+      ));
+      return replacement ? {...stateRow, ...replacement} : stateRow;
+    });
+  }
   // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
   // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
   // not. Old clients have no revision and retain the established compatibility behavior.
@@ -871,7 +887,10 @@ function refreshAgentWindowActivityDisplays() {
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (typeof refreshTabberPanels === 'function'
+      && typeof itemInLayout === 'function'
+      && typeof tabberItemId !== 'undefined'
+      && itemInLayout(tabberItemId)) refreshTabberPanels();
   if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
 }
 
@@ -1205,6 +1224,13 @@ function agentWindowStatusDotHtml(item, options = {}) {
   const animate = options.animate !== false;
   const pulse = !acknowledging && animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
+  // Working markers must keep their green liveness signal for the whole run. The optional
+  // broad attention pulse is disabled by default, and the short transition pulse expires;
+  // without this independent class a long Codex turn looks idle.
+  const alwaysWorkingPulse = !acknowledging
+    && animate
+    && tone === STATE_KEY.working
+    && options.alwaysPulseWorking !== false;
   const transitionPulse = !acknowledging && animate && item.transitionPulseActive === true && item.acknowledged !== true;
   const transitionGlow = pulse && agentWindowVisibleTone(tone);
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
@@ -1238,6 +1264,7 @@ function agentWindowStatusDotHtml(item, options = {}) {
     acknowledgementShapeClass,
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
+    alwaysWorkingPulse ? 'heartbeat-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
     aggregateToneClasses,
     tone === 'unavailable' ? 'status-indicator--blocked' : '',
@@ -1254,7 +1281,8 @@ function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
   const subwindowPulse = item?.pulseActive !== false;
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
-  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
+  const alwaysWorkingPulse = options.alwaysPulseWorking === true && tone === STATE_KEY.working;
+  const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse || alwaysWorkingPulse;
   if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
     const durationMs = Math.max(1, Number(agentStatusPulsePeriodMs) || 1);
@@ -1289,6 +1317,12 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   // sub-window. Parent Tab circles are status-only, so they still disappear entirely.
   if (acknowledged && statusOnly) return '';
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
+  const animate = options.animate !== false;
+  // A working marker is a live liveness signal on every surface, not only on the
+  // status-only parent tab. Keep the green heartbeat after the short transition
+  // glow has expired; callers may explicitly suppress it for static snapshots.
+  const alwaysPulseWorking = animate && (options.alwaysPulseWorking === true
+    || (item?.state === STATE_KEY.working && options.alwaysPulseWorking !== false));
   const agentClasses = [
     'agent-window-activity-icon',
     'agent-window-agent-icon',
@@ -1299,6 +1333,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {
     animate: options.animate !== false,
     subwindowGlyphPulse,
+    alwaysPulseWorking,
     acknowledgementPreview: options.acknowledgementPreview === true,
   });
   if (statusOnly && !markerHtml) return '';
@@ -1308,6 +1343,7 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
   const style = agentWindowActivityStyleAttribute(tone, item, {
     subwindowGlyphPulse,
+    alwaysPulseWorking,
     acknowledgementPreview: options.acknowledgementPreview === true,
   });
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);

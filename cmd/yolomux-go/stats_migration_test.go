@@ -3259,6 +3259,73 @@ func TestStatsSnapshotReturnsPersistedFacts(t *testing.T) {
 	}
 }
 
+func TestStatsSnapshotCostUsesPythonShapedPricingCatalog(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	catalogPath := filepath.Join(root, "synthetic-pricing.json")
+	catalogJSON := `{"schema_version":1,"catalog_revision":42,"models":[{"provider":"synthetic-provider","model":"synthetic-model","aliases":["synthetic-model"],"source":{"kind":"fixture","url":"https://example.invalid/synthetic-pricing"},"rates":[{"direction":"input","modality":"text","cache_role":"none","unit":"tokens","scale":1000000,"usd":"2.00","effective_from":"1970-01-01T00:00:00Z"}]}]}`
+	if err := os.WriteFile(catalogPath, []byte(catalogJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := stats.LoadRepositoryPricingCatalog("", catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := stats.PricingResolver(catalog)
+	path := filepath.Join(root, "synthetic-stats.sqlite3")
+	writer, err := stats.OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	now := time.Unix(1000, 0)
+	if _, err := writer.AppendBatch(ctx, stats.AppendBatch{UsageAtoms: []stats.UsageAtom{{
+		EventID: "synthetic-priced-usage", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 990,
+		Payload: map[string]any{"quantity": 1000.0, "provider": "synthetic-provider", "model": "synthetic-model", "agent_id": "synthetic-agent", "thread_id": "synthetic-thread"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Price: resolver, Now: func() time.Time { return now }})
+	lifecycle.DemandProduct(300, 10)
+	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Price: resolver, Now: func() time.Time { return now }})
+	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {
+		if err := lifecycle.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Refresh(ctx); err != nil && !errors.Is(err, stats.ErrProductPending) {
+			t.Fatal(err)
+		}
+	}
+	if !service.State().Ready {
+		t.Fatalf("synthetic priced product did not become ready: %+v", service.State())
+	}
+	server := &server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }}
+	record := httptest.NewRecorder()
+	server.statsSnapshot(record, httptest.NewRequest(http.MethodGet, "/api/stats-snapshot?range_seconds=300&resolution=10&client_id=synthetic-cost", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", record.Code, record.Body.String())
+	}
+	var payload struct {
+		CostReport struct {
+			TotalTokens       int64 `json:"total_tokens"`
+			TotalMicroUSD     int64 `json:"total_micro_usd"`
+			TotalAPIListMicro int64 `json:"total_api_list_micro_usd"`
+			Evidence          []struct {
+				CatalogRevision int64 `json:"catalog_revision"`
+			} `json:"evidence"`
+		} `json:"cost_report"`
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.CostReport.TotalTokens != 1000 || payload.CostReport.TotalMicroUSD != 2000 || payload.CostReport.TotalAPIListMicro != 2000 {
+		t.Fatalf("synthetic catalog cost report = %+v body=%s", payload.CostReport, record.Body.String())
+	}
+	if len(payload.CostReport.Evidence) == 0 || payload.CostReport.Evidence[0].CatalogRevision != 42 {
+		t.Fatalf("synthetic catalog evidence = %+v body=%s", payload.CostReport.Evidence, record.Body.String())
+	}
+}
+
 func TestCurrentStatsSnapshotAllowsUnrelatedSourceGeneration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")

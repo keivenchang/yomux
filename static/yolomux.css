@@ -2549,10 +2549,9 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }
-/* Every coarse-pointer top-level menu uses the same bounded sheet. Measured topbar packing may keep
-   the five desktop roots when they fit, so limiting this rule to the compact Menus root left a
-   perfectly valid File menu clipped off the phone viewport. */
-body.app-topbar-touch-compact .app-menu > .app-menu-popover {
+/* Phones use a viewport-bounded sheet. Tablets keep the normal content-sized dropdown even when
+   their topbar uses touch-sized controls; an iPad is not an iPhone. */
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu > .app-menu-popover {
   position: fixed;
   inset-block-start: calc(max(var(--topbar-height), env(safe-area-inset-top)) + var(--space-4));
   inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
@@ -2564,7 +2563,7 @@ body.app-topbar-touch-compact .app-menu > .app-menu-popover {
   overflow: auto;
   transform: none !important;
 }
-body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
   width: 100% !important;
   max-width: none;
   box-sizing: border-box;
@@ -7819,6 +7818,10 @@ body .file-explorer-changes-panel {
 .git-diff-panel {
   --git-diff-row-separator: color-mix(in srgb, var(--line) 76%, transparent);
   --git-diff-secondary-text: var(--text-muted-cool);
+  --git-diff-branch: var(--accent-sky-strong);
+  --git-diff-sha: var(--link-soft);
+  --git-diff-added: var(--git-staged);
+  --git-diff-removed: var(--git-deleted);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   width: 100%;
@@ -7832,6 +7835,10 @@ body .file-explorer-changes-panel {
 body.theme-light .git-diff-panel {
   --git-diff-row-separator: #aeb9c8;
   --git-diff-secondary-text: #465468;
+  --git-diff-branch: #005cc5;
+  --git-diff-sha: var(--git-diff-branch);
+  --git-diff-added: #008000;
+  --git-diff-removed: #c5221f;
 }
 .git-diff-toolbar {
   display: grid;
@@ -7844,7 +7851,20 @@ body.theme-light .git-diff-panel {
   font-weight: 700;
 }
 .git-diff-path {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-6);
   color: var(--text-muted-cool);
+}
+.git-diff-pathname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-diff-branch {
+  flex: 0 0 auto;
+  color: var(--git-diff-branch);
+  font-weight: 800;
 }
 .git-diff-refresh,
 .git-diff-load-older {
@@ -7902,6 +7922,35 @@ body.theme-light .git-diff-panel {
   color: var(--muted);
   white-space: pre;
 }
+.git-diff-worktree-status {
+  display: block;
+  grid-column: 1 / -1;
+  --git-diff-worktree-columns: var(--git-diff-history-columns);
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+}
+.git-diff-worktree-summary {
+  list-style: none;
+  cursor: pointer;
+}
+.git-diff-commit,
+.git-diff-worktree-summary {
+  box-shadow: inset 0 -1px var(--git-diff-row-separator);
+}
+.git-diff-worktree-summary::-webkit-details-marker {
+  display: none;
+}
+.git-diff-worktree-entries {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: auto;
+  margin: var(--space-4) 0 var(--space-8) 22px;
+}
+.git-diff-worktree-truncated {
+  margin: var(--space-4) 0 0;
+  color: var(--muted);
+}
 .git-diff-panel-body {
   min-height: 0;
   overflow: auto;
@@ -7911,7 +7960,8 @@ body.theme-light .git-diff-panel {
   display: grid;
   width: 100%;
   min-width: 0;
-  grid-template-columns: 14px max-content max-content max-content minmax(5rem, max-content) minmax(6rem, 1fr);
+  --git-diff-history-columns: 14px 13ch 26ch 18ch 20ch minmax(6rem, 1fr);
+  grid-template-columns: var(--git-diff-history-columns);
   gap: 0 var(--space-8);
 }
 .git-diff-commit {
@@ -7921,7 +7971,10 @@ body.theme-light .git-diff-panel {
   column-gap: var(--space-8);
   min-width: 0;
   width: 100%;
-  box-shadow: inset 0 -1px var(--git-diff-row-separator);
+}
+.git-diff-commit.git-diff-worktree-status {
+  display: block;
+  grid-template-columns: none;
 }
 .git-diff-commit-row {
   display: grid;
@@ -7942,6 +7995,16 @@ body.theme-light .git-diff-panel {
   text-align: start;
   white-space: nowrap;
 }
+.git-diff-worktree-status > .git-diff-worktree-summary {
+  grid-template-columns: var(--git-diff-worktree-columns);
+  column-gap: var(--space-8);
+}
+.git-diff-worktree-status > .git-diff-worktree-summary::marker {
+  content: '';
+}
+.git-diff-worktree-status > .git-diff-worktree-summary > :not(.git-diff-commit-caret) {
+  margin-inline-start: calc(-1 * var(--space-6));
+}
 .git-diff-commit-row:hover,
 .git-diff-commit-row:focus-visible {
   background: var(--changes-tree-row-hover-bg);
@@ -7952,6 +8015,22 @@ body.theme-light .git-diff-panel {
 .git-diff-commit-sha,
 .git-diff-commit-refs {
   font-family: var(--mono-font);
+}
+.git-diff-commit-sha {
+  min-width: 9ch;
+  color: var(--git-diff-sha);
+  font-weight: 700;
+}
+.git-diff-commit-signature {
+  color: var(--git-diff-secondary-text);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+}
+.git-diff-commit-decorations {
+  margin-inline-end: var(--space-4);
+  color: var(--accent);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
 }
 .git-diff-commit-description {
   min-width: 0;
@@ -7980,10 +8059,14 @@ body.theme-light .git-diff-panel {
   color: var(--git-diff-secondary-text);
 }
 .git-diff-commit-added {
-  color: var(--git-staged);
+  color: var(--git-diff-added);
 }
 .git-diff-commit-removed {
-  color: var(--git-deleted);
+  color: var(--git-diff-removed);
+}
+.git-diff-worktree-count {
+  color: var(--git-diff-secondary-text);
+  font-family: var(--mono-font);
 }
 .git-diff-commit-detail {
   grid-column: 1 / -1;
@@ -8032,7 +8115,8 @@ body.theme-light .git-diff-panel {
     display: none;
   }
   .git-diff-commits {
-    grid-template-columns: 14px max-content max-content max-content minmax(6rem, 1fr);
+    --git-diff-history-columns: 14px 13ch 26ch 18ch minmax(6rem, 1fr);
+    grid-template-columns: var(--git-diff-history-columns);
   }
 }
 @container git-diff-panel (max-width: 48rem) {
@@ -8040,7 +8124,8 @@ body.theme-light .git-diff-panel {
     display: none;
   }
   .git-diff-commits {
-    grid-template-columns: 14px max-content max-content minmax(6rem, 1fr);
+    --git-diff-history-columns: 14px 13ch 18ch minmax(6rem, 1fr);
+    grid-template-columns: var(--git-diff-history-columns);
   }
 }
 @container git-diff-panel (max-width: 34rem) {
@@ -8048,7 +8133,8 @@ body.theme-light .git-diff-panel {
     display: none;
   }
   .git-diff-commits {
-    grid-template-columns: 14px max-content minmax(6rem, 1fr);
+    --git-diff-history-columns: 14px 13ch minmax(6rem, 1fr);
+    grid-template-columns: var(--git-diff-history-columns);
   }
   .git-diff-toolbar {
     grid-template-columns: minmax(0, 1fr) auto;
@@ -9647,6 +9733,19 @@ body.app-topbar-touch-compact .pane-tab-close {
   width: 36px;
   min-width: 36px;
   height: 36px;
+  touch-action: manipulation;
+}
+/* Pane-frame actions use Dockview's separate header-actions strip, so the tab-close rule above
+   does not reach the actual minimize button. Give that button the same one-tap touch target while
+   leaving the desktop 20px geometry unchanged. */
+body.app-topbar-touch-compact .tabs .pane-minimize {
+  flex-basis: 36px;
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
   touch-action: manipulation;
 }
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
@@ -13959,6 +14058,10 @@ body.app-vw-lte-980 .tabs {
   font-size: var(--file-explorer-font-size);
   line-height: 1.4;
   cursor: pointer;
+  /* A tap should activate the row without the browser waiting to classify it as a double tap.
+     manipulation keeps native vertical scrolling available while removing the touch ambiguity
+     caused by the draggable Finder row. */
+  touch-action: manipulation;
   white-space: nowrap;
   user-select: none;
 }

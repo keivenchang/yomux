@@ -2553,6 +2553,7 @@
   "debug.system.roster.detail.sampler": "Amostrador do YO!stats",
   "gitDiff.binary": "binário",
   "gitDiff.changedFiles": "Arquivos alterados",
+  "gitDiff.dirty": "Sujo",
   "gitDiff.empty": "Nenhum commit neste escopo.",
   "gitDiff.filesTruncated": "A lista de arquivos foi truncada.",
   "gitDiff.firstParent": "Comparado com o primeiro pai",

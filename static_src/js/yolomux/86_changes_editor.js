@@ -104,7 +104,8 @@ function sessionFilesRefsQuery() {
 
 function sessionFilesRequestQueryString(destination = 'differ') {
   return destination === 'finder'
-    ? 'from=HEAD&to=current'
+    ? `from=HEAD&to=current${(typeof fileExplorerVisibleRepositoryPaths === 'function' ? fileExplorerVisibleRepositoryPaths() : [])
+      .map(path => `&repo_path=${encodeURIComponent(path)}`).join('')}`
     : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
@@ -116,13 +117,16 @@ function sessionFilesRequestForDestination(destination, sessionOverride = '') {
     const parsed = safeJsonParse(refs, null);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
   }
-  return {
+  const request = {
     session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
     hours: 24,
     from_ref: params.get('from') || 'HEAD',
     to_ref: params.get('to') || 'current',
     repo_refs: repoRefs,
   };
+  const repoPaths = destination === 'finder' ? params.getAll('repo_path') : [];
+  if (repoPaths.length) request.repo_paths = repoPaths;
+  return request;
 }
 
 function clientSessionFilesWatchRequests() {
@@ -155,6 +159,11 @@ function normalizedSessionFilesRepoRefs(repoRefs) {
   return normalized;
 }
 
+function normalizedSessionFilesRepoPaths(repoPaths) {
+  if (!Array.isArray(repoPaths)) return [];
+  return [...new Set(repoPaths.map(path => normalizeDirectoryPath(path || '')).filter(Boolean))].sort();
+}
+
 function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
   const from = cleanDiffRef(request.from_ref || request.from || '', 'HEAD');
   const to = cleanDiffRef(request.to_ref || request.to || '', 'current');
@@ -165,6 +174,7 @@ function normalizedSessionFilesRequest(request = {}, sessionFallback = '') {
     from_ref: from,
     to_ref: to,
     repo_refs: normalizedSessionFilesRepoRefs(request.repo_refs),
+    repo_paths: normalizedSessionFilesRepoPaths(request.repo_paths),
   };
 }
 
@@ -1026,6 +1036,19 @@ function switchFileExplorerFinderSession(session) {
   if (cachedPayloadIsLoaded) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     setSessionFilesSignatureForDestination('finder', cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload));
+    // The directory rows are already mounted when a cached session is selected. Complete the
+    // same first-paint transition as a fresh listing so a prior filesystem refresh cannot leave
+    // the Finder diff gate held forever.
+    finishFinderFastPaint();
+  } else {
+    // A session switch without a cache must not keep decorating Finder with the previous
+    // session's +/- rows while the target's slower Git/transcript backfill runs.
+    beginFinderSessionFilesDiffBackfill();
+    const pendingPayload = emptySessionFilesPayload(session, false, 'finder');
+    setSessionFilesPayloadForDestination('finder', pendingPayload);
+    setSessionFilesSignatureForDestination('finder', sessionFilesPayloadSignatureForPayload(pendingPayload));
+    setSessionFilesLoadingForDestination('finder', true);
+    renderSessionFilesDestination('finder', {force: true});
   }
   fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   return true;
@@ -1181,6 +1204,53 @@ function setSessionFilesLoadingForDestination(destination, loading) {
   sessionFilesStateForDestination(destination).loading = loading;
 }
 
+function finderSessionFilesDiffIsDeferred() {
+  return fileExplorerFinderSessionFilesState.diffBackfillPending === true
+    && fileExplorerFinderSessionFilesState.partialBackfillPainted !== true;
+}
+
+function beginFinderSessionFilesDiffBackfill() {
+  fileExplorerFinderSessionFilesState.diffBackfillPending = true;
+  fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
+  fileExplorerFinderSessionFilesState.fastListingPainted = false;
+}
+
+function markFinderFastListingPainted() {
+  fileExplorerFinderSessionFilesState.fastListingPainted = true;
+}
+
+function releaseFinderSessionFilesDiffBackfillIfReady() {
+  if (
+    fileExplorerFinderSessionFilesState.diffBackfillPending !== true
+    || fileExplorerFinderSessionFilesState.fastListingPainted !== true
+    || sessionFilesRequestIsActiveForDestination('finder')
+    || !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())
+  ) return false;
+  fileExplorerFinderSessionFilesState.diffBackfillPending = false;
+  return true;
+}
+
+function finishFinderFastPaint() {
+  markFinderFastListingPainted();
+  ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+  releaseFinderSessionFilesDiffBackfillIfReady();
+  updateFileTreeGitStatusRows();
+}
+
+function scheduleFinderSessionFilesBackfillAfterFastPaint(session) {
+  const expectedSession = String(session || '');
+  if (!expectedSession) return;
+  scheduleAfterFileExplorerFirstPaint(() => {
+    if (fileExplorerFinderTargetSession() !== expectedSession) return;
+    markFinderFastListingPainted();
+    if (!sessionFilesRequestIsActiveForDestination('finder')) {
+      void fetchSessionFiles({destination: 'finder', session: expectedSession, silent: true, force: true});
+    }
+    releaseFinderSessionFilesDiffBackfillIfReady();
+    updateFileTreeGitStatusRows();
+  });
+}
+
 function sessionFilesRenderOptions(options = {}) {
   return options.force === true || options.silent !== true ? {force: true} : {};
 }
@@ -1188,6 +1258,103 @@ function sessionFilesRenderOptions(options = {}) {
 function sessionFilesPerfDetails(payload = {}, extra = {}) {
   const files = Array.isArray(payload?.files) ? payload.files.length : 0;
   return {nodes: sessionFilesRepoRoots(payload).length, rows: files, ...extra};
+}
+
+function sessionFilesStreamSupported(destination) {
+  return destination === 'finder' && /^Go(?:\s|$)/.test(String(bootstrap.backendLabel || ''));
+}
+
+function sessionFilesStreamRows(payload, key) {
+  return Array.isArray(payload?.[key]) ? payload[key].filter(row => row && typeof row === 'object') : [];
+}
+
+function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent) {
+  if (!requestIsCurrent() || !chunk || typeof chunk !== 'object') return false;
+  const state = sessionFilesStateForDestination(destination);
+  const current = state.payload?.session === session ? state.payload : emptySessionFilesPayload(session, false, destination);
+  const reposByPath = new Map(sessionFilesStreamRows(current, 'repos').map(row => [String(row.repo || ''), row]));
+  const replaceRepo = chunk.replace_repo === true;
+  const chunkRepoPaths = new Set(sessionFilesStreamRows(chunk, 'repos').map(row => String(row.repo || '')).filter(Boolean));
+  for (const repo of sessionFilesStreamRows(chunk, 'repos')) {
+    const path = String(repo.repo || '');
+    if (path) reposByPath.set(path, repo);
+  }
+  const filesByPath = new Map(sessionFilesStreamRows(current, 'files').map(file => [
+    `${String(file.repo || '')}\x1f${String(file.abs_path || file.path || '')}`,
+    file,
+  ]));
+  if (replaceRepo && chunkRepoPaths.size) {
+    for (const [key, file] of filesByPath) {
+      if (chunkRepoPaths.has(String(file.repo || ''))) filesByPath.delete(key);
+    }
+  }
+  for (const file of sessionFilesStreamRows(chunk, 'files')) {
+    filesByPath.set(`${String(file.repo || '')}\x1f${String(file.abs_path || file.path || '')}`, file);
+  }
+  const refsByRepo = {...(current.refs_by_repo || {}), ...(chunk.refs_by_repo || {})};
+  const warnings = [...(Array.isArray(current.warnings) ? current.warnings : []), ...(Array.isArray(chunk.warnings) ? chunk.warnings : [])];
+  const nextPayload = {
+    ...current,
+    session,
+    hours: chunk.hours ?? current.hours,
+    files: [...filesByPath.values()],
+    repos: [...reposByPath.values()],
+    refs_by_repo: refsByRepo,
+    from_ref: chunk.from_ref || current.from_ref,
+    to_ref: chunk.to_ref || current.to_ref,
+    warnings: [...new Set(warnings.map(value => String(value)))],
+    errors: [],
+    loaded: false,
+    streaming: true,
+  };
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
+  setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(nextPayload));
+  if (destination === 'finder') {
+    fileExplorerFinderSessionFilesState.partialBackfillPainted = true;
+    renderSessionFilesDestination(destination, {force: true});
+  }
+  return true;
+}
+
+async function fetchSessionFilesStream(url, state, requestIsCurrent, onRepo) {
+  const controller = state.abortController;
+  const response = await apiFetch(url, {
+    cache: 'no-store',
+    headers: {Accept: 'text/event-stream'},
+    ...(controller ? {signal: controller.signal} : {}),
+  }, {recordDebug: true});
+  if (!response.ok) {
+    const error = new Error(response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const error = new Error('session-files stream is unavailable');
+    error.status = 501;
+    throw error;
+  }
+  const decoder = new TextDecoder();
+  let streamError = null;
+  let donePayload = {};
+  const parser = createFileQuickOpenSseParser((event, payload) => {
+    if (event === 'repo') onRepo(payload);
+    else if (event === 'done') donePayload = payload || {};
+    else if (event === 'error') {
+      streamError = new Error(String(payload?.message || payload?.error || 'Finder session-files stream failed'));
+      streamError.payload = payload;
+    }
+  });
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    parser.feed(decoder.decode(result.value, {stream: true}));
+  }
+  parser.feed(decoder.decode());
+  parser.finish();
+  if (streamError) throw streamError;
+  if (!requestIsCurrent()) return {};
+  return donePayload;
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
@@ -1243,6 +1410,7 @@ async function fetchSessionFiles(options = {}) {
     renderSessionFilesDestination(destination, {force: true});
     renderPaneTabStrips();
   }
+  let streamMode = sessionFilesStreamSupported(destination);
   try {
     const request = sessionFilesRequestForDestination(destination, session);
     const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
@@ -1255,11 +1423,44 @@ async function fetchSessionFiles(options = {}) {
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
-      payload = await apiFetchJson(
-        requestUrl,
-        {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
-        {abortRetirementReason: 'session_files_request_superseded'},
-      );
+      if (streamMode) {
+        if (destination === 'finder') fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
+        const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true};
+        setSessionFilesPayloadForDestination(destination, partialPayload, {invalidateRequest: false});
+        setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(partialPayload));
+        try {
+          const donePayload = await fetchSessionFilesStream(
+            `/api/session-files-stream?${params.toString()}`,
+            state,
+            requestIsCurrent,
+            chunk => mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent),
+          );
+          payload = {
+            ...fileExplorerFinderSessionFilesState.payload,
+            ...donePayload,
+            session,
+            loaded: true,
+            streaming: false,
+          };
+        } catch (streamError) {
+          if (![404, 501].includes(Number(streamError?.status))) throw streamError;
+          streamMode = false;
+          const fallbackPayload = emptySessionFilesPayload(session, false, destination);
+          setSessionFilesPayloadForDestination(destination, fallbackPayload, {invalidateRequest: false});
+          setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(fallbackPayload));
+          payload = await apiFetchJson(
+            requestUrl,
+            {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+            {abortRetirementReason: 'session_files_request_superseded'},
+          );
+        }
+      } else {
+        payload = await apiFetchJson(
+          requestUrl,
+          {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+          {abortRetirementReason: 'session_files_request_superseded'},
+        );
+      }
     } catch (err) {
       // A producer can return the same accepted receipt again while its terminal result is still
       // retained locally. Reuse that exact result instead of painting a terminal Differ as queued.
@@ -1308,7 +1509,10 @@ async function fetchSessionFiles(options = {}) {
     }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
     const failedRefs = sessionFilesRequestForDestination(destination, session);
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
+    const partialPayload = streamMode && state.payload?.streaming === true && state.payload?.session === session;
+    const nextPayload = partialPayload
+      ? {...state.payload, streaming: false, loaded: true, errors: [issue]}
+      : {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -1323,11 +1527,17 @@ async function fetchSessionFiles(options = {}) {
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
+    // The request owner must be cleared before releasing the Finder's first-paint gate. Otherwise
+    // the completion path sees its own controller as active, leaves the gate set forever, and the
+    // late session-files +/- metadata can never repaint the already-mounted fast rows.
+    const finderBackfillReleased = current
+      && destination === 'finder'
+      && releaseFinderSessionFilesDiffBackfillIfReady();
     if (state.completionWaiter === completionWaiter) {
       state.completionWaiter = null;
       releaseCompletionWaiter?.();
     }
-    if (current && (shouldRender || wasLoading) && visible) {
+    if (current && (shouldRender || wasLoading || finderBackfillReleased) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       renderPaneTabStrips();
       renderSessionButtons();
@@ -1952,7 +2162,7 @@ function buildSessionFileTree(repoPath, sessionFiles) {
   const directoryStatusCounts = new Map(); // normalizedDirPath → {added, deleted} file counts
   const countedStatusPaths = new Set();
   for (const item of sessionFiles) {
-    const absPath = item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || '');
+    const absPath = normalizeDirectoryPath(item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || ''));
     if (!absPath) continue;
     sessionFilesMap.set(absPath, item);
     const status = sessionFileDisplayStatus(item);
@@ -3171,12 +3381,46 @@ function createFileExplorerPanel(item = finderItemId) {
     panel.classList.toggle('file-explorer-root-mode-fixed', fileExplorerRootMode !== 'sync');
     syncFileExplorerSessionControlVisibility(panel);
     renderFileExplorerRootModeControls();
-    refreshFileExplorerPanelTree(panel);
+    startFinderPanelListing(panel);
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
+  if (view !== 'finder') ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
   return panel;
+}
+
+// Finder's direct listing is the first-paint owner. Session-files can run Git history, status, and
+// numstat work for every repository in a session; starting it beside a cold listing can occupy both
+// Finder workers and leave the user staring at an empty tree. Start that backfill only after the
+// listing has mounted, while still starting it after a failed listing so the session surface reports
+// its own result independently.
+function startFinderPanelListing(panel, options = {}) {
+  const firstPaint = !panel?.querySelector?.('.file-tree-row[data-path]');
+  if (firstPaint) beginFinderSessionFilesDiffBackfill();
+  const listing = refreshFileExplorerPanelTree(panel, {...options, deferSessionFilesDiff: firstPaint});
+  void listing.then(
+    () => {
+      // Keep the fast directory rows on screen for one complete browser paint. This also applies
+      // to a warm session-files payload: cached +/- totals are slower metadata, so they must not
+      // change the first-paint result merely because another owner finished earlier.
+      scheduleAfterFileExplorerFirstPaint(() => {
+        markFinderFastListingPainted();
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+        releaseFinderSessionFilesDiffBackfillIfReady();
+        updateFileTreeGitStatusRows();
+      });
+    },
+    error => {
+      scheduleAfterFileExplorerFirstPaint(() => {
+        markFinderFastListingPainted();
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+        releaseFinderSessionFilesDiffBackfillIfReady();
+        updateFileTreeGitStatusRows();
+      });
+      console.warn('Finder initial listing failed', error);
+    },
+  );
+  return listing;
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
@@ -3212,7 +3456,11 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     ? options.entries
     : await fetchDirectory(root);
   if (!entries) return;
-  renderTreeChildren(treeEl, root, entries, 0, {entriesByDir: options.entriesByDir});
+  renderTreeChildren(treeEl, root, entries, 0, {
+    entriesByDir: options.entriesByDir,
+    view: 'finder',
+    deferSessionFilesDiff: options.deferSessionFilesDiff === true,
+  });
   scheduleFinderUsableObservation(
     treeEl,
     entries,
@@ -3274,8 +3522,7 @@ function activateFileExplorerSurface(item) {
   const panel = panelNodes.get(item);
   if (!view || !panel) return false;
   if (view === 'finder') {
-    refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
-    ensureSessionFilesSurfaceLoaded(view, {fetchEvenWhenPush: true});
+    startFinderPanelListing(panel, {preserveExpanded: true, preserveScroll: true});
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});

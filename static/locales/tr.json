@@ -800,6 +800,7 @@
   "git.status.untracked": "izlenmiyor",
   "gitDiff.binary": "ikili",
   "gitDiff.changedFiles": "Değiştirilen dosyalar",
+  "gitDiff.dirty": "Kirli",
   "gitDiff.empty": "Bu kapsamda commit yok.",
   "gitDiff.filesTruncated": "Dosya listesi kısaltıldı.",
   "gitDiff.firstParent": "İlk üst öğeyle karşılaştırıldı",

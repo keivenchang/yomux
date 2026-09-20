@@ -40,6 +40,7 @@ from _git_helpers import git
 from _git_helpers import init_repo
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
+from tests.browser_helpers.browser_layout import TimeoutException
 from tests.browser_helpers.browser_layout import WebDriverWait
 from tests.browser_helpers.browser_layout import new_chrome_driver
 from tests.browser_helpers.browser_layout import register_browser_new_document_script
@@ -877,9 +878,26 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         WebDriverWait(browser, 12).until(
             lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
         )
-        WebDriverWait(finder, 12).until(
-            lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
-        )
+        try:
+            WebDriverWait(finder, 12).until(
+                lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
+            )
+        except TimeoutException as error:
+            finder_state = finder.execute_script(
+                "return {"
+                "connected: clientEventTransportState?.connected,"
+                "demand: clientEventTransportState?.demand,"
+                "sourceReadyState: clientEventTransportState?.source?.readyState,"
+                "replacementReadyState: clientEventTransportState?.replacementSource?.readyState,"
+                "resourceEpoch: clientEventTransportState?.resourceEpoch,"
+                "resourceRevisions: Object.fromEntries(clientEventTransportState?.resourceRevisions || []),"
+                    "requests: window.__e3SessionFilesRequests,"
+                "descriptor: sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder')),"
+                "payload: fileExplorerFinderSessionFilesState?.payload,"
+                "errors: window.__yolomuxDebugFailureEvents || []"
+                "};"
+            )
+            raise AssertionError(f"Finder missed session-files completion: {finder_state}") from error
         requests = browser.execute_script("return [...window.__e3SessionFilesRequests];")
         assert requests == [expected_cache_read]
         assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]

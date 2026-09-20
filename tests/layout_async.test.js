@@ -307,6 +307,7 @@ async function runLayoutAsyncSuite() {
     const row = api.gitDiffCommitRowForTest(item, {
       sha: 'a'.repeat(40), short: 'a'.repeat(9), authored_at: 1786931640,
       files: 3, added: 42, removed: 11, binary_files: 0,
+      signature_status: 'U', decorations: 'HEAD -> go_release, tag: v0.9.1',
       author: 'Keiven Chang', subject: 'Record release evidence #123', parents: ['b'.repeat(40)],
       decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main'],
     });
@@ -323,6 +324,8 @@ async function runLayoutAsyncSuite() {
     assert.equal(row.children[1].textContent, 'aaaaaaaaa', 'SHA is always rendered');
     assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
     assert.deepStrictEqual([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent), ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main']);
+    assert.equal(row.querySelector('.git-diff-commit-signature').textContent, 'U', 'Git signature status is shown beside the SHA');
+    assert.ok(row.querySelector('.git-diff-commit-decorations').textContent.includes('HEAD -> go_release') && row.querySelector('.git-diff-commit-decorations').textContent.includes('tag: v0.9.1'), 'Git ref decorations are shown with the commit subject');
     assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
     assert.deepStrictEqual([
       row.querySelector('.git-diff-commit-added').textContent,
@@ -343,10 +346,14 @@ async function runLayoutAsyncSuite() {
     const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
     const changesDrop = css.indexOf('.git-diff-commit-changes', dateDrop + 1);
     assert.ok(authorDrop >= 0 && dateDrop > authorDrop && changesDrop > dateDrop, 'responsive rules remove author, then date, then changes');
-    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*grid-template-columns:\s*14px max-content max-content max-content/,
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*--git-diff-history-columns:\s*14px 13ch 26ch 18ch 20ch/,
       'one commit-list grid owns the shared semantic column tracks');
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each commit group inherits the list tracks');
+    assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*--git-diff-worktree-columns:\s*var\(--git-diff-history-columns\)/,
+      'the Dirty group uses the shared history-column template');
+    assert.match(css, /\.git-diff-worktree-status\s*> \.git-diff-worktree-summary\s*\{[\s\S]*grid-template-columns:\s*var\(--git-diff-worktree-columns\)/,
+      'the Dirty summary uses the shared history-column template');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each summary row inherits the same list tracks');
     assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-8\)/,
@@ -360,7 +367,72 @@ async function runLayoutAsyncSuite() {
     assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
     assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
+    assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-diff-added\)/);
+    assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-diff-removed\)/);
+    assert.match(css, /\.git-diff-branch\s*\{[\s\S]*font-weight:\s*800/);
+    assert.match(css, /\.git-diff-commit-sha\s*\{[\s\S]*color:\s*var\(--git-diff-sha\)[\s\S]*font-weight:\s*700/);
+    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+[\s\S]*--git-diff-branch:\s*#[0-9a-f]+;[\s\S]*--git-diff-added:\s*#[0-9a-f]+;[\s\S]*--git-diff-removed:\s*#[0-9a-f]+;/i);
+    assert.match(css, /--git-diff-branch:\s*#005cc5/);
+    assert.match(css, /--git-diff-sha:\s*var\(--git-diff-branch\)/);
+    assert.match(css, /--git-diff-added:\s*#008000/);
+    assert.match(css, /--git-diff-removed:\s*#c5221f/);
+    assert.match(css, /\.git-diff-commit\s*(?:,\s*\.git-diff-worktree-summary)?\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
     assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
+    assert.doesNotMatch(css, /\.git-diff-worktree-entries\s*\{[^}]*max-height:/, 'dirty file details use the parent panel scroll instead of a nested cap');
+    assert.doesNotMatch(css, /\.git-diff-worktree-entries\s*\{[^}]*overflow:\s*auto/, 'dirty file details are not independently scrollable');
+  });
+
+  test('Git worktree status is a clickable first-line dirty summary with path details', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const state = api.setGitDiffTabStateForTest(item, {
+      repo: '/repo',
+      head: 'f'.repeat(40),
+      worktreeStatus: {
+        available: true,
+        dirty: true,
+        truncated: false,
+        entries: [
+          {status: '??', path: 'scratch.txt', counts_available: true, added: 2, removed: 0, binary: false},
+          {status: 'M', path: 'src/app.js', counts_available: true, added: 3, removed: 1, binary: false},
+        ],
+        files: 2,
+        added: 3,
+        removed: 1,
+        binary_files: 0,
+        stats_available: true,
+        modified_at: 1786931640,
+        status_counts: {'??': 1, M: 1},
+      },
+    });
+    const node = api.gitDiffWorktreeStatusNodeForTest(item, state);
+    assert.ok(node?.matches('details'), 'dirty status uses native clickable details disclosure');
+    const summary = node.querySelector('summary');
+    const fields = [...summary.children].map(child => child.textContent.replace(/\s+/g, ' ').trim());
+    assert.equal(fields.length, 6, 'dirty summary uses the same six-column row shape as commits');
+    assert.equal(fields[1], 'Dirty', 'dirty summary labels the SHA-shaped column');
+    assert.ok(fields[2], 'dirty summary exposes the latest modified time');
+    assert.equal(summary.children[3].getAttribute('aria-label'), '2 files +3 -1', 'dirty summary exposes aggregate line counts');
+    assert.equal(fields[4], '', 'dirty summary leaves the author column empty after moving the label');
+    assert.equal(summary.children[5].getAttribute('aria-label'), '1 ??, 1 M', 'dirty summary exposes grouped status counts');
+    const allEntries = [...node.querySelectorAll('.git-diff-worktree-entries .file-tree-row[data-path]')];
+    const fileEntries = allEntries.filter(entry => entry.dataset.kind === 'file');
+    assert.deepEqual(fileEntries.map(entry => entry.querySelector('.file-tree-name')?.textContent), ['app.js', 'scratch.txt']);
+    assert.deepEqual(fileEntries.map(entry => entry.querySelector('.file-tree-diff')?.innerHTML), [
+      '<span class="changes-diff-add">+3</span> <span class="changes-diff-remove">-1</span>',
+      '<span class="changes-diff-add-neutral">+2</span>',
+    ]);
+    assert.deepEqual(fileEntries.map(entry => entry.querySelector('.file-tree-git-status')?.textContent), ['M', '?']);
+    assert.deepEqual(fileEntries.map(entry => [...entry.children].map(child => child.className)), [
+      ['file-tree-icon file-icon-code', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status', 'file-tree-date'],
+      ['file-tree-icon file-icon-doc', 'file-tree-name', 'file-tree-agent', 'file-tree-diff', 'file-tree-dir-count', 'file-tree-git-status file-tree-git-status-unknown', 'file-tree-date'],
+    ], 'dirty file rows reuse the normal Differ file-tree columns');
+    const entries = allEntries;
+    assert.equal(node.querySelector('.git-diff-worktree-entries')?.getAttribute('role'), 'tree', 'dirty files own a tree for shared keyboard interaction');
+    assert.deepEqual(entries.map(entry => entry.getAttribute('role')), ['treeitem', 'treeitem', 'treeitem'], 'dirty files and folders are actionable tree items');
+    assert.deepEqual(entries.map(entry => entry.tabIndex), [0, -1, -1], 'dirty files use shared roving focus');
+    node.open = true;
+    assert.equal(node.open, true, 'native details disclosure opens the path details');
   });
 
   test('Git history commit rows use shared roving focus and valid tree ownership', () => {
@@ -430,7 +502,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Git history fills the viewport and exposes two viewport pages without another Git request', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 40}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -438,21 +510,186 @@ async function runLayoutAsyncSuite() {
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
-      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: 'next-page', truncated: false}));
+      const stats = String(url).includes('stats=1');
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits: stats ? commits.map(commit => ({...commit, files: 1, added: 2, removed: 1, binary_files: 0})) : commits, next_cursor: stats ? '' : 'next-page', truncated: false}));
     });
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
     Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
     assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=200'], 'one request carries five viewport pages');
+    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=2'], 'the first request is sized to the visible viewport');
+    assert.equal(panel.querySelector('.git-diff-commit-changes')?.textContent, '', 'the first paint does not block on or display unavailable stats');
+    assert.equal(panel.querySelector('.git-diff-commit-changes')?.getAttribute('aria-hidden'), 'true', 'unavailable stats are visually empty');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, [
+      '/api/fs/git-history?path=%2Frepo&limit=2',
+      '/api/fs/git-history?path=%2Frepo&limit=200&stats=1',
+    ], 'stats backfill is deferred and bounded to ten commits');
+    assert.equal(panel.querySelector('.git-diff-commit-added')?.textContent, '+2', 'stats backfill updates the painted commit row');
+    assert.equal(panel.querySelector('.git-diff-commit-removed')?.textContent, '-1', 'stats backfill updates the removed count too');
     assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
-    assert.equal(requests.length, 2, 'reaching the second visible page starts the next five-page fetch');
+    assert.equal(requests.filter(request => !request.includes('stats=1')).length, 2, 'reaching the second visible page starts the next five-page fetch');
+  });
+
+  await testAsync('Python Git history backfills stats through the compatibility JSON request', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 25}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      requests.push(parsed);
+      if (parsed.searchParams.get('stats') === '1') {
+        return Promise.resolve(jsonResponse({
+          path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
+          commits: commits.map((commit, index) => ({...commit, files: 1, added: index + 2, removed: 1, binary_files: 0})),
+          next_cursor: '', truncated: false,
+        }));
+      }
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
+        commits, next_cursor: '', truncated: false,
+      }));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    assert.deepStrictEqual(requests.map(request => request.toString()), [
+      'http://localhost/api/fs/git-history?path=%2Frepo&limit=2',
+    ], 'metadata paints before any stats request');
+    assert.equal(panel.querySelector('.git-diff-commit-changes').textContent, '', 'the first paint keeps stats empty');
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await flushAsyncWork();
+    const statsRequests = requests.filter(request => request.searchParams.get('stats') === '1');
+    assert.deepStrictEqual(statsRequests.map(request => ({limit: request.searchParams.get('limit'), cursor: request.searchParams.get('cursor')})), [
+      {limit: '200', cursor: null},
+    ], 'Python keeps one compatibility stats request');
+    const state = api.gitDiffTabStateForTest(item);
+    assert.equal(state.commits[24].added, 26, 'the compatibility response fills commits beyond the first viewport');
+    assert.equal(state.statsExhausted, true, 'stats backfill stops at the end of the frozen history');
+  });
+
+  await testAsync('Go Git history pushes scheduled chunks and fills every visible commit', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 17}, (_, index) => ({
+      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
+    }));
+    const requests = [];
+    const streams = [controllableSseResponse(), controllableSseResponse()];
+    let streamIndex = -1;
+    api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://localhost');
+      requests.push(parsed);
+      if (parsed.pathname.endsWith('git-history-stats-stream')) {
+        streamIndex += 1;
+        const stream = streams[streamIndex];
+        assert.ok(stream, `unexpected stats stream ${streamIndex + 1}`);
+        stream.bindSignal(options.signal);
+        return Promise.resolve(stream.response);
+      }
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: '', truncated: false}));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests.map(request => ({path: request.pathname, limit: request.searchParams.get('limit'), batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
+      {path: '/api/fs/git-history', limit: '2', batchSizes: null, cursor: null},
+      {path: '/api/fs/git-history-stats-stream', limit: null, batchSizes: '1,2,4', cursor: 'snapshot-zero'},
+    ], 'the first backfill is one scheduled stream request');
+
+    const streamPayload = (offset, size, nextCursor) => ({
+      path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
+      commits: commits.slice(offset, offset + size).map(commit => ({...commit, files: 1, added: offset + 1, removed: 1, binary_files: 0})), next_cursor: nextCursor, truncated: false,
+    });
+    streams[0].push(sseFrame('start', {path: '/repo', batch_sizes: [1, 2, 4]}));
+    streams[0].push(sseFrame('chunk', streamPayload(3, 4, 'cursor-7')));
+    await flushAsyncWork();
+    assert.equal(api.gitDiffTabStateForTest(item).commits[6].added, 4, 'a completed later batch paints before earlier batches');
+    streams[0].push(sseFrame('chunk', streamPayload(0, 1, 'cursor-1')));
+    streams[0].push(sseFrame('chunk', streamPayload(1, 2, 'cursor-3')));
+    streams[0].push(sseFrame('chunk', streamPayload(3, 4, 'cursor-7')));
+    await flushAsyncWork();
+    streams[0].push(sseFrame('done', {count: 7, next_cursor: 'cursor-7'}));
+    streams[0].close();
+    await flushAsyncWork();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests.filter(request => request.pathname.endsWith('stats-stream')).map(request => ({batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
+      {batchSizes: '1,2,4', cursor: 'snapshot-zero'},
+      {batchSizes: '4,4,4,4', cursor: 'cursor-7'},
+    ], 'the second request switches to 4-commit batches from the pushed cursor');
+    streams[1].push(sseFrame('start', {path: '/repo', batch_sizes: [4, 4, 4, 4]}));
+    streams[1].push(sseFrame('chunk', streamPayload(7, 10, '')));
+    await flushAsyncWork();
+    assert.equal(api.gitDiffTabStateForTest(item).commits[16].added, 8, 'the later batch applies as soon as it arrives');
+    streams[1].push(sseFrame('done', {count: 10, next_cursor: ''}));
+    streams[1].close();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    const state = api.gitDiffTabStateForTest(item);
+    assert.ok(state.commits.every(commit => Number.isSafeInteger(commit.added) && Number.isSafeInteger(commit.removed) && Number.isSafeInteger(commit.files) && Number.isSafeInteger(commit.binary_files)), 'every commit on the loaded page has complete stats');
+    assert.equal(state.statsExhausted, true, 'stats backfill stops after the final scheduled batch');
+  });
+
+  await testAsync('Git history refresh cancels an in-flight stats backfill before applying stale counts', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
+    const item = api.gitDiffItemFor('/repo');
+    const sha = 'a'.repeat(40);
+    const statsStream = controllableSseResponse();
+    const statsSignals = [];
+    api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname.endsWith('git-history-stats-stream')) {
+        statsSignals.push(options.signal);
+        statsStream.bindSignal(options.signal);
+        return Promise.resolve(statsStream.response);
+      }
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
+        commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], next_cursor: '', truncated: false,
+      }));
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    await api.refreshGitDiffHistoryForTest(item, {refresh: true});
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await flushAsyncWork();
+    assert.equal(api.gitDiffTabStateForTest(item).statsLoading, true, 'the first stats request is in flight');
+
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      assert.equal(parsed.pathname, '/api/fs/git-history', 'refresh does not wait for stale stats before fetching metadata');
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'fresh-snapshot',
+        commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh', files: 1, added: 7, removed: 0, binary_files: 0}], next_cursor: '', truncated: false,
+      }));
+    });
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    statsStream.push(sseFrame('chunk', {
+      path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
+      commits: [{sha, short: 'aaaaaaaaa', subject: 'stale', files: 1, added: 99, removed: 99, binary_files: 0}], next_cursor: '', truncated: false,
+    }));
+    statsStream.close();
+    await flushAsyncWork();
+    assert.equal(statsSignals.length, 1, 'the Go first window has one in-flight stream');
+    assert.ok(statsSignals[0]?.aborted, 'refresh aborts the old stats stream');
+    assert.equal(api.gitDiffTabStateForTest(item).commits[0].added, 7, 'stale stats cannot overwrite refreshed metadata');
   });
 
   await testAsync('Git history auto-loads when the initial rows do not create a scrollbar', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 8}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -460,7 +697,9 @@ async function runLayoutAsyncSuite() {
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
-      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: requests.length === 1 ? 'next-page' : '', truncated: false}));
+      const stats = String(url).includes('stats=1');
+      const historyRequestCount = requests.filter(request => !request.includes('stats=1')).length;
+      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits: stats ? commits.map(commit => ({...commit, files: 1, added: 2, removed: 1, binary_files: 0})) : commits, next_cursor: stats ? '' : historyRequestCount === 1 ? 'next-page' : '', truncated: false}));
     });
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
@@ -472,12 +711,12 @@ async function runLayoutAsyncSuite() {
     await api.refreshGitDiffHistoryForTest(item, {refresh: true});
     await new Promise(resolve => setTimeout(resolve, 0));
     await new Promise(resolve => setTimeout(resolve, 0));
-    assert.equal(requests.length, 2, 'a short initial list requests its next page without waiting for an impossible scroll event');
+    assert.equal(requests.filter(request => !request.includes('stats=1')).length, 2, 'a short initial list requests its next page without waiting for an impossible scroll event');
     assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 8, 'auto-loaded history renders the complete available result');
   });
 
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo/src');
     const stale = deferredFetch();
     const fresh = deferredFetch();
@@ -485,8 +724,11 @@ async function runLayoutAsyncSuite() {
     const requests = [];
     api.setFetchForTest((url, options = {}) => {
       requests.push({url: String(url), signal: options.signal});
-      if (requests.length === 1) return stale.promise;
-      if (requests.length === 2) return fresh.promise;
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.searchParams.get('stats') === '1') return Promise.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'f'.repeat(40), short: 'fffffffff', subject: 'fresh', files: 1, added: 1, removed: 0, binary_files: 0}], next_cursor: '', truncated: false}));
+      const historyRequests = requests.filter(request => !request.url.includes('stats=1')).length;
+      if (historyRequests === 1) return stale.promise;
+      if (historyRequests === 2) return fresh.promise;
       return older.promise;
     });
     const staleLoad = api.refreshGitDiffHistoryForTest(item, {refresh: true});
@@ -498,10 +740,10 @@ async function runLayoutAsyncSuite() {
     let state = api.gitDiffTabStateForTest(item);
     assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
     assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=200$/);
+    assert.match(requests.find(request => !request.url.includes('stats=1')).url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=1$/);
 
     const append = api.loadOlderGitDiffHistoryForTest(item);
-    assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
+    assert.ok(requests.find(request => request.url.includes('cursor=frozen-cursor')).url, 'pagination uses the frozen snapshot cursor');
     older.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'd'.repeat(40), short: 'ddddddddd', subject: 'older'}], next_cursor: '', truncated: true, truncation_reason: 'cursor_limit'}));
     await append;
     state = api.gitDiffTabStateForTest(item);
@@ -516,7 +758,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Git history retries once without a stale saved cursor', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo');
     const requests = [];
     api.setFetchForTest(url => {
@@ -535,8 +777,8 @@ async function runLayoutAsyncSuite() {
     api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
     assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
     assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=200&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=200',
+      '/api/fs/git-history?path=%2Frepo&limit=1&cursor=old-cursor',
+      '/api/fs/git-history?path=%2Frepo&limit=1',
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });
@@ -556,7 +798,7 @@ async function runLayoutAsyncSuite() {
         return Promise.reject(error);
       }
       if (requests.length === 2) {
-        return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], next_cursor: '', truncated: false}));
+        return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh', files: 1, added: 1, removed: 0, binary_files: 0}], next_cursor: '', truncated: false}));
       }
       return Promise.resolve(jsonResponse({sha, repo: '/repo', parents: [], from_ref: '0'.repeat(40), to_ref: sha, message: 'fresh detail', files: [], message_truncated: false, files_truncated: false, truncated: false}));
     });
@@ -564,7 +806,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(await api.loadGitDiffCommitDetailForTest(item, sha), true);
     assert.deepStrictEqual(requests, [
       `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
-      '/api/fs/git-history?path=%2Frepo&limit=200',
+      '/api/fs/git-history?path=%2Frepo&limit=1',
       `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
     ]);
     assert.equal(api.gitDiffTabStateForTest(item).detailErrors.has(sha), false);
@@ -734,12 +976,15 @@ async function runLayoutAsyncSuite() {
     const enDate = enApi.gitDiffCommitRowForTest(enApi.gitDiffItemFor('/repo'), commit).querySelector('.git-diff-commit-date').textContent;
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
     const item = api.gitDiffItemFor('/repo');
-    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', branch: 'go_release', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
     state.expanded.add(commit.sha);
     state.details.set(commit.sha, {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []});
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
     api.renderGitDiffPanelForTest(item, {panel});
+    assert.equal(panel.querySelector('.git-diff-pathname').textContent, '/repo', 'Diff header renders the repository pathname first');
+    assert.equal(panel.querySelector('.git-diff-branch').textContent, '[go_release]', 'Diff header renders the current branch immediately after the pathname');
+    assert.equal(panel.querySelector('.git-diff-path').title, '/repo [go_release]');
     const body = panel.querySelector('.git-diff-panel-body');
     body.scrollTop = 73;
     const detailsIdentity = state.details;
@@ -1278,6 +1523,279 @@ async function runLayoutAsyncSuite() {
     assert.ok(cachedRepoRow.querySelector(':scope > .file-tree-name').textContent.includes('feature-repo-00'), 'a later base-row render reapplies cached Git info without another request');
   });
 
+  await testAsync('Finder first paint defers cached repository +/- counts until session-files backfill', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const repoPath = '/repos/project';
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      files: [],
+      repos: [{repo: repoPath, added: 12, removed: 4, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.setFileExplorerRepoInfoForTest(repoPath, {root: repoPath, name: 'project', branch: 'feature/project'});
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url) === '/api/fs/fast/list?path=%2Frepos') {
+        return Promise.resolve(jsonResponse({
+          path: '/repos',
+          entries: [{name: 'project', kind: 'dir', mtime: 1786640000, repo_info_deferred: true}],
+        }));
+      }
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      return Promise.resolve(jsonResponse({responses: requests.map(request => ({
+        id: request.id,
+        ok: true,
+        status: 200,
+        payload: {path: request.path, kind: 'dir', repo: {root: repoPath, name: 'project', branch: 'feature/project'}},
+      }))}));
+    });
+
+    assert.equal(await api.openFileExplorerAtForTest('/repos', {manualSelection: true, refreshPanels: false}), true);
+    const row = api.fileExplorerTreeForTest().querySelector(`.file-tree-row[data-path="${repoPath}"]`);
+    assert.ok(row, 'the repository row is painted by the direct listing');
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '', 'the first paint contains no cached +/- counts');
+    assert.ok(frames.length > 0, 'the slower metadata backfill is scheduled after first paint');
+
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      files: [],
+      repos: [{repo: repoPath, added: 12, removed: 4, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.markFinderFastListingPaintedForTest();
+    assert.equal(api.releaseFinderSessionFilesDiffBackfillForTest(), true, 'the first-paint owner releases the cached metadata after the fast rows are mounted');
+    // The real session-files completion calls updateFileTreeGitStatusRows through the Finder
+    // render owner. Invoke that same owner directly after publishing the late payload here.
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+12</span> <span class="changes-diff-remove">-4</span>', 'the slower session-files backfill adds +/- counts after first paint');
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    await api.flushFileExplorerFsBatchForTest();
+    await flushAsyncWork();
+    await flushAsyncWork();
+  });
+
+  await testAsync('Finder session-files completion backfills +/- after the fast row paint', async () => {
+    const api = loadYolomux('', ['1']);
+    const repoPath = '/repos/project';
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: false,
+      files: [{session: '1', repo: repoPath, path: 'nested.txt', abs_path: `${repoPath}/nested.txt`, status: 'M', added: 99, removed: 77}],
+      repos: [{repo: repoPath, added: 99, removed: 77, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.setFetchForTest((url, options = {}) => {
+      const route = String(url);
+      if (route === '/api/fs/fast/list?path=%2Frepos') {
+        return Promise.resolve(jsonResponse({
+          path: '/repos',
+          entries: [{name: 'project', kind: 'dir', mtime: 1786640000, is_repo: true, repo_info_deferred: true}],
+        }));
+      }
+      if (route.startsWith('/api/session-files?')) {
+        return Promise.resolve(jsonResponse({
+          session: '1',
+          loaded: true,
+          files: [{session: '1', repo: repoPath, path: 'nested.txt', abs_path: `${repoPath}/nested.txt`, status: 'M', added: 5, removed: 2}],
+          repos: [{repo: repoPath, added: 5, removed: 2, count: 1}],
+          refs_by_repo: {},
+          errors: [],
+          from_ref: 'HEAD',
+          to_ref: 'current',
+        }));
+      }
+      assert.equal(route, '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      return Promise.resolve(jsonResponse({responses: requests.map(request => ({
+        id: request.id,
+        ok: true,
+        status: 200,
+        payload: {path: request.path, kind: 'dir', repo: {root: repoPath, name: 'project', branch: 'main'}},
+      }))}));
+    });
+
+    assert.equal(await api.openFileExplorerAtForTest('/repos', {manualSelection: true, refreshPanels: false}), true);
+    const row = api.fileExplorerTreeForTest().querySelector(`.file-tree-row[data-path="${repoPath}"]`);
+    assert.ok(row, 'the direct fast listing mounts the repository row');
+    api.markFinderFastListingPaintedForTest();
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '', 'the fast row has no +/- metadata before backfill');
+    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, false, 'the completed request releases the deferred diff gate');
+    // The detached Node harness does not include the test tree in document.querySelectorAll, so
+    // invoke the same incremental row owner the live completion invokes after its render pass.
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-2</span>', 'the completed request backfills +/- metadata');
+  });
+
+  await testAsync('Go Finder paints the fast list before streaming repository backfills and applies each chunk', async () => {
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    const stream = controllableSseResponse();
+    const calls = [];
+    const streamRepoPaths = [];
+    const repoEntries = ['one', 'two'].map(name => ({name, kind: 'dir', mtime: 1786640000, is_repo: true, repo_info_deferred: true}));
+    const repoChunk = (name, added, removed) => ({
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: `/repos/${name}`, branch: `feature/${name}`, count: 1, added, removed}],
+      files: [{session: '1', repo: `/repos/${name}`, path: 'changed.txt', abs_path: `/repos/${name}/changed.txt`, status: 'M', added, removed, mtime: 1786640000}],
+      refs_by_repo: {[`/repos/${name}`]: []}, errors: [], warnings: [],
+    });
+    api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'https://localhost');
+      calls.push(parsed.pathname);
+      if (parsed.pathname === '/api/fs/fast/list') return Promise.resolve(jsonResponse({path: '/repos', entries: repoEntries}));
+      if (parsed.pathname === '/api/session-files') return Promise.resolve(jsonResponse({session: '1', loaded: true, files: [], repos: [], refs_by_repo: {}, errors: []}));
+      if (parsed.pathname === '/api/session-files-stream') {
+        streamRepoPaths.push(parsed.searchParams.getAll('repo_path'));
+        stream.bindSignal(options.signal);
+        return Promise.resolve(stream.response);
+      }
+      throw new Error(`unexpected Finder request: ${parsed.pathname}`);
+    });
+
+    assert.equal(await api.openFileExplorerAtForTest('/repos', {manualSelection: true}), true);
+    assert.equal(calls[0], '/api/fs/fast/list', 'the first Finder call is only the cheap direct listing');
+    assert.ok(calls.indexOf('/api/session-files-stream') > 0, 'the repository stream starts only after the fast listing');
+    const tree = api.fileExplorerTreeForTest();
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repos/one"]'), 'the first-paint directory rows are mounted before Git work');
+
+    assert.deepStrictEqual(streamRepoPaths[0], ['/repos', '/repos/one', '/repos/two'], 'the later repo stream receives the Finder root and visible child repository paths after the listed parent paints');
+    stream.push(sseFrame('start', {session: '1'}));
+    stream.push(sseFrame('repo', repoChunk('one', 3, 1)));
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0]?.added, 3, 'the first repository chunk updates Finder state');
+    const firstRow = tree.querySelector('.file-tree-row[data-path="/repos/one"]');
+    const secondRow = tree.querySelector('.file-tree-row[data-path="/repos/two"]');
+    api.updateFileTreeGitStatusRowsForTest([firstRow, secondRow]);
+    assert.equal(firstRow.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+3</span> <span class="changes-diff-remove">-1</span>', 'the first repository paints its counts before the second finishes');
+    assert.equal(secondRow.querySelector(':scope > .file-tree-diff').innerHTML, '', 'the second repository remains unfilled until its chunk arrives');
+    const refreshedFirstChunk = repoChunk('one', 6, 4);
+    refreshedFirstChunk.replace_repo = true;
+    stream.push(sseFrame('repo', refreshedFirstChunk));
+    await flushAsyncWork();
+    api.updateFileTreeGitStatusRowsForTest([firstRow, secondRow]);
+    assert.equal(firstRow.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+6</span> <span class="changes-diff-remove">-4</span>', 'a later attribution update replaces the repository rows instead of leaving stale files');
+    stream.push(sseFrame('repo', repoChunk('two', 8, 2)));
+    stream.push(sseFrame('done', {session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], warnings: []}));
+    stream.close();
+    await flushAsyncWork();
+    api.updateFileTreeGitStatusRowsForTest([firstRow, secondRow]);
+    assert.equal(secondRow.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+8</span> <span class="changes-diff-remove">-2</span>', 'the later repository paints when its own chunk arrives');
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, false, 'the stream completion releases the Finder backfill gate');
+  });
+
+  await testAsync('Finder expansion keeps +/- counts deferred while session-files backfill is pending', async () => {
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
+    const repoPath = '/repos/project';
+    const childPath = `${repoPath}/nested.txt`;
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: false,
+      files: [{session: '1', repo: repoPath, path: 'nested.txt', abs_path: childPath, status: 'M', added: 99, removed: 77, agents: ['codex']}],
+      repos: [{repo: repoPath, added: 99, removed: 77, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.setFetchForTest((url, options = {}) => {
+      const route = String(url);
+      if (route === '/api/fs/fast/list?path=%2Frepos') {
+        return Promise.resolve(jsonResponse({path: '/repos', entries: [{name: 'project', kind: 'dir', mtime: 1786640000, is_repo: true, repo_info_deferred: true}]}));
+      }
+      if (route === `/api/fs/fast/list?path=${encodeURIComponent(repoPath)}`) {
+        return Promise.resolve(jsonResponse({path: repoPath, entries: [{name: 'nested.txt', kind: 'file', mtime: 1786640000}]}));
+      }
+      assert.equal(route, '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      return Promise.resolve(jsonResponse({responses: requests.map(request => ({
+        id: request.id,
+        ok: true,
+        status: 200,
+        payload: {path: request.path, kind: 'dir', repo: {root: repoPath, name: 'project', branch: 'feature/project'}},
+      }))}));
+    });
+
+    assert.equal(await api.openFileExplorerAtForTest('/repos', {manualSelection: true, refreshPanels: false}), true);
+    const tree = api.fileExplorerTreeForTest();
+    const row = tree.querySelector(`.file-tree-row[data-path="${repoPath}"]`);
+    assert.ok(row, 'the repository row is painted before the slower session-files result');
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '', 'the root has no stale +/- counts');
+    await api.expandDirectoryRowForTest(row, repoPath, {manual: true, user: true});
+    const child = tree.querySelector(`.file-tree-row[data-path="${childPath}"]`);
+    assert.ok(child, 'the expanded directory uses the fast child listing');
+    assert.equal(child.querySelector(':scope > .file-tree-diff').innerHTML, '', 'an expanded child has no stale +/- counts before backfill');
+    assert.equal(child.classList.contains('git-modified'), false, 'the first paint has no cached Git status class');
+    assert.equal(child.querySelector(':scope > .file-tree-agent')?.hidden, true, 'the first paint has no cached agent marker');
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      files: [{session: '1', repo: repoPath, path: 'nested.txt', abs_path: childPath, status: 'M', added: 5, removed: 2, agents: ['codex']}],
+      repos: [{repo: repoPath, added: 5, removed: 2, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.markFinderFastListingPaintedForTest();
+    assert.equal(api.releaseFinderSessionFilesDiffBackfillForTest(), true, 'the first-paint owner releases the expanded tree before applying counts');
+    api.updateFileTreeGitStatusRowsForTest([row, child]);
+    assert.equal(child.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-2</span>', 'the completed session-files backfill adds counts to the already-expanded child');
+    assert.equal(child.classList.contains('git-modified'), true, 'the completed session-files backfill adds the Git status class');
+    assert.equal(child.querySelector(':scope > .file-tree-agent')?.hidden, false, 'the completed session-files backfill adds the agent marker');
+  });
+
+  await testAsync('Finder re-enriches a full-push repo marker that replaced the fast listing', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const root = '/repos';
+    const repoPath = '/repos/project';
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push(String(url));
+      assert.equal(String(url), '/api/fs/batch');
+      const batch = JSON.parse(options.body || '{}').requests || [];
+      return Promise.resolve(jsonResponse({responses: batch.map(request => ({
+        id: request.id,
+        ok: true,
+        status: 200,
+        payload: {path: request.path, kind: 'dir', repo: {root: repoPath, name: 'project', branch: 'feature/project'}},
+      }))}));
+    });
+    api.setFileExplorerFsResourceValueForTest(root, [{name: 'project', kind: 'dir', is_repo: true}]);
+    await api.fetchDirectoryForTest(root);
+    assert.equal(frames.length, 1, 'a full listing repo marker still schedules the deferred INFO wave');
+    for (const frame of frames.splice(0)) frame();
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(canonical(requests), ['/api/fs/batch'], 'the backfill uses the shared INFO batch route');
+  });
+
   await testAsync('Finder discards invalidated in-flight Git enrichment before patching the mounted row', async () => {
     const frames = [];
     const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
@@ -1415,7 +1933,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await flushAsyncWork();
-    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project"]'), `the root row paints while descendants remain pending; calls=${JSON.stringify(calls)}`);
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project"]'), 'the root row paints while descendants remain pending');
     assert.equal(settled, false);
     assert.equal(calls[0], '/api/fs/fast/list?path=%2Frepo');
 
@@ -1433,6 +1951,39 @@ async function runLayoutAsyncSuite() {
     }));
     assert.equal(await sync, true);
     assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project/one/README.md"]'));
+  });
+
+  await testAsync('Finder Sync cache-first paint backfills cached +/- after the root rows mount', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const repoPath = '/repo/project';
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      files: [],
+      repos: [{repo: repoPath, added: 7, removed: 3, count: 1}],
+      refs_by_repo: {},
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    });
+    api.setFileExplorerFsResourceValueForTest('/repo', [{name: 'project', kind: 'dir', is_repo: true, mtime: 1}]);
+
+    await api.syncFileExplorerRootToPlanForTest({session: '1', root: '/repo', expandPaths: [], affectedDirs: []}, '1');
+    const row = api.fileExplorerTreeForTest().querySelector(`.file-tree-row[data-path="${repoPath}"]`);
+    assert.ok(row, 'the cached Sync root paints immediately');
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '', 'cached +/- stays hidden on the first root paint');
+    assert.ok(frames.length > 0, 'the cached Sync paint schedules the slower backfill phase');
+
+    while (frames.length) frames.shift()();
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+7</span> <span class="changes-diff-remove">-3</span>', `cached +/- backfills after the root paint (kind=${row.dataset.kind}, isRepo=${row.dataset.isRepo}, resolved=${row.dataset.repoInfoResolved}, diff=${row.querySelector(':scope > .file-tree-diff').innerHTML})`);
   });
 
   await testAsync('Finder Sync rejects a stale progressive descendant after a newer transaction takes ownership', async () => {
@@ -3590,6 +4141,187 @@ async function runLayoutAsyncSuite() {
     assert.equal(pending.length, 1, 'a ready event immediately after boot reuses the fresh auto-approve snapshot');
   });
 
+  await testAsync('auto-status fallback imports working Codex activity when Go lacks auto-approve', async () => {
+    const requests = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      const target = String(url);
+      requests.push(target);
+      if (target === '/api/auto-approve') return Promise.reject(new Error('route unavailable'));
+      if (target.startsWith('/api/activity?')) {
+        return Promise.resolve(jsonResponse({
+          activity: {},
+          agents: [],
+          agent_windows: {
+            '1': [{kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'}],
+          },
+          session_order: ['1'],
+        }));
+      }
+      assert.fail(`unexpected fallback request: ${target}`);
+    });
+
+    await api.loadAutoStatusesForTest({render: false, sessionFallback: false});
+    assert.deepStrictEqual(requests, ['/api/auto-approve', '/api/activity?hours=24&visible=1&scope=all'], 'an unavailable Go auto-status route falls back to one machine-wide activity snapshot');
+    const model = api.sessionAgentWindowStatusModelForTest('1');
+    assert.equal(model.agents.length, 1, 'the activity snapshot supplies the Codex window row');
+    assert.equal(model.agents[0].kind, 'codex');
+    assert.equal(model.agents[0].state, 'working', 'the shared activity state preserves the working marker');
+  });
+
+  await testAsync('Go activity fallback adopts an authoritative global session before legacy sessions converge', async () => {
+    const api = loadYolomux('', [], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      return Promise.resolve(jsonResponse({
+        activity: {},
+        agents: [],
+        agent_windows: {
+          yo7222: [{kind: 'codex', pane_target: '%73', window_index: 1, state: 'working'}],
+        },
+        session_order: ['yo7222'],
+      }));
+    });
+    await api.fetchTabberActivityForTest({visible: true});
+    const state = api.autoApproveStateForTest('yo7222');
+    assert.equal(state?.agent_windows?.[0]?.state, 'working', 'the authoritative activity roster reaches the shared status model before legacy session metadata');
+    const model = api.sessionAgentWindowStatusModelForTest('yo7222');
+    assert.equal(model.agents[0]?.state, 'working', 'the pane marker consumer sees the global working Codex row');
+    const marker = api.agentWindowActivityIconHtmlForStatusForTest(model.agents[0], 'codex', 'yo7222');
+    assert.match(marker, /status-indicator--working/);
+    assert.match(marker, /heartbeat-pulse/, 'the recovered global row renders the continuously blinking green marker');
+  });
+
+  await testAsync('Go activity fallback repairs a transient unavailable Codex sample while SSE stays connected', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    const requests = [];
+    let sample = 'unavailable';
+    api.setFetchForTest(url => {
+      const target = String(url);
+      requests.push(target);
+      assert.ok(target.startsWith('/api/activity?'), `Go status refresh uses the activity route: ${target}`);
+      return Promise.resolve(jsonResponse({
+        activity: {},
+        agents: [],
+        agent_windows: {
+          '1': [{kind: 'codex', pane_target: '%73', window_index: 0, state: sample}],
+        },
+        session_order: ['1'],
+      }));
+    });
+    await api.loadAutoStatusesForTest({render: false});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'unavailable');
+    sample = 'working';
+    await api.loadAutoStatusesForTest({render: false, force: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working', 'the next bounded repair promotes the live Codex pane to working');
+    assert.deepStrictEqual(requests.map(url => url.split('?')[0]), ['/api/activity', '/api/activity'], 'Go avoids the unsupported auto-approve probe on both refreshes');
+    const runtimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    assert.match(runtimeSource, /clientEventTransportState\.connected === true[\s\S]*goAgentStatusUsesActivityFallback/, 'Go keeps the fallback interval active while SSE is connected');
+  });
+
+  await testAsync('Go activity fallback does not erase a live working marker on a capture miss', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    const samples = ['working', 'unavailable'];
+    let index = 0;
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      const state = samples[Math.min(index++, samples.length - 1)];
+      return Promise.resolve(jsonResponse({
+        activity: {},
+        agents: [],
+        agent_windows: {
+          '1': [{kind: 'codex', pane_target: '%73', window_index: 0, state}],
+        },
+        session_order: ['1'],
+      }));
+    });
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working');
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working', 'a transient capture miss preserves the known live marker');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].state, 'working');
+  });
+
+  await testAsync('Go activity refresh promotes a newly working Codex pane into the shared marker model', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      return Promise.resolve(jsonResponse({
+        activity: {},
+        agents: [{session: '1', window: '0', window_index: 0, agent_kind: 'codex', state: 'working', pane_target: '%73'}],
+        agent_windows: {1: [{kind: 'codex', state: 'working', pane_target: '%73', window_index: 0}]},
+        session_order: ['1'],
+      }));
+    });
+    await api.fetchTabberActivityForTest({visible: true});
+    const state = api.autoApproveStateForTest('1');
+    assert.equal(state?.agent_windows?.[0]?.state, 'working', 'a later Go activity refresh reaches the shared auto-status model');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0]?.state, 'working', 'the pane marker consumer sees the promoted working state');
+  });
+
+  await testAsync('Go activity fallback paints a recovered working row over stale unavailable status', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    api.setAutoApproveStateForTest('1', {agent_windows: [
+      {kind: 'codex', state: 'unavailable', pane_target: '%73', window_index: 0},
+    ]});
+    api.setTabberActivityForTest({agent_windows: {1: [
+      {kind: 'codex', state: 'working', pane_target: '%73', window_index: 0},
+    ]}});
+    const model = api.sessionAgentWindowStatusModelForTest('1');
+    assert.equal(model.agents[0]?.state, 'working', `a recovered Go activity row replaces only the stale unavailable canonical row: ${JSON.stringify(model)}`);
+  });
+
+  await testAsync('Go activity fallback cannot resurrect a stale working row over a newer unavailable snapshot', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    api.setAutoApproveStateForTest('1', {
+      agent_window_snapshot_revision: 10,
+      agent_windows: [{kind: 'codex', state: 'unavailable', pane_target: '%73', window_index: 0}],
+    });
+    api.setTabberActivityForTest({
+      agent_window_snapshot_revision: 9,
+      agent_windows: {1: [{kind: 'codex', state: 'working', pane_target: '%73', window_index: 0}]},
+    });
+    const model = api.sessionAgentWindowStatusModelForTest('1');
+    assert.equal(model.agents[0]?.state, 'unavailable', 'an older Go activity sample cannot override a newer canonical unavailable row');
+    assert.equal(model.stale, true, 'the mismatched snapshot remains visibly stale');
+  });
+
+  await testAsync('Go activity adoption cannot replace a newer canonical working snapshot', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
+    });
+    api.setAutoApproveStateForTest('1', {
+      agent_window_snapshot_revision: 10,
+      agent_windows: [{kind: 'codex', state: 'working', pane_target: '%73', window_index: 0}],
+    });
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      return Promise.resolve(jsonResponse({
+        agent_window_snapshot_revision: 9,
+        activity: {},
+        agents: [],
+        agent_windows: {1: [{kind: 'codex', state: 'unavailable', pane_target: '%73', window_index: 0}]},
+        session_order: ['1'],
+      }));
+    });
+    await api.loadAutoStatusesForTest({force: true, render: false});
+    const state = api.autoApproveStateForTest('1');
+    assert.equal(state.agent_window_snapshot_revision, 10, 'the older activity response does not lower the canonical revision');
+    assert.equal(state.agent_windows[0].state, 'working', 'the older activity response cannot erase the green working state');
+  });
+
   await testAsync('auto-approve accepted snapshot waits for its terminal without per-session recovery fetches', async () => {
     const api = loadYolomux('', ['1']);
     const requests = [];
@@ -4539,7 +5271,32 @@ async function runLayoutAsyncSuite() {
     assert.equal(stateAfterDelayed.payload.sessions.old, undefined);
   });
 
-  await testAsync('the real rename flow issues one forced metadata refresh and accepts later roster pushes', async () => {
+  await testAsync('metadata survives same-epoch event-stream adoption during the request', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const pending = [];
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const refresh = api.refreshSessionMetadataForTest(quiet);
+    assert.equal(pending.length, 1, 'metadata request is held in flight');
+    api.adoptServerEpochForTest('server-current');
+    pending[0].resolve(jsonResponse({
+      metadata_identity: {epoch: 'server-current', generation: 1},
+      topology_generation: 1,
+      session_order: ['new-a', 'new-b'],
+      sessions: {'new-a': {panes: []}, 'new-b': {panes: []}},
+    }));
+    const refreshResult = await refresh;
+    assert.equal(refreshResult.ok, true, 'same-epoch metadata remains current after event-stream adoption');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['new-a', 'new-b']);
+    assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'applied');
+  });
+
+  await testAsync('the fast rename flow survives a delayed pre-rename metadata response without polling', async () => {
     const api = loadYolomuxWithFileExplorerClosed(
       '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
       ['glm-5_3'],
@@ -6426,6 +7183,127 @@ async function runLayoutAsyncSuite() {
       assert.equal(differState.loading, false);
       assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'peer completion order emits no diagnostic failure');
     }
+  });
+
+  await testAsync('an uncached Finder session switch clears the prior +/- payload until backfill completes', async () => {
+    const pending = deferredFetch();
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: true, repos: [{repo: '/old', added: 9, removed: 8}], files: [], errors: []});
+    api.setFetchForTest((url, options = {}) => {
+      assert.ok(String(url).startsWith('/api/session-files?'));
+      assert.equal(new URL(String(url), 'https://yolomux.test').searchParams.get('session'), '2');
+      return pending.promise;
+    });
+
+    assert.equal(api.switchFileExplorerFinderSessionForTest('2'), true);
+    const state = api.fileExplorerFinderSessionFilesStateForTest();
+    assert.equal(state.payload.session, '2', 'an uncached switch owns a pending target payload');
+    assert.equal(state.payload.loaded, false, 'the prior session payload is not presented as the new session');
+    assert.equal(state.payload.repos.length, 0, 'the prior session +/- source is cleared before backfill');
+    assert.equal(state.diffBackfillPending, true, 'the Finder metadata gate stays closed during backfill');
+    pending.resolve(jsonResponse({session: '2', loaded: true, repos: [{repo: '/new', added: 4, removed: 3}], files: [], errors: []}));
+    await flushAsyncWork();
+  });
+
+  await testAsync('a cached Finder session switch releases the fast-first metadata gate', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: true, repos: [{repo: '/old', added: 9, removed: 8}], files: [], errors: []});
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/session-files?'));
+      return Promise.resolve(jsonResponse({session: '2', loaded: true, repos: [{repo: '/new', added: 4, removed: 3}], files: [], errors: []}));
+    });
+
+    await api.refreshFileExplorerFromPushForTest({
+      mode: 'diff',
+      token: 'pending-fast-list',
+      directories: [{path: '/repo', ok: true, status: 200, data: {path: '/repo', entries: [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]}}],
+    });
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, true, 'the setup opens the fast-first gate');
+    api.setFinderSessionFilesCachePayloadForTest('2', {loaded: true, repos: [{repo: '/new', added: 4, removed: 3}], files: [], errors: []});
+
+    assert.equal(api.switchFileExplorerFinderSessionForTest('2'), true);
+    await flushAsyncWork();
+    const state = api.fileExplorerFinderSessionFilesStateForTest();
+    assert.equal(state.fastListingPainted, true, 'a cached switch retains the already-painted Finder listing');
+    assert.equal(state.diffBackfillPending, false, 'a cached switch releases the deferred metadata gate');
+    assert.equal(state.payload.repos[0].repo, '/new', 'the cached target payload remains visible');
+  });
+
+  await testAsync('an fs_changed Finder refresh hides stale metadata until backfill completes', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.setFinderSessionFilesPayloadForTest({
+      session: '1',
+      loaded: true,
+      repos: [{repo: '/repo', added: 9, removed: 8}],
+      files: [{session: '1', repo: '/repo', path: 'changed.txt', abs_path: '/repo/changed.txt', status: 'M', added: 9, removed: 8}],
+      errors: [],
+    });
+    const tree = api.fileExplorerTreeForTest();
+    api.renderTreeChildrenForTest(tree, '/repo', [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]);
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/changed.txt"]');
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+9</span> <span class="changes-diff-remove">-8</span>', 'the pre-refresh row starts with the prior session-files metadata');
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').pathname;
+      assert.equal(path, '/api/session-files');
+      return Promise.resolve(jsonResponse({
+        session: '1',
+        loaded: true,
+        repos: [{repo: '/repo', added: 4, removed: 3}],
+        files: [{session: '1', repo: '/repo', path: 'changed.txt', abs_path: '/repo/changed.txt', status: 'M', added: 4, removed: 3}],
+        errors: [],
+      }));
+    });
+
+    await api.refreshFileExplorerFromPushForTest({mode: 'diff', token: 'new-token', directories: [{path: '/repo', ok: true, status: 200, data: {path: '/repo', entries: [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}]}}]});
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, true, 'a filesystem push opens the metadata backfill gate');
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '', 'the fast filesystem refresh hides stale +/- metadata');
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, false, 'the session-files response releases the gate after the fast refresh');
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+4</span> <span class="changes-diff-remove">-3</span>', 'the slower backfill restores the new +/- metadata');
+  });
+
+  await testAsync('an unchanged full watch-diff baseline does not reopen Finder session-files', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: true, repos: [{repo: '/repo', added: 9, removed: 8}], files: [], errors: []});
+    const entries = [{name: 'changed.txt', kind: 'file', mtime: 10, size: 5}];
+    api.recordDirectorySignatureForTest('/repo', entries);
+    api.setFetchForTest(url => { throw new Error(`unchanged baseline must not request ${url}`); });
+
+    await api.refreshFileExplorerFromPushForTest({
+      mode: 'full',
+      token: 'reconnect-baseline',
+      directories: [
+        {path: '/repo', ok: true, status: 200, data: {path: '/repo', entries}},
+        {path: '/server/home', ok: true, status: 200, data: {path: '/server/home', entries: [{name: '.cache', kind: 'dir', mtime: 20, size: 0}]}},
+      ],
+    });
+    await flushAsyncWork();
+
+    assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, false, 'an unchanged reconnect baseline leaves the metadata gate closed');
   });
 
   await testAsync('session-files background completion applies its ready payload without another accepted request', async () => {
@@ -9686,7 +10564,9 @@ async function runLayoutAsyncSuite() {
           return Promise.resolve(jsonResponse({path: '/repo', entries: [{name: 'note.txt', kind: 'file'}]}));
         }
         if (parsed.pathname === '/api/fs/fast/list' && parsed.searchParams.get('path') === '/repo/note.txt') {
-          return Promise.resolve(jsonResponse({path: '/repo/note.txt', entries: [{name: 'inside.txt', kind: 'file'}]}));
+          return Promise.resolve(rootKind === 'file'
+            ? jsonResponse({error: 'not a directory'}, 400)
+            : jsonResponse({path: '/repo/note.txt', entries: [{name: 'inside.txt', kind: 'file'}]}));
         }
         return Promise.reject(new Error(`unexpected request ${parsed}`));
       });
@@ -9696,17 +10576,27 @@ async function runLayoutAsyncSuite() {
       rootKind = 'file';
       api.applyLayoutUrlStateSeedForTest({finder: {root: '/repo/note.txt'}});
       const opened = api.openFileExplorerAtForTest('/repo/note.txt', {refreshPanels: false});
-      await api.flushFileExplorerFsBatchForTest();
+      for (let index = 0; index < 3; index += 1) {
+        await flushAsyncWork();
+        await api.flushFileExplorerFsBatchForTest();
+      }
       assert.equal(await opened, true, 'a file-valued Finder root opens its containing directory');
-      assert.equal(calls.some(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo/note.txt'), false, 'a file-valued root never reaches the directory-listing route');
+      assert.equal(calls.filter(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo/note.txt').length, 1, 'a file-valued root gets one fast directory probe before falling back to kind validation');
       assert.ok(calls.some(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo'), 'the resolved containing directory owns the one fast listing');
       rootKind = 'dir';
       api.applyLayoutUrlStateSeedForTest({finder: {root: '/repo/note.txt'}});
       const reopened = api.openFileExplorerAtForTest('/repo/note.txt', {refreshPanels: false});
-      await api.flushFileExplorerFsBatchForTest();
+      for (let index = 0; index < 3; index += 1) {
+        await flushAsyncWork();
+        await api.flushFileExplorerFsBatchForTest();
+      }
       assert.equal(await reopened, true, 'a cached file root that becomes a directory is reclassified and opened directly');
-      assert.equal(calls.filter(call => call.path === '/api/fs/batch').length, 3, 'each validated open bypasses the prior INFO kind cache');
-      assert.equal(calls.filter(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo/note.txt').length, 1, 'file-to-directory recreation clears the old list negative and fetches the new directory once');
+      await flushAsyncWork();
+      await api.flushFileExplorerFsBatchForTest();
+      assert.equal(calls[1].path, '/api/fs/fast/list', 'the validated open probes the fast directory route before falling back to INFO for a file');
+      assert.equal(calls[1].queryPath, '/repo/note.txt');
+      assert.equal(calls[2].path, '/api/fs/batch', 'the file-valued probe falls back to INFO after the fast route rejects the file');
+      assert.equal(calls.filter(call => call.path === '/api/fs/fast/list' && call.queryPath === '/repo/note.txt').length, 2, 'file-to-directory recreation clears the old list negative and fetches the new directory once');
     }
 
     {
@@ -9727,6 +10617,9 @@ async function runLayoutAsyncSuite() {
             payload: {path: request.path, name: request.path.split('/').pop(), kind: 'dir'},
           }))}));
         }
+        if (parsed.pathname === '/api/fs/fast/list' && parsed.searchParams.get('path') === '/repo/old') {
+          return Promise.resolve(jsonResponse({error: 'not a directory'}, 400));
+        }
         if (parsed.pathname === '/api/fs/fast/list') {
           const path = parsed.searchParams.get('path');
           fastListPaths.push(path);
@@ -9735,10 +10628,9 @@ async function runLayoutAsyncSuite() {
         return Promise.reject(new Error(`unexpected request ${parsed}`));
       });
       const oldOpen = api.openFileExplorerAtForTest('/repo/old', {validateKind: true, refreshPanels: false});
-      const oldFlush = api.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
+      const oldFlush = api.flushFileExplorerFsBatchForTest();
       const newOpen = api.openFileExplorerAtForTest('/repo/new', {validateKind: true, refreshPanels: false});
-      await api.flushFileExplorerFsBatchForTest();
       assert.equal(await newOpen, true, 'the newer validated root applies while the old INFO request is held');
       oldInfo.resolve(jsonResponse({responses: [{id: 1, ok: true, status: 200, payload: {path: '/repo/old', name: 'old', kind: 'dir'}}]}));
       await oldFlush;

@@ -14,26 +14,37 @@ function toggleFileExplorer() {
 async function resolveFileExplorerDirectoryRoot(path, options = {}) {
   const requested = normalizeDirectoryPath(expandUserPath(path));
   try {
+    // A directory listing is the fastest useful answer for an unverified root. The old order
+    // performed a full INFO batch first, which made opening a cold repository wait for Git-aware
+    // metadata before the user saw even its plain directory rows. A file path cannot be listed;
+    // only that case falls through to INFO so it can resolve to the containing directory.
+    const entries = await fetchDirectory(requested, {
+      fresh: true,
+      user: options.user === true || options.manualSelection === true,
+      enrich: false,
+      trigger: options.trigger,
+    });
+    if (entries) return {root: requested, entries};
     const info = await fetchFilePathInfo(requested, {fresh: true, force: true, user: options.user === true || options.manualSelection === true});
     if (info?.kind === 'dir') {
       const key = fileExplorerFsBatchKey('list', requested);
       const record = fileExplorerFsResourceRecords.get(key);
       if (record?.failureStatus) invalidateFileExplorerFsResourceRecord(key, record);
-      return requested;
+      return {root: requested, entries: null};
     }
     if (info?.kind === 'file') {
       markFileExplorerDirectoryDemandNegative(requested, 400);
       retireFileExplorerDirectoryDemand(requested);
-      return dirnameOf(requested);
+      return {root: dirnameOf(requested), entries: null};
     }
     const error = new Error(t('fs.error.notDirectory', {path: requested}));
     error.status = 400;
     error.payload = {user_message: {key: 'fs.error.notDirectory', params: {path: requested}, fallback: error.message}};
     setFileExplorerListError(requested, error, 400);
-    return '';
+    return {root: '', entries: null};
   } catch (error) {
     setFileExplorerListError(requested, error, Number(error?.status) || 0);
-    return '';
+    return {root: '', entries: null};
   }
 }
 
@@ -45,24 +56,33 @@ async function openFileExplorerAt(path, options = {}) {
   const openGeneration = fileWorkspaceState.beginOpen();
   const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const requestedRoot = normalizeDirectoryPath(expandUserPath(path));
-  const validateKind = options.validateKind === true
-    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
-  const root = validateKind ? await resolveFileExplorerDirectoryRoot(requestedRoot, options) : requestedRoot;
-  if (!root || !openStillCurrent()) return false;
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
+  // Claim an explicit path before the kind probe. The probe is the fastest validation available,
+  // but it is still asynchronous; leaving the previous tree mounted until it completes makes a
+  // slow path look like the typed request was ignored.
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
-    setFileExplorerPathDisplay(root, {deferRepoInfo: true});
+    setFileExplorerPathDisplay(requestedRoot, {deferRepoInfo: true});
     renderFileExplorerRootModeControls();
-    renderFileExplorerTreeSearching(root);
-  } else if (options.syncSelection === true) {
+    renderFileExplorerTreeSearching(requestedRoot);
+  }
+  const validateKind = options.validateKind === true
+    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
+  const resolvedRoot = validateKind
+    ? await resolveFileExplorerDirectoryRoot(requestedRoot, options)
+    : {root: requestedRoot, entries: null};
+  const root = resolvedRoot.root;
+  if (!root || !openStillCurrent()) return false;
+  if (!showPendingRoot && options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {
-    user: options.user === true || options.manualSelection === true,
-    trigger: options.trigger,
-    enrichRoot: true,
-  });
+  const entries = Array.isArray(resolvedRoot.entries)
+    ? resolvedRoot.entries
+    : await fetchDirectory(root, {
+      user: options.user === true || options.manualSelection === true,
+      trigger: options.trigger,
+      enrichRoot: true,
+    });
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -70,6 +90,7 @@ async function openFileExplorerAt(path, options = {}) {
     if (showPendingRoot) renderFileExplorerTreeStatus(error || t('preview.openFailed', {path: root}), {root, error: true});
     return false;
   }
+  beginFinderSessionFilesDiffBackfill();
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   const rootChanged = root !== currentFileExplorerRoot();
@@ -82,12 +103,24 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder', deferSessionFilesDiff: true});
     scheduleFinderUsableObservation(fileExplorerTree, entries, observabilityJourney);
   }
+  if (Array.isArray(resolvedRoot.entries)) {
+    scheduleFileExplorerRepoInfoEnrichment(fileExplorerRoot, entries, {includeRoot: true});
+  }
   if (options.refreshPanels !== false) {
-    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false, observabilityJourney});
+    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false, observabilityJourney, deferSessionFilesDiff: true});
     if (!openStillCurrent()) return false;
+    scheduleAfterFileExplorerFirstPaint(() => {
+      if (!openStillCurrent()) return;
+      markFinderFastListingPainted();
+      if (typeof ensureSessionFilesSurfaceLoaded === 'function') {
+        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
+      }
+      if (typeof releaseFinderSessionFilesDiffBackfillIfReady === 'function') releaseFinderSessionFilesDiffBackfillIfReady();
+      updateFileTreeGitStatusRows();
+    });
   }
   if (previousExpanded.length) {
     await restoreFileExplorerExpandedPaths(previousExpanded, fileExplorerRoot);
@@ -170,6 +203,23 @@ const FILE_TREE_ROW_HANDLERS = Object.freeze([
   'ondragstart',
   'ondragend',
 ]);
+const FILE_TREE_TOUCH_CLICK_DEDUP_MS = 1000;
+
+function armFileTreeTouchClickSuppression(row) {
+  row.__fileTreeTouchClickSuppressions = (Number(row.__fileTreeTouchClickSuppressions) || 0) + 1;
+  setTimeout(() => {
+    row.__fileTreeTouchClickSuppressions = Math.max(0, (Number(row.__fileTreeTouchClickSuppressions) || 0) - 1);
+  }, FILE_TREE_TOUCH_CLICK_DEDUP_MS);
+}
+
+function consumeFileTreeTouchClickSuppression(row, event) {
+  const generatedByTouch = event?.sourceCapabilities?.firesTouchEvents === true
+    || (row.__fileTreeLastPointerType === 'touch' && event?.detail === 1);
+  const pending = Number(row.__fileTreeTouchClickSuppressions) || 0;
+  if (!generatedByTouch || pending <= 0) return false;
+  row.__fileTreeTouchClickSuppressions = pending - 1;
+  return true;
+}
 
 function fileTreeRowPadding(depth, compact = false) {
   const safeDepth = Math.max(0, Number(depth) || 0);
@@ -810,6 +860,7 @@ function invalidateFileExplorerRoots(roots = []) {
 
 function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
   const entriesByDir = new Map();
+  const changedDirectories = [];
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
   for (const item of directories) {
     const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
@@ -818,6 +869,9 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
     reconcileFileExplorerDeletedPathTombstones(path, entries, true);
     const visibleEntries = entries ? filterFileExplorerDeletedPathTombstones(path, entries) : null;
     if (!path || !visibleEntries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    const previousSignature = fileExplorerDirectoryRecord(path)?.signature;
+    const nextSignature = directoryEntriesSignature(visibleEntries);
+    if (previousSignature !== undefined && previousSignature !== nextSignature) changedDirectories.push(path);
     entriesByDir.set(path, visibleEntries);
     cacheFileExplorerRepoInfoEntries(path, visibleEntries);
     markNewDirectoryEntries(path, visibleEntries);
@@ -828,7 +882,7 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
       watchDiffOwned: options.fromWatchDiff === true,
     });
   }
-  return entriesByDir;
+  return {entriesByDir, changedDirectories};
 }
 
 async function fetchFilesystemWatchDiff(options = {}) {
@@ -970,7 +1024,9 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       fileExplorerFilesystemWatchToken = nextToken;
       fileExplorerFilesystemPushToken = nextToken;
     }
-    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : new Map();
+    const pushed = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : {entriesByDir: new Map(), changedDirectories: []};
+    const entriesByDir = pushed.entriesByDir;
+    const changedDirectories = pushed.changedDirectories;
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
     if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
@@ -987,6 +1043,15 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     }
     if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
     if (!entriesByDir.size) return;
+    const finderBackfillSession = fileExplorerFinderTargetSession();
+    const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+    const watchDiffChangedVisibleTree = changedDirectories.some(path => (
+      pathIsInsideDirectory(path, currentRoot) || pathIsInsideDirectory(currentRoot, path)
+    ));
+    const finderHasLoadedMetadata = finderBackfillSession
+      && sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, finderBackfillSession)
+      && (options.fromWatchDiff !== true || watchDiffChangedVisibleTree);
+    if (finderHasLoadedMetadata) beginFinderSessionFilesDiffBackfill();
     fileExplorerPushRefreshDepth += 1;
     try {
       const root = normalizeDirectoryPath(currentFileExplorerRoot());
@@ -997,6 +1062,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
           preserveExpanded: true,
           preserveScroll: true,
           entriesByDir,
+          deferSessionFilesDiff: finderHasLoadedMetadata,
         });
       }
       const openFileDirs = Array.from(fileState.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
@@ -1004,6 +1070,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
     }
+    if (finderHasLoadedMetadata) scheduleFinderSessionFilesBackfillAfterFastPaint(finderBackfillSession);
   } finally {
     clientPerfEnd(perf, {nodes: changedRoots, rows: renderedRows, skipped});
   }
@@ -1217,7 +1284,10 @@ function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {
   const candidates = [];
   if (options.includeRoot === true && root) candidates.push(root);
   for (const entry of Array.isArray(entries) ? entries : []) {
-    if (entry?.kind !== 'dir' || entry.repo_info_deferred !== true || entry.repo) continue;
+    // A filesystem push can carry the full listing's cheap is_repo marker without the detailed
+    // repo payload. Treat that shape like FastList's explicit deferred marker; otherwise a push
+    // that overwrites the fast resource can suppress the INFO backfill permanently.
+    if (entry?.kind !== 'dir' || entry.repo || (entry.repo_info_deferred !== true && entry.is_repo !== true)) continue;
     candidates.push(childPath(root, entry.name));
   }
   for (const path of candidates) {
@@ -1283,11 +1353,12 @@ async function enrichFileExplorerRepoInfoEntries() {
       ? cacheFileExplorerRepoInfo(path, result.value.info.repo, {persist: false}) || changed
       : clearFileExplorerRepoInfo(path, {persist: false}) || changed;
   }
-  if (changed) {
-    persistFileExplorerRepoInfoCache();
+  if (changed || enrichedPaths.size) {
+    if (changed) persistFileExplorerRepoInfoCache();
     const mountedRows = fileExplorerTreeContainers().flatMap(container => Array.from(
       container.querySelectorAll?.('.file-tree-row[data-path]') || [],
     )).filter(row => !row.dataset.tabberType && enrichedPaths.has(normalizeDirectoryPath(row.dataset.path || '')));
+    for (const row of mountedRows) row.dataset.repoInfoResolved = 'true';
     updateFileTreeGitStatusRows(mountedRows);
     const root = currentFileExplorerRoot();
     if (enrichedPaths.has(root) && !currentFileExplorerListError(root)) {
@@ -2511,6 +2582,12 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
     }
   }
   const rootChanged = root !== currentFileExplorerRoot();
+  const finderTrees = [fileExplorerTree, ...Array.from(document.querySelectorAll('.file-explorer-panel .file-explorer-tree-panel'))]
+    .filter(Boolean);
+  const firstPaint = rootChanged || !finderTrees.some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
+  if (firstPaint && typeof beginFinderSessionFilesDiffBackfill === 'function') {
+    beginFinderSessionFilesDiffBackfill();
+  }
   const preserveState = options.preserveState === true && !rootChanged;
   const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = preserveState ? captureFileExplorerScrollPositions() : null;
@@ -2526,10 +2603,11 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
     if (!fileExplorerSyncPathSuppressed(path)) fileExplorerExpanded.add(path);
   }
   for (const path of qualifiedExpansionPaths) fileExplorerExpanded.add(path);
-  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  const renderOptions = {view: 'finder', entriesByDir, deferSessionFilesDiff: firstPaint};
+  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, renderOptions);
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
     const tree = panel.querySelector?.('.file-explorer-tree-panel');
-    if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+    if (tree) renderTreeChildren(tree, root, rootEntries, 0, renderOptions);
   }
   updateFileExplorerCurrentFileHighlight();
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
@@ -2586,6 +2664,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
   const generation = fileExplorerSyncState.generation;
   requestAnimationFrame(() => {
     if (fileExplorerSyncState.generation !== generation) return;
+    if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
     void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
@@ -2649,7 +2728,16 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return false;
     if (!Array.isArray(rootEntries)) return false;
     const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
+    const firstPaint = normalizedRoot !== currentFileExplorerRoot()
+      || ![fileExplorerTree, ...Array.from(document.querySelectorAll('.file-explorer-panel .file-explorer-tree-panel'))]
+        .filter(Boolean)
+        .some(tree => tree.querySelector?.('.file-tree-row[data-path]'));
     changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
+    if (firstPaint) {
+      scheduleAfterFileExplorerFirstPaint(() => {
+        if (typeof finishFinderFastPaint === 'function') finishFinderFastPaint();
+      });
+    }
     if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
     restoreFileExplorerSyncCursorState(plan.session, plan.root);
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
@@ -2699,6 +2787,36 @@ function fileExplorerTreeContainers() {
     if (!containers.includes(tree)) containers.push(tree);
   });
   return containers;
+}
+
+// The first Finder listing is intentionally only one level deep. Once those rows are mounted,
+// expose the visible repository paths to the later session-files stream so the Go backend can
+// enrich each repository independently, including child repositories under a non-Git parent.
+function fileExplorerVisibleRepositoryPaths() {
+  // The scoped repository candidates are consumed by the Go per-repository stream. Python keeps
+  // its established aggregate session-files request and must not acquire a Finder-only request
+  // identity that would prevent valid Finder/Differ peer sharing.
+  if (typeof sessionFilesStreamSupported === 'function' && !sessionFilesStreamSupported('finder')) return [];
+  const paths = [];
+  const seen = new Set();
+  const add = rawPath => {
+    const path = normalizeDirectoryPath(rawPath || '');
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    paths.push(path);
+  };
+  // The opened Finder root is itself a repository candidate. It is not rendered as a child row,
+  // so looking only at mounted repository rows would omit a root repo when the active tmux CWD is
+  // elsewhere. This runs only while constructing the later session-files request; the first
+  // /api/fs/fast/list request remains a direct one-level filesystem listing.
+  add(currentFileExplorerRoot());
+  for (const container of fileExplorerTreeContainers()) {
+    for (const row of container.querySelectorAll?.('.file-tree-row[data-path]') || []) {
+      if (row.dataset.tabberType || row.dataset.kind !== 'dir' || row.dataset.isRepo !== 'true') continue;
+      add(row.dataset.path);
+    }
+  }
+  return paths.slice(0, 128);
 }
 
 function renderFileExplorerTreeStatus(message, options = {}) {
@@ -2848,6 +2966,11 @@ async function ensureDirectoryRowExpanded(row, fullPath, options = {}) {
 
 function nextAnimationFrame() {
   return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+function scheduleAfterFileExplorerFirstPaint(callback) {
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : handler => setTimeout(handler, 0);
+  schedule(() => schedule(callback));
 }
 
 function scrollFileTreeRowIntoView(container, row) {
@@ -3488,32 +3611,35 @@ function fileTreeDirCountText(count) {
 
 function fileTreeRowDerivedState(fullPath, entry, options = {}) {
   const differMode = options.differMode === true;
+  const deferSessionFilesDiff = options.deferSessionFilesDiff === true;
   const indexExcludedEntry = !differMode && fileExplorerPathIsExcluded(fullPath);
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
-  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
+  const changedAncestor = !deferSessionFilesDiff && !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
     ? (options.changedAncestorStats.get(fullPath) || null)
     : null;
-  const changedFile = entry.kind === 'file'
+  const changedFile = !deferSessionFilesDiff && entry.kind === 'file'
     ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
     : null;
   const changedFileStatus = changedFile ? sessionFileDisplayStatus(changedFile) : '';
   const gitStatus = indexExcludedEntry
     ? t('finder.index.excluded')
     : entry.kind === 'file'
-    ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
+    ? (deferSessionFilesDiff ? '' : (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath)))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const displayName = differMode ? {text: entry.display_name || entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const directoryDiffParts = entry.kind === 'dir'
     ? (differMode
       ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
-      : (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {})))
+      : (deferSessionFilesDiff
+        ? []
+        : (entry.is_repo === true ? fileTreeRepoDiffParts(fullPath) : sessionFileDiffText(changedAncestor || {}))))
     : [];
   const dirCountText = entry.kind === 'dir'
     ? (differMode && directoryDiffParts.length
       ? ''
       : (differMode
         ? fileTreeDirCountText(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap))
-        : fileTreeDirCountText(changedAncestor?.count)))
+        : (deferSessionFilesDiff ? '' : fileTreeDirCountText(changedAncestor?.count))))
     : '';
   const icon = options.iconText != null
     ? String(options.iconText)
@@ -3535,8 +3661,8 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
       disclosureExpanded: entry.kind === 'dir' ? options.expanded === true : undefined,
       nameHtml: differMode ? null : displayName.html,
       dateText: options.dateText || '',
-      diffParts: changedFile ? sessionFileDiffText(changedFile) : directoryDiffParts,
-      agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
+      diffParts: changedFile && !deferSessionFilesDiff ? sessionFileDiffText(changedFile) : directoryDiffParts,
+      agentHtml: deferSessionFilesDiff ? '' : (changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '')),
       dirCountText,
       preserveDirCount: options.preserveDirCount === true,
       preserveDate: options.preserveDate === true,
@@ -3659,6 +3785,7 @@ function bindFinderRowHandlers(row, state) {
   }
   row.onpointerdown = event => {
     if (event.button != null && event.button !== 0) return;
+    row.__fileTreeLastPointerType = event.pointerType || '';
     cancelPendingFileExplorerActiveSync();
     row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
   };
@@ -3685,7 +3812,11 @@ function bindFinderRowHandlers(row, state) {
     if (start && Math.max(dx, dy) > 4) return;
     event.preventDefault();
     event.stopPropagation();
-    if (event.detail > 1) return;
+    // Desktop double-click keeps its dedicated ondblclick route, but touch browsers report the
+    // second intentional tap with detail=2. Dropping that pointerup makes a touch collapse look
+    // dead because the first tap expanded the directory and the second tap is the collapse.
+    if (event.pointerType !== 'touch' && event.detail > 1) return;
+    if (event.pointerType === 'touch') armFileTreeTouchClickSuppression(row);
     row.__fileTreePointerActivated = true;
     setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
     scheduleFileTreeRowActivation(row, fullPath, entry, event);
@@ -3698,6 +3829,12 @@ function bindFinderRowHandlers(row, state) {
       return;
     }
     if (typeof dockviewTabContentInteractionSuppressed === 'function' && dockviewTabContentInteractionSuppressed()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (consumeFileTreeTouchClickSuppression(row, event)) {
+      row.__fileTreePointerActivated = false;
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -3715,6 +3852,10 @@ function bindFinderRowHandlers(row, state) {
   row.ondblclick = event => {
     event.preventDefault();
     event.stopPropagation();
+    // Chromium can synthesize a dblclick after two touch taps. Touch already uses each tap for
+    // expand/collapse in the pointerup path; letting this desktop-only route run would navigate
+    // into the directory and make the original row disappear instead of collapsing it.
+    if (row.__fileTreeLastPointerType === 'touch' || event.sourceCapabilities?.firesTouchEvents === true) return;
     if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
     else openFileInEditor(fullPath, entry);
   };
@@ -3817,6 +3958,9 @@ function fileTreeRowViewModel(state) {
       kind: entry.kind,
       name: entry.name,
       isRepo: entry.is_repo === true ? 'true' : 'false',
+      repoInfoResolved: entry.kind === 'dir'
+        ? (entry.repo_info_deferred === true || (state.options.deferSessionFilesDiff === true && entry.is_repo === true && !entry.repo) ? 'false' : 'true')
+        : '',
       isSymlink: entry.is_symlink === true ? 'true' : 'false',
       symlinkTarget: entry.symlink_target || '',
       indexed: state.indexedDirectory ? 'true' : 'false',
@@ -3877,6 +4021,16 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     sessionHighlightSets: options.sessionHighlightSets || fileExplorerSessionHighlightSets(),
     changedAncestorStats: options.changedAncestorStats instanceof Map ? options.changedAncestorStats : fileTreeChangedAncestorStats(),
   };
+  // Every Finder tree renderer, including a direct user expansion, must honor the same first-paint
+  // boundary. The root open path passes this flag explicitly, but expansion and sync renderers do not
+  // share that call site; derive it here so a pending session-files payload cannot leak stale +/- rows.
+  if (
+    renderOptions.view === 'finder'
+    && typeof finderSessionFilesDiffIsDeferred === 'function'
+    && finderSessionFilesDiffIsDeferred()
+  ) {
+    renderOptions.deferSessionFilesDiff = true;
+  }
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
   const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
@@ -4076,7 +4230,8 @@ function updateFileTreeGitStatusRows(targetRows = null) {
   for (const row of rows) {
     if (!row?.dataset?.path || row.dataset.tabberType) continue;
     const fullPath = row.dataset.path || '';
-    const isRepo = Boolean(exactFileExplorerRepoInfo(fullPath));
+    const isRepo = Boolean(exactFileExplorerRepoInfo(fullPath))
+      || (row.dataset.repoInfoResolved !== 'true' && row.dataset.isRepo === 'true');
     row.dataset.isRepo = isRepo ? 'true' : 'false';
     const entry = {
       kind: row.dataset.kind,
@@ -4085,7 +4240,10 @@ function updateFileTreeGitStatusRows(targetRows = null) {
       is_symlink: row.dataset.isSymlink === 'true',
       symlink_target: row.dataset.symlinkTarget || '',
     };
-    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel') || row.dataset.changesFolderToggle || row.dataset.openChangeFile || row.dataset.openChangeDirectory);
+    // `openChangeFile` is an action on a changed Finder row, not proof that the row belongs to the
+    // Differ surface. Only the rendered surface or directory action markers select Differ mode;
+    // otherwise Finder's late session-files payload must be allowed to replace its deferred diff cell.
+    const inDiffer = Boolean(row.closest?.('.file-explorer-changes-panel, .git-diff-file-tree') || row.dataset.changesFolderToggle || row.dataset.openChangeDirectory);
     applyFileTreeRowDerivedState(row, fileTreeRowDerivedState(fullPath, entry, {
       changedAncestorStats,
       differMode: inDiffer,
@@ -4094,7 +4252,11 @@ function updateFileTreeGitStatusRows(targetRows = null) {
       expanded: entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {differMode: inDiffer}),
       iconText: row.querySelector(':scope > .file-tree-icon')?.textContent || '',
       preserveDate: true,
-      preserveDiff: true,
+      deferSessionFilesDiff: !inDiffer && typeof finderSessionFilesDiffIsDeferred === 'function' && finderSessionFilesDiffIsDeferred(),
+      // Differ owns its already-rendered status-count columns through entriesByDir. Finder rows
+      // instead derive repository +/- totals from the session-files payload, so allow the late
+      // session-files backfill to repaint those columns after the fast directory listing.
+      preserveDiff: inDiffer,
       preserveDirCount: inDiffer,
     }));
     if (!inDiffer && isRepo) {
@@ -5137,14 +5299,83 @@ function tabberActivityPayloadIsRefreshPlaceholder(payload) {
   return payload?.cache?.refreshing === true && !tabberActivityPayloadHasUsefulData(payload);
 }
 
+function mergeTabberActivitySessionMetadata(payload) {
+  const sessionPayloads = payload?.sessions && typeof payload.sessions === 'object' ? payload.sessions : null;
+  const order = Array.isArray(payload?.session_order) ? payload.session_order : null;
+  if (!sessionPayloads && !order) return false;
+  const prior = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
+    ? transcriptMetadataState.payload
+    : {};
+  const priorSessions = prior.sessions && typeof prior.sessions === 'object' ? prior.sessions : {};
+  // A session order supplied by the global tmux inventory is authoritative.  Do not retain a
+  // disappeared session in the metadata map, because tabberOrderedSessions() also considers map
+  // keys that are not present in the current order.
+  const sessions = order
+    ? Object.fromEntries(order.filter(session => priorSessions[session] && typeof priorSessions[session] === 'object').map(session => [session, priorSessions[session]]))
+    : {...priorSessions};
+  for (const [session, info] of Object.entries(sessionPayloads || {})) {
+    if (!info || typeof info !== 'object') continue;
+    // When the backend supplies an authoritative global roster, metadata keys outside that
+    // roster are stale cross-route enrichments and must not create a synthetic Tabber row.
+    if (order && !order.includes(session)) continue;
+    sessions[session] = {...(sessions[session] || {}), ...info};
+  }
+  const nextOrder = order || Object.keys(sessions);
+  setTranscriptMetadataPayload({...prior, sessions, session_order: nextOrder}, {invalidateRequest: false});
+  const changed = updateSessionList(nextOrder);
+  if (changed) {
+    renderSessionButtons();
+    if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
+  }
+  return changed;
+}
+
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
-  if (!payload || typeof payload !== 'object' || !payload.activity || typeof payload.activity !== 'object') return false;
+  if (!payload || typeof payload !== 'object') return false;
+  const payloadTopologyGeneration = Number(payload.topology_generation || 0);
+  const currentTopologyGeneration = Math.max(Number(tmuxTopologyGeneration || 0), Number(transcriptMetadataState.rosterGeneration || 0));
+  if (Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+      && Number.isSafeInteger(payloadTopologyGeneration)
+      && payloadTopologyGeneration < currentTopologyGeneration) return false;
+  const hasActivity = payload.activity && typeof payload.activity === 'object';
+  const hasTopology = Array.isArray(payload.session_order)
+    || (payload.sessions && typeof payload.sessions === 'object');
+  if (!hasActivity && !hasTopology) return false;
+  // Do not advance the shared roster clock from a response that has no usable activity or
+  // topology. Such a placeholder must not poison the generation guard for the next valid read.
+  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration >= currentTopologyGeneration
+      && typeof adoptTopologyGeneration === 'function') adoptTopologyGeneration(payload);
+  if (Number.isSafeInteger(payloadTopologyGeneration) && payloadTopologyGeneration > transcriptMetadataState.rosterGeneration) {
+    transcriptMetadataState.rosterGeneration = payloadTopologyGeneration;
+  }
+  const hasVersionedTopology = Object.prototype.hasOwnProperty.call(payload, 'topology_generation')
+    && Number.isSafeInteger(payloadTopologyGeneration)
+    && payloadTopologyGeneration > 0;
+  // Python's legacy activity/roster responses predate topology generations, so they remain
+  // valid on a cold boot. Once a versioned Go metadata/activity response has established a
+  // roster, an unversioned response is only safe if it contains every known session. Otherwise
+  // it is an older cross-route read and must not make a live Tabber row disappear.
+  if (!hasVersionedTopology && currentTopologyGeneration > 0) {
+    const currentOrder = Array.isArray(transcriptMetadataState.payload.session_order)
+      ? transcriptMetadataState.payload.session_order.map(session => String(session))
+      : [];
+    const incomingOrder = Array.isArray(payload.session_order)
+      ? payload.session_order.map(session => String(session))
+      : Object.keys(payload.sessions && typeof payload.sessions === 'object' ? payload.sessions : {});
+    const incomingSessions = new Set(incomingOrder);
+    if (currentOrder.some(session => !incomingSessions.has(session))) return false;
+  }
+  // Session metadata is a valid topology-only repair when the activity product is unavailable.
+  // Keep the shared payload shape explicit so renderers never interpret missing activity as a
+  // useful empty snapshot.
+  if (!hasActivity) payload = {...payload, activity: {}};
   // Generation zero denotes a direct/pushed snapshot rather than an HTTP completion. Give it a new
   // generation so any request started before that snapshot cannot roll the cache back afterward.
   const generation = Number(requestGeneration) || ++tabberActivityState.requestGeneration;
   if (generation > 0 && generation < tabberActivityState.appliedGeneration) return false;
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
+  mergeTabberActivitySessionMetadata(payload);
   tabberActivityPayload = payload;
   tabberActivityState.loaded = true;
   // A refresh placeholder is not an authoritative snapshot. Let an older in-flight full response
@@ -5165,10 +5396,49 @@ async function fetchTabberActivity(options = {}) {
       const params = new URLSearchParams();
       params.set('hours', String(normalizeSessionFileLookbackHours(tabberSessionFileLookbackHours)));
       params.set('visible', visible ? '1' : '0');
+      // Tabber is the machine-wide tmux view. Python's activity API only includes
+      // that roster when the caller opts into the global scope; keep the Go and
+      // Python backends on the same one-session-per-row contract.
+      params.set('scope', 'all');
       const payload = await apiFetchJson(`/api/activity?${params.toString()}`, {cache: 'no-store'});
-      applyTabberActivityPayload(payload, requestGeneration);
+      const applied = applyTabberActivityPayload(payload, requestGeneration);
+      // Go owns live agent status in the activity product.  Keep the shared
+      // auto-status model in step with every accepted activity refresh, not
+      // only the initial stats-only boot and explicit status repair path; the
+      // Tabber and pane-tab renderers read that shared model for the green
+      // working marker.
+      if (applied
+          && typeof goAgentStatusUsesActivityFallback === 'function'
+          && goAgentStatusUsesActivityFallback()
+          && typeof adoptTabberActivityAsAutoStatusFallback === 'function') {
+        const adopted = adoptTabberActivityAsAutoStatusFallback();
+        if (adopted > 0) {
+          // The activity request's finally block owns the Tabber tree refresh.
+          // Repaint only the status-bearing pane chrome here so this repair
+          // does not trigger Tabber's lazy session-files reads a second time.
+          if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+          if (typeof renderAutoApproveButtons === 'function') renderAutoApproveButtons();
+          if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
+        }
+      }
     } catch (_) {
-      // Keep the last snapshot; the interval retries without a render-triggered request loop.
+      // The activity product is optional for topology. Python's session-metadata path still owns
+      // the live roster, so use it as a topology-only repair instead of hiding every tmux session
+      // when activity collection is temporarily unavailable.
+      try {
+        const metadata = await apiFetchJson('/api/session-metadata', {cache: 'no-store'});
+        applyTabberActivityPayload({...metadata, activity: {}}, requestGeneration);
+      } catch (_) {
+        // Older Go/compatibility servers may expose the lighter roster through /api/tmux even
+        // when their full metadata build is unavailable.  It carries the same authoritative
+        // session_order, so preserve one Tabber row per live session instead of clearing the tree.
+        try {
+          const roster = await apiFetchJson('/api/tmux', {cache: 'no-store'});
+          applyTabberActivityPayload({...roster, activity: {}}, requestGeneration);
+        } catch (_) {
+          // Keep the last snapshot; the interval retries without a render-triggered request loop.
+        }
+      }
     } finally {
       if (tabberActivityState.request === request) {
         tabberActivityState.loaded = true;
@@ -5296,18 +5566,22 @@ async function fetchTabberSessionFilesBatch(sessions, options = {}) {
   if (itemInLayout(tabberItemId)) refreshTabberPanels();
 }
 
-// Tabber level 0: session_order first, then any remaining live tmux sessions with panes.
+// Tabber level 0: one row for every live tmux session in session_order. Pane metadata enriches
+// the row with windows, but a session must remain visible while that metadata is unavailable.
 function tabberOrderedSessions() {
   const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
   const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const ordered = [];
+  // `session_order` is the backend's authoritative global tmux roster.  It can arrive before the
+  // older top-level `sessions` list has converged (notably on a Go stats-only boot), so do not
+  // discard a valid roster entry merely because `isTmuxSession()` still reflects that old list.
+  // When no roster order exists, retain the legacy guard for metadata-only callers.
+  const hasAuthoritativeRoster = order.length > 0;
   for (const session of [...order, ...all]) {
     if (seen.has(session)) continue;
     seen.add(session);
-    if (!isTmuxSession(session)) continue;
-    const info = transcriptMetadataState.payload.sessions?.[session];
-    if (!Array.isArray(info?.panes) || !info.panes.length) continue;
+    if (!hasAuthoritativeRoster && !isTmuxSession(session)) continue;
     ordered.push(session);
   }
   return ordered;
@@ -5396,7 +5670,10 @@ function buildTabberTree() {
       const agentStatusForIcon = agentStatusForDisplay || (active && ['claude', 'codex', 'opencode'].includes(agentKey)
         ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
         : agentStatus);
-      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session, {animate: false});
+      // Keep the Tabber window marker on the shared live-status pulse path.  A working Codex/Claude
+      // pane must remain visibly green while the tree is open; disabling animation here made the
+      // status look idle even though the backend had classified the pane as working.
+      const activityIconHtml = agentWindowActivityIconHtmlForStatus(agentStatusForIcon, agentKey, session);
       const dateDisplay = tabberWindowDateDisplay(windowMtime, agentStatusForDisplay, nowSeconds);
       if (repoEntries.length) entriesByDir.set(normalizeDirectoryPath(windowPath), repoEntries);
       return {

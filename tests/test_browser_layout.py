@@ -8095,6 +8095,66 @@ def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
     assert metrics["clicks"] == 1, metrics
 
 
+def test_touch_pane_minimize_uses_a_large_one_tap_hit_target(browser, tmp_path):
+    page = tmp_path / "touch-pane-minimize.html"
+    with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html("""
+          <div class="yolomux-dockview"><div class="dockview-pane-header-actions"><div class="tabs">
+            <button id="touch-minimize" class="tab pane-minimize pc-window-control pc-minimize" type="button" data-pane-minimize="__finder__"></button>
+          </div></div></div>
+        """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
+        )
+        browser.execute_script("document.body.classList.add('app-topbar-touch-compact');")
+        trusted_touch_tap(browser, '#touch-minimize')
+        metrics = browser.execute_script(
+            "const control = document.getElementById('touch-minimize'); const style = getComputedStyle(control); return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, touchAction: style.touchAction};"
+        )
+    assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
+    assert metrics["touchAction"] == "manipulation", metrics
+
+
+def test_touch_pane_minimize_dispatches_the_real_layout_action(browser, tmp_path):
+    with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=390,
+            grid_height=780,
+        )
+        wait_for_dockview(browser, min_tabs=2)
+        selector = '[data-pane-minimize="1"]'
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "const button = document.querySelector(arguments[0]); return Boolean(button) && document.body.classList.contains('app-topbar-touch-compact');",
+                selector,
+            )
+        )
+        before = browser.execute_script(
+            "return {source: slotForItem('1'), target: slotForItem('2'), width: document.querySelector(arguments[0]).getBoundingClientRect().width};",
+            selector,
+        )
+        trusted_touch_tap(browser, selector)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return slotForItem('1') === null && slotForItem('2') === 'left' && activeItemForSide('left') === '2';"
+            )
+        )
+        after = browser.execute_script(
+            "return {source: slotForItem('1'), target: slotForItem('2'), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};"
+        )
+    assert before["source"] == "left" and before["target"] == "left", before
+    assert before["width"] >= 36, before
+    assert after == {"source": None, "target": "left", "errors": [], "rejections": []}, after
+
+
 def test_touch_editor_preview_and_diff_controls_keep_desktop_button_geometry(browser, tmp_path):
     page = tmp_path / "touch-editor-controls.html"
     browser.execute_cdp_cmd(
@@ -8231,7 +8291,7 @@ def test_full_mobile_app_and_compact_menu_respect_nonzero_safe_area_insets(brows
         )
         metrics = browser.execute_script(
             """
-            document.body.classList.add('app-topbar-touch-compact');
+            document.body.classList.add('app-phone-single-pane', 'app-topbar-touch-compact');
             const rect = node => {
               const value = node.getBoundingClientRect();
               return {left: value.left, top: value.top, right: value.right, bottom: value.bottom};
@@ -12190,6 +12250,41 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     assert terminal_closed["openIds"] == [], terminal_closed
 
 
+def test_ipad_app_menu_dropdown_keeps_normal_content_width(browser, tmp_path):
+    ipad_user_agent = "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"
+    with trusted_touch_emulation(browser, user_agent=ipad_user_agent):
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True})
+        load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return window.__terminalOpened >= 1 && document.querySelector('.app-menu[data-app-menu=\\\"file\\\"] > .app-menu-button') !== null"
+            )
+        )
+        browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
+        metrics = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const root = document.querySelector('.app-menu[data-app-menu="file"]');
+                const popover = root?.querySelector(':scope > .app-menu-popover');
+                const style = popover ? getComputedStyle(popover) : null;
+                const rect = popover?.getBoundingClientRect?.();
+                if (!root?.classList.contains('open') || !popover || !rect?.width) return null;
+                return {
+                  width: rect.width,
+                  viewportWidth: innerWidth,
+                  position: style.position,
+                  phoneSinglePane: document.body.classList.contains('app-phone-single-pane'),
+                  touchCompact: document.body.classList.contains('app-topbar-touch-compact'),
+                };
+                """
+            )
+        )
+    assert metrics["touchCompact"] is True, metrics
+    assert metrics["phoneSinglePane"] is False, metrics
+    assert metrics["position"] == "absolute", metrics
+    assert metrics["width"] < metrics["viewportWidth"] - 32, metrics
+
+
 def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     WebDriverWait(browser, 5).until(
@@ -12348,7 +12443,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         mobileSinglePaneMode = () => true;
         syncTopbarPacking = () => [];
         terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
-        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
+        document.body.classList.add('app-phone-single-pane', 'app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
         renderSessionButtons({force: true});
         """
     )
@@ -12567,7 +12662,7 @@ def test_live_compact_menus_root_button_survives_coalesced_rerender_at_tap(brows
         mobileSinglePaneMode = () => true;
         syncTopbarPacking = () => [];
         terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
-        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
+        document.body.classList.add('app-phone-single-pane', 'app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
         renderSessionButtons({force: true});
         """
     )

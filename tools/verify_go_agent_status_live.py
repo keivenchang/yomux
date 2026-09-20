@@ -42,6 +42,53 @@ def copy_live_jsonl(source: Path, destination: Path, now: float) -> None:
     destination.write_text("\n".join(records) + "\n", encoding="utf-8")
 
 
+def write_synthetic_codex_token_usage_jsonl(destination: Path, now: float) -> None:
+    """Create the current Codex token_usage_record shape without host input."""
+    records = [
+        {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 2)),
+            "type": "session_meta",
+            "payload": {"id": "synthetic-codex-thread", "model": "gpt-synthetic"},
+        },
+    ]
+    for offset, input_tokens, cached_tokens, output_tokens, thread_input, thread_cached, thread_output in (
+        (1, 10, 2, 5, 10, 2, 5),
+        (0, 6, 3, 4, 16, 5, 9),
+    ):
+        usage = {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+        thread_usage = {
+            "input_tokens": thread_input,
+            "cached_input_tokens": thread_cached,
+            "output_tokens": thread_output,
+            "reasoning_output_tokens": thread_output,
+            "total_tokens": thread_input + thread_output,
+        }
+        records.append(
+            {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - offset)),
+                "type": "token_usage_record",
+                "payload": {
+                    "thread_id": "synthetic-codex-thread",
+                    "turn_id": f"synthetic-turn-{offset}",
+                    "response_id": f"synthetic-response-{offset}",
+                    "usage": usage,
+                    "turn_token_usage": usage,
+                    "thread_token_usage": thread_usage,
+                },
+            }
+        )
+    destination.write_text(
+        "\n".join(json.dumps(record, separators=(",", ":")) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+
 def make_opencode_database(path: Path, now_ms: int) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -87,6 +134,50 @@ def get_json(url: str, headers: dict[str, str]) -> dict[str, object]:
         return json.load(response)
 
 
+def wait_for_roster(
+    url: str,
+    headers: dict[str, str],
+    expected: dict[str, str],
+    *,
+    timeout: float = 20,
+) -> dict[str, object]:
+    """Wait for one persisted agent-status roster, not just a successful HTTP response."""
+    deadline = time.monotonic() + timeout
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        latest = get_json(url, headers)
+        roster = latest.get("agents")
+        if isinstance(roster, list):
+            states = {
+                str(item.get("kind")): str(item.get("state"))
+                for item in roster
+                if isinstance(item, dict) and item.get("kind")
+            }
+            if all(states.get(kind) == state for kind, state in expected.items()):
+                return latest
+        time.sleep(0.25)
+    raise AssertionError(f"agent roster did not reach {expected}: {latest}")
+
+
+def set_opencode_running_fixture(database: Path, running: bool) -> None:
+    """Toggle a synthetic running-tool row; never touches an operator database."""
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM part WHERE id = 'part-running-fixture'")
+        if running:
+            connection.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "part-running-fixture",
+                    "msg-live",
+                    "ses-live",
+                    int(time.time() * 1000),
+                    int(time.time() * 1000),
+                    '{"type":"tool","state":{"status":"running"}}',
+                ),
+            )
+        connection.commit()
+
+
 def main() -> int:
     tmux = shutil.which("tmux")
     python = shutil.which("python3")
@@ -108,7 +199,7 @@ def main() -> int:
         now = time.time()
         make_opencode_database(root / "opencode.db", int(now * 1000))
         copy_live_jsonl(REPO / "tests/fixtures/current_model_usage/observed.claude.jsonl", home / "claude" / "projects" / "live.jsonl", now)
-        copy_live_jsonl(REPO / "tests/fixtures/current_model_usage/observed.codex.jsonl", home / "codex" / "sessions" / "live.jsonl", now)
+        write_synthetic_codex_token_usage_jsonl(home / "codex" / "sessions" / "live.jsonl", now)
         opencode_interpreter = root / "opencode"
         shutil.copy(Path(python).resolve(), opencode_interpreter)
         opencode_interpreter.chmod(0o700)
@@ -180,6 +271,11 @@ def main() -> int:
                 # processes cannot contaminate the isolated fixture's root.
                 "YOLOMUX_OPENCODE_TMUX_SCOPE": "1",
                 "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"),
+                # Never admit host /proc, memory, or GPU input into a
+                # development verifier. The Go server's explicit synthetic
+                # source carries the measured CPU fixtures instead.
+                "YOLOMUX_STATS_SYNTHETIC_HOST": "1",
+                "YOLOMUX_STATS_SYNTHETIC_INVENTORY": "1",
                 "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
                 "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
                 "YOLOMUX_PRICING_CATALOG": str(REPO / "yolomux_lib" / "data" / "model_pricing.json"),
@@ -207,8 +303,43 @@ def main() -> int:
             first_stream_line = stats_stream.readline().decode("utf-8", errors="replace")
             if not first_stream_line.startswith("id: "):
                 raise AssertionError(f"stats stream did not start with an SSE id: {first_stream_line!r}")
+            system_status = get_json(base + "/api/system-status", auth)
+            watcher = system_status.get("tmux_signal_watcher")
+            if not isinstance(watcher, dict) or watcher.get("state") != "attached" or watcher.get("healthy") is not True:
+                raise AssertionError(f"synthetic tmux watcher did not attach: {system_status}")
+            if set(watcher.get("sessions", [])) != set(started_sessions) or watcher.get("process_pid") != 0:
+                raise AssertionError(f"synthetic tmux watcher roster/identity was wrong: {watcher}")
+            status_url = base + "/api/stats-agent-status"
+            wait_for_roster(status_url, auth, {"claude": "idle", "codex": "idle", "opencode": "idle"})
+            # Exercise the actual pane polling and the OpenCode state reader in one
+            # synthetic roster: Codex is visibly working, Claude is asking for input,
+            # and OpenCode has a matching synthetic running-tool row. This proves that
+            # the persisted roster exposes both green (run) and red (ask) activity.
+            set_opencode_running_fixture(root / "opencode.db", True)
+            for client, command in (("claude", "mock ask_user_question"), ("codex", "mock goal_active")):
+                sent = run(tmux, "-S", str(socket_path), "send-keys", "-t", f"{sessions[client]}:", command, "Enter", env=env, check=False)
+                if sent.returncode != 0:
+                    raise AssertionError(f"could not drive {client} synthetic state: {sent.stderr}")
+            status = wait_for_roster(status_url, auth, {"claude": "ask", "codex": "run", "opencode": "run"})
+            counts = status.get("counts")
+            if not isinstance(counts, dict) or counts.get("running") != 2 or counts.get("red") != 1:
+                raise AssertionError(f"running/red counts did not follow the synthetic roster: {status}")
             time.sleep(45)
-            status = get_json(base + "/api/stats-agent-status", auth)
+            status = get_json(status_url, auth)
+            system_status_after = get_json(base + "/api/system-status", auth)
+            runtime_diagnostics = system_status_after.get("stats_runtime", {})
+            host_diagnostics = runtime_diagnostics.get("collectors", {}).get("host", {})
+            process_diagnostics = runtime_diagnostics.get("process_diagnostics", {})
+            if host_diagnostics.get("last_cpu_process_rows") != 3 or host_diagnostics.get("last_memory_process_rows") != 3:
+                raise AssertionError(
+                    "synthetic host collector admitted non-fixture rows: "
+                    f"{host_diagnostics}"
+                )
+            if process_diagnostics.get("last_agent_inventory_rows") != 3:
+                raise AssertionError(
+                    "synthetic agent inventory admitted non-fixture rows: "
+                    f"{process_diagnostics}"
+                )
             captures = {}
             for session in started_sessions:
                 captures[session] = run(tmux, "-S", str(socket_path), "capture-pane", "-p", "-J", "-S", "-12", "-t", f"{session}:", env=env, check=False).stdout
@@ -234,10 +365,15 @@ def main() -> int:
                 raise AssertionError("live collector persisted neither GPU facts nor explicit GPU unavailable evidence")
             if any(timestamp < now - 60 or timestamp >= now for timestamp in usage_times):
                 raise AssertionError(f"live usage_atoms timestamps are outside the query window: {usage_times}")
-            providers_models = {(json.loads(payload).get("provider"), json.loads(payload).get("model")) for _, _, _, payload in usage}
-            expected_providers = {"claude", "codex", "openai"}
+            usage_payloads = [json.loads(payload) for _, _, _, payload in usage]
+            providers_models = {(payload.get("provider"), payload.get("model")) for payload in usage_payloads}
+            # Codex is priced through Python's OpenAI catalog identity; the source kind remains
+            # explicit so provider attribution and execution attribution are both preserved.
+            expected_providers = {"claude", "openai"}
             if {provider for provider, _ in providers_models} != expected_providers:
                 raise AssertionError(f"live usage_atoms providers = {providers_models}")
+            if not any(payload.get("provider") == "openai" and payload.get("execution_source") == "codex" for payload in usage_payloads):
+                raise AssertionError(f"live usage_atoms omitted Python-compatible Codex execution attribution: {usage_payloads}")
             rates = status["token_rates"]
             if not rates["total_per_second"] > 0 or not rates["input_per_second"] > 0 or not rates["output_per_second"] > 0:
                 raise AssertionError(f"live token rates are not positive: {rates}")
@@ -247,7 +383,7 @@ def main() -> int:
             cost_report = snapshot.get("cost_report", {})
             if int(cost_report.get("total_tokens", 0)) <= 0 or int(cost_report.get("unpriced", {}).get("tokens", 0)) <= 0:
                 raise AssertionError(f"live cost report did not preserve usage: {cost_report}")
-            print(json.dumps({"tmux_panes": inventory.splitlines(), "captures": captures, "api": status, "snapshot": snapshot, "db": {"observations": [{"family": family, "payload": json.loads(payload)} for family, payload in observations], "unavailable": [{"family": family, "source_id": source_id, "reason": reason} for family, source_id, reason in unavailable], "usage_atoms": [{"direction": direction, "cache_role": cache_role, "unit": unit, "payload": json.loads(payload)} for direction, cache_role, unit, payload in usage]}}, sort_keys=True))
+            print(json.dumps({"tmux_panes": inventory.splitlines(), "tmux_watcher": watcher, "captures": captures, "api": status, "system_status": system_status_after, "snapshot": snapshot, "db": {"observations": [{"family": family, "payload": json.loads(payload)} for family, payload in observations], "unavailable": [{"family": family, "source_id": source_id, "reason": reason} for family, source_id, reason in unavailable], "usage_atoms": [{"direction": direction, "cache_role": cache_role, "unit": unit, "payload": json.loads(payload)} for direction, cache_role, unit, payload in usage]}}, sort_keys=True))
             server_log.flush()
             print(server_log_path.read_text(encoding="utf-8"), flush=True)
         finally:

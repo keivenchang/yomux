@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	finderJobWorkers     = 2
-	finderJobQueue       = 32
-	finderBulkJobQueue   = 8
-	finderStreamWorkers  = 2
-	finderStreamJobQueue = 8
-	finderJobDeadline    = 10 * time.Minute
-	finderFastListBudget = 50 * time.Millisecond
+	finderJobWorkers        = 2
+	finderJobQueue          = 32
+	finderBackgroundWorkers = 1
+	finderBackgroundQueue   = 8
+	finderBulkJobQueue      = 8
+	finderStreamWorkers     = 2
+	finderStreamJobQueue    = 8
+	finderJobDeadline       = 10 * time.Minute
+	finderFastListBudget    = 50 * time.Millisecond
 )
 
 type finderProduct struct {
@@ -35,6 +37,17 @@ type finderProduct struct {
 
 func newFinderJobScheduler() *work.Scheduler {
 	return work.New(finderJobWorkers, finderJobQueue)
+}
+
+func newFinderBackgroundJobScheduler() *work.Scheduler {
+	return work.New(finderBackgroundWorkers, finderBackgroundQueue)
+}
+
+func (s *server) finderBackgroundScheduler() *work.Scheduler {
+	if s.finderBackgroundJobs != nil {
+		return s.finderBackgroundJobs
+	}
+	return s.finderJobs
 }
 
 func newFinderBulkJobScheduler() *work.Scheduler {
@@ -175,11 +188,15 @@ func normalizeFinderSearchLimit(raw string) int {
 }
 
 func (s *server) enqueueFinderJSON(w http.ResponseWriter, ctx context.Context, route, operation, path string, task func(context.Context) (map[string]any, *finder.Error)) {
-	s.enqueueFinderJSONWithBudget(w, ctx, route, operation, path, 0, task)
+	s.enqueueFinderJSONWithScheduler(w, ctx, s.finderJobs, route, operation, path, 0, task)
 }
 
 func (s *server) enqueueFinderJSONWithBudget(w http.ResponseWriter, ctx context.Context, route, operation, path string, budget time.Duration, task func(context.Context) (map[string]any, *finder.Error)) {
-	if s.finderJobs == nil || s.events == nil {
+	s.enqueueFinderJSONWithScheduler(w, ctx, s.finderJobs, route, operation, path, budget, task)
+}
+
+func (s *server) enqueueFinderJSONWithScheduler(w http.ResponseWriter, ctx context.Context, scheduler *work.Scheduler, route, operation, path string, budget time.Duration, task func(context.Context) (map[string]any, *finder.Error)) {
+	if scheduler == nil || s.events == nil {
 		payload, finderErr := task(ctx)
 		finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
 		return
@@ -191,7 +208,7 @@ func (s *server) enqueueFinderJSONWithBudget(w http.ResponseWriter, ctx context.
 		return
 	}
 	jobContext, cancel := newFinderJobContext(acceptedFinderJobParent(ctx), finderJobDeadline)
-	result, err := s.finderJobs.Submit(jobContext, id, func(ctx context.Context) (any, error) {
+	result, err := scheduler.Submit(jobContext, id, func(ctx context.Context) (any, error) {
 		payload, finderErr := task(ctx)
 		if finderErr != nil {
 			return finderErr, nil
@@ -321,10 +338,6 @@ func (s *server) finishFinderDeleteOperation(id, requestID, path string, result 
 	}
 	terminal, status := finderJSONCompletion(requestID, completed)
 	_, _ = s.terminalizeOperation(id, terminal, status)
-}
-
-func (s *server) enqueueFinderFastList(w http.ResponseWriter, ctx context.Context, path string) {
-	s.enqueueFinderList(w, ctx, path, false, "fast_list")
 }
 
 func (s *server) enqueueFinderList(w http.ResponseWriter, ctx context.Context, path string, includeRepo bool, operation string) {

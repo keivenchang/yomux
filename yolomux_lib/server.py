@@ -2618,6 +2618,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 "epoch": client_event_snapshot["epoch"],
                 "resource_revisions": client_event_snapshot["resource_revisions"],
             })
+            if not operation_id and not replay_operation_ids and hasattr(self.server.app, "replay_shared_background_client_events"):
+                self.server.app.replay_shared_background_client_events(subscriber_id=subscriber_id)
             if operation_id and hasattr(self.server.app, "operation_replay_payload"):
                 replay = self.server.app.operation_replay_payload(operation_id)
                 if isinstance(replay, dict):

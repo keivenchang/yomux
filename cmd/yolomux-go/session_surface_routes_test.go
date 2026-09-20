@@ -329,6 +329,32 @@ func TestAgentKindFromCommandRecognizesWrappedAgents(t *testing.T) {
 	}
 }
 
+func TestTmuxSignalPaneAgentRecognizesCodexBelowNodeLauncher(t *testing.T) {
+	s := &server{processEntriesFn: func() ([]procEntry, error) {
+		return []procEntry{{PID: 200, PPID: 100, Command: "node /home/keivenc/.local/bin/codex --resume thread"}}, nil
+	}}
+	kind, pid, command := s.tmuxSignalPaneAgent(100, "node")
+	if kind != "codex" || pid != 200 || command != "node /home/keivenc/.local/bin/codex --resume thread" {
+		t.Fatalf("tmux signal agent = (%q, %d, %q), want wrapped Codex child", kind, pid, command)
+	}
+}
+
+func TestPaneAgentProcessPrefersClassifiedNativeChild(t *testing.T) {
+	s := &server{processEntriesFn: func() ([]procEntry, error) {
+		return []procEntry{
+			{PID: 20, PPID: 10, Command: "node /home/test/.local/bin/codex", Executable: "/usr/bin/node"},
+			{PID: 21, PPID: 20, Command: "/home/test/.local/bin/codex", Executable: "/home/test/.local/bin/codex"},
+		}, nil
+	}}
+	kind, pid, command, executable := s.paneAgentProcess(10, "bash")
+	if kind != "codex" || pid != 21 || command != "/home/test/.local/bin/codex" {
+		t.Fatalf("pane agent = (%q, %d, %q), want native Codex child", kind, pid, command)
+	}
+	if executable != "/home/test/.local/bin/codex" {
+		t.Fatalf("pane agent executable = %q, want native Codex executable", executable)
+	}
+}
+
 func TestAgentTranscriptFallsBackToClaudeCWD(t *testing.T) {
 	root := t.TempDir()
 	transcript := filepath.Join(root, "project", "claude-session.jsonl")

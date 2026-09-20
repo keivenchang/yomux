@@ -42,30 +42,15 @@ func derivedCacheGeneration(generatedAt float64, ringGeneration int64) int64 {
 	return base + ringGeneration
 }
 
-// ringBucketPayloadMetadata reads only the publication metadata needed by the
-// service cursor. Legacy development rows are reported as having no metadata so
-// callers can apply the durable timestamp/ring fallback above.
-func ringBucketPayloadMetadata(value string) (cacheGeneration int64, generatedAt float64, present bool, err error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(value), &raw); err != nil || raw == nil {
-		return 0, 0, false, nil
-	}
-	if _, ok := raw["cache_generation"]; !ok {
-		return 0, 0, false, nil
-	}
-	var version int
-	var generated float64
-	var cache int64
-	if err := json.Unmarshal(raw["version"], &version); err != nil || version != RingPayloadVersion {
-		return 0, 0, true, fmt.Errorf("invalid ring payload version")
-	}
-	if err := json.Unmarshal(raw["generated_at"], &generated); err != nil || !finiteNonNegative(generated) {
-		return 0, 0, true, fmt.Errorf("invalid ring payload generated_at")
-	}
-	if err := json.Unmarshal(raw["cache_generation"], &cache); err != nil || cache < 0 {
-		return 0, 0, true, fmt.Errorf("invalid ring payload cache_generation")
-	}
-	return cache, generated, true, nil
+// decodedRingBucketPayload carries the publication metadata alongside the
+// decoded bucket. Keeping both results from one JSON parse avoids making the
+// service decode each uncached payload twice.
+type decodedRingBucketPayload struct {
+	bucket          MaterializedBucket
+	noData          []MaterializedNoData
+	cacheGeneration int64
+	generatedAt     float64
+	hasMetadata     bool
 }
 
 type ringBucketWire struct {
@@ -184,32 +169,40 @@ func encodeRingBucketPayload(bucket MaterializedBucket, noData []MaterializedNoD
 	return string(encoded), nil
 }
 
-func decodeRingBucketPayload(value string) (MaterializedBucket, []MaterializedNoData, error) {
+func decodeRingBucketPayloadWithMetadata(value string) (decodedRingBucketPayload, error) {
 	var envelope ringBucketPayload
 	decoder := json.NewDecoder(bytes.NewReader([]byte(value)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&envelope); err == nil && envelope.Bucket.Duration > 0 {
 		if envelope.Version != RingPayloadVersion || envelope.CacheGeneration < 0 || !finiteNonNegative(envelope.GeneratedAt) {
-			return MaterializedBucket{}, nil, fmt.Errorf("invalid ring bucket payload metadata")
+			return decodedRingBucketPayload{}, fmt.Errorf("invalid ring bucket payload metadata")
 		}
 		bucket, err := ringBucketFromWire(envelope.Bucket)
 		if err != nil {
-			return MaterializedBucket{}, nil, err
+			return decodedRingBucketPayload{}, err
 		}
 		cost, err := costDetailFromWire(envelope.CostDetail)
 		if err != nil {
-			return MaterializedBucket{}, nil, err
+			return decodedRingBucketPayload{}, err
 		}
 		bucket.Cost = cost
-		return bucket, noDataFromWire(envelope.NoData), nil
+		return decodedRingBucketPayload{bucket: bucket, noData: noDataFromWire(envelope.NoData), cacheGeneration: envelope.CacheGeneration, generatedAt: envelope.GeneratedAt, hasMetadata: true}, nil
 	}
 	// Accept the pre-envelope development payload while old databases are
 	// drained. New publications always use the explicit envelope above.
 	var bucket MaterializedBucket
 	if err := json.Unmarshal([]byte(value), &bucket); err != nil {
+		return decodedRingBucketPayload{}, err
+	}
+	return decodedRingBucketPayload{bucket: bucket}, nil
+}
+
+func decodeRingBucketPayload(value string) (MaterializedBucket, []MaterializedNoData, error) {
+	decoded, err := decodeRingBucketPayloadWithMetadata(value)
+	if err != nil {
 		return MaterializedBucket{}, nil, err
 	}
-	return bucket, nil, nil
+	return decoded.bucket, decoded.noData, nil
 }
 
 func ringBucketToWire(bucket MaterializedBucket) ringBucketWire {

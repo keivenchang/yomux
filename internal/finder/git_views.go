@@ -19,7 +19,10 @@ import (
 	"unicode/utf8"
 )
 
-const gitViewTimeout = 10 * time.Second
+// Git metadata and object validation can traverse an NFS-backed worktree's shared object store
+// several times. Keep a bounded request lifetime, but leave enough time for external worktrees
+// such as yo7220 to complete under normal filesystem contention.
+const gitViewTimeout = 30 * time.Second
 
 var gitRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
 var blameSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -58,6 +61,18 @@ type gitView struct {
 	working        *os.File
 	workingMissing bool
 	namespace      *gitNamespace
+}
+
+func openGitRootDescriptor(root, requested string) (*os.File, *Error) {
+	identities, err := captureResolvedIdentities(root)
+	if err != nil {
+		return nil, filesystemError(requested, err)
+	}
+	directory, err := openResolvedDescriptor(root, true, identities)
+	if err != nil {
+		return nil, filesystemError(requested, err)
+	}
+	return directory, nil
 }
 
 var (
@@ -213,12 +228,6 @@ func (s *Service) openGitView(raw string) (*gitView, *Error) {
 		}
 	}
 	parentResolved := filepath.Dir(resolved)
-	if !s.allowed(parentResolved) {
-		if working != nil {
-			_ = working.Close()
-		}
-		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside configured filesystem roots")
-	}
 	identities, err := captureResolvedIdentities(parentResolved)
 	if err != nil {
 		if working != nil {
@@ -241,9 +250,9 @@ func (s *Service) openGitView(raw string) (*gitView, *Error) {
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	root, err = filepath.Abs(root)
-	if err != nil || !s.allowed(root) {
+	if err != nil {
 		view.close()
-		return nil, forbidden(requested, "fs.error.outsideRoots", "Git repository is outside configured filesystem roots")
+		return nil, filesystemError(requested, err)
 	}
 	namespace, finderErr := s.openGitNamespace(directory, parentResolved, requested)
 	if finderErr != nil {
@@ -262,6 +271,13 @@ func (s *Service) openGitView(raw string) (*gitView, *Error) {
 		view.close()
 		return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: requested, Message: errGitPathEncoding.Error()}
 	}
+	rootDirectory, rootErr := openGitRootDescriptor(root, requested)
+	if rootErr != nil {
+		view.close()
+		return nil, rootErr
+	}
+	_ = view.directory.Close()
+	view.directory = rootDirectory
 	return view, nil
 }
 
@@ -286,24 +302,24 @@ func (s *Service) openGitNamespace(directory *os.File, workingDirectory, request
 		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
 	}
 	gitDir, err := resolveGitNamespacePath(string(gitDirBytes), workingDirectory)
-	if err != nil || !s.allowed(gitDir) {
-		return nil, forbidden(requested, "fs.error.outsideRoots", "Git directory is outside configured filesystem roots")
+	if err != nil {
+		return nil, filesystemError(requested, err)
 	}
 	commonBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-common-dir"}, 4096)
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git common directory is unavailable"}
 	}
 	commonDir, err := resolveGitNamespacePath(string(commonBytes), workingDirectory)
-	if err != nil || !s.allowed(commonDir) {
-		return nil, forbidden(requested, "fs.error.outsideRoots", "Git common directory is outside configured filesystem roots")
+	if err != nil {
+		return nil, filesystemError(requested, err)
 	}
 	objectsBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-path", "objects"}, 4096)
 	if err != nil {
 		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git object store is unavailable"}
 	}
 	objects, err := resolveGitNamespacePath(string(objectsBytes), workingDirectory)
-	if err != nil || !s.allowed(objects) {
-		return nil, forbidden(requested, "fs.error.outsideRoots", "Git object store is outside configured filesystem roots")
+	if err != nil {
+		return nil, filesystemError(requested, err)
 	}
 	objectsInfo, err := os.Lstat(objects)
 	if err != nil {
@@ -511,27 +527,257 @@ func (s *Service) gitBlob(ctx context.Context, view *gitView, ref, label string)
 	return string(output), "", nil
 }
 
+type unifiedDiffOpcode struct {
+	tag     string
+	oldFrom int
+	oldTo   int
+	newFrom int
+	newTo   int
+}
+
+type unifiedDiffEdit struct {
+	tag     byte
+	oldLine int
+	newLine int
+}
+
+func splitUnifiedDiffLines(value string) []string {
+	if value == "" {
+		return nil
+	}
+	lines := strings.SplitAfter(value, "\n")
+	// Python's splitlines(keepends=True) does not add a synthetic empty line after a final
+	// newline; strings.SplitAfter does, so remove only that sentinel.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func cloneUnifiedDiffFrontier(frontier map[int]int) map[int]int {
+	clone := make(map[int]int, len(frontier))
+	for diagonal, oldLine := range frontier {
+		clone[diagonal] = oldLine
+	}
+	return clone
+}
+
+// myersUnifiedDiffOpcodes produces the line operations needed by Python's unified_diff shape.
+// It keeps the edit frontier proportional to the number of changed lines instead of allocating
+// an old-lines by new-lines matrix for a large source file.
+func myersUnifiedDiffOpcodes(oldLines, newLines []string) []unifiedDiffOpcode {
+	if len(oldLines) == 0 && len(newLines) == 0 {
+		return nil
+	}
+	frontier := map[int]int{1: 0}
+	trace := make([]map[int]int, 0, len(oldLines)+len(newLines)+1)
+	maxDistance := len(oldLines) + len(newLines)
+	for distance := 0; distance <= maxDistance; distance++ {
+		for diagonal := -distance; diagonal <= distance; diagonal += 2 {
+			oldLine := 0
+			if diagonal == -distance || (diagonal != distance && frontier[diagonal-1] < frontier[diagonal+1]) {
+				oldLine = frontier[diagonal+1]
+			} else {
+				oldLine = frontier[diagonal-1] + 1
+			}
+			newLine := oldLine - diagonal
+			for oldLine < len(oldLines) && newLine < len(newLines) && oldLines[oldLine] == newLines[newLine] {
+				oldLine++
+				newLine++
+			}
+			frontier[diagonal] = oldLine
+			if oldLine >= len(oldLines) && newLine >= len(newLines) {
+				trace = append(trace, cloneUnifiedDiffFrontier(frontier))
+				return unifiedDiffOpcodesFromTrace(trace, oldLines, newLines)
+			}
+		}
+		trace = append(trace, cloneUnifiedDiffFrontier(frontier))
+	}
+	return nil
+}
+
+func unifiedDiffOpcodesFromTrace(trace []map[int]int, oldLines, newLines []string) []unifiedDiffOpcode {
+	oldLine, newLine := len(oldLines), len(newLines)
+	edits := make([]unifiedDiffEdit, 0, oldLine+newLine)
+	for distance := len(trace) - 1; distance > 0; distance-- {
+		frontier := trace[distance-1]
+		diagonal := oldLine - newLine
+		previousDiagonal := diagonal - 1
+		if diagonal == -distance || (diagonal != distance && frontier[diagonal-1] < frontier[diagonal+1]) {
+			previousDiagonal = diagonal + 1
+		}
+		previousOldLine := frontier[previousDiagonal]
+		previousNewLine := previousOldLine - previousDiagonal
+		for oldLine > previousOldLine && newLine > previousNewLine {
+			oldLine--
+			newLine--
+			edits = append(edits, unifiedDiffEdit{tag: '=', oldLine: oldLine, newLine: newLine})
+		}
+		if oldLine == previousOldLine {
+			newLine--
+			edits = append(edits, unifiedDiffEdit{tag: '+', oldLine: oldLine, newLine: newLine})
+		} else {
+			oldLine--
+			edits = append(edits, unifiedDiffEdit{tag: '-', oldLine: oldLine, newLine: newLine})
+		}
+	}
+	for oldLine > 0 && newLine > 0 {
+		oldLine--
+		newLine--
+		edits = append(edits, unifiedDiffEdit{tag: '=', oldLine: oldLine, newLine: newLine})
+	}
+	for oldLine > 0 {
+		oldLine--
+		edits = append(edits, unifiedDiffEdit{tag: '-', oldLine: oldLine, newLine: newLine})
+	}
+	for newLine > 0 {
+		newLine--
+		edits = append(edits, unifiedDiffEdit{tag: '+', oldLine: oldLine, newLine: newLine})
+	}
+	for left, right := 0, len(edits)-1; left < right; left, right = left+1, right-1 {
+		edits[left], edits[right] = edits[right], edits[left]
+	}
+
+	opcodes := make([]unifiedDiffOpcode, 0)
+	oldCursor, newCursor := 0, 0
+	for index := 0; index < len(edits); {
+		if edits[index].tag == '=' {
+			startOld, startNew := oldCursor, newCursor
+			for index < len(edits) && edits[index].tag == '=' {
+				oldCursor++
+				newCursor++
+				index++
+			}
+			opcodes = append(opcodes, unifiedDiffOpcode{tag: "equal", oldFrom: startOld, oldTo: oldCursor, newFrom: startNew, newTo: newCursor})
+			continue
+		}
+		startOld, startNew := oldCursor, newCursor
+		hasDelete, hasInsert := false, false
+		for index < len(edits) && edits[index].tag != '=' {
+			if edits[index].tag == '-' {
+				oldCursor++
+				hasDelete = true
+			} else {
+				newCursor++
+				hasInsert = true
+			}
+			index++
+		}
+		tag := "replace"
+		if !hasDelete {
+			tag = "insert"
+		} else if !hasInsert {
+			tag = "delete"
+		}
+		opcodes = append(opcodes, unifiedDiffOpcode{tag: tag, oldFrom: startOld, oldTo: oldCursor, newFrom: startNew, newTo: newCursor})
+	}
+	return opcodes
+}
+
+func groupedUnifiedDiffOpcodes(opcodes []unifiedDiffOpcode, contextLines int) [][]unifiedDiffOpcode {
+	if len(opcodes) == 0 {
+		return nil
+	}
+	if contextLines < 0 {
+		contextLines = 0
+	}
+	first := opcodes[0]
+	if first.tag == "equal" {
+		first.oldFrom = maxUnifiedDiffInt(first.oldFrom, first.oldTo-contextLines)
+		first.newFrom = maxUnifiedDiffInt(first.newFrom, first.newTo-contextLines)
+		opcodes[0] = first
+	}
+	lastIndex := len(opcodes) - 1
+	last := opcodes[lastIndex]
+	if last.tag == "equal" {
+		last.oldTo = minUnifiedDiffInt(last.oldTo, last.oldFrom+contextLines)
+		last.newTo = minUnifiedDiffInt(last.newTo, last.newFrom+contextLines)
+		opcodes[lastIndex] = last
+	}
+	groups := make([][]unifiedDiffOpcode, 0)
+	group := make([]unifiedDiffOpcode, 0)
+	for _, opcode := range opcodes {
+		if opcode.tag == "equal" && opcode.oldTo-opcode.oldFrom > 2*contextLines {
+			group = append(group, unifiedDiffOpcode{tag: "equal", oldFrom: opcode.oldFrom, oldTo: opcode.oldFrom + contextLines, newFrom: opcode.newFrom, newTo: opcode.newFrom + contextLines})
+			if len(group) > 0 {
+				groups = append(groups, group)
+			}
+			group = []unifiedDiffOpcode{{tag: "equal", oldFrom: opcode.oldTo - contextLines, oldTo: opcode.oldTo, newFrom: opcode.newTo - contextLines, newTo: opcode.newTo}}
+			continue
+		}
+		group = append(group, opcode)
+	}
+	if len(group) > 0 && !(len(group) == 1 && group[0].tag == "equal") {
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func maxUnifiedDiffInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func minUnifiedDiffInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func unifiedDiffRange(from, to int) string {
+	start := from + 1
+	length := to - from
+	if length == 1 {
+		return strconv.Itoa(start)
+	}
+	return fmt.Sprintf("%d,%d", start, length)
+}
+
 func unifiedFileDiff(original, working, relative string) string {
 	if original == working {
 		return ""
 	}
-	oldLines := strings.SplitAfter(original, "\n")
-	newLines := strings.SplitAfter(working, "\n")
-	if len(oldLines) == 1 && oldLines[0] == "" {
-		oldLines = nil
-	}
-	if len(newLines) == 1 && newLines[0] == "" {
-		newLines = nil
+	oldLines, newLines := splitUnifiedDiffLines(original), splitUnifiedDiffLines(working)
+	groups := groupedUnifiedDiffOpcodes(myersUnifiedDiffOpcodes(oldLines, newLines), 3)
+	if len(groups) == 0 {
+		return ""
 	}
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,%d +1,%d @@\n", relative, relative, relative, relative, len(oldLines), len(newLines))
-	for _, line := range oldLines {
-		builder.WriteByte('-')
-		builder.WriteString(line)
-	}
-	for _, line := range newLines {
-		builder.WriteByte('+')
-		builder.WriteString(line)
+	fmt.Fprintf(&builder, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n", relative, relative, relative, relative)
+	for _, group := range groups {
+		first, last := group[0], group[len(group)-1]
+		fmt.Fprintf(&builder, "@@ -%s +%s @@\n", unifiedDiffRange(first.oldFrom, last.oldTo), unifiedDiffRange(first.newFrom, last.newTo))
+		for _, opcode := range group {
+			switch opcode.tag {
+			case "equal":
+				for index := opcode.oldFrom; index < opcode.oldTo; index++ {
+					builder.WriteByte(' ')
+					builder.WriteString(oldLines[index])
+				}
+			case "delete":
+				for index := opcode.oldFrom; index < opcode.oldTo; index++ {
+					builder.WriteByte('-')
+					builder.WriteString(oldLines[index])
+				}
+			case "insert":
+				for index := opcode.newFrom; index < opcode.newTo; index++ {
+					builder.WriteByte('+')
+					builder.WriteString(newLines[index])
+				}
+			case "replace":
+				for index := opcode.oldFrom; index < opcode.oldTo; index++ {
+					builder.WriteByte('-')
+					builder.WriteString(oldLines[index])
+				}
+				for index := opcode.newFrom; index < opcode.newTo; index++ {
+					builder.WriteByte('+')
+					builder.WriteString(newLines[index])
+				}
+			}
+		}
 	}
 	return builder.String()
 }
@@ -752,14 +998,19 @@ func (s *Service) Blame(ctx context.Context, raw, ref string) (map[string]any, *
 	if view.workingMissing {
 		return map[string]any{"path": view.requested, "repo": view.repo, "relative_path": view.relative, "in_repo": true, "lines": map[string]map[string]any{}}, nil
 	}
-	if err := validateGitRef(ref, "common.unknownFromRef"); err != nil && strings.TrimSpace(ref) != "" {
+	useRef := strings.TrimSpace(ref)
+	if useRef == "working" {
+		// Python treats the working-tree spelling as the current contents supplied through --contents.
+		useRef = "current"
+	}
+	if err := validateGitRef(useRef, "common.unknownFromRef"); err != nil && useRef != "" {
 		return nil, err
 	}
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
 	args := []string{"blame", "--line-porcelain", "--contents", "/proc/self/fd/4"}
-	if strings.TrimSpace(ref) != "" && ref != "HEAD" && ref != "current" {
-		args = append(args, ref)
+	if useRef != "" && useRef != "HEAD" && useRef != "current" {
+		args = append(args, useRef)
 	}
 	args = append(args, historyPathArgs(view.relative)...)
 	output, stderr, err := runGitBounded(gitCtx, view.directory, view.working, args, MaxReadBytes, view.namespace)
@@ -773,7 +1024,11 @@ func (s *Service) Blame(ctx context.Context, raw, ref string) (map[string]any, *
 		if errors.Is(err, errGitOutputLimit) {
 			return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitHistoryTooLarge", Path: view.requested, Message: "Git blame is too large"}
 		}
-		return map[string]any{"path": view.requested, "repo": view.repo, "relative_path": view.relative, "in_repo": true, "lines": map[string]map[string]any{}, "error": strings.TrimSpace(string(stderr))}, nil
+		errorText := strings.TrimSpace(string(stderr))
+		if errorText == "" {
+			errorText = "not committed yet"
+		}
+		return map[string]any{"path": view.requested, "repo": view.repo, "relative_path": view.relative, "in_repo": true, "lines": map[string]map[string]any{}, "error": errorText}, nil
 	}
 	head, _, headErr := runGitBounded(gitCtx, view.directory, nil, []string{"rev-parse", "HEAD"}, 4096, view.namespace)
 	if errors.Is(headErr, errGitNamespaceChanged) {

@@ -800,6 +800,7 @@
   "git.status.untracked": "未追跡",
   "gitDiff.binary": "バイナリ",
   "gitDiff.changedFiles": "変更されたファイル",
+  "gitDiff.dirty": "変更あり",
   "gitDiff.empty": "この範囲にコミットはありません。",
   "gitDiff.filesTruncated": "ファイル一覧は切り詰められています。",
   "gitDiff.firstParent": "最初の親と比較",

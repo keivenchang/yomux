@@ -2002,7 +2002,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');
-    assert.ok(/function sessionFilesRequestQueryString\(destination = 'differ'\)[\s\S]*destination === 'finder'[\s\S]*'from=HEAD&to=current'[\s\S]*diffRefQueryString\(\)/.test(appSource), 'Finder is pinned to HEAD/current while Differ follows selected global and per-repo refs');
+    assert.ok(/function sessionFilesRequestQueryString\(destination = 'differ'\)[\s\S]*destination === 'finder'[\s\S]*[`']from=HEAD&to=current[\s\S]*diffRefQueryString\(\)/.test(appSource), 'Finder is pinned to HEAD/current while Differ follows selected global and per-repo refs');
     assert.ok(/function sessionFilesRepoRoots\(payload = fileExplorerFinderSessionFilesState\.payload\)/.test(appSource), 'Finder Sync root planning defaults to the working-tree record rather than the active Differ comparison');
     assert.ok(/const destination = fileExplorerViewForItem\(panel\.dataset\.panelItem\) === 'finder' \? 'finder' : 'differ';[\s\S]*destination === 'finder' \? fileExplorerFinderTargetSession\(\) : fileExplorerSessionFilesTargetSession\(\)/.test(appSource), 'the shared Reload handler targets the mounted Finder or Differ record instead of treating both panels as Finder');
     assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(appSource), 'the legacy mode entry point now activates the matching independent surface instead of maintaining a second renderer mode');
@@ -3520,7 +3520,7 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
       assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
-      assert.ok(/app-topbar-touch-compact \.app-menu > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'every touch top-level menu uses a viewport-bounded sheet with compact paired actions and separator-free shell text controls');
+      assert.ok(/app-phone-single-pane\.app-topbar-touch-compact \.app-menu > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'phone menus use a viewport-bounded sheet while tablet touch menus retain compact paired actions and separator-free shell text controls');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
@@ -3672,11 +3672,32 @@ async function runCrossSurfaceStateSuite() {
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
     const facadeSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     assert.ok(facadeSource.includes('class FileWorkspaceState'), 'Finder root opens have a dedicated state owner for async race cancellation');
-    assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = fileWorkspaceState\.beginOpen\(\);[\s\S]*const openStillCurrent = \(\) => fileWorkspaceState\.openIsCurrent\(openGeneration\);[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
+    const openSource = source.slice(openFileExplorerAtStart, openFileExplorerAtEnd);
+    const resolvedRootIndex = openSource.indexOf('const resolvedRoot = validateKind');
+    const resolvedEntriesIndex = openSource.indexOf('const entries = Array.isArray(resolvedRoot.entries)', resolvedRootIndex);
+    const resolvedGuardIndex = openSource.indexOf('if (!openStillCurrent()) return false;', resolvedEntriesIndex);
+    assert.ok(openSource.includes('const openGeneration = fileWorkspaceState.beginOpen();')
+      && openSource.includes('const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);')
+      && resolvedRootIndex >= 0
+      && resolvedEntriesIndex > resolvedRootIndex
+      && resolvedGuardIndex > resolvedEntriesIndex, 'stale Finder root fetches are dropped before they can render');
     assert.ok(source.slice(openFileExplorerAtStart, openFileExplorerAtEnd).includes("if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});"), 'completed manual Finder opens cancel pending sync without invalidating their own open generation');
-    assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*setFileExplorerSelectionPin\(options\.manualSelection === true\);[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
+    const pendingRootIndex = openSource.indexOf('const showPendingRoot = options.manualSelection === true || options.showPending === true;');
+    const pendingBlockEnd = openSource.indexOf('const validateKind =', pendingRootIndex);
+    const pendingBlock = openSource.slice(pendingRootIndex, pendingBlockEnd);
+    assert.ok(pendingBlock.includes('if (showPendingRoot) {')
+      && pendingBlock.includes('setFileExplorerSelectionPin(options.manualSelection === true);')
+      && pendingBlock.includes('renderFileExplorerTreeSearching(requestedRoot);'), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
     assert.equal(source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab(')).includes('openFileExplorerAt('), false, 'cache-first Finder Sync never tears down the root through the manual-open transaction');
-    assert.ok(/async function openFileExplorerAt\([\s\S]*if \(options\.manualSelection === true\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*setFileExplorerSelectionPin\(options\.manualSelection === true\);[\s\S]*setFileExplorerPathDisplay\(root, \{deferRepoInfo: true\}\);[\s\S]*renderFileExplorerRootModeControls\(\);[\s\S]*renderFileExplorerTreeSearching\(root\);[\s\S]*const entries = await fetchDirectory\(root,/.test(source), 'typed/manual Finder opens disable Sync, clears stale rows, and shows searching before slow directory listing resolves without starting root Git enrichment');
+    const pendingRenderIndex = openSource.indexOf('renderFileExplorerTreeSearching(requestedRoot);', pendingRootIndex);
+    assert.ok(openSource.includes('if (options.manualSelection === true) {')
+      && openSource.includes('cancelPendingFileExplorerActiveSync();')
+      && pendingRootIndex >= 0
+      && openSource.indexOf('setFileExplorerSelectionPin(options.manualSelection === true);', pendingRootIndex) > pendingRootIndex
+      && openSource.indexOf('setFileExplorerPathDisplay(requestedRoot, {deferRepoInfo: true});', pendingRootIndex) > pendingRootIndex
+      && pendingRenderIndex > pendingRootIndex
+      && resolvedRootIndex > pendingRenderIndex
+      && resolvedEntriesIndex > resolvedRootIndex, 'typed/manual Finder opens disable Sync, clear stale rows, and show searching before fast kind validation and directory listing without starting root Git enrichment');
     assert.ok(source.includes("textWithMovingEllipsisHtml('searching...', 'file-tree-searching-dots')"), 'Finder searching row reuses the shared moving ellipsis helper');
     assert.ok(/\.file-tree-status-row\s*\{[\s\S]*cursor:\s*default/.test(css), 'Finder searching row is styled as passive status, not an interactive path');
     assert.equal(finderSyncBody.includes('syncFileExplorerToActiveTab(preferredItem'), false, 'fixed Finder mode never follows explicit tmux/editor clicks');

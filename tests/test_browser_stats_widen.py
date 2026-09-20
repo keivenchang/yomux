@@ -949,10 +949,11 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         unrelated_routes = (
             "/api/settings", "/api/session-metadata", "/api/background/status", "/api/auto-approve",
             "/api/fs/index-status", "/api/watched-prs", "/api/update-status", "/api/chat/bootstrap",
-            "/api/transcripts", "/api/activity",
+            "/api/transcripts",
         )
         unexpected_routes = {route: result["unrelatedRouteCounts"].get(route, 0) for route in unrelated_routes if result["unrelatedRouteCounts"].get(route, 0)}
         assert not unexpected_routes, {"unexpected_routes": unexpected_routes, "route_counts": result["unrelatedRouteCounts"]}
+        assert result["unrelatedRouteCounts"].get("/api/activity", 0) == 1, result
     finally:
         active_error = sys.exc_info()[1]
         browser_retirement_error = None

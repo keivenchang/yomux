@@ -800,6 +800,7 @@
   "git.status.untracked": "추적되지 않음",
   "gitDiff.binary": "바이너리",
   "gitDiff.changedFiles": "변경된 파일",
+  "gitDiff.dirty": "변경됨",
   "gitDiff.empty": "이 범위에 커밋이 없습니다.",
   "gitDiff.filesTruncated": "파일 목록이 잘렸습니다.",
   "gitDiff.firstParent": "첫 번째 부모와 비교",

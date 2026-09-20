@@ -25,6 +25,8 @@ Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--gol
 
 Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
+Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOLOMUX_TMUX_SOCKET explicitly.
+
 Examples:
   ./boot.sh
   ./boot.sh <dev-port>
@@ -148,6 +150,7 @@ export PATH
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+yolomux_use_machine_tmux
 
 # YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
 # binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
@@ -168,6 +171,10 @@ fi
 
 extra_env=()
 extra_env+=("$(yolomux_default_server_optin)")
+# Managed/operator launches always use the machine-wide tmux server. Clear a
+# private socket inherited from a test fixture or a long-lived tmux client;
+# test launchers pass their private socket directly to their child process.
+extra_env+=("YOLOMUX_TMUX_SOCKET=")
 if [[ "$backend" == "go" ]]; then
   go_binary="${YOLOMUX_GO_BINARY:-}"
   if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
@@ -181,9 +188,17 @@ if [[ "$backend" == "go" ]]; then
     go_binary="$repo_root/yolomux-go"
   fi
   [[ -n "$go_binary" ]] && extra_env+=("YOLOMUX_GO_BINARY=$go_binary")
+  # The managed launcher is an operator demand boundary. Go persists the
+  # reason so restart and demand-start counters stay measured across boots;
+  # direct launches that omit this value remain explicitly partial.
+  extra_env+=("YOLOMUX_GO_START_REASON=${YOLOMUX_GO_START_REASON:-demand}")
+  # The Go collector intentionally refuses to derive mutable client-data roots
+  # from HOME/XDG. The managed operator launch is the explicit production
+  # boundary, so pass those roots here; synthetic tests launch the binary with
+  # their own private roots instead of going through boot.sh.
   extra_env+=("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT=${YOLOMUX_CLAUDE_TRANSCRIPT_ROOT:-$HOME/.claude/projects}")
   extra_env+=("YOLOMUX_CODEX_TRANSCRIPT_ROOT=${YOLOMUX_CODEX_TRANSCRIPT_ROOT:-$HOME/.codex/sessions}")
-  extra_env+=("YOLOMUX_OPENCODE_DATABASE=${YOLOMUX_OPENCODE_DATABASE:-$HOME/.local/share/opencode/opencode.db}")
+  extra_env+=("YOLOMUX_OPENCODE_DATABASE=${YOLOMUX_OPENCODE_DATABASE:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}")
 fi
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
@@ -250,8 +265,9 @@ print_launch_command() {
 shell_command_for() {
   local log_path="$1"
   # A server started from inside a tmux client inherits TMUX and would then operate on
-  # that client socket instead of the user's shared default server. A deliberate custom
-  # socket still travels through YOLOMUX_TMUX_SOCKET below.
+  # that client socket instead of the user's shared default server. Managed launches
+  # always clear YOLOMUX_TMUX_SOCKET below; isolated fixtures launch their own process
+  # directly with a private socket instead of going through this operator path.
   printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
     local key="${item%%=*}"

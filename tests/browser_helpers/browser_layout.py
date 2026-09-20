@@ -3128,7 +3128,71 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             sessions: buildSessionRows(),
           });
         }
+        if (url.pathname === '/api/activity') {
+          // Go owns live agent status on the real 7222 backend. Keep the browser
+          // fixture on that contract instead of silently falling through to an
+          // empty response (which would erase the working marker before render).
+          const autoPayload = window.__fixtureAutoApprovePayload || {};
+          const sessionsPayload = autoPayload.sessions && typeof autoPayload.sessions === 'object'
+            ? autoPayload.sessions
+            : {};
+          const agentWindows = Object.fromEntries(Object.entries(sessionsPayload).map(([session, state]) => [
+            session,
+            Array.isArray(state?.agent_windows) ? state.agent_windows : [],
+          ]));
+          const agents = Object.entries(agentWindows).flatMap(([session, rows]) => rows.map(row => ({
+            ...row,
+            session,
+            pane_target: row.pane_target || row.pane || '',
+            window: row.window ?? row.window_index ?? '',
+            window_index: row.window_index ?? row.window ?? null,
+          })));
+          return jsonResponse({
+            activity: {},
+            agent_window_snapshot_revision: Number(autoPayload.agent_window_snapshot_revision || 0),
+            agent_windows: agentWindows,
+            agents,
+            errors: [],
+            session_order: window.__fixtureSessions,
+            session_scope: 'all',
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, window.__fixtureTranscriptSessions?.[session] || {session, panes: []}])),
+            topology_generation: 1,
+          });
+        }
         if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
+        if (url.pathname === '/api/background/status') return jsonResponse(window.__fixtureBackgroundStatusPayload || {
+          owner: true,
+          status: 'disabled',
+          generation: {},
+          current_owner: {},
+          roles: {
+            'search-index': {role: 'search-index', owner: true, status: 'disabled'},
+            'stats-sampler': {role: 'stats-sampler', owner: true, status: 'disabled'},
+          },
+          search_index: {role: 'search-index', owner: true, mode: 'indexing-server', current_server: {}, owner_server: {}, status: 'disabled'},
+        });
+        if (url.pathname === '/api/session-files-stream') {
+          const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
+          const payload = (window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true};
+          const repos = Array.isArray(payload.repos) ? payload.repos : [];
+          const files = Array.isArray(payload.files) ? payload.files : [];
+          const refsByRepo = payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {};
+          const chunks = [];
+          for (const repo of repos) {
+            const repoPath = String(repo?.repo || repo?.root || '');
+            const repoRefs = repoPath && refsByRepo[repoPath] ? {[repoPath]: refsByRepo[repoPath]} : {};
+            chunks.push(`event: repo\ndata: ${JSON.stringify({session, repos: [repo], files: files.filter(file => String(file?.repo || '') === repoPath), refs_by_repo: repoRefs})}\n\n`);
+          }
+          if (!repos.length && files.length) chunks.push(`event: repo\ndata: ${JSON.stringify({session, repos: [], files, refs_by_repo: refsByRepo})}\n\n`);
+          chunks.push(`event: done\ndata: ${JSON.stringify({session, from_ref: payload.from_ref || 'HEAD', to_ref: payload.to_ref || 'current'})}\n\n`);
+          const streamBody = new TextEncoder().encode(chunks.join(''));
+          return Promise.resolve(new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(streamBody);
+              controller.close();
+            },
+          }), {headers: {'Content-Type': 'text/event-stream'}}));
+        }
         if (url.pathname === '/api/session-files') {
           const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
@@ -3881,6 +3945,53 @@ def trusted_touch_emulation(browser, *, user_agent=None):
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         if user_agent is not None:
             browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
+def trusted_touch_tap(browser, selector, *, timeout=3):
+    """Tap a visible selector through Chromium's trusted touch path and require its click."""
+    point = wait_for_visible_selector(browser, selector)
+    _assert_browser_point_hits_target(browser, point, selector=selector)
+    browser.execute_script(
+        """
+        window.__yolomuxTrustedTapProbe = [];
+        window.__yolomuxTrustedTapHandler = event => window.__yolomuxTrustedTapProbe.push({
+          type: event.type, trusted: event.isTrusted, pointerType: event.pointerType || '',
+        });
+        for (const type of ['pointerdown', 'pointerup', 'click']) {
+          document.addEventListener(type, window.__yolomuxTrustedTapHandler, true);
+        }
+        """
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}]},
+    )
+    try:
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        events = WebDriverWait(browser, timeout).until(
+            lambda driver: driver.execute_script(
+                "return (window.__yolomuxTrustedTapProbe || []).some(event => event.type === 'click');"
+            )
+        )
+    finally:
+        events = browser.execute_script(
+            """
+            const handler = window.__yolomuxTrustedTapHandler;
+            if (handler) {
+              for (const type of ['pointerdown', 'pointerup', 'click']) {
+                document.removeEventListener(type, handler, true);
+              }
+            }
+            const probe = window.__yolomuxTrustedTapProbe || [];
+            window.__yolomuxTrustedTapProbe = null;
+            window.__yolomuxTrustedTapHandler = null;
+            return probe;
+            """
+        )
+    assert any(event["type"] == "pointerdown" and event["trusted"] and event["pointerType"] == "touch" for event in events), events
+    assert any(event["type"] == "pointerup" and event["trusted"] and event["pointerType"] == "touch" for event in events), events
+    assert any(event["type"] == "click" and event["trusted"] for event in events), events
+    return point
 
 
 def trusted_touch_long_press(browser, selector, *, until, x_ratio=0.5, y_ratio=0.5, timeout=3):

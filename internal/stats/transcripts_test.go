@@ -86,6 +86,21 @@ func usageCodex(timestamp, input, cached, output float64) map[string]any {
 	}}}
 }
 
+func usageCodexTokenUsageRecord(timestamp float64, threadID string, input, cached, output, threadInput, threadCached, threadOutput float64) map[string]any {
+	usage := map[string]any{
+		"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output,
+		"reasoning_output_tokens": output, "total_tokens": input + output,
+	}
+	threadUsage := map[string]any{
+		"input_tokens": threadInput, "cached_input_tokens": threadCached, "output_tokens": threadOutput,
+		"reasoning_output_tokens": threadOutput, "total_tokens": threadInput + threadOutput,
+	}
+	return map[string]any{"timestamp": timestamp, "type": "token_usage_record", "payload": map[string]any{
+		"thread_id": threadID, "turn_id": "turn-synthetic", "response_id": "response-synthetic",
+		"usage": usage, "turn_token_usage": usage, "thread_token_usage": threadUsage,
+	}}
+}
+
 func copyObservedTranscript(t *testing.T, provider, relativePath string) string {
 	t.Helper()
 	fixture := testsupport.RepoPath(t, filepath.Join("tests", "fixtures", "current_model_usage", "observed."+provider+".jsonl"))
@@ -159,6 +174,67 @@ func TestScanTranscriptObservedFixturesFromRealisticPaths(t *testing.T) {
 	repeat, err := ScanTranscript(claudeSource, &TranscriptScannerState{}, TranscriptScanOptions{})
 	if err != nil || !bytes.Equal([]byte(claudeIDs[0]), []byte(atomIDs(repeat.Atoms)[0])) {
 		t.Fatalf("deterministic Claude IDs = %v / %v, err = %v", claudeIDs, atomIDs(repeat.Atoms), err)
+	}
+}
+
+func TestScanTranscriptCodexTokenUsageRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-token-usage-record.jsonl")
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": "thread-synthetic", "model": "gpt-synthetic"}},
+		usageCodexTokenUsageRecord(1, "thread-synthetic", 10, 2, 5, 10, 2, 5),
+	)
+	state := &TranscriptScannerState{}
+	source := TranscriptSource{Path: path, Provider: "codex", ThreadID: "fallback-thread"}
+	result, err := ScanTranscript(source, state, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomQuantities(result.Atoms); !reflect.DeepEqual(got, map[string]float64{"input:none": 8, "input:read": 2, "output:none": 5}) {
+		t.Fatalf("token usage record quantities = %#v, result=%+v", got, result)
+	}
+	if len(result.Atoms) != 3 || result.Atoms[0].Payload["thread_id"] != "thread-synthetic" || result.Atoms[0].Payload["model"] != "gpt-synthetic" {
+		t.Fatalf("token usage record metadata = %#v", result.Atoms)
+	}
+	for _, atom := range result.Atoms {
+		if atom.Payload["provider"] != "openai" || atom.Payload["execution_source"] != "codex" || atom.Payload["endpoint"] != "responses" {
+			t.Fatalf("Codex Python-compatible pricing identity = %#v", atom.Payload)
+		}
+	}
+	result.Receipt.Commit()
+	appendJSONL(t, path, usageCodexTokenUsageRecord(2, "thread-synthetic", 6, 3, 4, 16, 5, 9), false)
+	resumed, err := ScanTranscript(source, state, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomQuantities(resumed.Atoms); !reflect.DeepEqual(got, map[string]float64{"input:none": 3, "input:read": 3, "output:none": 4}) {
+		t.Fatalf("token usage record incremental quantities = %#v, result=%+v", got, resumed)
+	}
+}
+
+func TestCodexTranscriptAtomsResolvePythonCatalogCost(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-priced.jsonl")
+	observedAt := float64(1783728000)
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "timestamp": observedAt, "payload": map[string]any{"id": "thread-priced", "model": "gpt-4.1"}},
+		usageCodexTokenUsageRecord(observedAt, "thread-priced", 100, 20, 10, 100, 20, 10),
+	)
+	result, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex", ThreadID: "thread-priced"}, &TranscriptScannerState{}, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	layer, err := (Materializer{Price: PricingResolver(catalog)}).Build(
+		MaterializeRequest{Start: observedAt - 1, End: observedAt + 10, Resolution: 10},
+		nil, nil, nil, result.Atoms,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layer.Buckets) != 2 || layer.Buckets[0].Cost.MicroUSD <= 0 || layer.Buckets[0].Cost.PricedAtoms != len(result.Atoms) {
+		t.Fatalf("Codex catalog pricing = %+v, atoms=%+v", layer.Buckets, result.Atoms)
 	}
 }
 

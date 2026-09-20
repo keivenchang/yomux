@@ -53,18 +53,26 @@ type CPUSample struct {
 	Process           CPUMeasurement
 	Group             CPUMeasurement
 	ProcessCPUPercent map[string]float64
-	Reason            CPUSampleReason
+	// OwnedProcessCPUPercent is the wall-clock CPU series for the process
+	// identity selected by the collector. ProcessCPUPercent deliberately keeps
+	// the host-wide, executable-grouped view used by the top-process chart; the
+	// owned series must stay separate so same-named co-tenants cannot inflate a
+	// Go Daemons row.
+	OwnedProcessCPUPercent map[string]float64
+	Reason                 CPUSampleReason
 }
 
 // CPUDeltaSampler compares cumulative counters with the previous accepted
 // snapshot. Host CPU is normalized to host Total; wall-clock process CPU is
 // normalized to the process counter rate and is not host-normalized.
 type CPUDeltaSampler struct {
-	processKey  string
-	groupKeys   []string
-	logicalCPUs int
-	wallProcess bool
-	previous    *CPUSnapshot
+	processKey      string
+	processIdentity string
+	groupIdentity   string
+	groupKeys       []string
+	logicalCPUs     int
+	wallProcess     bool
+	previous        *CPUSnapshot
 }
 
 const maxProcessCPUSeries = 4
@@ -105,7 +113,7 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 	}
 	result.Host = validMeasurement(percentage(snapshot.Host.Busy-previous.Host.Busy, hostDelta))
 
-	process, previousProcess, ok := selectedProcessPair(snapshot, *previous, s.processKey)
+	process, previousProcess, ok := s.selectedProcessPair(snapshot, *previous)
 	if !ok {
 		result.Reason = CPUUnavailable
 		return result
@@ -123,16 +131,25 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 		processPercent = wallPercentage(process.CPU-previousProcess.CPU, wallDuration, processCounterRate(snapshot, *previous))
 	}
 	result.Process = validMeasurement(processPercent)
+	if s.processIdentity != "" {
+		binary := process.Binary
+		if binary == "" {
+			binary = s.processKey
+		}
+		if binary != "" {
+			result.OwnedProcessCPUPercent = map[string]float64{binary: processPercent}
+		}
+	}
 
 	groupKeys := s.groupKeys
 	autoGroups := len(groupKeys) == 0
 	if autoGroups {
 		groupKeys = stableProcessBinaries(snapshot, *previous)
 	}
-	if hasBinaries(snapshot, groupKeys) && hasBinaries(*previous, groupKeys) {
+	if s.hasBinaries(snapshot, groupKeys) && s.hasBinaries(*previous, groupKeys) {
 		var delta uint64
 		for _, binary := range groupKeys {
-			current, old, ok := binaryPair(snapshot, *previous, binary)
+			current, old, ok := s.binaryPair(snapshot, *previous, binary)
 			if !ok || current < old {
 				if autoGroups {
 					continue
@@ -144,7 +161,7 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 		}
 		if s.wallProcess {
 			result.Group = validMeasurement(cpuPercentage(delta, wallDuration, s.logicalCPUs, processCounterRate(snapshot, *previous)))
-			result.ProcessCPUPercent = groupedProcessPercent(snapshot, *previous, wallDuration, s.logicalCPUs, groupKeys)
+			result.ProcessCPUPercent = s.groupedProcessPercent(snapshot, *previous, wallDuration, s.logicalCPUs, groupKeys)
 		} else {
 			result.Group = validMeasurement(percentage(delta, hostDelta))
 		}
@@ -153,6 +170,114 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 		return result
 	}
 	result.Reason = CPUValid
+	return result
+}
+
+func (s *CPUDeltaSampler) ownedIdentity(identity string) bool {
+	if s.processIdentity == "" {
+		return true
+	}
+	if identity == s.processIdentity {
+		return true
+	}
+	return strings.HasSuffix(s.processIdentity, ":") && strings.HasPrefix(identity, s.processIdentity)
+}
+
+func (s *CPUDeltaSampler) selectedProcessPair(current, previous CPUSnapshot) (CPUProcessCounters, CPUProcessCounters, bool) {
+	if s.processIdentity == "" {
+		return selectedProcessPair(current, previous, s.processKey)
+	}
+	var currentProcess, previousProcess CPUProcessCounters
+	var currentOK, previousOK bool
+	for key, process := range current.Processes {
+		identity := process.Identity
+		if identity == "" {
+			identity = key
+		}
+		if s.ownedIdentity(identity) && process.Binary == s.processKey {
+			currentProcess, currentOK = process, true
+			break
+		}
+	}
+	for key, process := range previous.Processes {
+		identity := process.Identity
+		if identity == "" {
+			identity = key
+		}
+		if s.ownedIdentity(identity) && process.Binary == s.processKey {
+			previousProcess, previousOK = process, true
+			break
+		}
+	}
+	return currentProcess, previousProcess, currentOK && previousOK
+}
+
+func (s *CPUDeltaSampler) hasBinaries(snapshot CPUSnapshot, binaries []string) bool {
+	for _, binary := range binaries {
+		if _, _, ok := s.groupBinaryPair(snapshot, snapshot, binary); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *CPUDeltaSampler) binaryPair(current, previous CPUSnapshot, binary string) (uint64, uint64, bool) {
+	return s.groupBinaryPair(current, previous, binary)
+}
+
+func (s *CPUDeltaSampler) groupOwnedIdentity(identity string) bool {
+	if s.groupIdentity == "" {
+		return true
+	}
+	if identity == s.groupIdentity {
+		return true
+	}
+	return strings.HasSuffix(s.groupIdentity, ":") && strings.HasPrefix(identity, s.groupIdentity)
+}
+
+func (s *CPUDeltaSampler) groupBinaryPair(current, previous CPUSnapshot, binary string) (uint64, uint64, bool) {
+	if s.groupIdentity == "" {
+		return binaryPair(current, previous, binary)
+	}
+	var currentValue, previousValue uint64
+	var currentOK, previousOK bool
+	for key, process := range current.Processes {
+		identity := process.Identity
+		if identity == "" {
+			identity = key
+		}
+		if s.groupOwnedIdentity(identity) && process.Binary == binary {
+			currentValue, currentOK = process.CPU, true
+			break
+		}
+	}
+	for key, process := range previous.Processes {
+		identity := process.Identity
+		if identity == "" {
+			identity = key
+		}
+		if s.groupOwnedIdentity(identity) && process.Binary == binary {
+			previousValue, previousOK = process.CPU, true
+			break
+		}
+	}
+	return currentValue, previousValue, currentOK && previousOK
+}
+
+func (s *CPUDeltaSampler) groupedProcessPercent(current, previous CPUSnapshot, wall time.Duration, logicalCPUs int, binaries []string) map[string]float64 {
+	if s.groupIdentity == "" {
+		return groupedProcessPercent(current, previous, wall, logicalCPUs, binaries)
+	}
+	values := make(map[string]float64)
+	for _, binary := range binaries {
+		if a, b, ok := s.binaryPair(current, previous, binary); ok && a >= b {
+			values[binary] = cpuPercentage(a-b, wall, logicalCPUs, processCounterRate(current, previous))
+		}
+	}
+	result := make(map[string]float64, len(values))
+	for binary, value := range values {
+		result[binary] = math.Min(100, value)
+	}
 	return result
 }
 

@@ -1027,10 +1027,8 @@ func (s *Service) Zip(ctx context.Context, raw string, transferLimit ...int64) (
 }
 
 func (s *Service) checkMutationTarget(path, resolved string) *Error {
-	for _, root := range s.roots {
-		if path == root || resolved == root {
-			return forbidden(path, "fs.error.rootMutationBlocked", "configured filesystem roots cannot be mutated")
-		}
+	if path == s.root || resolved == s.root {
+		return forbidden(path, "fs.error.rootMutationBlocked", "the Finder service root cannot be mutated")
 	}
 	return nil
 }
@@ -1103,9 +1101,6 @@ func (s *Service) openMutationParent(raw string) (*mutationParent, *Error) {
 	parentResolved, err = filepath.Abs(parentResolved)
 	if err != nil {
 		return nil, filesystemError(parentRequested, err)
-	}
-	if !s.allowed(parentResolved) || isSecretPath(parentResolved) {
-		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside configured filesystem roots")
 	}
 	identities, err := captureResolvedIdentities(parentResolved)
 	if err != nil {

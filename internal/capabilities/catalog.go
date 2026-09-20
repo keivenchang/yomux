@@ -84,6 +84,7 @@ func New(backendBuild string) *Catalog {
 		"finder.git.v1",
 		"finder.preview.v1",
 		"pane.differ.v1",
+		"pane.tabber.v1",
 		"pane.stats.v1",
 		"session.create.v1",
 		"session.kill.v1",
@@ -239,7 +240,7 @@ func RouteCapability(method, rawPath string) string {
 	}
 	if strings.HasPrefix(path, "/api/fs/") || path == "/api/watch/roots" || path == "/api/upload" || strings.HasPrefix(path, "/api/batch/") {
 		switch path {
-		case "/api/fs/diff", "/api/fs/git-history", "/api/fs/git-commit", "/api/batch/blame":
+		case "/api/fs/diff", "/api/fs/git-history", "/api/fs/git-history-stats-stream", "/api/fs/git-commit", "/api/batch/blame":
 			return "finder.git.v1"
 		case "/api/batch/zip", "/api/batch/html-preview":
 			return "finder.preview.v1"

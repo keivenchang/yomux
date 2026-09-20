@@ -96,6 +96,12 @@ func TestHostCollectorRunOnceWritesCapturedFactsAndUnavailable(t *testing.T) {
 	if counters.Cycles != 3 || counters.AcceptedObservations != 7 || counters.UnavailableSpans != 2 || counters.Errors != 0 {
 		t.Fatalf("counters = %+v", counters)
 	}
+	if counters.LastCPUProcessRows != 1 || counters.LastMemoryProcessRows != 1 {
+		t.Fatalf("process census counters = %+v", counters)
+	}
+	if timing := counters.Family["cpu"]; timing.Runs != 3 || timing.SourceDurationTotal <= 0 || timing.LastSourceDuration <= 0 {
+		t.Fatalf("CPU source timing = %+v", timing)
+	}
 	reader, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +127,105 @@ func TestHostCollectorRunOnceWritesCapturedFactsAndUnavailable(t *testing.T) {
 	}
 	if seen["cpu"] != 2 || seen["system_memory"] != 3 || seen["gpu"] != 2 {
 		t.Fatalf("family rows = %#v", seen)
+	}
+}
+
+func TestHostCollectorWritesSyntheticTopProcessCPUUsers(t *testing.T) {
+	sources := &capturedHostSources{
+		cpu: []CPUSnapshot{
+			{
+				Host: CPUHostCounters{Busy: 100, Total: 200},
+				Processes: map[string]CPUProcessCounters{
+					"go:1":     {Identity: "go:1", CPU: 100, Binary: "yolomux-go"},
+					"python:1": {Identity: "python:1", CPU: 50, Binary: "python"},
+				},
+			},
+			{
+				Host: CPUHostCounters{Busy: 140, Total: 240},
+				Processes: map[string]CPUProcessCounters{
+					"go:1":     {Identity: "go:1", CPU: 120, Binary: "yolomux-go"},
+					"python:1": {Identity: "python:1", CPU: 60, Binary: "python"},
+				},
+			},
+		},
+		memory: []MemoryCounters{{UsedBytes: 8, CapacityBytes: 16}, {UsedBytes: 9, CapacityBytes: 16}},
+		gpu:    [][]GPUDevice{{{SourceID: "gpu:0", Label: "synthetic"}}, {{SourceID: "gpu:0", Label: "synthetic"}}},
+	}
+	writer := &recordingBatchWriter{}
+	clock := &collectorClock{now: time.Unix(100, 0)}
+	collector := NewHostCollector(sources, writer, clock, HostCollectorConfig{
+		ActiveCadence: time.Second, SourceTimeout: time.Second, EpochID: "synthetic-top-cpu", EpochStartedAt: 100,
+		OwnerGeneration: 7, SourceID: "host", ProcessKey: "yolomux-go", LogicalCPUs: 1,
+	})
+	collector.RunOnce(context.Background())
+	clock.advance(time.Second)
+	collector.RunOnce(context.Background())
+
+	var cpuPayload map[string]any
+	for _, batch := range writer.snapshot() {
+		for _, observation := range batch.Observations {
+			if observation.Family == "cpu" {
+				cpuPayload = observation.Payload
+			}
+		}
+	}
+	if cpuPayload == nil {
+		t.Fatal("synthetic collector emitted no CPU observation")
+	}
+	processes, ok := cpuPayload["process_cpu_percent"].(map[string]any)
+	if !ok {
+		t.Fatalf("synthetic top CPU series = %#v", cpuPayload["process_cpu_percent"])
+	}
+	if processes["yolomux-go"] != 20.0 || processes["python"] != 10.0 {
+		t.Fatalf("synthetic top CPU series = %#v, want yolomux-go=20 and python=10", processes)
+	}
+}
+
+func TestHostCollectorSeparatesOwnedCPUFromSameNamedHostUsers(t *testing.T) {
+	sources := &capturedHostSources{
+		cpu: []CPUSnapshot{
+			{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{
+				"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux-go"},
+				"202:20": {Identity: "202:20", CPU: 200, Binary: "yolomux-go"},
+				"303:30": {Identity: "303:30", CPU: 50, Binary: "python"},
+			}},
+			{Host: CPUHostCounters{Busy: 140, Total: 240}, Processes: map[string]CPUProcessCounters{
+				"101:10": {Identity: "101:10", CPU: 110, Binary: "yolomux-go"},
+				"202:20": {Identity: "202:20", CPU: 260, Binary: "yolomux-go"},
+				"303:30": {Identity: "303:30", CPU: 70, Binary: "python"},
+			}},
+		},
+		memory: []MemoryCounters{{UsedBytes: 8, CapacityBytes: 16}, {UsedBytes: 9, CapacityBytes: 16}},
+		gpu:    [][]GPUDevice{{{SourceID: "gpu:0", Label: "synthetic"}}, {{SourceID: "gpu:0", Label: "synthetic"}}},
+	}
+	writer := &recordingBatchWriter{}
+	clock := &collectorClock{now: time.Unix(100, 0)}
+	collector := NewHostCollector(sources, writer, clock, HostCollectorConfig{
+		ActiveCadence: time.Second, SourceTimeout: time.Second, EpochID: "synthetic-owned-cpu", EpochStartedAt: 100,
+		OwnerGeneration: 7, SourceID: "host", ProcessKey: "yolomux-go", ProcessIdentity: "101:", LogicalCPUs: 1,
+	})
+	collector.RunOnce(context.Background())
+	clock.advance(time.Second)
+	collector.RunOnce(context.Background())
+
+	var cpuPayload map[string]any
+	for _, batch := range writer.snapshot() {
+		for _, observation := range batch.Observations {
+			if observation.Family == "cpu" {
+				cpuPayload = observation.Payload
+			}
+		}
+	}
+	if cpuPayload == nil {
+		t.Fatal("synthetic collector emitted no CPU observation")
+	}
+	hostUsers, ok := cpuPayload["process_cpu_percent"].(map[string]any)
+	if !ok || hostUsers["yolomux-go"] != 70.0 || hostUsers["python"] != 20.0 {
+		t.Fatalf("host CPU users = %#v, want yolomux-go=70 and python=20", cpuPayload["process_cpu_percent"])
+	}
+	owned, ok := cpuPayload["owned_process_cpu_percent"].(map[string]any)
+	if !ok || owned["yolomux-go"] != 10.0 {
+		t.Fatalf("owned CPU users = %#v, want yolomux-go=10", cpuPayload["owned_process_cpu_percent"])
 	}
 }
 

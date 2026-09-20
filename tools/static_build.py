@@ -211,6 +211,11 @@ NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:09d8f565dfb2": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:0b8d97565a93": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:0fa488303097": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:5fc7ee95ca7c": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:6cdd8a05e7db": "Differ and changes editor each own separate SSE stream consumers",
 }
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)

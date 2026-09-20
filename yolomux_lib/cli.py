@@ -638,5 +638,7 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         print(f"ERROR: Go backend binary is unavailable; searched: {searched}", file=sys.stderr)
         return 2
     command = [str(binary), "--host", args.host, "--port", str(args.port), "--root", str(repo_root)]
+    if args.dangerously_yolo:
+        command.append("--dangerously-yolo")
     os.execv(str(binary), command)
     return 127

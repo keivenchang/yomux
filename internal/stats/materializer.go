@@ -640,6 +640,17 @@ func addObservation(b *MaterializedBucket, o Observation) bool {
 				add("process_cpu_max_percent:"+binary, "maximum", v)
 			}
 		}
+		if ownedProcessCPU, ok := p["owned_process_cpu_percent"].(map[string]any); ok {
+			for binary, raw := range ownedProcessCPU {
+				v, err := number(raw)
+				if err != nil {
+					continue
+				}
+				add("owned_process_cpu_percent:"+binary, "average", v)
+				add("owned_process_cpu_min_percent:"+binary, "minimum", v)
+				add("owned_process_cpu_max_percent:"+binary, "maximum", v)
+			}
+		}
 		if v, ok := num("system_percent"); ok {
 			add("system_cpu_percent", "average", v)
 			add("system_cpu_min_percent", "minimum", v)

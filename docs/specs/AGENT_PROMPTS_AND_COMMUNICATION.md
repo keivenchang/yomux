@@ -2,7 +2,7 @@
 
 This file records the working knowledge YOLOmux uses to detect Claude, Codex, and the currently supported visible OpenCode state from terminal screens, transcripts, and structured approval channels. Treat the exact strings as versioned examples, not a permanent API. The durable contract is the state model, the visible-block boundaries, and the fallback order.
 
-Backend scope: the detector and communication owners below are Python and power Tabber, auto-approval, and YO!agent, which are unavailable in the experimental Go capability catalog. Go has separate `internal/stats` agent inventory/status/token classifiers for YO!stats; those collectors do not make YO!agent sends or approval actions available. Shared visible state vocabulary may be compared across implementations, but their process and communication owners are different.
+Backend scope: the detector and communication owners below are Python and power Tabber, auto-approval, and YO!agent. Go now exposes the global Tabber roster/activity surface, but auto-approval and YO!agent remain unavailable in its capability catalog. Go has separate `internal/stats` agent inventory/status/token classifiers for YO!stats; those collectors do not make YO!agent sends or approval actions available. Shared visible state vocabulary may be compared across implementations, but their process and communication owners are different.
 
 ## Purpose
 

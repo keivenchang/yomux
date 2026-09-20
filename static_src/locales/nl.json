@@ -2507,6 +2507,7 @@
   "debug.system.roster.detail.sampler": "YO!stats-sampler",
   "gitDiff.binary": "binair",
   "gitDiff.changedFiles": "Gewijzigde bestanden",
+  "gitDiff.dirty": "Gewijzigd",
   "gitDiff.empty": "Geen commits binnen dit bereik.",
   "gitDiff.filesTruncated": "De bestandslijst is afgekapt.",
   "gitDiff.firstParent": "Vergeleken met de eerste ouder",

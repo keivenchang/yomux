@@ -1,6 +1,6 @@
 # TMUX signals available to YOLOmux
 
-Backend scope: tmux formats, hooks, control mode, pane capture, and PTY facts are implementation-independent references. Python consumes the full set for Tabber, auto-approval, recovery, and agent communication. Go currently owns roster/create/kill, PTY/WebSocket attach, terminal status, and YO!stats agent inventory; it does not implement Python Tabber, YO!agent, or approvald behavior. Application notes below that name Python modules or auto-approval are Python-specific unless a Go owner is stated.
+Backend scope: tmux formats, hooks, control mode, pane capture, and PTY facts are implementation-independent references. Python consumes the full set for Tabber, auto-approval, recovery, and agent communication. Go currently owns the global Tabber roster/activity API, roster/create/kill, PTY/WebSocket attach, terminal status, and YO!stats agent inventory; it does not implement Python YO!agent or approvald behavior. Application notes below that name Python modules or auto-approval are Python-specific unless a Go owner is stated.
 
 Reference for every signal tmux exposes, captured from this host's `man tmux` (tmux 3.4). "Signals" fall into three kinds: **state** (FORMATS variables you query on demand), **events** (hooks and control-mode notifications you subscribe to), and **content** (pane buffers you read). All are read-only ways to observe tmux without attaching a sizing client, which matters for terminal resize/minimize handling and capture-based agent features.
 

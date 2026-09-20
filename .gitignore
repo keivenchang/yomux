@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 node_modules/
 bazel-*
+/instance.lock
 
 # Scratch worklists — never committed (kept local only)
 DOIT*.md

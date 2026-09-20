@@ -18,10 +18,10 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 	if !catalog.Available("finder.read.v1") || !catalog.Available("pane.finder.v1") || !catalog.Available("pane.differ.v1") {
 		t.Fatal("Finder read capability is not enabled")
 	}
-	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
-		t.Fatal("capability availability does not match the implemented Finder and stats surfaces")
+	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("pane.tabber.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
+		t.Fatal("capability availability does not match the implemented Finder, Tabber, and stats surfaces")
 	}
-	for _, name := range []string{"core.settings.v1", "core.integrations.v1", "pane.tabber.v1", "pane.chat.v1"} {
+	for _, name := range []string{"core.settings.v1", "core.integrations.v1", "pane.chat.v1"} {
 		if catalog.Available(name) {
 			t.Fatalf("unimplemented capability %q is unexpectedly available", name)
 		}
@@ -30,10 +30,10 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 
 func TestSetAdvancesRevisionOnlyWhenStateChanges(t *testing.T) {
 	catalog := New("go-test")
-	if catalog.Set("pane.tabber.v1", Entry{Available: true}) != true || catalog.Revision() != 2 {
+	if catalog.Set("pane.chat.v1", Entry{Available: true}) != true || catalog.Revision() != 2 {
 		t.Fatalf("first transition revision = %d", catalog.Revision())
 	}
-	if catalog.Set("pane.tabber.v1", Entry{Available: true}) {
+	if catalog.Set("pane.chat.v1", Entry{Available: true}) {
 		t.Fatal("identical transition changed the revision")
 	}
 }
@@ -71,11 +71,11 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 			t.Errorf("RouteCapability(%q, %q) = %q, want %q", method, path, got, want)
 		}
 	}
-	catalog := New("go-test")
-	if !catalog.Available("finder.git.v1") {
-		t.Fatal("Git Finder capability is not enabled")
+	if got := RouteCapability("GET", "/api/fs/git-history-stats-stream?path=/tmp/repo&count=1&batch_size=1"); got != "finder.git.v1" {
+		t.Fatalf("RouteCapability(git-history-stats-stream) = %q, want finder.git.v1", got)
 	}
-	if catalog.Available("pane.tabber.v1") {
-		t.Fatal("later capability pane.tabber.v1 is unexpectedly available")
+	catalog := New("go-test")
+	if !catalog.Available("finder.git.v1") || !catalog.Available("pane.tabber.v1") {
+		t.Fatal("implemented Finder and Tabber capabilities are not enabled")
 	}
 }

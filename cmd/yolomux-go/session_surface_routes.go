@@ -8,13 +8,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,9 +55,10 @@ type goGitSnapshot struct {
 }
 
 type procEntry struct {
-	PID     int
-	PPID    int
-	Command string
+	PID        int
+	PPID       int
+	Command    string
+	Executable string
 }
 
 func runGitMetadata(path string, args ...string) (string, bool) {
@@ -329,33 +333,136 @@ func processEntries() ([]procEntry, error) {
 		if command == "" {
 			continue
 		}
-		processes = append(processes, procEntry{PID: pid, PPID: processParent(pid), Command: command})
+		executable, _ := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		processes = append(processes, procEntry{PID: pid, PPID: processParent(pid), Command: command, Executable: executable})
 	}
 	return processes, nil
 }
 
-func paneAgentProcess(panePID int, paneCommand string) (string, int, string) {
-	if kind := agentKindFromCommand(paneCommand); kind != "" {
-		return kind, panePID, paneCommand
+// descendantProcessEntries walks Linux's per-process children files instead
+// of scanning every process on the machine. The Go Daemons panel only needs
+// descendants of this server; a machine-wide roster here duplicated the much
+// more expensive agent inventory scan and was a major avoidable contributor to
+// high CPU while /api/system-status was polled.
+func descendantProcessEntries(rootPID int) ([]procEntry, error) {
+	if rootPID <= 0 || runtime.GOOS != "linux" {
+		return nil, errors.New("descendant process walk unavailable")
 	}
-	processes, err := processEntries()
+	queue := []int{rootPID}
+	seen := map[int]bool{rootPID: true}
+	result := make([]procEntry, 0)
+	for len(queue) > 0 && len(result) < maxProcEntries {
+		parent := queue[0]
+		queue = queue[1:]
+		children, err := processChildren(parent)
+		if err != nil {
+			if parent == rootPID {
+				return nil, err
+			}
+			continue
+		}
+		for _, pid := range children {
+			if pid <= 0 || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			command := processCommand(pid)
+			executable, _ := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+			if command != "" {
+				result = append(result, procEntry{PID: pid, PPID: parent, Command: command, Executable: executable})
+			}
+			queue = append(queue, pid)
+			if len(result) >= maxProcEntries {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func processChildren(pid int) ([]int, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "task", strconv.Itoa(pid), "children"))
 	if err != nil {
-		return "", 0, ""
+		return nil, err
+	}
+	return parseProcessChildren(string(data)), nil
+}
+
+func parseProcessChildren(text string) []int {
+	fields := strings.Fields(text)
+	children := make([]int, 0, len(fields))
+	for _, field := range fields {
+		child, parseErr := strconv.Atoi(field)
+		if parseErr == nil && child > 0 {
+			children = append(children, child)
+		}
+	}
+	return children
+}
+
+func (s *server) paneAgentProcess(panePID int, paneCommand string) (string, int, string, string) {
+	if s.processEntriesFn == nil {
+		if kind := agentKindFromCommand(paneCommand); kind != "" {
+			return kind, panePID, paneCommand, ""
+		}
+		return "", 0, "", ""
+	}
+	processes, err := s.processEntriesFn()
+	if err != nil {
+		return "", 0, "", ""
+	}
+	byPID := make(map[int]procEntry, len(processes))
+	for _, process := range processes {
+		byPID[process.PID] = process
+	}
+	classify := func(process procEntry) string { return stats.ClassifyAgent(process.Command, process.Executable) }
+	if process, ok := byPID[panePID]; ok {
+		if kind := classify(process); kind != "" {
+			return kind, process.PID, process.Command, process.Executable
+		}
+	} else if kind := agentKindFromCommand(paneCommand); kind != "" {
+		return kind, panePID, paneCommand, ""
 	}
 	children := make(map[int][]procEntry)
 	for _, process := range processes {
 		children[process.PPID] = append(children[process.PPID], process)
 	}
 	queue := append([]procEntry(nil), children[panePID]...)
+	var fallback *procEntry
 	for len(queue) > 0 {
 		process := queue[0]
 		queue = queue[1:]
-		if kind := agentKindFromCommand(process.Command); kind != "" {
-			return kind, process.PID, process.Command
+		if kind := classify(process); kind != "" {
+			return kind, process.PID, process.Command, process.Executable
+		}
+		// Codex's Linux launcher is a Node process whose argv contains the
+		// real /.../codex entry point.  Keep this as a fallback so a native
+		// Codex child later in the same tree wins over its Node wrapper.
+		if fallback == nil {
+			if kind := agentKindFromCommand(process.Command); kind != "" {
+				candidate := process
+				fallback = &candidate
+			}
 		}
 		queue = append(queue, children[process.PID]...)
 	}
-	return "", 0, ""
+	if fallback != nil {
+		return agentKindFromCommand(fallback.Command), fallback.PID, fallback.Command, fallback.Executable
+	}
+	return "", 0, "", ""
+}
+
+// tmux signal rows expose pane_current_command, which is only the shell's
+// short label.  Codex's launcher is commonly reported as "node" even though
+// its child command is the real Codex entry point.  Reuse the same bounded
+// process-tree identity check as session metadata so the signal state can
+// drive the green working marker for wrapped Codex panes too.
+func (s *server) tmuxSignalPaneAgent(panePID int, paneCommand string) (string, int, string) {
+	kind, pid, command, _ := s.paneAgentProcess(panePID, paneCommand)
+	if kind != "claude" && kind != "codex" {
+		return "", 0, ""
+	}
+	return kind, pid, command
 }
 
 func transcriptRoot(kind string) string {
@@ -1025,11 +1132,53 @@ func readTranscriptTextForAgent(path string, agent map[string]any, lines int) (s
 	return text, nil, err
 }
 
+const liveSessionMetadataTmuxFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}"
+
+const (
+	goTmuxSignalWindowFormat = "#{session_name}\t#{session_id}\t#{session_activity}\t#{session_last_attached}\t#{session_attached}\t#{session_attached_list}\t#{window_index}\t#{window_id}\t#{window_name}\t#{window_active}\t#{window_activity}\t#{window_activity_flag}\t#{window_bell_flag}\t#{window_silence_flag}\t#{window_active_clients}\t#{window_active_clients_list}\t#{window_panes}\t#{window_width}\t#{window_height}\t#{window_zoomed_flag}\t#{window_layout}\t#{window_visible_layout}"
+	goTmuxSignalPaneFormat   = "#{session_name}\t#{window_index}\t#{window_id}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_dead_time}\t#{alternate_on}\t#{pane_in_mode}\t#{pane_mode}\t#{pane_input_off}\t#{pane_synchronized}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{history_size}\t#{history_bytes}"
+	goTmuxSignalClientFormat = "#{client_name}\t#{client_session}\t#{client_activity}\t#{client_width}\t#{client_height}\t#{client_flags}\t#{client_control_mode}\t#{client_readonly}\t#{client_user}"
+)
+
 func (s *server) liveSessionMetadata(session string) map[string]any {
-	format := "#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}\t#{pane_active}\t#{window_active}"
-	output, err := s.tmuxCommand("list-panes", "-s", "-t", s.exactTarget(session), "-F", format).Output()
+	return s.liveSessionMetadataForSessions([]string{session})[session]
+}
+
+func (s *server) liveSessionMetadataForSessions(sessions []string) map[string]map[string]any {
+	result, _ := s.liveSessionMetadataForSessionsWithError(sessions)
+	return result
+}
+
+// liveSessionMetadataForSessionsWithError keeps the roster and pane inventory as
+// separate observations.  A transient list-panes failure must not turn a known
+// global session roster into a healthy-looking empty topology.
+func (s *server) liveSessionMetadataForSessionsWithError(sessions []string) (map[string]map[string]any, error) {
+	// Use one machine-wide inventory, matching Python's discover_sessions() path.
+	// Operator launches must see every session on the global tmux server.
+	// Keep the global pane scan bounded just like the session roster scan. A wedged
+	// tmux server must degrade metadata to empty panes, not hold Tabber's request
+	// open indefinitely.
+	result := make(map[string]map[string]any, len(sessions))
+	if len(sessions) == 0 {
+		return result, nil
+	}
+	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := s.tmuxCommandContext(commandContext, "list-panes", "-a", "-F", liveSessionMetadataTmuxFormat).Output()
+	for _, session := range sessions {
+		result[session] = s.liveSessionMetadataFromOutput(session, output, err)
+	}
+	return result, err
+}
+
+func (s *server) liveSessionMetadataFromOutput(session string, output []byte, err error) map[string]any {
 	if err != nil {
-		return map[string]any{"panes": []any{}, "selected_pane": nil, "agents": []any{}, "window_metadata": []any{}}
+		return map[string]any{
+			"panes":           []map[string]any{},
+			"selected_pane":   nil,
+			"agents":          []map[string]any{},
+			"window_metadata": []map[string]any{},
+		}
 	}
 	panes := make([]map[string]any, 0)
 	agents := make([]map[string]any, 0)
@@ -1037,19 +1186,19 @@ func (s *server) liveSessionMetadata(session string) map[string]any {
 	var selected map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		parts := splitTmuxFields(line)
-		if len(parts) < 10 {
+		if len(parts) < 11 || parts[0] != session {
 			continue
 		}
-		pid, _ := strconv.Atoi(parts[7])
-		paneIndex, _ := strconv.Atoi(parts[2])
-		windowIndex, _ := strconv.Atoi(parts[0])
-		active := parts[8] == "1"
-		windowActive := parts[9] == "1"
+		pid, _ := strconv.Atoi(parts[8])
+		paneIndex, _ := strconv.Atoi(parts[3])
+		windowIndex, _ := strconv.Atoi(parts[1])
+		active := parts[9] == "1"
+		windowActive := parts[10] == "1"
 		pane := map[string]any{
-			"session": session, "window": parts[0], "window_index": windowIndex, "pane": parts[2],
-			"pane_index": paneIndex, "pane_id": parts[3], "target": parts[3], "current_path": parts[4],
-			"command": parts[5], "active": active, "window_active": windowActive, "title": parts[6], "pid": pid,
-			"window_name": parts[1],
+			"session": session, "window": parts[1], "window_index": windowIndex, "pane": parts[3],
+			"pane_index": paneIndex, "pane_id": parts[4], "target": parts[4], "current_path": parts[5],
+			"command": parts[6], "active": active, "window_active": windowActive, "title": parts[7], "pid": pid,
+			"window_name": parts[2],
 		}
 		panes = append(panes, pane)
 		if selected == nil && windowActive && active {
@@ -1058,25 +1207,32 @@ func (s *server) liveSessionMetadata(session string) map[string]any {
 		if selected == nil && active {
 			selected = pane
 		}
-		if _, ok := windows[parts[0]]; !ok {
-			windows[parts[0]] = map[string]any{
-				"window": parts[0], "window_index": windowIndex, "window_name": parts[1],
-				"path": parts[4], "pane": parts[2], "pane_target": parts[3],
+		if _, ok := windows[parts[1]]; !ok {
+			windows[parts[1]] = map[string]any{
+				"window": parts[1], "window_index": windowIndex, "window_name": parts[2],
+				"path": parts[5], "pane": parts[3], "pane_target": parts[4],
 			}
 		}
-		kind, agentPID, agentCommand := paneAgentProcess(pid, parts[5])
+		kind, agentPID, agentCommand, agentExecutable := s.paneAgentProcess(pid, parts[6])
 		if kind == "" {
 			continue
 		}
-		cwd := parts[4]
-		sessionID, transcript, resolvedCWD := agentTranscriptWithCommand(kind, agentPID, cwd, parts[6], agentCommand)
+		cwd := parts[5]
+		sessionID, transcript, resolvedCWD := agentTranscriptWithCommand(kind, agentPID, cwd, parts[7], agentCommand)
 		if resolvedCWD != "" {
 			cwd = resolvedCWD
 		}
+		status := "idle"
+		if s.agentStatusClassifier != nil {
+			classified := s.agentStatusClassifier(context.Background(), stats.AgentStatusRequest{
+				Kind: kind, PID: agentPID, Command: agentCommand, Executable: agentExecutable, PaneTarget: parts[4], Directory: cwd,
+			})
+			status = liveAgentWindowState(classified.Status)
+		}
 		agents = append(agents, map[string]any{
-			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[3], "command": agentCommand,
-			"cwd": cwd, "status": "idle", "session_id": sessionID, "transcript": transcript,
-			"error": "", "window": parts[0], "window_index": windowIndex, "pane": parts[2],
+			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand,
+			"cwd": cwd, "status": status, "session_id": sessionID, "transcript": transcript,
+			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
 			"window_active": windowActive, "current": active && windowActive,
 		})
 	}
@@ -1090,6 +1246,288 @@ func (s *server) liveSessionMetadata(session string) map[string]any {
 		return left < right
 	})
 	return map[string]any{"panes": panes, "selected_pane": selected, "agents": agents, "window_metadata": windowMetadata}
+}
+
+func liveAgentWindowState(status stats.AgentStatus) string {
+	switch status {
+	case stats.AgentStatusRun:
+		return "working"
+	case stats.AgentStatusAsk:
+		return "needs-input"
+	case stats.AgentStatusTransition:
+		return "cooldown"
+	case stats.AgentStatusError:
+		return "blocked"
+	case stats.AgentStatusUnavailable:
+		return "unavailable"
+	default:
+		return "idle"
+	}
+}
+
+func goTmuxSignalFields(line string, want int) ([]string, bool) {
+	parts := splitTmuxFields(line)
+	return parts, len(parts) == want
+}
+
+func goTmuxSignalInt(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func goTmuxSignalNullableInt(value string) any {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return parsed
+}
+
+func goTmuxSignalBool(value string) bool {
+	return strings.TrimSpace(value) == "1"
+}
+
+func goTmuxSignalList(value string) []string {
+	value = strings.NewReplacer(",", " ").Replace(value)
+	items := strings.Fields(value)
+	if len(items) == 0 {
+		return []string{}
+	}
+	return items
+}
+
+func goTmuxSignalWindowKey(session, window string) string {
+	return session + ":" + window
+}
+
+func goTmuxSignalPaneKey(session, window, pane string) string {
+	return goTmuxSignalWindowKey(session, window) + "." + pane
+}
+
+func goTmuxSignalCommandError(label string, err error, output []byte) string {
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		detail = err.Error()
+	}
+	return label + ": " + detail
+}
+
+func (s *server) tmuxSignalSnapshot(session string) (map[string]any, int) {
+	started := time.Now()
+	target := strings.TrimSpace(session)
+	targetArgs := []string{}
+	if target != "" {
+		// Match Python's tmux_session_target(): a bare name permits tmux's
+		// prefix/glob resolution (for example, `1` can select `12`).  Signal
+		// snapshots are read-only, but selecting the wrong session still makes
+		// Tabber display the wrong window, so filtered reads must be exact.
+		targetArgs = []string{"-t", "=" + target + ":"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	errorsPayload := make([]string, 0)
+	read := func(label, format string, args ...string) []byte {
+		commandArgs := append([]string{}, args...)
+		commandArgs = append(commandArgs, "-F", format)
+		output, err := s.tmuxCommandContext(ctx, commandArgs...).CombinedOutput()
+		if err != nil {
+			errorsPayload = append(errorsPayload, goTmuxSignalCommandError(label, err, output))
+			return nil
+		}
+		return output
+	}
+	windowArgs := []string{"list-windows"}
+	if target == "" {
+		windowArgs = append(windowArgs, "-a")
+	} else {
+		windowArgs = append(windowArgs, targetArgs...)
+	}
+	paneArgs := []string{"list-panes"}
+	if target == "" {
+		paneArgs = append(paneArgs, "-a")
+	} else {
+		paneArgs = append(paneArgs, targetArgs...)
+	}
+	clientArgs := []string{"list-clients"}
+	if target != "" {
+		clientArgs = append(clientArgs, targetArgs...)
+	}
+	windowsOutput := read("tmux list-windows failed", goTmuxSignalWindowFormat, windowArgs...)
+	panesOutput := read("tmux list-panes failed", goTmuxSignalPaneFormat, paneArgs...)
+	clientsOutput := read("tmux list-clients failed", goTmuxSignalClientFormat, clientArgs...)
+
+	windows := make([]map[string]any, 0)
+	windowsByKey := make(map[string]map[string]any)
+	sessions := make(map[string]map[string]any)
+	for _, line := range strings.Split(strings.TrimSpace(string(windowsOutput)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts, ok := goTmuxSignalFields(line, 22)
+		if !ok {
+			errorsPayload = append(errorsPayload, "invalid tmux sub-window signal row")
+			continue
+		}
+		sessionName, windowIndex := parts[0], parts[6]
+		activityTS := goTmuxSignalInt(parts[10])
+		window := map[string]any{
+			"key": goTmuxSignalWindowKey(sessionName, windowIndex), "session": sessionName, "session_name": sessionName,
+			"session_id": parts[1], "session_activity_ts": goTmuxSignalInt(parts[2]), "session_last_attached_ts": goTmuxSignalInt(parts[3]),
+			"session_attached": goTmuxSignalInt(parts[4]), "session_attached_list": parts[5], "window_index": windowIndex,
+			"window": windowIndex, "window_id": parts[7], "window_name": parts[8], "active": goTmuxSignalBool(parts[9]),
+			"activity_ts": activityTS, "window_activity": activityTS, "activity_age_seconds": nil,
+			"activity_flag": goTmuxSignalBool(parts[11]), "bell_flag": goTmuxSignalBool(parts[12]), "silence_flag": goTmuxSignalBool(parts[13]),
+			"active_clients": goTmuxSignalInt(parts[14]), "active_clients_list": parts[15], "pane_count": goTmuxSignalInt(parts[16]),
+			"width": goTmuxSignalInt(parts[17]), "height": goTmuxSignalInt(parts[18]), "zoomed": goTmuxSignalBool(parts[19]),
+			"layout": parts[20], "visible_layout": parts[21], "panes": []map[string]any{},
+			"active_client_details": []map[string]any{}, "authoritative_client": nil,
+		}
+		if activityTS > 0 {
+			window["activity_age_seconds"] = math.Max(0, time.Now().Sub(time.Unix(int64(activityTS), 0)).Seconds())
+		}
+		windows = append(windows, window)
+		windowsByKey[window["key"].(string)] = window
+		if sessions[sessionName] == nil {
+			sessions[sessionName] = map[string]any{
+				"name": sessionName, "session_id": parts[1], "activity_ts": goTmuxSignalInt(parts[2]),
+				"last_attached_ts": goTmuxSignalInt(parts[3]), "attached": goTmuxSignalInt(parts[4]),
+				"attached_list": parts[5], "windows": []string{},
+			}
+		}
+		sessions[sessionName]["windows"] = append(sessions[sessionName]["windows"].([]string), window["key"].(string))
+	}
+
+	panes := make([]map[string]any, 0)
+	orphanPanes := make([]map[string]any, 0)
+	agents := make([]map[string]any, 0)
+	for _, line := range strings.Split(strings.TrimSpace(string(panesOutput)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts, ok := goTmuxSignalFields(line, 23)
+		if !ok {
+			errorsPayload = append(errorsPayload, "invalid tmux pane signal row")
+			continue
+		}
+		sessionName, windowIndex, paneIndex, paneID := parts[0], parts[1], parts[3], parts[4]
+		command := parts[7]
+		panePID := goTmuxSignalInt(parts[18])
+		pane := map[string]any{
+			"key": goTmuxSignalPaneKey(sessionName, windowIndex, paneIndex), "window_key": goTmuxSignalWindowKey(sessionName, windowIndex),
+			"session": sessionName, "window_index": windowIndex, "window": windowIndex, "window_id": parts[2], "pane_index": paneIndex,
+			"pane": paneIndex, "pane_id": paneID, "target": paneID, "active": goTmuxSignalBool(parts[5]), "current_path": parts[6],
+			"current_command": command, "command": command, "title": parts[8], "dead": goTmuxSignalBool(parts[9]),
+			"dead_status": goTmuxSignalNullableInt(parts[10]), "dead_signal": goTmuxSignalNullableInt(parts[11]), "dead_time": goTmuxSignalNullableInt(parts[12]),
+			"alternate_on": goTmuxSignalBool(parts[13]), "in_mode": goTmuxSignalBool(parts[14]), "mode": parts[15],
+			"input_off": goTmuxSignalBool(parts[16]), "synchronized": goTmuxSignalBool(parts[17]), "pid": goTmuxSignalNullableInt(parts[18]),
+			"width": goTmuxSignalInt(parts[19]), "height": goTmuxSignalInt(parts[20]), "history_size": goTmuxSignalInt(parts[21]),
+			"history_bytes": goTmuxSignalInt(parts[22]),
+		}
+		if kind, agentPID, agentCommand := s.tmuxSignalPaneAgent(panePID, command); kind != "" {
+			pane["agent"] = kind
+			agents = append(agents, map[string]any{"session": sessionName, "window_index": windowIndex, "pane_id": paneID, "target": paneID, "agent": kind, "pid": agentPID, "command": agentCommand, "current_path": parts[6], "alternate_on": pane["alternate_on"], "dead": pane["dead"]})
+		} else {
+			pane["agent"] = ""
+		}
+		panes = append(panes, pane)
+		window := windowsByKey[goTmuxSignalWindowKey(sessionName, windowIndex)]
+		if window == nil {
+			orphanPanes = append(orphanPanes, pane)
+			continue
+		}
+		window["panes"] = append(window["panes"].([]map[string]any), pane)
+	}
+
+	clients := make([]map[string]any, 0)
+	for _, line := range strings.Split(strings.TrimSpace(string(clientsOutput)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts, ok := goTmuxSignalFields(line, 9)
+		if !ok {
+			errorsPayload = append(errorsPayload, "invalid tmux client signal row")
+			continue
+		}
+		clients = append(clients, map[string]any{"name": parts[0], "session": parts[1], "activity_ts": goTmuxSignalInt(parts[2]), "width": goTmuxSignalInt(parts[3]), "height": goTmuxSignalInt(parts[4]), "flags": parts[5], "control_mode": goTmuxSignalBool(parts[6]), "readonly": goTmuxSignalBool(parts[7]), "user": parts[8]})
+	}
+
+	for _, window := range windows {
+		sort.SliceStable(window["panes"].([]map[string]any), func(i, j int) bool {
+			left := goTmuxSignalInt(window["panes"].([]map[string]any)[i]["pane_index"].(string))
+			right := goTmuxSignalInt(window["panes"].([]map[string]any)[j]["pane_index"].(string))
+			return left < right
+		})
+		names := make(map[string]struct{})
+		for _, name := range goTmuxSignalList(window["active_clients_list"].(string)) {
+			names[name] = struct{}{}
+		}
+		active := make([]map[string]any, 0)
+		var authoritative map[string]any
+		for _, client := range clients {
+			if client["session"] != window["session"] {
+				continue
+			}
+			if _, ok := names[client["name"].(string)]; !ok {
+				continue
+			}
+			active = append(active, client)
+			if client["control_mode"].(bool) || client["width"].(int) <= 0 || client["height"].(int) <= 0 {
+				continue
+			}
+			if authoritative == nil || client["activity_ts"].(int) > authoritative["activity_ts"].(int) || (client["activity_ts"].(int) == authoritative["activity_ts"].(int) && client["width"].(int)*client["height"].(int) > authoritative["width"].(int)*authoritative["height"].(int)) {
+				authoritative = client
+			}
+		}
+		window["active_client_details"] = active
+		if authoritative != nil {
+			window["authoritative_client"] = map[string]any{"client_name": authoritative["name"], "client_user": authoritative["user"], "activity_ts": authoritative["activity_ts"], "width": authoritative["width"], "height": authoritative["height"], "readonly": authoritative["readonly"], "flags": authoritative["flags"], "reason": "most-recent-active-viewer"}
+		}
+	}
+
+	sessionNames := make([]string, 0, len(sessions))
+	for name := range sessions {
+		sessionNames = append(sessionNames, name)
+	}
+	sort.SliceStable(sessionNames, func(i, j int) bool {
+		left, right := tmuxSessionSortKey(sessionNames[i]), tmuxSessionSortKey(sessionNames[j])
+		if left.rank != right.rank {
+			return left.rank < right.rank
+		}
+		if left.group != right.group {
+			return left.group < right.group
+		}
+		return left.number < right.number
+	})
+	sortedSessions := make(map[string]any, len(sessionNames))
+	for _, name := range sessionNames {
+		sortedSessions[name] = sessions[name]
+	}
+	sort.SliceStable(windows, func(i, j int) bool {
+		left, right := tmuxSessionSortKey(windows[i]["session"].(string)), tmuxSessionSortKey(windows[j]["session"].(string))
+		if left.rank != right.rank {
+			return left.rank < right.rank
+		}
+		if left.group != right.group {
+			return left.group < right.group
+		}
+		if left.number != right.number {
+			return left.number < right.number
+		}
+		return goTmuxSignalInt(windows[i]["window_index"].(string)) < goTmuxSignalInt(windows[j]["window_index"].(string))
+	})
+	status := http.StatusOK
+	if len(errorsPayload) > 0 {
+		status = http.StatusServiceUnavailable
+	}
+	return map[string]any{
+		"ok": len(errorsPayload) == 0, "generated_at": float64(time.Now().UnixNano()) / 1e9,
+		"compute_ms": time.Since(started).Seconds() * 1000, "window_count": len(windows), "pane_count": len(panes),
+		"client_count": len(clients), "agent_count": len(agents), "sessions": sortedSessions, "session_order": sessionNames,
+		"windows": windows, "clients": clients, "orphan_panes": orphanPanes, "agents": agents, "errors": errorsPayload,
+	}, status
 }
 
 func transcriptSignature(path string) (int64, int64) {

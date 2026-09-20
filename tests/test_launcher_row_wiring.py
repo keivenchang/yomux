@@ -40,7 +40,11 @@ def _launcher_path() -> Path:
     override = os.environ.get("YOLO_DEV_START_SH")
     if override:
         return Path(override)
-    return Path.home() / "dev" / "ai-config" / "claude" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh"
+    candidates = (
+        Path.home() / ".agents" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
+        Path.home() / "dev" / "ai-config" / "claude" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
 
 
 LAUNCHER = _launcher_path()

@@ -652,12 +652,26 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
 	if err != nil {
 		return OpenCodeStepFinishWindow{}, fmt.Errorf("encode OpenCode step-finish selections: %w", err)
 	}
+	// Read the bounded row floor separately so SQLite sees a scalar parameter in
+	// the rowid predicate. Hiding the same boundary behind a CTE made the
+	// planner scan the complete part table on databases without a session/time
+	// index, even though only the newest active rows were eligible.
+	revisionRows, err := d.reader.Rows(ctx, "SELECT COALESCE(MAX(rowid), 0) FROM part")
+	if err != nil {
+		return OpenCodeStepFinishWindow{}, fmt.Errorf("read OpenCode part revision: %w", err)
+	}
+	if len(revisionRows) != 1 || len(revisionRows[0]) != 1 {
+		return OpenCodeStepFinishWindow{}, fmt.Errorf("malformed OpenCode part revision")
+	}
+	maxRowID, err := openCodeInteger(revisionRows[0][0])
+	if err != nil || maxRowID < 0 {
+		return OpenCodeStepFinishWindow{}, fmt.Errorf("malformed OpenCode part revision")
+	}
+	rowFloor := int64(0)
+	if maxRowID > openCodeActivePartRows {
+		rowFloor = maxRowID - openCodeActivePartRows
+	}
 	query := `WITH
-revision(max_rowid, row_floor) AS (
-	SELECT COALESCE(MAX(rowid), 0),
-	       CASE WHEN COALESCE(MAX(rowid), 0) > ? THEN COALESCE(MAX(rowid), 0) - ? ELSE 0 END
-	FROM part
-),
 selected(session_id, root_session_id, active_since, cursor_rowid) AS (
   SELECT json_extract(value, '$.session_id'),
          json_extract(value, '$.root_session_id'),
@@ -670,26 +684,12 @@ candidates AS (
          p.data AS part_data, m.data AS message_data, s.model, selected.root_session_id
   FROM part AS p
   JOIN selected ON selected.session_id = p.session_id
-  CROSS JOIN revision
   JOIN message AS m ON m.id = p.message_id AND m.session_id = p.session_id
   JOIN session AS s ON s.id = p.session_id
   WHERE p.time_updated < ?
-    AND p.rowid > revision.row_floor
-    AND p.time_updated >= selected.active_since
-    AND json_valid(p.data) = 1 AND json_extract(p.data, '$.type') = 'step-finish'
-    AND json_valid(m.data) = 1 AND json_extract(m.data, '$.role') = 'assistant'
-  UNION
-  SELECT p.rowid, p.id, p.message_id, p.session_id, p.time_created, p.time_updated,
-         p.data AS part_data, m.data AS message_data, s.model, selected.root_session_id
-  FROM part AS p
-  JOIN selected ON selected.session_id = p.session_id
-  CROSS JOIN revision
-  JOIN message AS m ON m.id = p.message_id AND m.session_id = p.session_id
-  JOIN session AS s ON s.id = p.session_id
-  WHERE selected.cursor_rowid > 0
-    AND p.time_updated < ?
-    AND p.rowid > CASE WHEN selected.cursor_rowid > revision.row_floor
-                       THEN selected.cursor_rowid ELSE revision.row_floor END
+    AND p.rowid > ?
+    AND (p.time_updated >= selected.active_since
+         OR (selected.cursor_rowid > 0 AND p.rowid > selected.cursor_rowid))
     AND json_valid(p.data) = 1 AND json_extract(p.data, '$.type') = 'step-finish'
     AND json_valid(m.data) = 1 AND json_extract(m.data, '$.role') = 'assistant'
 ),
@@ -704,10 +704,7 @@ bounded AS (
 SELECT rowid, id, message_id, session_id, time_created, time_updated,
 	       part_data, message_data, model, root_session_id, global_rank, root_rank
 FROM bounded`
-	// The repeated row-count arguments keep row-floor computation inside the
-	// same statement as the bounded read. This avoids a separate full-table
-	// revision query while retaining the existing recent-row rewrite guard.
-	args := []any{openCodeActivePartRows, openCodeActivePartRows, string(selectionJSON), end, end, limit, limit + 1}
+	args := []any{string(selectionJSON), end, rowFloor, limit, limit + 1}
 	rows, err := d.reader.Rows(ctx, query, args...)
 	if err != nil {
 		return OpenCodeStepFinishWindow{}, fmt.Errorf("read OpenCode step-finish selection window: %w", err)

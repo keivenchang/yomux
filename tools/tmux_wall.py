@@ -44,6 +44,7 @@ from yolomux_lib.tmux.tmux_utils import run_cmd
 from yolomux_lib.tmux.tmux_utils import tmux
 from yolomux_lib.tmux.tmux_utils import tmux_capture_pane
 from yolomux_lib.tmux.tmux_utils import tmux_capture_pane_styled
+from yolomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
 from yolomux_lib.web import current_language_pref
 from yolomux_lib.web import html_lang_dir_attrs
 from yolomux_lib.web import server_string
@@ -771,4 +772,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    use_machine_tmux_for_operator_launch()
     raise SystemExit(main())
