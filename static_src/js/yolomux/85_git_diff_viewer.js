@@ -779,12 +779,17 @@ function gitDiffCommitRow(item, commit, row = null) {
     shortShaText,
     gitDiffHostedLink(state?.hostedRemote, 'commit', sha),
   );
+  const signatureStatus = String(commit?.signature_status || '').trim();
+  if (signatureStatus) {
+    const signature = gitDiffTextNode('git-diff-commit-signature', signatureStatus);
+    shortSha.append(document.createTextNode(' '), signature);
+  }
   const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
   date.title = localizedExactDateTimeFormat(commit?.authored_at);
   const changes = gitDiffCommitChangesNode(commit);
   const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
   const description = gitDiffCommitSubjectNode(commit, state?.hostedRemote);
-  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' '));
+  control.setAttribute('aria-label', [shortShaText, signatureStatus, date.textContent, changes.getAttribute('aria-label'), author.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' '));
   control.replaceChildren(caret, shortSha, date, changes, author, description);
   return control;
 }

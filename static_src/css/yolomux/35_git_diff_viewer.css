@@ -231,12 +231,6 @@ body.theme-light .git-diff-panel {
   font-size: var(--ui-font-size-2xs);
   font-weight: 700;
 }
-.git-diff-commit-decorations {
-  margin-inline-end: var(--space-4);
-  color: var(--accent);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-}
 .git-diff-commit-description {
   min-width: 0;
   overflow: hidden;
@@ -248,6 +242,9 @@ body.theme-light .git-diff-panel {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-inline-end: var(--space-4);
+  color: var(--accent);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
   vertical-align: baseline;
 }
 .git-diff-commit-decoration {

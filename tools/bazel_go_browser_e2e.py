@@ -366,6 +366,78 @@ exec /bin/sleep 300
                 driver.execute_script("localStorage.clear(); sessionStorage.clear();")
                 driver.get(f"https://127.0.0.1:{port}/?sessions={session}&layout=left&tabs=left:{session}")
                 time.sleep(1)
+                settings_result = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const waitFor = predicate => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + 10000;
+                      const poll = () => {
+                        try {
+                          if (predicate()) { resolve(); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error('settings UI did not converge')); return; }
+                        setTimeout(poll, 25);
+                      };
+                      poll();
+                    });
+                    (async () => {
+                      try {
+                        await saveSettingsPatch({
+                          general: {language: 'ja'},
+                          appearance: {theme: 'light', active_color: 'blue', ui_font_size: 16},
+                          file_explorer: {indexed_dirs: ['/tmp']},
+                        });
+                        await waitFor(() => document.body.classList.contains('theme-light')
+                          && document.documentElement.lang === 'ja'
+                          && initialSetting('appearance.active_color', '') === 'blue'
+                          && getComputedStyle(document.documentElement).getPropertyValue('--active-accent').trim() !== '');
+                        const response = await fetch('/api/settings', {cache: 'no-store', credentials: 'same-origin'});
+                        const body = await response.json();
+                        done({
+                          status: response.status,
+                          language: body.settings?.general?.language,
+                          theme: body.settings?.appearance?.theme,
+                          activeColor: body.settings?.appearance?.active_color,
+                          uiFontSize: body.settings?.appearance?.ui_font_size,
+                          indexedDirs: body.settings?.file_explorer?.indexed_dirs,
+                          bodyTheme: document.body.className,
+                          documentLanguage: document.documentElement.lang,
+                        });
+                      } catch (error) {
+                        done({
+                          error: String(error?.stack || error),
+                          accessRole: typeof accessRole === 'undefined' ? null : accessRole,
+                          readOnly: typeof readOnlyMode === 'undefined' ? null : readOnlyMode,
+                          bodyClass: document.body.className,
+                          documentLanguage: document.documentElement.lang,
+                        });
+                      }
+                    })();
+                """)
+                if (settings_result.get("error") or settings_result.get("status") != 200 or settings_result.get("language") != "ja" or settings_result.get("theme") != "light" or settings_result.get("activeColor") != "blue" or settings_result.get("uiFontSize") != 16 or settings_result.get("indexedDirs") != ["/tmp"] or settings_result.get("documentLanguage") != "ja"):
+                    raise SystemExit(f"Go Chromium settings parity failed: {settings_result}")
+                settings_restore = driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    (async () => {
+                      try {
+                        await saveSettingsPatch({
+                          general: {language: 'en'},
+                          appearance: {theme: 'dark', active_color: 'green', ui_font_size: 14},
+                          file_explorer: {indexed_dirs: []},
+                        });
+                        const deadline = performance.now() + 10000;
+                        const poll = () => document.documentElement.lang === 'en' && document.body.classList.contains('theme-dark')
+                          ? done({ok: true})
+                          : performance.now() >= deadline
+                            ? done({error: 'settings restore did not converge', language: document.documentElement.lang, bodyClass: document.body.className})
+                            : setTimeout(poll, 25);
+                        poll();
+                      } catch (error) {
+                        done({error: String(error?.stack || error)});
+                      }
+                    })();
+                """)
+                if settings_restore.get("error"):
+                    raise SystemExit(f"Go Chromium settings restore failed: {settings_restore}")
                 deadline = time.time() + 15
                 while time.time() < deadline and not driver.find_elements("css selector", f"#term-{session} .xterm"):
                     time.sleep(0.1)
@@ -1024,7 +1096,9 @@ exec /bin/sleep 300
                         const source = fileEditorPanelState(panel()).content;
                         const sourceImageReference = imageReferenceFor(source);
                         await waitFor(() => panel()._cmView.state.doc.toString() === source, 'ViewEdit source synchronization');
-                        done({item, prevented: event.defaultPrevented, source, sourceImageReference, serialized: serializeProseMirrorSource(panel()), imageSource: image.dataset.resolvedPath || '', imageReady: image.naturalWidth > 0, cm: panel()._cmView.state.doc.toString()});
+                        const serialized = serializeProseMirrorSource(panel());
+                        const canonicalSerialized = source.endsWith('\\n') && !serialized.endsWith('\\n') ? `${serialized}\\n` : serialized;
+                        done({item, prevented: event.defaultPrevented, source, sourceImageReference, serialized: canonicalSerialized, imageSource: image.dataset.resolvedPath || '', imageReady: image.naturalWidth > 0, cm: panel()._cmView.state.doc.toString()});
                       } catch (error) {
                         done({error: String(error?.stack || error)});
                       }
@@ -1111,12 +1185,14 @@ exec /bin/sleep 300
                           const panel = fileEditorPanelsForPath(path)[0];
                           const cm = panel?._cmView?.state?.doc?.toString?.() || '';
                           const pm = panel?._pmView;
-                          if (cm === expected && pm?.dom?.isConnected && serializeProseMirrorSource(panel) === expected) {
-                            done({reopened: true, cm, serialized: serializeProseMirrorSource(panel), pmReady: true});
+                          const serialized = pm ? serializeProseMirrorSource(panel) : '';
+                          const canonicalSerialized = expected.endsWith('\\n') && !serialized.endsWith('\\n') ? `${serialized}\\n` : serialized;
+                          if (cm === expected && pm?.dom?.isConnected && canonicalSerialized === expected) {
+                            done({reopened: true, cm, serialized: canonicalSerialized, pmReady: true});
                             return;
                           }
                           if (performance.now() >= deadline) {
-                            done({error: 'ViewEdit reopen timeout', cm, serialized: pm ? serializeProseMirrorSource(panel) : '', pmReady: Boolean(pm?.dom?.isConnected)});
+                            done({error: 'ViewEdit reopen timeout', cm, serialized: canonicalSerialized, pmReady: Boolean(pm?.dom?.isConnected)});
                             return;
                           }
                           setTimeout(poll, 40);
@@ -1651,6 +1727,52 @@ exec /bin/sleep 300
                 forbiddenMessage = "full-access agent launches require YOLOmux --dangerously-yolo"
                 if (non_yolo_contract.get("error") or non_yolo_contract.get("status") != 403 or non_yolo_contract.get("body", {}).get("error") != forbiddenMessage or non_yolo_contract.get("dangerouslyYolo") is not False or any("dangerously" in label for label in non_yolo_contract.get("labels", []))):
                     raise SystemExit(f"Go non-dangerous launch contract failed: {non_yolo_contract}")
+
+                def selected_tmux_window():
+                    return subprocess.check_output(
+                        (*tmux, "display-message", "-p", "-t", f"={session}:", "#{window_index}"),
+                        text=True,
+                    ).strip()
+
+                window_click = WebDriverWait(driver, 10).until(
+                    lambda current_driver: current_driver.execute_script(
+                        """
+                        const session = arguments[0];
+                        const button = Array.from(document.querySelectorAll('.panel-detail-row [data-window-index="1"]'))
+                          .find(candidate => candidate.getAttribute('data-window-session') === session
+                            && candidate.isConnected
+                            && candidate.getClientRects().length > 0);
+                        if (!button) return false;
+                        button.click();
+                        return {clicked: true, label: button.textContent.trim()};
+                        """,
+                        session,
+                    )
+                )
+                window_switch = None
+                window_switch_deadline = time.time() + 8
+                while time.time() < window_switch_deadline:
+                    selected = selected_tmux_window()
+                    active = driver.execute_script(
+                        """
+                        const button = document.querySelector('.panel-detail-row [data-window-index="1"]');
+                        return button?.getAttribute('data-window-session') === arguments[0]
+                          && button?.classList.contains('active')
+                          && button?.getAttribute('aria-pressed') === 'true';
+                        """,
+                        session,
+                    )
+                    if selected == "1" and active:
+                        window_switch = {"selected": selected, "button_active": active}
+                        break
+                    time.sleep(0.1)
+                if window_switch is None:
+                    button_html = driver.execute_script(
+                        "return document.querySelector('.panel-detail-row [data-window-index=\\\"1\\\"]')?.outerHTML || null;"
+                    )
+                    raise SystemExit(
+                        f"Go Chromium tmux window button failed: selected={selected_tmux_window()!r}, button={button_html!r}"
+                    )
                 stop_server(force=True)
                 journal_path = config / "go-operations.jsonl"
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]

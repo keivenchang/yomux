@@ -60,6 +60,7 @@ class BrowserBootScenario:
     yoagent_chat_mode: str | None = None
     available_agents: tuple[str, ...] | None = None
     agent_auth: Mapping | None = None
+    background_status_payload: Mapping | None = None
     runtime_script_uri: str | None = None
     dangerously_yolo: bool = False
     hold_auto_approve: bool = False

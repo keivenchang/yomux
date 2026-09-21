@@ -135,7 +135,7 @@ function topbarServerUptimeTitle() {
 }
 
 function topbarBackendVersionTitle() {
-  const backend = String(bootstrap.backend || '').trim() || t('common.unknown');
+  const backend = String(bootstrap.backendLabel || bootstrap.backend || '').trim() || t('common.unknown');
   const version = String(bootstrap.versionStatus || bootstrap.version || '').trim() || t('common.unknown');
   return `${version} [${backend}]`;
 }

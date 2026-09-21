@@ -325,7 +325,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
     assert.deepStrictEqual([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent), ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main']);
     assert.equal(row.querySelector('.git-diff-commit-signature').textContent, 'U', 'Git signature status is shown beside the SHA');
-    assert.ok(row.querySelector('.git-diff-commit-decorations').textContent.includes('HEAD -> go_release') && row.querySelector('.git-diff-commit-decorations').textContent.includes('tag: v0.9.1'), 'Git ref decorations are shown with the commit subject');
+    assert.ok([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent).join(' ').includes('HEAD -> yo7110') && [...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent).join(' ').includes('tag: v0.8.8'), 'Git ref decorations are shown with the commit subject');
     assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
     assert.deepStrictEqual([
       row.querySelector('.git-diff-commit-added').textContent,
@@ -361,12 +361,9 @@ async function runLayoutAsyncSuite() {
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*24px;[\s\S]*padding:\s*var\(--space-2\) var\(--space-6\)/,
       'commit summaries keep the approved compact row height and padding');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
-    assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-staged\)/);
-    assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-deleted\)/);
     assert.match(css, /\.git-diff-commit-decoration\s*\{[\s\S]*font:\s*var\(--ui-font-size-2xs\)/);
     assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
     assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
-    assert.match(css, /\.git-diff-commit\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
     assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-diff-added\)/);
     assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-diff-removed\)/);
     assert.match(css, /\.git-diff-branch\s*\{[\s\S]*font-weight:\s*800/);

@@ -7219,10 +7219,6 @@ async function boot() {
     if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) refreshTabberPanels();
     return;
   }
-  refreshBackgroundOwnerStatus({render: false}).catch(error => {
-    console.warn('initial background-owner status refresh failed', error);
-    return false;
-  });
   bindClipboardPaste();
   paintInitialAppShell();
   scheduleDeferredSettingsMetadataRefresh();
