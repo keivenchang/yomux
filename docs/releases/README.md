@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.8.9 | `v0.8.9` | `v0.8.9^{commit}` | [v0.8.9-evidence.md](v0.8.9-evidence.md) | ViewEditor tab-switch recovery, read-only Mermaid previews, simplified single-instance ownership, bounded refresh cleanup, and backend runtime identity in the version hover |
 | 0.8.8 | `v0.8.8` | `v0.8.8^{commit}` | [v0.8.8-evidence.md](v0.8.8-evidence.md) | token-coverage and metadata-epoch convergence, lower-latency Tabs roster updates, and incomplete-HTML ViewEditor recovery |
 | 0.8.7 | `v0.8.7` | `v0.8.7^{commit}` | [v0.8.7-evidence.md](v0.8.7-evidence.md) | product-root isolation, editor/theme fixes, token collection ownership, metadata refresh coalescing, and terminal upload compatibility |
 | 0.8.6 | `v0.8.6` | `v0.8.6^{commit}` | [v0.8.6-evidence.md](v0.8.6-evidence.md) | coalesced cold session-metadata reads to reduce request-driven CPU and metadata rebuilds |

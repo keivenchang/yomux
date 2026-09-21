@@ -162,24 +162,15 @@ _BFS_FULL_BUILD_RUNNER: Callable[..., bool] | None = None
 SEARCH_INDEX_ROLE = "search-index"
 LOGGER = logging.getLogger(__name__)
 
-# These reason strings and the user-visible priority number MUST equal the ones `bfs_index` owns.
-# `file_index` cannot import `bfs_index` (it imports this module), so the shared values live here as
-# plain literals and are pinned to their one owner by a parity test
-# (tests/test_bfs_index.py::test_reason_priority_constants_match_file_index). A safety refresh and a
-# user-visible-demand promotion both drive the SAME breadth-first frontier; these are only the
-# precedence labels, not a second scheduler or queue.
+# These literals mirror bfs_index and are pinned by its parity test; both safety refresh and
+# user-visible demand use the same breadth-first frontier.
 SAFETY_REFRESH_REASON = "full-safety-refresh"
 USER_VISIBLE_DEMAND_REASON = "user-visible-demand"
 USER_VISIBLE_DEMAND_PRIORITY = 2
 HOT_CHANGE_REASON = "hot-change"
 HOT_CHANGE_PRIORITY = 1
-# Item 6 hot-path fairness. A continuously-hot root always has a dirty subtree, so `schedule_refreshes`
-# would take the bounded incremental repair branch on every tick and NEVER run the low-priority
-# breadth / safety reconciliation -- starving deeper-layer coverage and missed-event repair. After
-# this many consecutive hot (dirty) repairs the scheduler yields exactly one `full-safety-refresh`
-# (the lowest-priority, resumable, breadth-first pass that re-lists the whole tree and so supersedes
-# the pending dirty subtrees) before it resumes hot repairs. This is the tested starvation bound; it
-# is a count, not a timer, so the yield does not wait for the 1800s TTL.
+# Hot-path fairness yields one resumable full-safety refresh after this many dirty repairs, so a
+# continuously hot root cannot starve deeper coverage; the bound is count-based, not timer-based.
 HOT_REPAIR_STARVATION_BOUND = 8
 # Cap the heat score so a pathological event storm cannot grow an unbounded counter.
 HOT_MAX_SCORE = 10_000
@@ -189,6 +180,7 @@ HOT_INACTIVITY_SECONDS = 90.0
 # Coalesce a burst of Quick Open queries for the same root into one promotion dispatch, so a fast
 # typist cannot spawn a thread per keystroke.
 _PROMOTION_DEBOUNCE_SECONDS = 2.0
+_PROMOTION_HISTORY_LIMIT = 1024
 _PROMOTION_LOCK = threading.Lock()
 _PROMOTION_LAST_DISPATCH: dict[str, float] = {}
 
@@ -1288,6 +1280,7 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
     second dispatch thread. Repeated queries for the same root within a short window coalesce into
     one scheduler submission. Returns whether the operation was accepted for background dispatch.
     """
+    global _PROMOTION_LAST_DISPATCH
     if _BACKGROUND_REFRESH_REQUESTER is None or _BACKGROUND_WORK_SUBMITTER is None:
         return False
     key = str(root)
@@ -1296,10 +1289,14 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
         return False
     now = time.monotonic()
     with _PROMOTION_LOCK:
+        cutoff = now - _PROMOTION_DEBOUNCE_SECONDS
+        _PROMOTION_LAST_DISPATCH = {key: value for key, value in _PROMOTION_LAST_DISPATCH.items() if value > cutoff}
         last = _PROMOTION_LAST_DISPATCH.get(key, 0.0)
         if now - last < _PROMOTION_DEBOUNCE_SECONDS:
             return False
         _PROMOTION_LAST_DISPATCH[key] = now
+        while len(_PROMOTION_LAST_DISPATCH) > _PROMOTION_HISTORY_LIMIT:
+            del _PROMOTION_LAST_DISPATCH[min(_PROMOTION_LAST_DISPATCH, key=_PROMOTION_LAST_DISPATCH.get)]
     payload = {
         "root": key,
         "operation": "promote",

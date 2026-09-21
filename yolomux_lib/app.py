@@ -3370,6 +3370,8 @@ class WatchBridge:
                 if not app.sync_watchd_descriptors(record):
                     record.watchd_stop_event.wait(1.0)
                     continue
+                if record.stop_event.is_set():
+                    break
                 if record.next_watch_snapshot_refresh_at > 0 and time.monotonic() >= record.next_watch_snapshot_refresh_at:
                     app.start_client_watch_snapshot_publish()
                 # The descriptor set is the sole demand owner for watchd. Once the final
@@ -3379,6 +3381,8 @@ class WatchBridge:
                 if not record.watchd_descriptor_ids:
                     break
                 response = app.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
+                if record.stop_event.is_set():
+                    break
                 if response.get("ok") is not True:
                     app.publish_watchd_failure(record, response, action="wait_revision")
                     if response.get("_transport_error") in LOCAL_SERVICE_LIFECYCLE_REASONS:
@@ -4869,9 +4873,8 @@ class WatchBridge:
             record.tmux_roster_rename_hint = False
             record.snapshot_worker = None
         app.stop_status_generation_watcher(record)
-        # Keep an in-flight metadata worker as the single-flight owner until its finally block
-        # releases the guard. A Git/filesystem operation may not have a cancellation boundary, and
-        # releasing ownership here would let an SSE reconnect start a duplicate full rebuild.
+        # Keep in-flight metadata ownership until its finally block releases the guard; a
+        # Git/filesystem operation may not have a cancellation boundary.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
@@ -9691,9 +9694,6 @@ class TmuxWebtermApp:
         self.batchd_operation_service.stop()
 
     def stop_background_scheduler(self) -> None:
-        # Stop the one local scheduler before stopping any worker. The client-event bridge owns
-        # watchd revision RPCs, so closing scheduler admission first prevents a late watcher from
-        # racing teardown while index leases are released.
         scheduler = getattr(self, "background_scheduler", None)
         scheduler_stopped = False
         if scheduler is not None:
@@ -9704,6 +9704,8 @@ class TmuxWebtermApp:
             elif hasattr(scheduler, "begin_stop"):
                 scheduler.begin_stop()
         try:
+            if hasattr(self, "input_heartbeat_record"):
+                self.stop_input_heartbeat_worker()
             if hasattr(self, "_watch_bridge"):
                 self.stop_client_event_watcher()
             self.stop_update_check_thread()

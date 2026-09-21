@@ -2398,6 +2398,8 @@ def test_background_scheduler_demotion_stops_current_runtime_not_legacy_schedule
     reserved = webapp.session_files_service.reserve_work(("active",), "stable")
     assert reserved is not None
     webapp.background_scheduler = SimpleNamespace(status_payload=lambda: {"status": "local"})
+    webapp.input_heartbeat_record = SimpleNamespace()
+    webapp.stop_input_heartbeat_worker = lambda: calls.append("input")
     # Slice B: demotion releases the indexd scheduler lease; a bounded no-op here that must not
     # perturb the asserted stop order.
     webapp.search_indexer = SimpleNamespace(release_scheduler_lease=lambda: None)
@@ -2406,7 +2408,7 @@ def test_background_scheduler_demotion_stops_current_runtime_not_legacy_schedule
 
     webapp.stop_background_scheduler()
 
-    assert calls == ["pricing", "current", "batchd", "indexes"]
+    assert calls == ["input", "pricing", "current", "batchd", "indexes"]
     assert webapp.activity_transcript_service.tabber_warmer_record.wake.is_set() is False  # fresh replacement record
     assert webapp.metadata_warm_record.stop_event.is_set()
     assert webapp.session_files_service.work_records == {}

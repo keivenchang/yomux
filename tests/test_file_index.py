@@ -737,6 +737,23 @@ def test_search_does_not_report_warming_when_refresh_request_is_rejected(tmp_pat
     assert payload["index_state"] == "fallback-skipped"
 
 
+def test_promotion_debounce_history_is_bounded_and_expires(tmp_path, monkeypatch):
+    file_index._PROMOTION_LAST_DISPATCH.clear()
+    now = [100.0]
+    monkeypatch.setattr(file_index.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", lambda *_args: {"queued": True})
+    monkeypatch.setattr(file_index, "_BACKGROUND_WORK_SUBMITTER", lambda *_args: {"queued": True})
+    for index in range(file_index._PROMOTION_HISTORY_LIMIT + 1):
+        root = tmp_path / f"root-{index}"
+        root.mkdir()
+        monkeypatch.setattr(file_index, "_current_root_identity", lambda _path, root=root: file_index.root_identity(root.stat()))
+        assert file_index.request_user_visible_promotion(str(root))
+    assert len(file_index._PROMOTION_LAST_DISPATCH) == file_index._PROMOTION_HISTORY_LIMIT
+    now[0] += file_index._PROMOTION_DEBOUNCE_SECONDS + 1
+    assert file_index.request_user_visible_promotion(str(root))
+    assert len(file_index._PROMOTION_LAST_DISPATCH) == 1
+
+
 def test_cold_read_only_search_queues_scheduler_refresh_without_persistent_rpc(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
