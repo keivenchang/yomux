@@ -7156,7 +7156,7 @@ class ActivityCache:
                     self.state.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
     def refresh_tabber_activity_cache_owner(self, app, bounded_hours: float, source_signature: str, session_scope: Any = "configured") -> dict[str, Any]:
         started = time.perf_counter()
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        if not app.scheduler_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
             cached = app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
             if cached:
@@ -7471,16 +7471,14 @@ class ActivityCache:
                 if not visible_consumer:
                     payload["cache"]["refreshing"] = False
                     payload["cache"]["idle_no_consumer"] = True
-                elif app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                elif app.scheduler_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     if normalized_scope == "configured":
                         payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
                     else:
                         payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh(session_scope=normalized_scope)
                 else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
                     refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-                    if app.background_refresh_should_fallback(refresh_result):
+                    if RefreshOutcome.from_result(refresh_result).fallback:
                         payload = build_current_payload()
                         app.set_tabber_activity_cache(payload, source_signature=source_signature)
                         payload = copy.deepcopy(payload)
@@ -7496,10 +7494,9 @@ class ActivityCache:
             return payload, HTTPStatus.OK
         if not visible_consumer:
             return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, session_scope=normalized_scope, idle_no_consumer=True), HTTPStatus.OK
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        if not app.scheduler_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
-            app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-            if app.background_refresh_should_fallback(refresh_result):
+            if RefreshOutcome.from_result(refresh_result).fallback:
                 payload = build_current_payload()
                 app.set_tabber_activity_cache(payload, source_signature=source_signature)
                 payload = copy.deepcopy(payload)
@@ -10313,83 +10310,6 @@ class TmuxWebtermApp:
         if compute_ms is not None:
             event_payload.setdefault("compute_ms", round(max(0.0, compute_ms), 1))
         return self.client_events.publish(event_type, event_payload)
-
-    def shared_background_client_event_record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "id": uuid.uuid4().hex,
-            "time": time.time(),
-            "type": event_type,
-            "payload": dict(payload),
-            "source": self.background_owner.owner_payload(),
-        }
-
-    def write_shared_background_client_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        record = self.shared_background_client_event_record(event_type, payload)
-        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError))
-            raw_events = manifest.get("events") if isinstance(manifest, dict) else []
-            events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-            resource = client_event_resource(event_type, payload)
-            # The manifest is a bounded recovery snapshot, not an audit log. Retain only the
-            # newest event for each independently ordered resource so a returning follower repairs
-            # current state once instead of replaying stale transitions.
-            events = [item for item in events if client_event_resource(str(item.get("type") or ""), item.get("payload") if isinstance(item.get("payload"), dict) else {}) != resource]
-            events.append(record)
-            events = events[-BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT:]
-            payload_text = json.dumps({"version": 1, "events": events}, sort_keys=True, separators=(",", ":")) + "\n"
-            atomic_write_text(BACKGROUND_CLIENT_EVENTS_PATH, payload_text, mode=0o600)
-        return record
-
-    def replay_shared_background_client_events(self, subscriber_id: int | None = None) -> int:
-        """Replay the durable latest-per-resource manifest after a follower was offline.
-
-        A live SSE stream supplies ``subscriber_id`` so recovery belongs only to the stream that
-        just crossed its ready fence. The no-argument form remains the process-wide adapter used by
-        direct lifecycle callers and older tests.
-        """
-        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, None, exceptions=(OSError, json.JSONDecodeError, TypeError))
-            if manifest is None:
-                return 0
-        raw_events = manifest.get("events") if isinstance(manifest, dict) else []
-        if not isinstance(raw_events, list):
-            return 0
-        replayed = 0
-        for record in raw_events:
-            if not isinstance(record, dict):
-                continue
-            event_id = str(record.get("id") or "")
-            event_type = str(record.get("type") or "")
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-            if not event_id or (subscriber_id is None and event_id in self.replayed_background_client_event_ids):
-                continue
-            if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
-                continue
-            if subscriber_id is None:
-                self.replayed_background_client_event_ids.add(event_id)
-                self.handle_background_client_event({"event_type": event_type, "payload": payload})
-                replayed += 1
-            elif self.client_events.publish_to_subscriber(subscriber_id, event_type, payload) is not None:
-                replayed += 1
-        return replayed
-
-    def notify_background_client_event_followers(self, event_type: str, payload: dict[str, Any], shared_event: dict[str, Any]) -> None:
-        source = self.background_owner.owner_payload()
-        source_generation = str(source.get("generation_id") or "")
-        request = {
-            "action": "background_client_event",
-            "event_type": event_type,
-            "payload": payload,
-            "shared_event": shared_event,
-            "requester": source,
-        }
-        for record in self.background_owner.live_generation_records():
-            if str(record.get("generation_id") or "") == source_generation:
-                continue
-            if not str(record.get("control_socket") or ""):
-                continue
-            send_yolomux_control_request(record, request, timeout=BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS)
 
     def publish_background_client_event(
         self,

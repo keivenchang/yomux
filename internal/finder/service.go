@@ -106,6 +106,7 @@ func changed(path string) *Error {
 
 type Service struct {
 	root                       string
+	uploadMu                   sync.RWMutex
 	uploadLimits               UploadLimits
 	publish                    EventPublisher
 	mu                         sync.Mutex
@@ -294,6 +295,27 @@ func (s *Service) Close() {
 }
 
 func (s *Service) Root() string { return s.root }
+
+// SetUploadLimits applies settings changes to uploads already served by this
+// process. The settings file is shared with Python, but the Finder service
+// keeps its upload policy in memory for the duration of an upload request.
+func (s *Service) SetUploadLimits(uploadLimits UploadLimits) {
+	if uploadLimits.MaxBytes <= 0 {
+		uploadLimits.MaxBytes = MaxUploadBytes
+	}
+	if uploadLimits.MaxFiles <= 0 {
+		uploadLimits.MaxFiles = MaxUploadFiles
+	}
+	s.uploadMu.Lock()
+	s.uploadLimits = uploadLimits
+	s.uploadMu.Unlock()
+}
+
+func (s *Service) currentUploadLimits() UploadLimits {
+	s.uploadMu.RLock()
+	defer s.uploadMu.RUnlock()
+	return s.uploadLimits
+}
 
 func (s *Service) WatchStatus() (available, degraded bool, reason string) {
 	s.mu.Lock()

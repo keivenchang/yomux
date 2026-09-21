@@ -48,8 +48,12 @@ import (
 	"github.com/keivenchang/yolomux/internal/work"
 )
 
-const version = "0.9.2"
+const version = "0.9.3"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func goRuntimeLabel() string {
+	return fmt.Sprintf("Go %s %s/%s", strings.TrimPrefix(runtime.Version(), "go"), runtime.GOOS, runtime.GOARCH)
+}
 
 type server struct {
 	root                             string
@@ -2859,6 +2863,7 @@ func main() {
 	mux.Handle("/api/tmux-status", s.protected(http.HandlerFunc(s.tmuxStatus), "readonly"))
 	mux.Handle("/api/tmux-signals", s.protected(http.HandlerFunc(s.tmuxSignals), "readonly"))
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
+	mux.Handle("/api/tmux-window", s.protected(http.HandlerFunc(s.tmuxWindow), "admin"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
 	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
 	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan), "admin"))
@@ -6557,6 +6562,53 @@ func (s *server) tmuxSignals(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, status, payload)
 }
 
+func (s *server) tmuxWindow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "missing session"})
+		return
+	}
+	window := strings.TrimSpace(r.URL.Query().Get("window"))
+	if window == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"session": session,
+			"error":   "window must be a non-negative integer",
+		})
+		return
+	}
+	for _, character := range window {
+		if character < '0' || character > '9' {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{
+				"session": session,
+				"error":   "window must be a non-negative integer",
+			})
+			return
+		}
+	}
+
+	commandContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.tmuxCommandContext(commandContext, "has-session", "-t", s.exactTarget(session)).Run(); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
+		return
+	}
+	target := s.exactTarget(session) + window
+	output, err := s.tmuxCommandContext(commandContext, "select-window", "-t", target).CombinedOutput()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{
+			"session": session,
+			"window":  window,
+			"error":   goTmuxSignalCommandError("tmux select-window failed", err, output),
+		})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"session": session, "window": window, "ok": true})
+}
+
 func goIntValue(value any) (int, bool) {
 	switch number := value.(type) {
 	case int:
@@ -7060,11 +7112,10 @@ func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// settings delegates Startup Tips persistence to the repository's Python settings owner. Keeping
-// one owner for defaults, validation, migrations, comments, and atomic YAML writes prevents the Go
-// backend from silently accepting a different value. Other settings remain unavailable here until
-// their Python app side effects have an equivalent Go owner. The bridge is intentionally JSON-only
-// and uses the server's explicit config directory, so tests can provide a synthetic isolated file.
+// settings delegates persistence to the repository's Python settings owner. Keeping one owner for
+// defaults, validation, migrations, comments, and atomic YAML writes prevents the Go backend from
+// silently accepting a different value. The bridge is intentionally JSON-only and uses the server's
+// explicit config directory, so tests can provide a synthetic isolated file.
 func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -7080,18 +7131,6 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		if err := decodeJSONBody(r.Body, 64*1024, &payload); err != nil {
 			jsonResponse(w, http.StatusBadRequest, typedError("invalid settings request", "request.error.invalid", false))
-			return
-		}
-		if !startupTipsSettingsPatch(payload) {
-			jsonResponse(w, http.StatusNotImplemented, map[string]any{
-				"error": "feature_unavailable",
-				"reason": map[string]any{
-					"code":          "settings_side_effects_unavailable",
-					"messageKey":    "capabilityUnavailable",
-					"messageParams": map[string]any{"setting": "general.startup_tips"},
-				},
-				"capability": "core.settings.v1",
-			})
 			return
 		}
 		encoded, err := json.Marshal(payload)
@@ -7142,28 +7181,19 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 		})
 		return
 	}
+	if r.Method == http.MethodPost && s.finder != nil {
+		s.finder.SetUploadLimits(finder.UploadLimits{
+			MaxBytes:         s.fileTransferMaxBytes(),
+			MaxFiles:         s.fileTransferMaxFiles(),
+			FilenameTemplate: s.fileTransferFilenameTemplate(),
+		})
+	}
 	if r.Method == http.MethodPost && s.events != nil {
 		if _, err := s.events.publish("settings_changed", map[string]any{"mtime_ns": payload["mtime_ns"], "data": payload}); err != nil {
 			slog.Warn("settings change event publish failed", "error", err)
 		}
 	}
 	jsonResponse(w, http.StatusOK, payload)
-}
-
-func startupTipsSettingsPatch(payload map[string]any) bool {
-	settings, ok := payload["settings"].(map[string]any)
-	if !ok {
-		settings = payload
-	}
-	if len(settings) != 1 {
-		return false
-	}
-	general, ok := settings["general"].(map[string]any)
-	if !ok || len(general) != 1 {
-		return false
-	}
-	_, ok = general["startup_tips"].(bool)
-	return ok
 }
 
 func pythonBridgeEnvironment(root, config string) []string {
@@ -7243,7 +7273,7 @@ print(html_page(json.loads(sys.argv[1]), access_role=sys.argv[2], auth_username=
 		statsOnly = "1"
 	}
 	command.Args = append(command.Args, string(capabilityData), statsOnly)
-	command.Args = append(command.Args, "Go "+version)
+	command.Args = append(command.Args, goRuntimeLabel())
 	if s.dangerouslyYolo {
 		command.Args = append(command.Args, "1")
 	} else {

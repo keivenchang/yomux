@@ -214,7 +214,8 @@ def brand_html(
     commit_count = yolomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
     version_status, post_release_commits = version_metadata or yolomux_version_metadata()
-    backend_version_title = f"{version_status} [{YOLOMUX_BACKEND}]"
+    backend_version = backend_label.strip() or YOLOMUX_BACKEND
+    backend_version_title = f"{version_status} [{backend_version}]"
     version_title = html.escape(
         f"{backend_version_title}\n"
         + "\n".join(post_release_commits)

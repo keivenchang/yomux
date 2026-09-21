@@ -1262,7 +1262,7 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 	}
 }
 
-func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
+func TestSettingsRoutePersistsSharedSchemaAndUpdatesGoOwnedSettings(t *testing.T) {
 	config := t.TempDir()
 	if err := os.WriteFile(filepath.Join(config, "settings.yaml"), []byte("general:\n  startup_tips: true\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1277,7 +1277,13 @@ func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
 		}
 		root = filepath.Dir(root)
 	}
-	s := &server{root: root, config: config}
+	finderRoot := t.TempDir()
+	service, err := finder.NewWithLimits(finderRoot, nil, finder.UploadLimits{MaxBytes: 4, MaxFiles: 1, FilenameTemplate: "{name}-{seq}{ext}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	s := &server{root: root, config: config, finder: service}
 
 	get := httptest.NewRecorder()
 	s.settings(get, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
@@ -1291,8 +1297,70 @@ func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
 	if got := initial["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != true {
 		t.Fatalf("initial startup_tips = %#v, want true", got)
 	}
+	initialSettings := initial["settings"].(map[string]any)
+	catalog, ok := initial["catalog"].(map[string]any)
+	if !ok || len(catalog) == 0 {
+		t.Fatalf("settings catalog is missing: %#v", initial["catalog"])
+	}
+	defaults, ok := initial["defaults"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings defaults are missing: %#v", initial["defaults"])
+	}
+	defaultPaths := make(map[string]struct{})
+	for sectionName, rawValues := range defaults {
+		values, sectionOK := rawValues.(map[string]any)
+		if !sectionOK {
+			t.Fatalf("settings defaults section %q is not an object: %#v", sectionName, rawValues)
+		}
+		for key := range values {
+			if strings.HasPrefix(key, "_") {
+				continue
+			}
+			defaultPaths[sectionName+"."+key] = struct{}{}
+		}
+	}
+	if len(catalog) != len(defaultPaths) {
+		t.Fatalf("settings catalog has %d paths, defaults have %d paths", len(catalog), len(defaultPaths))
+	}
+	for path := range defaultPaths {
+		if _, present := catalog[path]; !present {
+			t.Fatalf("settings catalog is missing default path %q", path)
+		}
+	}
+	allSettingsBody, err := json.Marshal(map[string]any{"settings": initialSettings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allSettingsRequest := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(string(allSettingsBody)))
+	allSettingsRequest = allSettingsRequest.WithContext(context.WithValue(allSettingsRequest.Context(), authContextKey{}, authUser{role: "admin"}))
+	allSettingsResponse := httptest.NewRecorder()
+	s.settings(allSettingsResponse, allSettingsRequest)
+	if allSettingsResponse.Code != http.StatusOK {
+		t.Fatalf("complete settings POST status = %d, body=%s", allSettingsResponse.Code, allSettingsResponse.Body.String())
+	}
+	var allSettingsPayload map[string]any
+	if err := json.Unmarshal(allSettingsResponse.Body.Bytes(), &allSettingsPayload); err != nil {
+		t.Fatal(err)
+	}
+	returnedSettings, ok := allSettingsPayload["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("complete settings response has no settings object: %#v", allSettingsPayload)
+	}
+	for path := range catalog {
+		parts := strings.SplitN(path, ".", 2)
+		if len(parts) != 2 {
+			t.Fatalf("catalog path is not section.key: %q", path)
+		}
+		section, sectionOK := returnedSettings[parts[0]].(map[string]any)
+		if !sectionOK {
+			t.Fatalf("complete settings response is missing section %q for %q", parts[0], path)
+		}
+		if _, present := section[parts[1]]; !present {
+			t.Fatalf("complete settings response is missing catalog path %q", path)
+		}
+	}
 
-	request := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"general":{"startup_tips":false}}}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"general":{"startup_tips":false,"language":"ja"},"appearance":{"theme":"light","active_color":"blue","ui_font_size":16},"file_explorer":{"indexed_dirs":["/tmp"]},"uploads":{"max_bytes":1048576,"filename_template":"{name}-{seq:03d}{ext}"}}}`))
 	request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{role: "admin"}))
 	post := httptest.NewRecorder()
 	s.settings(post, request)
@@ -1305,6 +1373,44 @@ func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
 	}
 	if got := saved["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != false {
 		t.Fatalf("saved startup_tips = %#v, want false", got)
+	}
+	if got := saved["settings"].(map[string]any)["general"].(map[string]any)["language"]; got != "ja" {
+		t.Fatalf("saved language = %#v, want ja", got)
+	}
+	appearance := saved["settings"].(map[string]any)["appearance"].(map[string]any)
+	if appearance["theme"] != "light" || appearance["active_color"] != "blue" || appearance["ui_font_size"] != float64(16) {
+		t.Fatalf("saved appearance = %#v", appearance)
+	}
+	if got := saved["settings"].(map[string]any)["file_explorer"].(map[string]any)["indexed_dirs"]; !reflect.DeepEqual(got, []any{"/tmp"}) {
+		t.Fatalf("saved indexed_dirs = %#v, want [/tmp]", got)
+	}
+	if got := saved["settings"].(map[string]any)["uploads"].(map[string]any)["max_bytes"]; got != float64(1048576) {
+		t.Fatalf("saved upload max_bytes = %#v, want 1048576", got)
+	}
+	coercionRequest := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"appearance":{"ui_font_size":999}}}`))
+	coercionRequest = coercionRequest.WithContext(context.WithValue(coercionRequest.Context(), authContextKey{}, authUser{role: "admin"}))
+	coercionResponse := httptest.NewRecorder()
+	s.settings(coercionResponse, coercionRequest)
+	if coercionResponse.Code != http.StatusOK {
+		t.Fatalf("coerced settings POST status = %d, body=%s", coercionResponse.Code, coercionResponse.Body.String())
+	}
+	var coercionPayload map[string]any
+	if err := json.Unmarshal(coercionResponse.Body.Bytes(), &coercionPayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := coercionPayload["settings"].(map[string]any)["appearance"].(map[string]any)["ui_font_size"]; got != float64(30) {
+		t.Fatalf("coerced ui_font_size = %#v, want 30", got)
+	}
+	if coerced, ok := coercionPayload["coerced"].([]any); !ok || len(coerced) == 0 {
+		t.Fatalf("coercion metadata = %#v, want a non-empty list", coercionPayload["coerced"])
+	}
+	uploadPayload, finderErr := service.Upload(context.Background(), "session", "user", "", finderRoot, []finder.UploadFile{{Name: "payload.txt", Data: []byte("more than four bytes")}})
+	if finderErr != nil {
+		t.Fatalf("updated Finder upload = %#v, error = %v", uploadPayload, finderErr)
+	}
+	uploaded := uploadPayload["files"].([]any)[0].(map[string]any)
+	if uploaded["saved_name"] != "payload-001.txt" {
+		t.Fatalf("updated Finder filename = %#v, want payload-001.txt", uploaded)
 	}
 
 	fresh := httptest.NewRecorder()
@@ -1319,15 +1425,10 @@ func TestSettingsRoutePersistsStartupTipsThroughSharedSchema(t *testing.T) {
 	if got := reloaded["settings"].(map[string]any)["general"].(map[string]any)["startup_tips"]; got != false {
 		t.Fatalf("reloaded startup_tips = %#v, want false", got)
 	}
-
-	unsupported := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"settings":{"appearance":{"theme":"light"}}}`))
-	unsupported = unsupported.WithContext(context.WithValue(unsupported.Context(), authContextKey{}, authUser{role: "admin"}))
-	unsupportedResponse := httptest.NewRecorder()
-	s.settings(unsupportedResponse, unsupported)
-	if unsupportedResponse.Code != http.StatusNotImplemented {
-		t.Fatalf("unsupported settings status = %d, body=%s", unsupportedResponse.Code, unsupportedResponse.Body.String())
+	reloadedSettings := reloaded["settings"].(map[string]any)
+	if reloadedSettings["appearance"].(map[string]any)["theme"] != "light" || reloadedSettings["general"].(map[string]any)["language"] != "ja" {
+		t.Fatalf("reloaded representative settings = %#v", reloadedSettings)
 	}
-
 	malformedConfig := t.TempDir()
 	if err := os.WriteFile(filepath.Join(malformedConfig, "settings.yaml"), []byte("general: [unterminated\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1645,6 +1746,47 @@ func TestTmuxSignalsFilteredSessionUsesExactTmuxTarget(t *testing.T) {
 	}
 }
 
+func TestTmuxWindowRouteSelectsExactWindow(t *testing.T) {
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "tmux.sock")
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "1", "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create tmux session: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "new-window", "-d", "-t", "=1:", "-n", "bash", "-c", root, "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("create tmux window: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+
+	server := &server{}
+	record := httptest.NewRecorder()
+	server.tmuxWindow(record, httptest.NewRequest(http.MethodPost, "/api/tmux-window?session=1&window=1", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("tmux window status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ok"] != true || payload["session"] != "1" || payload["window"] != "1" {
+		t.Fatalf("tmux window payload = %#v", payload)
+	}
+	selected, err := exec.Command("tmux", "-S", socket, "display-message", "-p", "-t", "=1:", "#{window_index}").Output()
+	if err != nil {
+		t.Fatalf("read selected tmux window: %v", err)
+	}
+	if strings.TrimSpace(string(selected)) != "1" {
+		t.Fatalf("selected tmux window = %q, want 1", strings.TrimSpace(string(selected)))
+	}
+
+	badWindow := httptest.NewRecorder()
+	server.tmuxWindow(badWindow, httptest.NewRequest(http.MethodPost, "/api/tmux-window?session=1&window=bad", nil))
+	if badWindow.Code != http.StatusBadRequest {
+		t.Fatalf("invalid tmux window status = %d, body=%s", badWindow.Code, badWindow.Body.String())
+	}
+}
+
 func TestTmuxSessionSortKeyMatchesPythonRosterOrdering(t *testing.T) {
 	got := []string{"zeta", "project10", "yolomux10", "project2", "yolomux2", "Alpha"}
 	sort.SliceStable(got, func(i, j int) bool {
@@ -1742,11 +1884,15 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.2`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.3`)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
 		t.Fatalf("Go root does not provide its backend label for the version popup: %s", page.Body.String())
+	}
+	wantBackendLabel := fmt.Sprintf(`"backendLabel":%q`, goRuntimeLabel())
+	if !bytes.Contains(page.Body.Bytes(), []byte(wantBackendLabel)) {
+		t.Fatalf("Go root backend label = %s, want %s: %s", goRuntimeLabel(), wantBackendLabel, page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(` [Go `)) {
 		t.Fatalf("Go root version popup does not use the one-line backend format: %s", page.Body.String())

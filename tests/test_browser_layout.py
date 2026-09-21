@@ -13497,6 +13497,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
             """
         )
     )
+
     browser.execute_script("setGlobalThemeMode('light')")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -13767,6 +13768,38 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
             """
         )
     )
+
+
+def test_stale_forced_settings_payload_cannot_revert_newer_active_color(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof saveSettingsPatch === 'function' && typeof applySettingsPayload === 'function'"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          await saveSettingsPatch({appearance: {active_color: 'blue'}});
+          await saveSettingsPatch({appearance: {active_color: 'blue'}});
+          const stale = {
+            settings: {appearance: {active_color: 'green'}},
+            mtime_ns: Number(window.__settingsPayload.mtime_ns || 2) - 1,
+          };
+          const applied = applySettingsPayload(stale, {force: true});
+          done({
+            applied,
+            activeColor: initialSetting('appearance.active_color', ''),
+            accent: getComputedStyle(document.documentElement).getPropertyValue('--active-accent').trim(),
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert result.get("error") is None, result
+    assert result["applied"] is False, result
+    assert result["activeColor"] == "blue", result
+    assert result["accent"] == "#3b82f6", result
 
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):

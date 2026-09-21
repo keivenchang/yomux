@@ -1175,17 +1175,18 @@ func restoreMutationTarget(parent *mutationParent, name string) error {
 }
 
 func (s *Service) Upload(ctx context.Context, session, username, editorPath, baseDir string, files []UploadFile) (map[string]any, *Error) {
+	uploadLimits := s.currentUploadLimits()
 	if len(files) == 0 {
 		return nil, invalid("", "no files supplied")
 	}
-	if len(files) > s.uploadLimits.MaxFiles {
-		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_many_files", MessageKey: "upload.error.tooManyFiles", Message: fmt.Sprintf("too many files; limit is %d", s.uploadLimits.MaxFiles)}
+	if len(files) > uploadLimits.MaxFiles {
+		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_many_files", MessageKey: "upload.error.tooManyFiles", Message: fmt.Sprintf("too many files; limit is %d", uploadLimits.MaxFiles)}
 	}
 	var totalBytes int64
 	for _, file := range files {
 		totalBytes += int64(len(file.Data))
-		if totalBytes > s.uploadLimits.MaxBytes {
-			return nil, tooLarge(file.Name, totalBytes, s.uploadLimits.MaxBytes)
+		if totalBytes > uploadLimits.MaxBytes {
+			return nil, tooLarge(file.Name, totalBytes, uploadLimits.MaxBytes)
 		}
 	}
 	targetDir := ""
@@ -1268,7 +1269,7 @@ func (s *Service) Upload(ctx context.Context, session, username, editorPath, bas
 		if err := ctx.Err(); err != nil {
 			return nil, cancelled(targetDir)
 		}
-		template := s.uploadLimits.FilenameTemplate
+		template := uploadLimits.FilenameTemplate
 		if template == "" {
 			template = os.Getenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE")
 		}

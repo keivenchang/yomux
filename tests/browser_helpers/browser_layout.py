@@ -2467,6 +2467,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     wrap_app_root = scenario.wrap_app_root
     yoagent_chat_mode = scenario.yoagent_chat_mode
     hold_auto_approve = scenario.hold_auto_approve
+    background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
     stats_only = scenario.stats_only
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
@@ -2837,7 +2838,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         // 404s cannot change stats readiness, rather than accidentally exercising fixture 200s.
         const statsOnlyUnavailableRoutes = new Set([
           ...Object.keys(window.__fixtureRouteMethods || {}),
-          '/api/fs/fast/list', '/api/watched-prs', '/api/update-status',
+          '/api/background/status', '/api/fs/fast/list', '/api/fs/index-status', '/api/watched-prs', '/api/update-status',
         ]);
         if (window.__fixtureStatsOnly === true
             && statsOnlyUnavailableRoutes.has(url.pathname)
@@ -3326,6 +3327,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           window.__fixtureStatsOnly = {json.dumps(bool(stats_only))};
           window.__fixtureReleaseAutoApprove = null;
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
+          window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
           window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
           window.__fixtureStatsAgentStatus = {json.dumps({
               "available": True,
@@ -3374,6 +3376,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         yoagent_chat_mode=yoagent_chat_mode,
         available_agents=tuple(available_agents) if available_agents is not None else None,
         agent_auth=agent_auth,
+        background_status_payload=background_status_payload,
         runtime_script_uri=runtime_script_uri,
         dangerously_yolo=dangerously_yolo,
         hold_auto_approve=hold_auto_approve,

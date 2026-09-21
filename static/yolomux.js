@@ -18095,7 +18095,7 @@ function topbarServerUptimeTitle() {
 }
 
 function topbarBackendVersionTitle() {
-  const backend = String(bootstrap.backend || '').trim() || t('common.unknown');
+  const backend = String(bootstrap.backendLabel || bootstrap.backend || '').trim() || t('common.unknown');
   const version = String(bootstrap.versionStatus || bootstrap.version || '').trim() || t('common.unknown');
   return `${version} [${backend}]`;
 }
@@ -66309,12 +66309,17 @@ function gitDiffCommitRow(item, commit, row = null) {
     shortShaText,
     gitDiffHostedLink(state?.hostedRemote, 'commit', sha),
   );
+  const signatureStatus = String(commit?.signature_status || '').trim();
+  if (signatureStatus) {
+    const signature = gitDiffTextNode('git-diff-commit-signature', signatureStatus);
+    shortSha.append(document.createTextNode(' '), signature);
+  }
   const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
   date.title = localizedExactDateTimeFormat(commit?.authored_at);
   const changes = gitDiffCommitChangesNode(commit);
   const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
   const description = gitDiffCommitSubjectNode(commit, state?.hostedRemote);
-  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' '));
+  control.setAttribute('aria-label', [shortShaText, signatureStatus, date.textContent, changes.getAttribute('aria-label'), author.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' '));
   control.replaceChildren(caret, shortSha, date, changes, author, description);
   return control;
 }
@@ -88363,10 +88368,6 @@ async function boot() {
     if (typeof itemInLayout === 'function' && itemInLayout(tabberItemId)) refreshTabberPanels();
     return;
   }
-  refreshBackgroundOwnerStatus({render: false}).catch(error => {
-    console.warn('initial background-owner status refresh failed', error);
-    return false;
-  });
   bindClipboardPaste();
   paintInitialAppShell();
   scheduleDeferredSettingsMetadataRefresh();

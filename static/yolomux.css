@@ -8026,12 +8026,6 @@ body.theme-light .git-diff-panel {
   font-size: var(--ui-font-size-2xs);
   font-weight: 700;
 }
-.git-diff-commit-decorations {
-  margin-inline-end: var(--space-4);
-  color: var(--accent);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-}
 .git-diff-commit-description {
   min-width: 0;
   overflow: hidden;
@@ -8043,6 +8037,9 @@ body.theme-light .git-diff-panel {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-inline-end: var(--space-4);
+  color: var(--accent);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
   vertical-align: baseline;
 }
 .git-diff-commit-decoration {
@@ -9584,15 +9581,6 @@ body.layout-resizing {
   border-bottom-color: var(--pane-tab-unfocused-active-bg);
   font-weight: 500;
   box-shadow: none;
-}
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
-.tmux-pane-tab-token.active,
-.panel.active-pane .pane-tab.active:not(.file-missing),
-.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
 }
 /* every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
