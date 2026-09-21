@@ -124,7 +124,7 @@ Each converted route must prove all of the following:
 - Waiting for completed daemon work in an HTTP handler, regardless of measured warm latency.
 - Calling a route warm because a synchronous producer happens to finish quickly.
 - Holding handler capacity after browser disconnect while waiting for retained daemon bytes.
-- Returning `200` with `pending`, `refreshing_elsewhere`, or successful-empty data.
+- Returning `200` with an ad hoc pending/refresh marker or successful-empty data.
 - Returning `202` before confirmed daemon acceptance.
 - Polling or sleeping in an HTTP handler.
 - Moving wait, decode, copy, or encode work to another thread in the web process and calling that an offload.

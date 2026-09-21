@@ -8,7 +8,7 @@ Six distinct user-visible failures on 2026-08-02 share one root: **a response th
 
 | Incident | What the API returned | What was true |
 |---|---|---|
-| Differ hung on `loading…` forever | `200 OK` carrying `refreshing_elsewhere: true` | not ready; still refreshing elsewhere |
+| Differ hung on `loading…` forever | `200 OK` carrying a non-terminal refresh marker | not ready; the refresh had not completed |
 | `/api/session-files` while `batchd` was a zombie | `202 QUEUED` | the job could never be scheduled |
 | 24h stats repeat selection | bare `409` with no body the browser could read | a repair was required and possible |
 | `/api/auto-approve` under lock contention | bare `503` | a valid retained snapshot existed |
@@ -67,7 +67,7 @@ Terminal states are published even when the producer crashes: the supervisor con
 
 ### 4. Never encode failure inside success
 
-`state: "ready"` means the data is present and correct. Nothing else. A field like `refreshing_elsewhere` is a `queued` state; a partial result is `queued` with `progress`; an empty result that means "unknown" is `failed`, not an empty `data`.
+`state: "ready"` means the data is present and correct. Nothing else. An in-progress refresh is a `queued` state; a partial result is `queued` with `progress`; an empty result that means "unknown" is `failed`, not an empty `data`.
 
 > An empty success is indistinguishable from a real empty answer. `$0` for an unpriced model and an empty file list for a vanished root are the same defect: a value that cannot be told apart from a measurement.
 
