@@ -86596,10 +86596,10 @@ async function updateLatency() {
   return measureClientHealth();
 }
 
-function refreshAll() {
+function refreshAll({forceMetadata = true} = {}) {
   resyncVisibleTerminalRemoteSizes('refresh');
   refreshVisibleTerminalScreens('manual-refresh');
-  refreshTranscripts({force: true});
+  refreshTranscripts(forceMetadata ? {force: true} : {});
   refreshAutoStatuses();
   if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
   refreshWatchedFilesystem({full: true});
@@ -86612,7 +86612,7 @@ function scheduleReconnectResync(reason = '') {
     if (!scope.current() || clientEventTransportState.resyncTimer !== timer) return;
     scope.relinquish('resync', timer);
     clientEventTransportState.resyncTimer = null;
-    refreshAll();
+    refreshAll({forceMetadata: false});
   }, reconnectResyncDebounceMs);
   clientEventTransportState.resyncTimer = timer;
   scope.ownTimer('resync', timer);

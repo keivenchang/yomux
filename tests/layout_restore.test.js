@@ -2226,7 +2226,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const activitySummaryState = {') && source.includes('guard: makeGenerationGuard()'), 'activity summary payload and refresh generation share one record');
     assert.ok(source.includes('if (activitySummaryState.refreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
     assert.ok(source.includes('const transcriptMetadataState = {') && source.includes('guard: makeGenerationGuard()'), 'metadata payload and request generation share one record');
-    assert.ok(source.includes('if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;'), 'metadata refreshes dedupe ordinary overlap while forced topology repair supersedes stale work');
+    assert.ok(source.includes('if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;'), 'metadata refreshes dedupe ordinary overlap while explicit forced mutations can supersede stale work');
+    const reconnectStart = source.indexOf('function scheduleReconnectResync(');
+    const reconnectEnd = source.indexOf('function resyncVisibleTerminalRemoteSizes(', reconnectStart);
+    assert.ok(reconnectStart > 0 && reconnectEnd > reconnectStart, 'could not locate reconnect resync body');
+    const reconnectBody = source.slice(reconnectStart, reconnectEnd);
+    assert.ok(reconnectBody.includes('refreshAll({forceMetadata: false});'), 'reconnect resync uses ordinary metadata convergence');
+    assert.equal(reconnectBody.includes('refreshAll();'), false, 'reconnect resync cannot invoke the forced metadata path');
     assert.ok(source.includes('transcriptMetadataState.loading = true;'), 'metadata refreshes expose a loading state');
     assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');

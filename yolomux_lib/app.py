@@ -675,11 +675,6 @@ SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS = WATCHD_DESCRIPTOR_RESYNC_SECONDS
-# A single-flight refresh worker that outlives this deadline is treated as stalled and
-# may be superseded, so a hung heavy build cannot pin the guard and refuse every future
-# refresh (which froze the aggregate session-metadata header indefinitely). Far above a
-# healthy build, which is a handful of timeout-bounded git calls per indexed repo.
-TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS = 60.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
 CONTEXT_OPERATION_DEADLINE_SECONDS = 15.0
 FS_BATCH_OPERATION_DEADLINE_SECONDS = 120.0
@@ -11507,7 +11502,6 @@ class TmuxWebtermApp:
         self,
         worker: object | None,
         *,
-        replace: bool = False,
         queue_rebuild_after: float | None = None,
         queue_rebuild_publish: bool = False,
         lifecycle_owner: bool = False,
@@ -11533,36 +11527,30 @@ class TmuxWebtermApp:
             if record.stopped:
                 return 0
             if record.worker is not None:
-                if replace:
-                    record.superseded_workers.add(record.worker)
+                # This worker may be slow because it is materializing Git metadata, but Python
+                # cannot cancel it safely. Elapsed time must never create a second writer; callers
+                # either reuse its generation or coalesce one follow-up under this same guard.
+                started_at = record.worker_started_at
+                lifecycle_owner_observes_current_input = (
+                    lifecycle_owner
+                    and record.worker_lifecycle_owner
+                    and record.worker_input_generation == record.input_generation
+                )
+                if queue_rebuild_after is not None and (
+                    started_at is None
+                    or (started_at < queue_rebuild_after and not lifecycle_owner_observes_current_input)
+                ):
+                    record.rebuild_requested = True
+                    record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
+                    # The queued follow-up commits the generation after the in-flight one.
+                    pending_generation = record.generation + 1
                 else:
-                    started_at = record.worker_started_at
-                # A worker still within the deadline holds the single-flight guard.
-                # Past it, the worker is treated as stalled and superseded so a hung
-                # build cannot refuse every future refresh; the stale worker's later
-                # commit/finish is a no-op because the generation has advanced.
-                    if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
-                        lifecycle_owner_observes_current_input = (
-                            lifecycle_owner
-                            and record.worker_lifecycle_owner
-                            and record.worker_input_generation == record.input_generation
-                        )
-                        if queue_rebuild_after is not None and (
-                            started_at is None
-                            or (started_at < queue_rebuild_after and not lifecycle_owner_observes_current_input)
-                        ):
-                            record.rebuild_requested = True
-                            record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
-                            # The queued follow-up commits the generation after the in-flight one.
-                            pending_generation = record.generation + 1
-                        else:
-                            # The in-flight build began at or after the request, so it already observes
-                            # what this caller is asking about.
-                            pending_generation = record.generation
-                        if pending_generation_out is not None:
-                            pending_generation_out.append(pending_generation)
-                        return 0
-                    record.superseded_workers.add(record.worker)
+                    # The in-flight build began at or after the request, so it already observes
+                    # what this caller is asking about.
+                    pending_generation = record.generation
+                if pending_generation_out is not None:
+                    pending_generation_out.append(pending_generation)
+                return 0
             record.generation += 1
             record.worker = worker
             if worker is not None:
@@ -11671,7 +11659,6 @@ class TmuxWebtermApp:
             if record.generation != generation or record.worker is not worker:
                 if record.worker is worker:
                     record.release_worker()
-                record.superseded_workers.discard(worker)
                 return False
             if invalidate:
                 record.generation += 1
@@ -11690,7 +11677,6 @@ class TmuxWebtermApp:
             record.generation += 1
             workers = tuple(record.active_workers)
             record.release_worker()
-            record.superseded_workers.clear()
             record.active_workers.clear()
             record.rebuild_requested = False
             record.rebuild_publish = False
@@ -11747,7 +11733,7 @@ class TmuxWebtermApp:
         return self.start_transcripts_payload_refresh(publish=publish)
 
     def set_transcripts_payload_cache(self, payload: dict[str, Any]) -> None:
-        generation = self.begin_transcripts_payload_work(None, replace=True)
+        generation = self.begin_transcripts_payload_work(None)
         self.commit_transcripts_payload_cache(payload, generation)
 
     def start_transcripts_payload_refresh(
@@ -11853,7 +11839,7 @@ class TmuxWebtermApp:
     ) -> None:
         current_worker = worker if worker is not None else threading.current_thread()
         if generation is None:
-            generation = self.begin_transcripts_payload_work(current_worker, replace=True)
+            generation = self.begin_transcripts_payload_work(current_worker)
             if generation <= 0:
                 return
         try:

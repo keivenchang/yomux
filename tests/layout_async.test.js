@@ -3831,7 +3831,12 @@ async function runLayoutAsyncSuite() {
       },
       clearTimeout(id) { clearedTimers.push(id); },
     });
-    api.setFetchForTest(() => Promise.resolve(jsonResponse({sessions: {}, session_order: []})));
+    const metadataRequests = [];
+    api.setFetchForTest(input => {
+      const url = String(input);
+      if (url.startsWith('/api/session-metadata')) metadataRequests.push(url);
+      return Promise.resolve(jsonResponse({sessions: {}, session_order: []}));
+    });
 
     api.queueClientPushEventForTest('noop', {session: '1', marker: 1});
     api.queueClientPushEventForTest('noop', {session: '1', marker: 2});
@@ -3890,6 +3895,7 @@ async function runLayoutAsyncSuite() {
     secondReconnectTimer.callback();
     assert.equal(api.clientEventTransportStateForTest().resyncTimer, null, 'firing consumes the reconnect timer');
     await flushAsyncWork();
+    assert.deepStrictEqual(metadataRequests, ['/api/session-metadata'], 'reconnect resync uses a cache read and does not force a metadata rebuild');
   });
 
   test('client-event demanded transport owns one exact grace episode through constructor recovery and removal', () => {

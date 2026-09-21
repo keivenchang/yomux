@@ -5787,10 +5787,8 @@ def test_forced_metadata_refresh_reuses_a_build_that_already_started_after_the_r
         webapp.control_server.stop()
 
 
-def test_transcripts_payload_worker_guard_supersedes_a_stalled_worker():
-    """The single-flight refresh guard must not be pinned forever by a hung build.
-    Within the deadline a second worker is refused; past it the stalled worker is
-    superseded so refreshes resume, and its late finish is a no-op."""
+def test_transcripts_payload_worker_guard_keeps_a_slow_worker_single_flight():
+    """A slow, non-cancellable build remains the sole owner instead of being duplicated."""
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.activity_transcript_service = SimpleNamespace(
         transcripts_payload_cache_lock=threading.Lock(),
@@ -5805,23 +5803,21 @@ def test_transcripts_payload_worker_guard_supersedes_a_stalled_worker():
     # A fresh in-flight worker holds the single-flight guard.
     assert webapp.begin_transcripts_payload_work(object()) == 0
 
-    # Simulate the worker stalling past the deadline.
-    record.worker_started_at -= app_module.TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS + 1.0
+    # Simulate the worker running well past any reasonable request deadline. The age does not
+    # change ownership because Python cannot cancel the Git-heavy worker safely.
+    record.worker_started_at -= 3600.0
     successor = object()
-    gen2 = webapp.begin_transcripts_payload_work(successor)
-    assert gen2 > gen1
-    assert record.worker is successor
-    assert record.superseded_workers == {stalled}
+    assert webapp.begin_transcripts_payload_work(successor) == 0
+    assert record.worker is stalled
+    assert record.active_workers == {stalled}
 
-    # The stalled worker's late finish/commit cannot clobber the successor.
-    assert webapp.finish_transcripts_payload_work(gen1, stalled) is False
-    assert webapp.commit_transcripts_payload_cache({"x": 1}, gen1) is False
-    assert record.worker is successor
-    assert record.superseded_workers == set()
+    assert webapp.finish_transcripts_payload_work(gen1, stalled) is True
+    assert record.worker is None
+    assert record.active_workers == set()
 
 
-def test_stop_transcripts_payload_work_joins_every_admitted_worker():
-    """Teardown retains a replaced worker until the transcript owner joins it."""
+def test_stop_transcripts_payload_work_joins_the_slow_single_flight_worker():
+    """Teardown waits for the one admitted worker instead of leaving a duplicate behind."""
 
     webapp, record = transcripts_payload_guard_app()
     entered = threading.Event()
@@ -5837,12 +5833,10 @@ def test_stop_transcripts_payload_work_joins_every_admitted_worker():
     assert generation > 0
     assert entered.wait(timeout=2)
 
-    replacement = object()
-    record.worker_started_at -= app_module.TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS + 1.0
-    replacement_generation = webapp.begin_transcripts_payload_work(replacement)
-    assert replacement_generation > generation
-    assert worker in record.active_workers
-    assert webapp.finish_transcripts_payload_work(replacement_generation, replacement) is True
+    record.worker_started_at -= 3600.0
+    assert webapp.begin_transcripts_payload_work(object()) == 0
+    assert record.worker is worker
+    assert record.active_workers == {worker}
 
     def stop_work() -> None:
         app_module.TmuxWebtermApp.stop_transcripts_payload_work(webapp)
@@ -6023,9 +6017,8 @@ def transcripts_payload_work_state(webapp):
             "worker": record.worker,
             "worker_started_at": record.worker_started_at,
             "publish_requested": record.publish_requested,
-        "rebuild_requested": record.rebuild_requested,
-        "rebuild_publish": record.rebuild_publish,
-        "superseded_workers": record.superseded_workers,
+            "rebuild_requested": record.rebuild_requested,
+            "rebuild_publish": record.rebuild_publish,
             "payload": record.payload,
             "stored_at": record.stored_at,
         }
@@ -6088,7 +6081,6 @@ def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_
         "publish_requested": False,
         "rebuild_requested": False,
         "rebuild_publish": False,
-        "superseded_workers": set(),
         "payload": None,
         "stored_at": None,
     }
@@ -6099,9 +6091,9 @@ def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_
     assert webapp.finish_transcripts_payload_work(generation, worker) is False
     assert started == [True]
 
-    # A later unrelated build cannot inherit an intent that belonged to the superseded caller.
+    # A later unrelated build cannot inherit an intent that belonged to the invalidated caller.
     next_worker = object()
-    next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
+    next_generation = webapp.begin_transcripts_payload_work(next_worker)
     assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
     assert started == [True]
 
@@ -6189,9 +6181,9 @@ def test_clear_transcript_caches_guard_assertion_fails_when_queued_intent_surviv
 
     # And the stale intent is inherited by the next unrelated build, which is the observable harm.
     next_worker = object()
-    next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
+    next_generation = webapp.begin_transcripts_payload_work(next_worker)
     assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
-    assert started == [True], "an unrelated build inherited the superseded caller's publishing rebuild"
+    assert started == [True], "an unrelated build inherited the invalidated caller's publishing rebuild"
 
 
 def test_forced_session_metadata_on_a_cold_cache_names_a_build_identity():
